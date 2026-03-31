@@ -1,0 +1,10 @@
+.git
+.gitignore
+target
+pb_data
+output
+downloads
+tmp
+secrets
+**/.DS_Store
+

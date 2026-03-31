@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: certd-config
+data:
+  CERTD_BIND_ADDR: "0.0.0.0:8080"
+  ARTIFACTS_BACKEND: "s3"
+  ARTIFACTS_BUCKET: "cert-artifacts"
+  ARTIFACTS_REGION: "us-east-1"
+  ARTIFACTS_ENDPOINT: "http://minio.certd.svc.cluster.local:9000"
+  ARTIFACTS_PATH_STYLE: "true"
+  HQL_NODE_ID_FROM: "k8s"
+  HQL_NODES: |
+    1 certd-0.certd-headless.certd.svc.cluster.local:8100 certd-0.certd-headless.certd.svc.cluster.local:8200
+    2 certd-1.certd-headless.certd.svc.cluster.local:8100 certd-1.certd-headless.certd.svc.cluster.local:8200
+    3 certd-2.certd-headless.certd.svc.cluster.local:8100 certd-2.certd-headless.certd.svc.cluster.local:8200
+  HQL_DATA_DIR: "/var/lib/certd/hiqlite"
+  HQL_BACKUP_CRON: "0 30 2 * * * *"
+  HQL_BACKUP_KEEP_DAYS: "30"
+  HQL_BACKUP_KEEP_DAYS_LOCAL: "3"
+  HQL_S3_URL: "http://minio.certd.svc.cluster.local:9000"
+  HQL_S3_BUCKET: "cert-backups"
+  HQL_S3_REGION: "us-east-1"
+  HQL_S3_PATH_STYLE: "true"
