@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use domain::{Business, DocumentArtifact, DocumentCategory, GenerationRecord, Plant, RateRecord, RecRecord, SyncMode, SyncRun, User};
-use hiqlite::Client;
-use serde::Deserialize;
+use domain::{
+    Business, DocumentArtifact, DocumentCategory, GenerationRecord, Plant, RateRecord, RecRecord,
+    SyncMode, SyncRun, User,
+};
+use hiqlite::{Client, Row};
+use std::borrow::Cow;
 use uuid::Uuid;
 
 macro_rules! params {
@@ -18,7 +21,7 @@ pub struct Database {
     bootstrap_user_name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StoredCertificate {
     pub id: String,
     pub business_id: String,
@@ -56,24 +59,24 @@ pub struct PlantSummary {
     pub document_categories: Vec<(DocumentCategory, i64)>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct CountRow {
     count: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct CountSumRow {
     count: i64,
     total: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct CountSumIntRow {
     count: i64,
     total: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct PlantRow {
     id: String,
     name: String,
@@ -85,7 +88,7 @@ struct PlantRow {
     confirm_issued: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct SyncRunRow {
     id: String,
     business_no: String,
@@ -97,7 +100,7 @@ struct SyncRunRow {
     duration_ms: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct GenerationRow {
     month: String,
     generation_kwh: f64,
@@ -106,7 +109,7 @@ struct GenerationRow {
     application_deadline: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct RateRow {
     month: String,
     self_rate: Option<f64>,
@@ -115,7 +118,7 @@ struct RateRow {
     nearby_highest: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct RecRow {
     month: String,
     application_no: String,
@@ -129,7 +132,7 @@ struct RecRow {
     status: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct DocumentRow {
     id: String,
     category: String,
@@ -143,7 +146,7 @@ struct DocumentRow {
     content_type: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct CategoryCountRow {
     category: String,
     count: i64,
@@ -156,6 +159,46 @@ impl Database {
             bootstrap_user_id,
             bootstrap_user_name,
         }
+    }
+
+    async fn query_consistent_rows<T, S>(
+        &self,
+        stmt: S,
+        params: Vec<hiqlite::Param>,
+        label: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+        S: Into<Cow<'static, str>>,
+    {
+        self.client
+            .query_consistent_map::<T, S>(stmt, params)
+            .await
+            .with_context(|| format!("query consistent rows: {label}"))
+    }
+
+    async fn query_consistent_row<T, S>(
+        &self,
+        stmt: S,
+        params: Vec<hiqlite::Param>,
+        label: &str,
+    ) -> Result<T>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+        S: Into<Cow<'static, str>>,
+    {
+        let rows: Vec<T> = self
+            .query_consistent_rows::<T, S>(stmt, params, label)
+            .await?;
+        if rows.is_empty() {
+            return Err(anyhow!("no row returned: {label}"));
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!("multiple rows returned: {label}, expected 1"));
+        }
+        rows.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no row returned: {label}"))
     }
 
     pub async fn ensure_schema(&self) -> Result<()> {
@@ -323,40 +366,41 @@ impl Database {
     ) -> Result<Business> {
         let now = now_string();
         self.client
-            .txn([
-                (
-                    "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT(id) DO UPDATE SET
-                        display_name = excluded.display_name,
-                        business_no = excluded.business_no,
-                        common_name = excluded.common_name,
-                        active = excluded.active,
-                        updated_at = excluded.updated_at",
-                    params!(
-                        business_no.to_owned(),
-                        display_name.to_owned(),
-                        business_no.to_owned(),
-                        common_name.to_owned(),
-                        1_i64,
-                        now.clone(),
-                        now.clone()
-                    ),
+            .execute(
+                "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    business_no = excluded.business_no,
+                    common_name = excluded.common_name,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at",
+                params!(
+                    business_no.to_owned(),
+                    display_name.to_owned(),
+                    business_no.to_owned(),
+                    common_name.to_owned(),
+                    1_i64,
+                    now.clone(),
+                    now.clone()
                 ),
-                (
-                    "INSERT INTO business_memberships (user_id, business_id, role, created_at)
-                     VALUES ($1, $2, $3, $4)
-                     ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
-                    params!(
-                        self.bootstrap_user_id.clone(),
-                        business_no.to_owned(),
-                        "owner",
-                        now.clone()
-                    ),
-                ),
-            ])
+            )
             .await
-            .context("upsert business and membership transaction")?;
+            .context("upsert business")?;
+        self.client
+            .execute(
+                "INSERT INTO business_memberships (user_id, business_id, role, created_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
+                params!(
+                    self.bootstrap_user_id.clone(),
+                    business_no.to_owned(),
+                    "owner",
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert business membership")?;
         Ok(Business {
             id: business_no.to_owned(),
             display_name: display_name.to_owned(),
@@ -372,77 +416,55 @@ impl Database {
         common_name: &str,
         encrypted_blob: &str,
     ) -> Result<StoredCertificate> {
+        self.upsert_business_with_owner(business_no, common_name, common_name)
+            .await?;
+
+        self.client
+            .execute(
+                "UPDATE certificates SET active = 0 WHERE business_id = $1",
+                params!(business_no.to_owned()),
+            )
+            .await
+            .context("deactivate prior certificates")?;
+
         let id = Uuid::new_v4().simple().to_string();
         let now = now_string();
         self.client
-            .txn([
-                (
-                    "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT(id) DO UPDATE SET
-                        display_name = excluded.display_name,
-                        business_no = excluded.business_no,
-                        common_name = excluded.common_name,
-                        active = excluded.active,
-                        updated_at = excluded.updated_at",
-                    params!(
-                        business_no.to_owned(),
-                        common_name.to_owned(),
-                        business_no.to_owned(),
-                        common_name.to_owned(),
-                        1_i64,
-                        now.clone(),
-                        now.clone()
-                    ),
+            .execute(
+                "INSERT INTO certificates (id, business_id, common_name, encrypted_blob, active, last_used_at, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                params!(
+                    id.clone(),
+                    business_no.to_owned(),
+                    common_name.to_owned(),
+                    encrypted_blob.to_owned(),
+                    1_i64,
+                    Option::<String>::None,
+                    now
                 ),
-                (
-                    "INSERT INTO business_memberships (user_id, business_id, role, created_at)
-                     VALUES ($1, $2, $3, $4)
-                     ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
-                    params!(
-                        self.bootstrap_user_id.clone(),
-                        business_no.to_owned(),
-                        "owner",
-                        now.clone()
-                    ),
-                ),
-                (
-                    "UPDATE certificates SET active = 0 WHERE business_id = $1",
-                    params!(business_no.to_owned()),
-                ),
-                (
-                    "INSERT INTO certificates (id, business_id, common_name, encrypted_blob, active, last_used_at, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                    params!(
-                        id.clone(),
-                        business_no.to_owned(),
-                        common_name.to_owned(),
-                        encrypted_blob.to_owned(),
-                        1_i64,
-                        Option::<String>::None,
-                        now
-                    ),
-                ),
-            ])
+            )
             .await
-            .context("save certificate transaction")?;
+            .context("insert certificate")?;
         self.load_active_certificate(business_no).await
     }
 
     pub async fn load_active_certificate(&self, business_no: &str) -> Result<StoredCertificate> {
-        let mut rows: Vec<StoredCertificate> = self
-            .client
-            .query_as(
+        let rows: Vec<StoredCertificate> = self
+            .query_consistent_rows(
                 "SELECT id, business_id, common_name, encrypted_blob, active, last_used_at, created_at
                  FROM certificates
                  WHERE business_id = $1
                  ORDER BY active DESC, created_at DESC
                  LIMIT 1",
                 params!(business_no.to_owned()),
+                "active certificate",
             )
             .await
             .context("query active certificate")?;
-        let cert = rows.pop().ok_or_else(|| anyhow!("certificate not found"))?;
+        let cert = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("certificate not found"))?;
         self.client
             .execute(
                 "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
@@ -497,19 +519,18 @@ impl Database {
         status: &str,
         duration_ms: i64,
         error_message: Option<&str>,
-        plant_id: Option<&str>,
+        _plant_id: Option<&str>,
     ) -> Result<()> {
         self.client
             .execute(
                 "UPDATE sync_runs
-                 SET status = $1, finished_at = $2, duration_ms = $3, error_message = $4, plant_id = COALESCE($5, plant_id)
-                 WHERE id = $6",
+                 SET status = $1, finished_at = $2, duration_ms = $3, error_message = $4
+                 WHERE id = $5",
                 params!(
                     status.to_owned(),
                     now_string(),
                     duration_ms,
                     error_message.map(ToOwned::to_owned),
-                    plant_id.map(ToOwned::to_owned),
                     run_id.to_owned()
                 ),
             )
@@ -560,102 +581,30 @@ impl Database {
         rates: &[StoredRateRecord],
         rec: &[RecRecord],
     ) -> Result<()> {
-        let updated_at = now_string();
-        let mut queries = vec![
-            (
-                "DELETE FROM generation_records WHERE plant_id = $1".to_owned(),
-                params!(plant_id.to_owned()),
-            ),
-            (
-                "DELETE FROM rate_records WHERE plant_id = $1".to_owned(),
-                params!(plant_id.to_owned()),
-            ),
-            (
-                "DELETE FROM rec_records WHERE plant_id = $1".to_owned(),
-                params!(plant_id.to_owned()),
-            ),
-        ];
-        for record in generation {
-            queries.push((
-                "INSERT INTO generation_records (plant_id, month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT(plant_id, month) DO UPDATE SET
-                    generation_kwh = excluded.generation_kwh,
-                    self_consumption_kwh = excluded.self_consumption_kwh,
-                    supply_kwh = excluded.supply_kwh,
-                    application_deadline = excluded.application_deadline,
-                    updated_at = excluded.updated_at".to_owned(),
-                params!(
-                    plant_id.to_owned(),
-                    record.month.clone(),
-                    record.generation_kwh,
-                    record.self_consumption_kwh,
-                    record.supply_kwh,
-                    record.application_deadline.clone(),
-                    updated_at.clone()
-                ),
-            ));
-        }
-        for record in rates {
-            queries.push((
-                "INSERT INTO rate_records (plant_id, month, self_rate, national_average, nearby_average, nearby_highest, published, source_control_flag, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                 ON CONFLICT(plant_id, month) DO UPDATE SET
-                    self_rate = excluded.self_rate,
-                    national_average = excluded.national_average,
-                    nearby_average = excluded.nearby_average,
-                    nearby_highest = excluded.nearby_highest,
-                    published = excluded.published,
-                    source_control_flag = excluded.source_control_flag,
-                    updated_at = excluded.updated_at".to_owned(),
-                params!(
-                    plant_id.to_owned(),
-                    record.record.month.clone(),
-                    record.record.self_rate,
-                    record.record.national_average,
-                    record.record.nearby_average,
-                    record.record.nearby_highest,
-                    if record.published { 1_i64 } else { 0_i64 },
-                    record.source_control_flag.clone(),
-                    updated_at.clone()
-                ),
-            ));
-        }
-        for record in rec {
-            queries.push((
-                "INSERT INTO rec_records (plant_id, application_no, month, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                 ON CONFLICT(plant_id, application_no) DO UPDATE SET
-                    month = excluded.month,
-                    supply_kwh = excluded.supply_kwh,
-                    rec_quantity = excluded.rec_quantity,
-                    fee_krw = excluded.fee_krw,
-                    issued_date = excluded.issued_date,
-                    expiry_date = excluded.expiry_date,
-                    virtual_account = excluded.virtual_account,
-                    bank_name = excluded.bank_name,
-                    status = excluded.status,
-                    updated_at = excluded.updated_at".to_owned(),
-                params!(
-                    plant_id.to_owned(),
-                    record.application_no.clone(),
-                    record.month.clone(),
-                    record.supply_kwh,
-                    record.rec_quantity,
-                    record.fee_krw,
-                    record.issued_date.clone(),
-                    record.expiry_date.clone(),
-                    record.virtual_account.clone(),
-                    record.bank_name.clone(),
-                    record.status.clone(),
-                    updated_at.clone()
-                ),
-            ));
-        }
         self.client
-            .txn(queries)
+            .execute(
+                "DELETE FROM generation_records WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+            )
             .await
-            .context("replace full records transaction")?;
+            .context("clear generation records")?;
+        self.client
+            .execute(
+                "DELETE FROM rate_records WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+            )
+            .await
+            .context("clear rate records")?;
+        self.client
+            .execute(
+                "DELETE FROM rec_records WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+            )
+            .await
+            .context("clear rec records")?;
+        self.upsert_generation_records(plant_id, generation).await?;
+        self.upsert_rate_records(plant_id, rates).await?;
+        self.upsert_rec_records(plant_id, rec).await?;
         Ok(())
     }
 
@@ -770,11 +719,11 @@ impl Database {
 
     pub async fn list_document_objects(&self, plant_id: &str) -> Result<Vec<String>> {
         let rows: Vec<DocumentRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
+                "document objects",
             )
             .await
             .context("list document rows")?;
@@ -786,46 +735,48 @@ impl Database {
         plant_id: &str,
         docs: &[PersistedDocument],
     ) -> Result<()> {
-        let updated_at = now_string();
-        let mut queries = vec![(
-            "DELETE FROM documents WHERE plant_id = $1".to_owned(),
-            params!(plant_id.to_owned()),
-        )];
-        for doc in docs {
-            queries.push((
-                "INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)".to_owned(),
-                params!(
-                    doc.id.clone(),
-                    plant_id.to_owned(),
-                    doc.category.to_storage(),
-                    doc.attachment_code.clone(),
-                    doc.file_class.clone(),
-                    doc.file_sec_name.clone(),
-                    doc.file_name.clone(),
-                    if doc.required { 1_i64 } else { 0_i64 },
-                    doc.source_sha256.clone(),
-                    doc.output_sha256.clone(),
-                    doc.object_key.clone(),
-                    doc.content_type.clone(),
-                    updated_at.clone()
-                ),
-            ));
-        }
         self.client
-            .txn(queries)
+            .execute(
+                "DELETE FROM documents WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+            )
             .await
-            .context("replace documents transaction")?;
+            .context("clear documents")?;
+        let updated_at = now_string();
+        for doc in docs {
+            self.client
+                .execute(
+                    "INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                    params!(
+                        doc.id.clone(),
+                        plant_id.to_owned(),
+                        doc.category.to_storage(),
+                        doc.attachment_code.clone(),
+                        doc.file_class.clone(),
+                        doc.file_sec_name.clone(),
+                        doc.file_name.clone(),
+                        if doc.required { 1_i64 } else { 0_i64 },
+                        doc.source_sha256.clone(),
+                        doc.output_sha256.clone(),
+                        doc.object_key.clone(),
+                        doc.content_type.clone(),
+                        updated_at.clone()
+                    ),
+                )
+                .await
+                .with_context(|| format!("insert document {}", doc.file_name))?;
+        }
         Ok(())
     }
 
     pub async fn list_plants(&self, business_no: &str) -> Result<Vec<Plant>> {
         let rows: Vec<PlantRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT id, name, business_no, contract_no, address, installed_kw, rec_start_date, confirm_issued
                  FROM plants WHERE business_id = $1 ORDER BY id ASC",
                 params!(business_no.to_owned()),
+                "plants",
             )
             .await
             .context("list plants")?;
@@ -834,11 +785,11 @@ impl Database {
 
     pub async fn latest_generation_month(&self, plant_id: &str) -> Result<Option<String>> {
         let rows: Vec<GenerationRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline
                  FROM generation_records WHERE plant_id = $1 ORDER BY month DESC LIMIT 1",
                 params!(plant_id.to_owned()),
+                "latest generation month",
             )
             .await
             .context("query latest generation month")?;
@@ -847,67 +798,67 @@ impl Database {
 
     pub async fn get_plant_summary(&self, plant_id: &str) -> Result<PlantSummary> {
         let mut plants: Vec<PlantRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT id, name, business_no, contract_no, address, installed_kw, rec_start_date, confirm_issued
                  FROM plants WHERE id = $1 LIMIT 1",
                 params!(plant_id.to_owned()),
+                "plant",
             )
             .await
             .context("query plant")?;
         let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
 
         let mut runs: Vec<SyncRunRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT id, business_id as business_no, plant_id, mode, status, started_at, finished_at, duration_ms
                  FROM sync_runs WHERE plant_id = $1 AND status = 'completed'
                  ORDER BY started_at DESC LIMIT 1",
                 params!(plant_id.to_owned()),
+                "latest sync run",
             )
             .await
             .context("query latest sync run")?;
         let last_sync = runs.pop().map(Into::into);
 
         let generation = self
-            .client
-            .query_as_one::<CountSumRow, _>(
+            .query_consistent_row::<CountSumRow, _>(
                 "SELECT COUNT(*) as count, COALESCE(SUM(generation_kwh), 0) as total
                  FROM generation_records WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
+                "generation aggregate",
             )
             .await
             .context("aggregate generation")?;
         let rates = self
-            .client
-            .query_as_one::<CountRow, _>(
+            .query_consistent_row::<CountRow, _>(
                 "SELECT COUNT(*) as count FROM rate_records WHERE plant_id = $1 AND published = 1",
                 params!(plant_id.to_owned()),
+                "rates aggregate",
             )
             .await
             .context("aggregate rates")?;
         let rec = self
-            .client
-            .query_as_one::<CountSumIntRow, _>(
+            .query_consistent_row::<CountSumIntRow, _>(
                 "SELECT COUNT(*) as count, COALESCE(SUM(rec_quantity), 0) as total
                  FROM rec_records WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
+                "rec aggregate",
             )
             .await
             .context("aggregate rec")?;
         let documents = self
-            .client
-            .query_as_one::<CountRow, _>(
+            .query_consistent_row::<CountRow, _>(
                 "SELECT COUNT(*) as count FROM documents WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
+                "document aggregate",
             )
             .await
             .context("aggregate documents")?;
         let category_rows: Vec<CategoryCountRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT category, COUNT(*) as count FROM documents WHERE plant_id = $1 GROUP BY category ORDER BY category ASC",
                 params!(plant_id.to_owned()),
+                "document category aggregate",
             )
             .await
             .context("aggregate document categories")?;
@@ -933,11 +884,11 @@ impl Database {
 
     pub async fn list_generation(&self, plant_id: &str) -> Result<Vec<GenerationRecord>> {
         let rows: Vec<GenerationRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline
                  FROM generation_records WHERE plant_id = $1 ORDER BY month ASC",
                 params!(plant_id.to_owned()),
+                "generation list",
             )
             .await
             .context("list generation")?;
@@ -946,11 +897,11 @@ impl Database {
 
     pub async fn list_rates(&self, plant_id: &str) -> Result<Vec<RateRecord>> {
         let rows: Vec<RateRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT month, self_rate, national_average, nearby_average, nearby_highest
                  FROM rate_records WHERE plant_id = $1 AND published = 1 ORDER BY month ASC",
                 params!(plant_id.to_owned()),
+                "rates list",
             )
             .await
             .context("list rates")?;
@@ -968,11 +919,11 @@ impl Database {
 
     pub async fn list_rec(&self, plant_id: &str) -> Result<Vec<RecRecord>> {
         let rows: Vec<RecRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT month, application_no, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status
                  FROM rec_records WHERE plant_id = $1 ORDER BY month ASC, application_no ASC",
                 params!(plant_id.to_owned()),
+                "rec list",
             )
             .await
             .context("list rec")?;
@@ -981,47 +932,50 @@ impl Database {
 
     pub async fn list_documents(&self, plant_id: &str) -> Result<Vec<StoredDocument>> {
         let rows: Vec<DocumentRow> = self
-            .client
-            .query_as(
+            .query_consistent_rows(
                 "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE plant_id = $1 ORDER BY category ASC, file_name ASC",
                 params!(plant_id.to_owned()),
+                "document list",
             )
             .await
             .context("list documents")?;
         Ok(rows
             .into_iter()
             .filter_map(|row| {
-                <DocumentCategory as DocumentCategoryExt>::from_storage(&row.category).map(|category| StoredDocument {
-                    artifact: DocumentArtifact {
-                        id: row.id,
-                        category,
-                        file_class: row.file_class,
-                        file_sec_name: row.file_sec_name,
-                        file_name: row.file_name,
-                        required: row.required == 1,
-                        source_sha256: row.source_sha256,
-                        output_sha256: row.output_sha256,
-                        download_url: None,
+                <DocumentCategory as DocumentCategoryExt>::from_storage(&row.category).map(
+                    |category| StoredDocument {
+                        artifact: DocumentArtifact {
+                            id: row.id,
+                            category,
+                            file_class: row.file_class,
+                            file_sec_name: row.file_sec_name,
+                            file_name: row.file_name,
+                            required: row.required == 1,
+                            source_sha256: row.source_sha256,
+                            output_sha256: row.output_sha256,
+                            download_url: None,
+                        },
+                        object_key: row.object_key,
+                        content_type: row.content_type,
                     },
-                    object_key: row.object_key,
-                    content_type: row.content_type,
-                })
+                )
             })
             .collect())
     }
 
     pub async fn get_document(&self, id: &str) -> Result<StoredDocument> {
-        let mut rows: Vec<DocumentRow> = self
-            .client
-            .query_as(
+        let rows: Vec<DocumentRow> = self
+            .query_consistent_rows(
                 "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE id = $1 LIMIT 1",
                 params!(id.to_owned()),
+                "document",
             )
             .await
             .context("get document")?;
-        let row = rows.pop().ok_or_else(|| anyhow!("document not found"))?;
+        let mut rows = rows.into_iter();
+        let row = rows.next().ok_or_else(|| anyhow!("document not found"))?;
         let category = <DocumentCategory as DocumentCategoryExt>::from_storage(&row.category)
             .ok_or_else(|| anyhow!("invalid document category {}", row.category))?;
         Ok(StoredDocument {
@@ -1109,6 +1063,143 @@ fn sync_mode_str(mode: &SyncMode) -> &'static str {
 
 fn now_string() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
+}
+
+impl From<&mut Row<'_>> for StoredCertificate {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            business_id: row.get("business_id"),
+            common_name: row.get("common_name"),
+            encrypted_blob: row.get("encrypted_blob"),
+            active: row.get("active"),
+            last_used_at: row.get("last_used_at"),
+            created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CountSumRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+            total: row.get("total"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CountSumIntRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+            total: row.get("total"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for PlantRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            name: row.get("name"),
+            business_no: row.get("business_no"),
+            contract_no: row.get("contract_no"),
+            address: row.get("address"),
+            installed_kw: row.get("installed_kw"),
+            rec_start_date: row.get("rec_start_date"),
+            confirm_issued: row.get("confirm_issued"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for SyncRunRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            business_no: row.get("business_no"),
+            plant_id: row.get("plant_id"),
+            mode: row.get("mode"),
+            status: row.get("status"),
+            started_at: row.get("started_at"),
+            finished_at: row.get("finished_at"),
+            duration_ms: row.get("duration_ms"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for GenerationRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            month: row.get("month"),
+            generation_kwh: row.get("generation_kwh"),
+            self_consumption_kwh: row.get("self_consumption_kwh"),
+            supply_kwh: row.get("supply_kwh"),
+            application_deadline: row.get("application_deadline"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for RateRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            month: row.get("month"),
+            self_rate: row.get("self_rate"),
+            national_average: row.get("national_average"),
+            nearby_average: row.get("nearby_average"),
+            nearby_highest: row.get("nearby_highest"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for RecRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            month: row.get("month"),
+            application_no: row.get("application_no"),
+            supply_kwh: row.get("supply_kwh"),
+            rec_quantity: row.get("rec_quantity"),
+            fee_krw: row.get("fee_krw"),
+            issued_date: row.get("issued_date"),
+            expiry_date: row.get("expiry_date"),
+            virtual_account: row.get("virtual_account"),
+            bank_name: row.get("bank_name"),
+            status: row.get("status"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for DocumentRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            category: row.get("category"),
+            file_class: row.get("file_class"),
+            file_sec_name: row.get("file_sec_name"),
+            file_name: row.get("file_name"),
+            required: row.get("required"),
+            source_sha256: row.get("source_sha256"),
+            output_sha256: row.get("output_sha256"),
+            object_key: row.get("object_key"),
+            content_type: row.get("content_type"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CategoryCountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            category: row.get("category"),
+            count: row.get("count"),
+        }
+    }
 }
 
 impl From<PlantRow> for Plant {
