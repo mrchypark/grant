@@ -323,41 +323,40 @@ impl Database {
     ) -> Result<Business> {
         let now = now_string();
         self.client
-            .execute(
-                "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT(id) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    business_no = excluded.business_no,
-                    common_name = excluded.common_name,
-                    active = excluded.active,
-                    updated_at = excluded.updated_at",
-                params!(
-                    business_no.to_owned(),
-                    display_name.to_owned(),
-                    business_no.to_owned(),
-                    common_name.to_owned(),
-                    1_i64,
-                    now.clone(),
-                    now.clone()
+            .txn([
+                (
+                    "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     ON CONFLICT(id) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        business_no = excluded.business_no,
+                        common_name = excluded.common_name,
+                        active = excluded.active,
+                        updated_at = excluded.updated_at",
+                    params!(
+                        business_no.to_owned(),
+                        display_name.to_owned(),
+                        business_no.to_owned(),
+                        common_name.to_owned(),
+                        1_i64,
+                        now.clone(),
+                        now.clone()
+                    ),
                 ),
-            )
-            .await
-            .context("upsert business")?;
-        self.client
-            .execute(
-                "INSERT INTO business_memberships (user_id, business_id, role, created_at)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
-                params!(
-                    self.bootstrap_user_id.clone(),
-                    business_no.to_owned(),
-                    "owner",
-                    now.clone()
+                (
+                    "INSERT INTO business_memberships (user_id, business_id, role, created_at)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
+                    params!(
+                        self.bootstrap_user_id.clone(),
+                        business_no.to_owned(),
+                        "owner",
+                        now.clone()
+                    ),
                 ),
-            )
+            ])
             .await
-            .context("upsert business membership")?;
+            .context("upsert business and membership transaction")?;
         Ok(Business {
             id: business_no.to_owned(),
             display_name: display_name.to_owned(),
@@ -373,35 +372,60 @@ impl Database {
         common_name: &str,
         encrypted_blob: &str,
     ) -> Result<StoredCertificate> {
-        self.upsert_business_with_owner(business_no, common_name, common_name)
-            .await?;
-
-        self.client
-            .execute(
-                "UPDATE certificates SET active = 0 WHERE business_id = $1",
-                params!(business_no.to_owned()),
-            )
-            .await
-            .context("deactivate prior certificates")?;
-
         let id = Uuid::new_v4().simple().to_string();
         let now = now_string();
         self.client
-            .execute(
-                "INSERT INTO certificates (id, business_id, common_name, encrypted_blob, active, last_used_at, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                params!(
-                    id.clone(),
-                    business_no.to_owned(),
-                    common_name.to_owned(),
-                    encrypted_blob.to_owned(),
-                    1_i64,
-                    Option::<String>::None,
-                    now
+            .txn([
+                (
+                    "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     ON CONFLICT(id) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        business_no = excluded.business_no,
+                        common_name = excluded.common_name,
+                        active = excluded.active,
+                        updated_at = excluded.updated_at",
+                    params!(
+                        business_no.to_owned(),
+                        common_name.to_owned(),
+                        business_no.to_owned(),
+                        common_name.to_owned(),
+                        1_i64,
+                        now.clone(),
+                        now.clone()
+                    ),
                 ),
-            )
+                (
+                    "INSERT INTO business_memberships (user_id, business_id, role, created_at)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
+                    params!(
+                        self.bootstrap_user_id.clone(),
+                        business_no.to_owned(),
+                        "owner",
+                        now.clone()
+                    ),
+                ),
+                (
+                    "UPDATE certificates SET active = 0 WHERE business_id = $1",
+                    params!(business_no.to_owned()),
+                ),
+                (
+                    "INSERT INTO certificates (id, business_id, common_name, encrypted_blob, active, last_used_at, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    params!(
+                        id.clone(),
+                        business_no.to_owned(),
+                        common_name.to_owned(),
+                        encrypted_blob.to_owned(),
+                        1_i64,
+                        Option::<String>::None,
+                        now
+                    ),
+                ),
+            ])
             .await
-            .context("insert certificate")?;
+            .context("save certificate transaction")?;
         self.load_active_certificate(business_no).await
     }
 
@@ -473,17 +497,19 @@ impl Database {
         status: &str,
         duration_ms: i64,
         error_message: Option<&str>,
+        plant_id: Option<&str>,
     ) -> Result<()> {
         self.client
             .execute(
                 "UPDATE sync_runs
-                 SET status = $1, finished_at = $2, duration_ms = $3, error_message = $4
-                 WHERE id = $5",
+                 SET status = $1, finished_at = $2, duration_ms = $3, error_message = $4, plant_id = COALESCE($5, plant_id)
+                 WHERE id = $6",
                 params!(
                     status.to_owned(),
                     now_string(),
                     duration_ms,
                     error_message.map(ToOwned::to_owned),
+                    plant_id.map(ToOwned::to_owned),
                     run_id.to_owned()
                 ),
             )
@@ -534,30 +560,102 @@ impl Database {
         rates: &[StoredRateRecord],
         rec: &[RecRecord],
     ) -> Result<()> {
-        self.client
-            .execute(
-                "DELETE FROM generation_records WHERE plant_id = $1",
+        let updated_at = now_string();
+        let mut queries = vec![
+            (
+                "DELETE FROM generation_records WHERE plant_id = $1".to_owned(),
                 params!(plant_id.to_owned()),
-            )
-            .await
-            .context("clear generation records")?;
-        self.client
-            .execute(
-                "DELETE FROM rate_records WHERE plant_id = $1",
+            ),
+            (
+                "DELETE FROM rate_records WHERE plant_id = $1".to_owned(),
                 params!(plant_id.to_owned()),
-            )
-            .await
-            .context("clear rate records")?;
-        self.client
-            .execute(
-                "DELETE FROM rec_records WHERE plant_id = $1",
+            ),
+            (
+                "DELETE FROM rec_records WHERE plant_id = $1".to_owned(),
                 params!(plant_id.to_owned()),
-            )
+            ),
+        ];
+        for record in generation {
+            queries.push((
+                "INSERT INTO generation_records (plant_id, month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(plant_id, month) DO UPDATE SET
+                    generation_kwh = excluded.generation_kwh,
+                    self_consumption_kwh = excluded.self_consumption_kwh,
+                    supply_kwh = excluded.supply_kwh,
+                    application_deadline = excluded.application_deadline,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    plant_id.to_owned(),
+                    record.month.clone(),
+                    record.generation_kwh,
+                    record.self_consumption_kwh,
+                    record.supply_kwh,
+                    record.application_deadline.clone(),
+                    updated_at.clone()
+                ),
+            ));
+        }
+        for record in rates {
+            queries.push((
+                "INSERT INTO rate_records (plant_id, month, self_rate, national_average, nearby_average, nearby_highest, published, source_control_flag, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(plant_id, month) DO UPDATE SET
+                    self_rate = excluded.self_rate,
+                    national_average = excluded.national_average,
+                    nearby_average = excluded.nearby_average,
+                    nearby_highest = excluded.nearby_highest,
+                    published = excluded.published,
+                    source_control_flag = excluded.source_control_flag,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    plant_id.to_owned(),
+                    record.record.month.clone(),
+                    record.record.self_rate,
+                    record.record.national_average,
+                    record.record.nearby_average,
+                    record.record.nearby_highest,
+                    if record.published { 1_i64 } else { 0_i64 },
+                    record.source_control_flag.clone(),
+                    updated_at.clone()
+                ),
+            ));
+        }
+        for record in rec {
+            queries.push((
+                "INSERT INTO rec_records (plant_id, application_no, month, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 ON CONFLICT(plant_id, application_no) DO UPDATE SET
+                    month = excluded.month,
+                    supply_kwh = excluded.supply_kwh,
+                    rec_quantity = excluded.rec_quantity,
+                    fee_krw = excluded.fee_krw,
+                    issued_date = excluded.issued_date,
+                    expiry_date = excluded.expiry_date,
+                    virtual_account = excluded.virtual_account,
+                    bank_name = excluded.bank_name,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    plant_id.to_owned(),
+                    record.application_no.clone(),
+                    record.month.clone(),
+                    record.supply_kwh,
+                    record.rec_quantity,
+                    record.fee_krw,
+                    record.issued_date.clone(),
+                    record.expiry_date.clone(),
+                    record.virtual_account.clone(),
+                    record.bank_name.clone(),
+                    record.status.clone(),
+                    updated_at.clone()
+                ),
+            ));
+        }
+        self.client
+            .txn(queries)
             .await
-            .context("clear rec records")?;
-        self.upsert_generation_records(plant_id, generation).await?;
-        self.upsert_rate_records(plant_id, rates).await?;
-        self.upsert_rec_records(plant_id, rec).await?;
+            .context("replace full records transaction")?;
         Ok(())
     }
 
@@ -688,35 +786,36 @@ impl Database {
         plant_id: &str,
         docs: &[PersistedDocument],
     ) -> Result<()> {
-        self.client
-            .execute("DELETE FROM documents WHERE plant_id = $1", params!(plant_id.to_owned()))
-            .await
-            .context("clear documents")?;
         let updated_at = now_string();
+        let mut queries = vec![(
+            "DELETE FROM documents WHERE plant_id = $1".to_owned(),
+            params!(plant_id.to_owned()),
+        )];
         for doc in docs {
-            self.client
-                .execute(
-                    "INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-                    params!(
-                        doc.id.clone(),
-                        plant_id.to_owned(),
-                        doc.category.to_storage(),
-                        doc.attachment_code.clone(),
-                        doc.file_class.clone(),
-                        doc.file_sec_name.clone(),
-                        doc.file_name.clone(),
-                        if doc.required { 1_i64 } else { 0_i64 },
-                        doc.source_sha256.clone(),
-                        doc.output_sha256.clone(),
-                        doc.object_key.clone(),
-                        doc.content_type.clone(),
-                        updated_at.clone()
-                    ),
-                )
-                .await
-                .with_context(|| format!("insert document {}", doc.file_name))?;
+            queries.push((
+                "INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)".to_owned(),
+                params!(
+                    doc.id.clone(),
+                    plant_id.to_owned(),
+                    doc.category.to_storage(),
+                    doc.attachment_code.clone(),
+                    doc.file_class.clone(),
+                    doc.file_sec_name.clone(),
+                    doc.file_name.clone(),
+                    if doc.required { 1_i64 } else { 0_i64 },
+                    doc.source_sha256.clone(),
+                    doc.output_sha256.clone(),
+                    doc.object_key.clone(),
+                    doc.content_type.clone(),
+                    updated_at.clone()
+                ),
+            ));
         }
+        self.client
+            .txn(queries)
+            .await
+            .context("replace documents transaction")?;
         Ok(())
     }
 

@@ -176,13 +176,8 @@ impl AppService {
                     self.db
                         .replace_full_records(&plant.code, &generation, &rates, &rec)
                         .await?;
-                    info!(plant_code = plant.code, "listing stale document objects");
+                    info!(plant_code = plant.code, "listing existing document objects");
                     let existing_objects = self.db.list_document_objects(&plant.code).await?;
-                    for object_key in existing_objects {
-                        if let Err(err) = self.artifacts.delete_object(&object_key).await {
-                            warn!("delete stale object {} failed: {}", object_key, err);
-                        }
-                    }
                     info!(
                         plant_code = plant.code,
                         document_count = snapshot.documents.len(),
@@ -196,6 +191,18 @@ impl AppService {
                         "writing document rows"
                     );
                     self.db.replace_documents(&plant.code, &persisted_docs).await?;
+                    let new_objects = persisted_docs
+                        .iter()
+                        .map(|doc| doc.object_key.clone())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    for object_key in existing_objects {
+                        if new_objects.contains(&object_key) {
+                            continue;
+                        }
+                        if let Err(err) = self.artifacts.delete_object(&object_key).await {
+                            warn!("delete stale object {} failed: {}", object_key, err);
+                        }
+                    }
                 } else {
                     info!(plant_code = plant.code, "upserting delta records");
                     self.db.upsert_generation_records(&plant.code, &generation).await?;
@@ -205,7 +212,7 @@ impl AppService {
 
                 let duration_ms = started.elapsed().as_millis() as i64;
                 self.db
-                    .finish_sync_run(&run.id, "completed", duration_ms, None)
+                    .finish_sync_run(&run.id, "completed", duration_ms, None, Some(&plant.code))
                     .await?;
                 info!(
                     "sync completed business={} plant={} mode={:?} duration_ms={}",
@@ -236,7 +243,13 @@ impl AppService {
                 );
                 let _ = self
                     .db
-                    .finish_sync_run(&run.id, "failed", duration_ms, Some(&message))
+                    .finish_sync_run(
+                        &run.id,
+                        "failed",
+                        duration_ms,
+                        Some(&message),
+                        input.facility_code.as_deref(),
+                    )
                     .await;
                 Err(err)
             }

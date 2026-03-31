@@ -181,7 +181,9 @@ struct JsonListResponse {
 pub async fn collect_snapshot(opts: BridgeOptions) -> Result<BridgeRun> {
     let temp_dir = TempDir::new().context("create collector temp dir")?;
     let cookie_jar_path = temp_dir.path().join("curl-cookie-jar.txt");
-    std::fs::write(&cookie_jar_path, b"").context("initialize curl cookie jar")?;
+    tokio::fs::write(&cookie_jar_path, b"")
+        .await
+        .context("initialize curl cookie jar")?;
     let signer = NpkiSigner::new(&bundle_from_certificate(&opts.bundle), &opts.bundle.password)
         .context("initialize NPKI signer")?;
     let collector = Collector::new(signer, cookie_jar_path);
@@ -198,6 +200,7 @@ pub async fn collect_snapshot(opts: BridgeOptions) -> Result<BridgeRun> {
     Ok(BridgeRun { temp_dir, snapshot })
 }
 
+#[derive(Clone)]
 struct Collector {
     signer: NpkiSigner,
     cookie_jar_path: PathBuf,
@@ -577,8 +580,12 @@ impl Collector {
             .join("downloads")
             .join("live")
             .join(&facility.code);
-        if download_root.exists() {
-            std::fs::remove_dir_all(&download_root)
+        if tokio::fs::try_exists(&download_root)
+            .await
+            .with_context(|| format!("check {}", download_root.display()))?
+        {
+            tokio::fs::remove_dir_all(&download_root)
+                .await
                 .with_context(|| format!("reset {}", download_root.display()))?;
         }
 
@@ -601,7 +608,8 @@ impl Collector {
                     &completion.application_no,
                     &attachment.file_name,
                     &content,
-                )?;
+                )
+                .await?;
                 documents.push(BridgeDocument {
                     attachment_code: attachment.attachment_code,
                     file_class: attachment.file_class,
@@ -763,7 +771,7 @@ impl Collector {
         T: DeserializeOwned,
     {
         for attempt in 1..=3 {
-            let (status, body) = match self.post_form(endpoint, form, headers.clone()) {
+            let (status, body) = match self.post_form_async(endpoint, form, headers.clone()).await {
                 Ok(response) => response,
                 Err(_err) if attempt < 3 => {
                     tokio::time::sleep(retry_delay(attempt)).await;
@@ -787,7 +795,7 @@ impl Collector {
         headers: Option<Vec<String>>,
     ) -> Result<String> {
         for attempt in 1..=3 {
-            let (status, body) = match self.post_form(endpoint, form, headers.clone()) {
+            let (status, body) = match self.post_form_async(endpoint, form, headers.clone()).await {
                 Ok(response) => response,
                 Err(_err) if attempt < 3 => {
                     tokio::time::sleep(retry_delay(attempt)).await;
@@ -811,7 +819,7 @@ impl Collector {
         headers: Option<Vec<String>>,
     ) -> Result<Vec<u8>> {
         for attempt in 1..=3 {
-            let (status, body) = match self.post_form(endpoint, form, headers.clone()) {
+            let (status, body) = match self.post_form_async(endpoint, form, headers.clone()).await {
                 Ok(response) => response,
                 Err(_err) if attempt < 3 => {
                     tokio::time::sleep(retry_delay(attempt)).await;
@@ -888,6 +896,29 @@ impl Collector {
 
         let status = easy.response_code().context("read curl response code")?;
         Ok((status, body))
+    }
+
+    async fn post_form_async(
+        &self,
+        endpoint: &str,
+        form: &[(&str, &str)],
+        headers: Option<Vec<String>>,
+    ) -> Result<(u32, Vec<u8>)> {
+        let collector = self.clone();
+        let endpoint = endpoint.to_owned();
+        let form_owned: Vec<(String, String)> = form
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let form_refs = form_owned
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            collector.post_form(&endpoint, &form_refs, headers)
+        })
+        .await
+        .context("join blocking post_form task")?
     }
 }
 
@@ -972,15 +1003,29 @@ fn extract_ente_id(body: &str) -> Result<String> {
 }
 
 fn parse_inputs(body: &str) -> BTreeMap<String, InputField> {
-    input_pattern()
-        .captures_iter(body)
-        .filter_map(|capture| {
-            let id = capture.get(1)?.as_str().to_owned();
-            let name = capture.get(2)?.as_str().to_owned();
-            let value = capture.get(3)?.as_str().to_owned();
-            Some((id, InputField { name, value }))
-        })
-        .collect()
+    let mut fields = BTreeMap::new();
+    for tag in input_tag_pattern().find_iter(body).map(|value| value.as_str()) {
+        let mut id = None;
+        let mut name = None;
+        let mut value = String::new();
+        for capture in input_attr_pattern().captures_iter(tag) {
+            let key = capture.get(1).map(|item| item.as_str()).unwrap_or_default();
+            let captured = capture
+                .get(2)
+                .map(|item| item.as_str().to_owned())
+                .unwrap_or_default();
+            match key {
+                "id" => id = Some(captured),
+                "name" => name = Some(captured),
+                "value" => value = captured,
+                _ => {}
+            }
+        }
+        if let (Some(id), Some(name)) = (id, name) {
+            fields.insert(id, InputField { name, value });
+        }
+    }
+    fields
 }
 
 fn input_value(fields: &BTreeMap<String, InputField>, id: &str) -> String {
@@ -1243,19 +1288,30 @@ fn headers(pairs: &[(&str, &str)]) -> Vec<String> {
         .collect()
 }
 
-fn write_downloaded_file(root: &Path, application_no: &str, file_name: &str, content: &[u8]) -> Result<String> {
+async fn write_downloaded_file(
+    root: &Path,
+    application_no: &str,
+    file_name: &str,
+    content: &[u8],
+) -> Result<String> {
     let dir = root.join(application_no);
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("create {}", dir.display()))?;
 
-    let target = unique_path(dir.join(Path::new(file_name).file_name().unwrap_or_default()));
-    std::fs::write(&target, content)
+    let target = unique_path(dir.join(Path::new(file_name).file_name().unwrap_or_default())).await?;
+    tokio::fs::write(&target, content)
+        .await
         .with_context(|| format!("write downloaded file {}", target.display()))?;
     Ok(target.to_string_lossy().into_owned())
 }
 
-fn unique_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
+async fn unique_path(path: PathBuf) -> Result<PathBuf> {
+    if !tokio::fs::try_exists(&path)
+        .await
+        .with_context(|| format!("check {}", path.display()))?
+    {
+        return Ok(path);
     }
 
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
@@ -1267,8 +1323,11 @@ fn unique_path(path: PathBuf) -> PathBuf {
         } else {
             parent.join(format!("{stem}-{idx}.{extension}"))
         };
-        if !candidate.exists() {
-            return candidate;
+        if !tokio::fs::try_exists(&candidate)
+            .await
+            .with_context(|| format!("check {}", candidate.display()))?
+        {
+            return Ok(candidate);
         }
     }
     unreachable!("unique path search must terminate")
@@ -1284,11 +1343,18 @@ struct InputField {
     value: String,
 }
 
-fn input_pattern() -> &'static Regex {
+fn input_tag_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(r#"(?is)<input[^>]*id="([^"]+)"[^>]*name="([^"]*)"[^>]*value="(.*?)"[^>]*>"#)
-            .expect("valid input regex")
+        Regex::new(r#"(?is)<input\b[^>]*>"#).expect("valid input tag regex")
+    })
+}
+
+fn input_attr_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r#"(?is)\b(id|name|value)\s*=\s*['"]([^'"]*)['"]"#)
+            .expect("valid input attribute regex")
     })
 }
 
