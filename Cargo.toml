@@ -44,3 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 x509-parser = "0.16"
+
+[patch.crates-io]
+hiqlite = { git = "https://github.com/mrchypark/hiqlite.git", rev = "3e2112cd140c24730a0d1493054ad007cdabc48e" }

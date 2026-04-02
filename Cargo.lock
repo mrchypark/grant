@@ -2162,8 +2162,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "hiqlite"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "069f42dc958188a0f5b56dd0db57d74610c7fa46718ce3fcc05a695416f29c4a"
+source = "git+https://github.com/mrchypark/hiqlite.git?rev=3e2112cd140c24730a0d1493054ad007cdabc48e#3e2112cd140c24730a0d1493054ad007cdabc48e"
 dependencies = [
  "aws-lc-rs",
  "aws-lc-sys",
@@ -2215,8 +2214,7 @@ dependencies = [
 [[package]]
 name = "hiqlite-wal"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05d53e55d82308a8433aab0cbbd8ba981e8e4fbecfa62b407ef26e92a671a65e"
+source = "git+https://github.com/mrchypark/hiqlite.git?rev=3e2112cd140c24730a0d1493054ad007cdabc48e#3e2112cd140c24730a0d1493054ad007cdabc48e"
 dependencies = [
  "bincode",
  "byteorder",
