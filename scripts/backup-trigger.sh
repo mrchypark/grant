@@ -13,9 +13,8 @@ To verify backup configuration:
   kubectl -n ${NAMESPACE} get secret certd-secrets -o yaml
 
 To inspect recent logs:
-  kubectl -n ${NAMESPACE} logs statefulset/certd --tail=200
+  kubectl -n ${NAMESPACE} logs statefulset/certd-voter --tail=200
 
 To list backup objects in MinIO/S3:
   aws s3 ls s3://\${HQL_S3_BUCKET}/
 EOF
-

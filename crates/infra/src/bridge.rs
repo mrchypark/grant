@@ -181,11 +181,12 @@ struct JsonListResponse {
 pub async fn collect_snapshot(opts: BridgeOptions) -> Result<BridgeRun> {
     let temp_dir = TempDir::new().context("create collector temp dir")?;
     let cookie_jar_path = temp_dir.path().join("curl-cookie-jar.txt");
-    tokio::fs::write(&cookie_jar_path, b"")
-        .await
-        .context("initialize curl cookie jar")?;
-    let signer = NpkiSigner::new(&bundle_from_certificate(&opts.bundle), &opts.bundle.password)
-        .context("initialize NPKI signer")?;
+    std::fs::write(&cookie_jar_path, b"").context("initialize curl cookie jar")?;
+    let signer = NpkiSigner::new(
+        &bundle_from_certificate(&opts.bundle),
+        &opts.bundle.password,
+    )
+    .context("initialize NPKI signer")?;
     let collector = Collector::new(signer, cookie_jar_path);
     let snapshot = collector
         .collect_snapshot(
@@ -200,7 +201,6 @@ pub async fn collect_snapshot(opts: BridgeOptions) -> Result<BridgeRun> {
     Ok(BridgeRun { temp_dir, snapshot })
 }
 
-#[derive(Clone)]
 struct Collector {
     signer: NpkiSigner,
     cookie_jar_path: PathBuf,
@@ -237,13 +237,19 @@ impl Collector {
         let generation_rows = self
             .fetch_generation(&login.ente_id, &start_month, &end_month)
             .await?;
-        let generation = generation_rows.iter().map(|item| item.record.clone()).collect();
+        let generation = generation_rows
+            .iter()
+            .map(|item| item.record.clone())
+            .collect();
         let rates = self.fetch_rates(&generation_rows).await?;
-        let rec = self.fetch_rec(&login.ente_id, &start_month, &end_month).await?;
+        let rec = self
+            .fetch_rec(&login.ente_id, &start_month, &end_month)
+            .await?;
         let documents = if skip_documents {
             Vec::new()
         } else {
-            self.fetch_documents(root_dir, &facility, &completions).await?
+            self.fetch_documents(root_dir, &facility, &completions)
+                .await?
         };
 
         Ok(BridgeSnapshot {
@@ -325,7 +331,10 @@ impl Collector {
                     ("userSsnType", &page.user_ssn_type),
                 ],
                 Some(headers(&[
-                    ("Referer", &format!("{DEFAULT_KCERT_BASE_URL}/keaDev/Login/CertLoginHTML5.do")),
+                    (
+                        "Referer",
+                        &format!("{DEFAULT_KCERT_BASE_URL}/keaDev/Login/CertLoginHTML5.do"),
+                    ),
                     ("Origin", DEFAULT_KCERT_BASE_URL),
                 ])),
             )
@@ -334,7 +343,11 @@ impl Collector {
         parse_kcert_result(&payload.result)
     }
 
-    async fn submit_return_form(&self, page: &KCertLoginPage, result: &KCertResult) -> Result<String> {
+    async fn submit_return_form(
+        &self,
+        page: &KCertLoginPage,
+        result: &KCertResult,
+    ) -> Result<String> {
         self.post_form_text(
             &page.return_page,
             &[
@@ -350,7 +363,10 @@ impl Collector {
                 ("CI", &result.ci),
             ],
             Some(headers(&[
-                ("Referer", &format!("{DEFAULT_KCERT_BASE_URL}/keaDev/Login/CertLoginHTML5.do")),
+                (
+                    "Referer",
+                    &format!("{DEFAULT_KCERT_BASE_URL}/keaDev/Login/CertLoginHTML5.do"),
+                ),
                 ("Origin", DEFAULT_KCERT_BASE_URL),
             ])),
         )
@@ -448,7 +464,10 @@ impl Collector {
         Ok(dedupe_generation(records))
     }
 
-    async fn fetch_rates(&self, generation: &[GenerationFetchRecord]) -> Result<Vec<BridgeRateRecord>> {
+    async fn fetch_rates(
+        &self,
+        generation: &[GenerationFetchRecord],
+    ) -> Result<Vec<BridgeRateRecord>> {
         let mut records = Vec::with_capacity(generation.len());
         for item in generation {
             if item.row_id.is_empty() {
@@ -457,10 +476,7 @@ impl Collector {
             let response: JsonListResponse = self
                 .post_form_json(
                     &format!("{DEFAULT_BASE_URL}/comm/SP_RPS_G.do"),
-                    &[
-                        ("P_GELEC_ID", &item.row_id),
-                        ("P_PKG_NM", "O2_02_02_026_S"),
-                    ],
+                    &[("P_GELEC_ID", &item.row_id), ("P_PKG_NM", "O2_02_02_026_S")],
                     None,
                 )
                 .await?;
@@ -576,16 +592,9 @@ impl Collector {
         facility: &FacilityRecord,
         completions: &[CompletionRecord],
     ) -> Result<Vec<BridgeDocument>> {
-        let download_root = root_dir
-            .join("downloads")
-            .join("live")
-            .join(&facility.code);
-        if tokio::fs::try_exists(&download_root)
-            .await
-            .with_context(|| format!("check {}", download_root.display()))?
-        {
-            tokio::fs::remove_dir_all(&download_root)
-                .await
+        let download_root = root_dir.join("downloads").join("live").join(&facility.code);
+        if download_root.exists() {
+            std::fs::remove_dir_all(&download_root)
                 .with_context(|| format!("reset {}", download_root.display()))?;
         }
 
@@ -608,8 +617,7 @@ impl Collector {
                     &completion.application_no,
                     &attachment.file_name,
                     &content,
-                )
-                .await?;
+                )?;
                 documents.push(BridgeDocument {
                     attachment_code: attachment.attachment_code,
                     file_class: attachment.file_class,
@@ -644,11 +652,18 @@ impl Collector {
             )
             .await?;
 
-        facility.business_no =
-            normalize_digits(&first_non_empty(&[string_value(&master, &["APP_BRNUM"]), facility.business_no.clone()]));
-        facility.name = first_non_empty(&[string_value(&master, &["POPLNT_TERM"]), facility.name.clone()]);
-        facility.installed_kw =
-            first_non_zero(&[float_value(&master, &["POPLNT_INST_CAPA"]), facility.installed_kw]);
+        facility.business_no = normalize_digits(&first_non_empty(&[
+            string_value(&master, &["APP_BRNUM"]),
+            facility.business_no.clone(),
+        ]));
+        facility.name = first_non_empty(&[
+            string_value(&master, &["POPLNT_TERM"]),
+            facility.name.clone(),
+        ]);
+        facility.installed_kw = first_non_zero(&[
+            float_value(&master, &["POPLNT_INST_CAPA"]),
+            facility.installed_kw,
+        ]);
         facility.rec_start_date = first_non_empty(&[
             normalize_date(&string_value(&master, &["CRTIF_STRT_DD"])),
             facility.rec_start_date.clone(),
@@ -709,7 +724,10 @@ impl Collector {
         Ok(())
     }
 
-    async fn fetch_attachments(&self, completion: &CompletionRecord) -> Result<Vec<AttachmentRecord>> {
+    async fn fetch_attachments(
+        &self,
+        completion: &CompletionRecord,
+    ) -> Result<Vec<AttachmentRecord>> {
         let response: JsonListResponse = self
             .post_form_json(
                 &format!("{DEFAULT_BASE_URL}/comm/SP_RPS_NP_L.do"),
@@ -771,7 +789,7 @@ impl Collector {
         T: DeserializeOwned,
     {
         for attempt in 1..=3 {
-            let (status, body) = match self.post_form_async(endpoint, form, headers.clone()).await {
+            let (status, body) = match self.post_form(endpoint, form, headers.clone()) {
                 Ok(response) => response,
                 Err(_err) if attempt < 3 => {
                     tokio::time::sleep(retry_delay(attempt)).await;
@@ -779,7 +797,8 @@ impl Collector {
                 }
                 Err(err) => return Err(err),
             };
-            let body = String::from_utf8(body).with_context(|| format!("decode UTF-8 body from {endpoint}"))?;
+            let body = String::from_utf8(body)
+                .with_context(|| format!("decode UTF-8 body from {endpoint}"))?;
             if !(200..300).contains(&status) {
                 bail!("POST {endpoint}: status {}: {}", status, body.trim());
             }
@@ -795,7 +814,7 @@ impl Collector {
         headers: Option<Vec<String>>,
     ) -> Result<String> {
         for attempt in 1..=3 {
-            let (status, body) = match self.post_form_async(endpoint, form, headers.clone()).await {
+            let (status, body) = match self.post_form(endpoint, form, headers.clone()) {
                 Ok(response) => response,
                 Err(_err) if attempt < 3 => {
                     tokio::time::sleep(retry_delay(attempt)).await;
@@ -803,7 +822,8 @@ impl Collector {
                 }
                 Err(err) => return Err(err),
             };
-            let body = String::from_utf8(body).with_context(|| format!("decode UTF-8 body from {endpoint}"))?;
+            let body = String::from_utf8(body)
+                .with_context(|| format!("decode UTF-8 body from {endpoint}"))?;
             if !(200..300).contains(&status) {
                 bail!("POST {endpoint}: status {}: {}", status, body.trim());
             }
@@ -819,7 +839,7 @@ impl Collector {
         headers: Option<Vec<String>>,
     ) -> Result<Vec<u8>> {
         for attempt in 1..=3 {
-            let (status, body) = match self.post_form_async(endpoint, form, headers.clone()).await {
+            let (status, body) = match self.post_form(endpoint, form, headers.clone()) {
                 Ok(response) => response,
                 Err(_err) if attempt < 3 => {
                     tokio::time::sleep(retry_delay(attempt)).await;
@@ -847,7 +867,8 @@ impl Collector {
         let header_lines = headers.unwrap_or_default();
 
         let mut easy = Easy::new();
-        easy.url(endpoint).with_context(|| format!("set URL {endpoint}"))?;
+        easy.url(endpoint)
+            .with_context(|| format!("set URL {endpoint}"))?;
         easy.post(true).context("enable POST")?;
         easy.follow_location(true).context("enable redirects")?;
         easy.useragent("curl/8.7.1")
@@ -897,29 +918,6 @@ impl Collector {
         let status = easy.response_code().context("read curl response code")?;
         Ok((status, body))
     }
-
-    async fn post_form_async(
-        &self,
-        endpoint: &str,
-        form: &[(&str, &str)],
-        headers: Option<Vec<String>>,
-    ) -> Result<(u32, Vec<u8>)> {
-        let collector = self.clone();
-        let endpoint = endpoint.to_owned();
-        let form_owned: Vec<(String, String)> = form
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-            .collect();
-        tokio::task::spawn_blocking(move || {
-            let form_refs = form_owned
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            collector.post_form(&endpoint, &form_refs, headers)
-        })
-        .await
-        .context("join blocking post_form task")?
-    }
 }
 
 fn retry_delay(attempt: usize) -> Duration {
@@ -928,7 +926,13 @@ fn retry_delay(attempt: usize) -> Duration {
 
 fn encode_form(form: &[(&str, &str)]) -> String {
     form.iter()
-        .map(|(key, value)| format!("{}={}", urlencoding::encode(key), urlencoding::encode(value)))
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                urlencoding::encode(key),
+                urlencoding::encode(value)
+            )
+        })
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -979,7 +983,10 @@ fn parse_kcert_login_page(body: &str) -> Result<KCertLoginPage> {
 fn parse_kcert_result(result: &str) -> Result<KCertResult> {
     let parts = result.split("::").collect::<Vec<_>>();
     if parts.len() < 7 {
-        bail!("parse KCert result: expected at least 7 fields, got {}", parts.len());
+        bail!(
+            "parse KCert result: expected at least 7 fields, got {}",
+            parts.len()
+        );
     }
     Ok(KCertResult {
         code: parts[0].to_owned(),
@@ -1003,40 +1010,35 @@ fn extract_ente_id(body: &str) -> Result<String> {
 }
 
 fn parse_inputs(body: &str) -> BTreeMap<String, InputField> {
-    let mut fields = BTreeMap::new();
-    for tag in input_tag_pattern().find_iter(body).map(|value| value.as_str()) {
-        let mut id = None;
-        let mut name = None;
-        let mut value = String::new();
-        for capture in input_attr_pattern().captures_iter(tag) {
-            let key = capture.get(1).map(|item| item.as_str()).unwrap_or_default();
-            let captured = capture
-                .get(2)
-                .map(|item| item.as_str().to_owned())
-                .unwrap_or_default();
-            match key {
-                "id" => id = Some(captured),
-                "name" => name = Some(captured),
-                "value" => value = captured,
-                _ => {}
-            }
-        }
-        if let (Some(id), Some(name)) = (id, name) {
-            fields.insert(id, InputField { name, value });
-        }
-    }
-    fields
+    input_pattern()
+        .captures_iter(body)
+        .filter_map(|capture| {
+            let id = capture.get(1)?.as_str().to_owned();
+            let name = capture.get(2)?.as_str().to_owned();
+            let value = capture.get(3)?.as_str().to_owned();
+            Some((id, InputField { name, value }))
+        })
+        .collect()
 }
 
 fn input_value(fields: &BTreeMap<String, InputField>, id: &str) -> String {
-    fields.get(id).map(|field| field.value.clone()).unwrap_or_default()
+    fields
+        .get(id)
+        .map(|field| field.value.clone())
+        .unwrap_or_default()
 }
 
 fn input_name(fields: &BTreeMap<String, InputField>, id: &str) -> String {
-    fields.get(id).map(|field| field.name.clone()).unwrap_or_default()
+    fields
+        .get(id)
+        .map(|field| field.name.clone())
+        .unwrap_or_default()
 }
 
-fn select_facility(facilities: &mut [FacilityRecord], requested_code: Option<&str>) -> Result<FacilityRecord> {
+fn select_facility(
+    facilities: &mut [FacilityRecord],
+    requested_code: Option<&str>,
+) -> Result<FacilityRecord> {
     if facilities.is_empty() {
         bail!("no facilities returned");
     }
@@ -1074,7 +1076,10 @@ fn resolve_range(
     Ok((start_month, end_month))
 }
 
-fn earliest_plant_history_month(facility: &FacilityRecord, completions: &[CompletionRecord]) -> Option<String> {
+fn earliest_plant_history_month(
+    facility: &FacilityRecord,
+    completions: &[CompletionRecord],
+) -> Option<String> {
     let mut candidates = vec![
         month_from_date(&facility.rec_start_date),
         month_from_date(&facility.confirm_date),
@@ -1088,10 +1093,7 @@ fn earliest_plant_history_month(facility: &FacilityRecord, completions: &[Comple
         candidates.push(month_from_date(&completion.submitted_at));
     }
 
-    candidates
-        .into_iter()
-        .flatten()
-        .min()
+    candidates.into_iter().flatten().min()
 }
 
 fn month_from_date(value: &str) -> Option<String> {
@@ -1110,7 +1112,11 @@ fn month_from_date(value: &str) -> Option<String> {
     }
 }
 
-fn month_chunks(start_month: &str, end_month: &str, max_months: usize) -> Result<Vec<(String, String)>> {
+fn month_chunks(
+    start_month: &str,
+    end_month: &str,
+    max_months: usize,
+) -> Result<Vec<(String, String)>> {
     let start = parse_month(start_month)?;
     let end = parse_month(end_month)?;
     if start > end {
@@ -1254,7 +1260,11 @@ fn first_non_empty(values: &[String]) -> String {
 }
 
 fn first_non_zero(values: &[f64]) -> f64 {
-    values.iter().copied().find(|value| *value != 0.0).unwrap_or(0.0)
+    values
+        .iter()
+        .copied()
+        .find(|value| *value != 0.0)
+        .unwrap_or(0.0)
 }
 
 fn join_non_empty(values: &[String]) -> String {
@@ -1288,34 +1298,31 @@ fn headers(pairs: &[(&str, &str)]) -> Vec<String> {
         .collect()
 }
 
-async fn write_downloaded_file(
+fn write_downloaded_file(
     root: &Path,
     application_no: &str,
     file_name: &str,
     content: &[u8],
 ) -> Result<String> {
     let dir = root.join(application_no);
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
-    let target = unique_path(dir.join(Path::new(file_name).file_name().unwrap_or_default())).await?;
-    tokio::fs::write(&target, content)
-        .await
+    let target = unique_path(dir.join(Path::new(file_name).file_name().unwrap_or_default()));
+    std::fs::write(&target, content)
         .with_context(|| format!("write downloaded file {}", target.display()))?;
     Ok(target.to_string_lossy().into_owned())
 }
 
-async fn unique_path(path: PathBuf) -> Result<PathBuf> {
-    if !tokio::fs::try_exists(&path)
-        .await
-        .with_context(|| format!("check {}", path.display()))?
-    {
-        return Ok(path);
+fn unique_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
     }
 
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-    let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("file");
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("file");
     let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
     for idx in 2.. {
         let candidate = if extension.is_empty() {
@@ -1323,11 +1330,8 @@ async fn unique_path(path: PathBuf) -> Result<PathBuf> {
         } else {
             parent.join(format!("{stem}-{idx}.{extension}"))
         };
-        if !tokio::fs::try_exists(&candidate)
-            .await
-            .with_context(|| format!("check {}", candidate.display()))?
-        {
-            return Ok(candidate);
+        if !candidate.exists() {
+            return candidate;
         }
     }
     unreachable!("unique path search must terminate")
@@ -1343,18 +1347,11 @@ struct InputField {
     value: String,
 }
 
-fn input_tag_pattern() -> &'static Regex {
+fn input_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(r#"(?is)<input\b[^>]*>"#).expect("valid input tag regex")
-    })
-}
-
-fn input_attr_pattern() -> &'static Regex {
-    static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r#"(?is)\b(id|name|value)\s*=\s*['"]([^'"]*)['"]"#)
-            .expect("valid input attribute regex")
+        Regex::new(r#"(?is)<input[^>]*id="([^"]+)"[^>]*name="([^"]*)"[^>]*value="(.*?)"[^>]*>"#)
+            .expect("valid input regex")
     })
 }
 
@@ -1388,7 +1385,10 @@ mod tests {
         let parsed = parse_kcert_login_page(html).expect("parse login page");
         assert_eq!(parsed.login_id, "kea0729");
         assert_eq!(parsed.sys_code, "NRPS");
-        assert_eq!(parsed.return_page, "https://rps.energy.or.kr/loginProc2_main.do");
+        assert_eq!(
+            parsed.return_page,
+            "https://rps.energy.or.kr/loginProc2_main.do"
+        );
         assert_eq!(parsed.id1_field_name, "8UDOKH4EGtc=");
         assert_eq!(parsed.id2_field_name, "uE6yNPh47vU=");
         assert!(parsed.server_km_cert_pem.contains("BEGIN CERTIFICATE"));
@@ -1396,8 +1396,9 @@ mod tests {
 
     #[test]
     fn parse_kcert_result_splits_delimited_payload() {
-        let parsed = parse_kcert_result("1::성공::token1::token2::커널로그에너지::20200101::ci-value")
-            .expect("parse result");
+        let parsed =
+            parse_kcert_result("1::성공::token1::token2::커널로그에너지::20200101::ci-value")
+                .expect("parse result");
         assert_eq!(parsed.code, "1");
         assert_eq!(parsed.id1, "token1");
         assert_eq!(parsed.id2, "token2");
@@ -1448,8 +1449,8 @@ mod tests {
             },
         ];
 
-        let (start, end) = resolve_range(None, Some("2026-03"), &facility, &completions)
-            .expect("resolve range");
+        let (start, end) =
+            resolve_range(None, Some("2026-03"), &facility, &completions).expect("resolve range");
         assert_eq!(start, "2024-08");
         assert_eq!(end, "2026-03");
     }

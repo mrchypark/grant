@@ -15,7 +15,9 @@ pub struct SecurityConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactBackendConfig {
-    FileSystem { root_dir: PathBuf },
+    FileSystem {
+        root_dir: PathBuf,
+    },
     S3 {
         bucket: String,
         region: String,
@@ -32,10 +34,43 @@ pub struct ArtifactConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Embedded,
+    Remote,
+    Split,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalNodeRole {
+    Voter,
+    Learner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadConsistency {
+    Local,
+    Strong,
+    PreferStrong,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiqliteConfig {
+    pub runtime_mode: RuntimeMode,
+    pub local_node_role: LocalNodeRole,
+    pub default_read_consistency: ReadConsistency,
+    pub remote_nodes: Vec<String>,
+    pub remote_tls: bool,
+    pub remote_tls_no_verify: bool,
+    pub remote_api_secret: Option<String>,
+    pub remote_with_proxy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub security: SecurityConfig,
     pub artifacts: ArtifactConfig,
+    pub hiqlite: HiqliteConfig,
 }
 
 impl AppConfig {
@@ -53,7 +88,29 @@ impl AppConfig {
             artifacts: ArtifactConfig {
                 backend: artifact_backend(&current_dir)?,
             },
+            hiqlite: hiqlite_config(),
         })
+    }
+}
+
+fn hiqlite_config() -> HiqliteConfig {
+    HiqliteConfig {
+        runtime_mode: runtime_mode_from_env("CERTD_RUNTIME_MODE"),
+        local_node_role: local_node_role_from_env("CERTD_LOCAL_NODE_ROLE"),
+        default_read_consistency: read_consistency_from_env("CERTD_READ_CONSISTENCY"),
+        remote_nodes: env::var("CERTD_REMOTE_NODES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(normalize_remote_node)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        remote_tls: env_bool("CERTD_REMOTE_TLS", false),
+        remote_tls_no_verify: env_bool("CERTD_REMOTE_TLS_NO_VERIFY", false),
+        remote_api_secret: env::var("CERTD_REMOTE_API_SECRET").ok(),
+        remote_with_proxy: env_bool("CERTD_REMOTE_WITH_PROXY", false),
     }
 }
 
@@ -100,4 +157,55 @@ fn env_bool(key: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn runtime_mode_from_env(key: &str) -> RuntimeMode {
+    match env::var(key)
+        .unwrap_or_else(|_| "embedded".to_owned())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "remote" => RuntimeMode::Remote,
+        "split" => RuntimeMode::Split,
+        _ => RuntimeMode::Embedded,
+    }
+}
+
+fn read_consistency_from_env(key: &str) -> ReadConsistency {
+    match env::var(key)
+        .unwrap_or_else(|_| "local".to_owned())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "strong" => ReadConsistency::Strong,
+        "prefer-strong" | "prefer_strong" | "preferstrong" => ReadConsistency::PreferStrong,
+        _ => ReadConsistency::Local,
+    }
+}
+
+fn local_node_role_from_env(key: &str) -> LocalNodeRole {
+    match env::var(key)
+        .unwrap_or_else(|_| "voter".to_owned())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "learner" | "learner-only" | "learner_only" => LocalNodeRole::Learner,
+        _ => LocalNodeRole::Voter,
+    }
+}
+
+fn normalize_remote_node(part: &str) -> Option<String> {
+    let trimmed = part.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .unwrap_or(trimmed);
+    Some(without_scheme.trim_end_matches('/').to_owned())
 }

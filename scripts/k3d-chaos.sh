@@ -8,6 +8,7 @@ BUSINESS_NO="${BUSINESS_NO:-2768603291}"
 FACILITY_CODE="${FACILITY_CODE:-PV15-R-090795}"
 CERTD_STABILIZE_SECONDS="${CERTD_STABILIZE_SECONDS:-45}"
 MINIO_STABILIZE_SECONDS="${MINIO_STABILIZE_SECONDS:-10}"
+LEARNER_DEPLOYMENTS=(certd-learner-1 certd-learner-2 certd-learner-3)
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -56,21 +57,30 @@ stop_port_forward
 time "${ROOT_DIR}/scripts/keploy-k8s-test.sh"
 start_port_forward
 
-CERTD_POD="$(kubectl -n "${NAMESPACE}" get pod -l app=certd -o jsonpath='{.items[0].metadata.name}')"
 MINIO_POD="$(kubectl -n "${NAMESPACE}" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}')"
 
-kubectl -n "${NAMESPACE}" delete pod "${CERTD_POD}" --wait=false
-kubectl -n "${NAMESPACE}" wait --for=condition=ready pod -l app=certd --timeout=10m
-sleep "${CERTD_STABILIZE_SECONDS}"
-start_port_forward
+for pod in certd-voter-0 certd-voter-1 certd-voter-2; do
+  echo "chaos: delete voter pod ${pod}..."
+  kubectl -n "${NAMESPACE}" delete pod "${pod}" --wait=false
+  kubectl -n "${NAMESPACE}" rollout status statefulset/certd-voter --timeout=10m
+  sleep "${CERTD_STABILIZE_SECONDS}"
+  start_port_forward
+  time curl -sS -X POST \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/businesses/${BUSINESS_NO}/sync" \
+    -H 'content-type: application/json' \
+    --data-binary "{\"facilityCode\":\"${FACILITY_CODE}\",\"mode\":\"delta\"}" | jq
+done
 
-echo "delta sync after certd pod restart..."
-time curl -sS -X POST \
-  "http://127.0.0.1:${LOCAL_PORT}/api/v1/businesses/${BUSINESS_NO}/sync" \
-  -H 'content-type: application/json' \
-  --data-binary "{\"facilityCode\":\"${FACILITY_CODE}\",\"mode\":\"delta\"}" | jq
+for deploy in "${LEARNER_DEPLOYMENTS[@]}"; do
+  echo "chaos: restart learner deployment ${deploy}..."
+  kubectl -n "${NAMESPACE}" rollout restart "deployment/${deploy}"
+  kubectl -n "${NAMESPACE}" rollout status "deployment/${deploy}" --timeout=10m
+  sleep "${CERTD_STABILIZE_SECONDS}"
+  start_port_forward
+  curl -sS "http://127.0.0.1:${LOCAL_PORT}/healthz" | jq
+done
 
-echo "keploy replay after certd pod restart..."
+echo "keploy replay after voter/learner chaos..."
 stop_port_forward
 time "${ROOT_DIR}/scripts/keploy-k8s-test.sh"
 start_port_forward

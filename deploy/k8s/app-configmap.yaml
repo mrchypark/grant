@@ -9,11 +9,15 @@ data:
   ARTIFACTS_REGION: "us-east-1"
   ARTIFACTS_ENDPOINT: "http://minio.certd.svc.cluster.local:9000"
   ARTIFACTS_PATH_STYLE: "true"
-  HQL_NODE_ID_FROM: "k8s"
   HQL_NODES: |
-    1 certd-0.certd-headless.certd.svc.cluster.local:8100 certd-0.certd-headless.certd.svc.cluster.local:8200
-    2 certd-1.certd-headless.certd.svc.cluster.local:8100 certd-1.certd-headless.certd.svc.cluster.local:8200
-    3 certd-2.certd-headless.certd.svc.cluster.local:8100 certd-2.certd-headless.certd.svc.cluster.local:8200
+    1 certd-voter-0.certd-headless.certd.svc.cluster.local:8100 certd-voter-0.certd-headless.certd.svc.cluster.local:8200
+    2 certd-voter-1.certd-headless.certd.svc.cluster.local:8100 certd-voter-1.certd-headless.certd.svc.cluster.local:8200
+    3 certd-voter-2.certd-headless.certd.svc.cluster.local:8100 certd-voter-2.certd-headless.certd.svc.cluster.local:8200
+    4 certd-learner-1.certd.svc.cluster.local:8100 certd-learner-1.certd.svc.cluster.local:8200
+    5 certd-learner-2.certd.svc.cluster.local:8100 certd-learner-2.certd.svc.cluster.local:8200
+    6 certd-learner-3.certd.svc.cluster.local:8100 certd-learner-3.certd.svc.cluster.local:8200
+  HQL_LISTEN_ADDR_API: "0.0.0.0"
+  HQL_LISTEN_ADDR_RAFT: "0.0.0.0"
   HQL_DATA_DIR: "/var/lib/certd/hiqlite"
   HQL_BACKUP_CRON: "0 30 2 * * * *"
   HQL_BACKUP_KEEP_DAYS: "30"

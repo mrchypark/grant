@@ -1,11 +1,17 @@
+use crate::{
+    config::ReadConsistency,
+    runtime::{HiqliteRuntime, Readiness},
+};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use domain::{
-    Business, DocumentArtifact, DocumentCategory, GenerationRecord, Plant, RateRecord, RecRecord,
-    SyncMode, SyncRun, User,
+    Agreement, DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization,
+    Plant, RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
+    RoleBindingSubjectType, SyncMode, SyncRun, User,
 };
-use hiqlite::{Client, Row};
+use hiqlite::Row;
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
 macro_rules! params {
@@ -16,7 +22,7 @@ macro_rules! params {
 
 #[derive(Clone)]
 pub struct Database {
-    client: Client,
+    runtime: HiqliteRuntime,
     bootstrap_user_id: String,
     bootstrap_user_name: String,
 }
@@ -24,7 +30,8 @@ pub struct Database {
 #[derive(Debug, Clone)]
 pub struct StoredCertificate {
     pub id: String,
-    pub business_id: String,
+    pub organization_id: String,
+    pub business_no: Option<String>,
     pub common_name: String,
     pub encrypted_blob: String,
     pub active: i64,
@@ -34,6 +41,7 @@ pub struct StoredCertificate {
 
 #[derive(Debug, Clone)]
 pub struct StoredDocument {
+    pub plant_id: String,
     pub artifact: DocumentArtifact,
     pub object_key: String,
     pub content_type: String,
@@ -79,8 +87,10 @@ struct CountSumIntRow {
 #[derive(Debug, Clone)]
 struct PlantRow {
     id: String,
+    facility_code: String,
+    owner_organization_id: String,
+    created_by_organization_id: Option<String>,
     name: String,
-    business_no: String,
     contract_no: String,
     address: String,
     installed_kw: f64,
@@ -91,13 +101,90 @@ struct PlantRow {
 #[derive(Debug, Clone)]
 struct SyncRunRow {
     id: String,
-    business_no: String,
+    organization_id: String,
     plant_id: Option<String>,
     mode: String,
     status: String,
     started_at: String,
     finished_at: Option<String>,
     duration_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RoleBindingRow {
+    id: String,
+    subject_type: String,
+    subject_id: String,
+    subject_organization_id: String,
+    resource_type: String,
+    resource_id: String,
+    role_id: String,
+    agreement_id: Option<String>,
+    state: String,
+    created_by_user_id: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct RoleOrgRow {
+    organization_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OrganizationIdRow {
+    id: String,
+}
+
+#[derive(Debug, Clone)]
+struct OrganizationRow {
+    id: String,
+    business_no: Option<String>,
+    name: String,
+    legal_entity_id: Option<String>,
+    active: i64,
+}
+
+#[derive(Debug, Clone)]
+struct OrganizationEdgeRow {
+    parent_organization_id: String,
+    child_organization_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct OrganizationPlantActionSeedRow {
+    organization_id: String,
+    plant_id: String,
+    action_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct OrganizationMembershipSeedRow {
+    id: String,
+    organization_id: String,
+    user_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct GroupMembershipSeedRow {
+    group_id: String,
+    organization_membership_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct GroupPlantActionSeedRow {
+    group_id: String,
+    organization_id: String,
+    plant_id: String,
+    action_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserPlantActionSeedRow {
+    user_id: String,
+    organization_id: String,
+    plant_id: String,
+    action_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +222,7 @@ struct RecRow {
 #[derive(Debug, Clone)]
 struct DocumentRow {
     id: String,
+    plant_id: String,
     category: String,
     file_class: String,
     file_sec_name: String,
@@ -153,16 +241,21 @@ struct CategoryCountRow {
 }
 
 impl Database {
-    pub fn new(client: Client, bootstrap_user_id: String, bootstrap_user_name: String) -> Self {
+    pub fn new(
+        runtime: HiqliteRuntime,
+        bootstrap_user_id: String,
+        bootstrap_user_name: String,
+    ) -> Self {
         Self {
-            client,
+            runtime,
             bootstrap_user_id,
             bootstrap_user_name,
         }
     }
 
-    async fn query_consistent_rows<T, S>(
+    async fn query_rows_with<T, S>(
         &self,
+        consistency: ReadConsistency,
         stmt: S,
         params: Vec<hiqlite::Param>,
         label: &str,
@@ -171,14 +264,15 @@ impl Database {
         T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
         S: Into<Cow<'static, str>>,
     {
-        self.client
-            .query_consistent_map::<T, S>(stmt, params)
+        self.runtime
+            .query_rows::<T, S>(consistency, stmt, params)
             .await
-            .with_context(|| format!("query consistent rows: {label}"))
+            .with_context(|| format!("query rows: {label}"))
     }
 
-    async fn query_consistent_row<T, S>(
+    async fn query_row_with<T, S>(
         &self,
+        consistency: ReadConsistency,
         stmt: S,
         params: Vec<hiqlite::Param>,
         label: &str,
@@ -188,7 +282,7 @@ impl Database {
         S: Into<Cow<'static, str>>,
     {
         let rows: Vec<T> = self
-            .query_consistent_rows::<T, S>(stmt, params, label)
+            .query_rows_with::<T, S>(consistency, stmt, params, label)
             .await?;
         if rows.is_empty() {
             return Err(anyhow!("no row returned: {label}"));
@@ -201,8 +295,90 @@ impl Database {
             .ok_or_else(|| anyhow!("no row returned: {label}"))
     }
 
+    async fn query_consistent_rows<T, S>(
+        &self,
+        stmt: S,
+        params: Vec<hiqlite::Param>,
+        label: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+        S: Into<Cow<'static, str>>,
+    {
+        self.query_rows_with(ReadConsistency::Strong, stmt, params, label)
+            .await
+    }
+
+    async fn query_default_rows<T, S>(
+        &self,
+        stmt: S,
+        params: Vec<hiqlite::Param>,
+        label: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+        S: Into<Cow<'static, str>>,
+    {
+        self.query_rows_with(
+            self.runtime.default_read_consistency(),
+            stmt,
+            params,
+            label,
+        )
+        .await
+    }
+
+    async fn query_count<S>(
+        &self,
+        consistency: ReadConsistency,
+        stmt: S,
+        params: Vec<hiqlite::Param>,
+        label: &str,
+    ) -> Result<i64>
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        Ok(self
+            .query_row_with::<CountRow, S>(consistency, stmt, params, label)
+            .await?
+            .count)
+    }
+
+    async fn exists_row_with<S>(
+        &self,
+        consistency: ReadConsistency,
+        stmt: S,
+        params: Vec<hiqlite::Param>,
+        label: &str,
+    ) -> Result<bool>
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        Ok(self
+            .query_count(consistency, stmt, params, label)
+            .await?
+            > 0)
+    }
+
+    fn validation_read_consistency(&self) -> ReadConsistency {
+        match self.runtime.runtime_mode() {
+            crate::config::RuntimeMode::Embedded => ReadConsistency::Local,
+            crate::config::RuntimeMode::Remote | crate::config::RuntimeMode::Split => {
+                ReadConsistency::Strong
+            }
+        }
+    }
+
+    pub async fn health_status(&self) -> HealthStatus {
+        self.runtime.health_status().await
+    }
+
+    pub async fn readiness(&self) -> Readiness {
+        self.runtime.readiness().await
+    }
+
     pub async fn ensure_schema(&self) -> Result<()> {
-        self.client
+        self.runtime
             .batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS users (
@@ -212,45 +388,181 @@ impl Database {
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS legal_entities (
+                CREATE TABLE IF NOT EXISTS organizations (
                     id TEXT PRIMARY KEY,
+                    business_no TEXT UNIQUE,
                     name TEXT NOT NULL,
-                    representative_name TEXT
-                );
-                CREATE TABLE IF NOT EXISTS businesses (
-                    id TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    business_no TEXT NOT NULL UNIQUE,
-                    common_name TEXT,
                     legal_entity_id TEXT,
                     active INTEGER NOT NULL DEFAULT 1,
-                    ente_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS business_memberships (
-                    user_id TEXT NOT NULL,
-                    business_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS organization_edges (
+                    parent_organization_id TEXT NOT NULL,
+                    child_organization_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    PRIMARY KEY (user_id, business_id)
+                    PRIMARY KEY (parent_organization_id, child_organization_id)
                 );
+                CREATE TABLE IF NOT EXISTS organization_memberships (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    membership_role TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (organization_id, user_id)
+                );
+                CREATE TABLE IF NOT EXISTS groups (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (organization_id, name)
+                );
+                CREATE TABLE IF NOT EXISTS group_memberships (
+                    group_id TEXT NOT NULL,
+                    organization_membership_id TEXT NOT NULL,
+                    PRIMARY KEY (group_id, organization_membership_id)
+                );
+                CREATE TABLE IF NOT EXISTS agreements (
+                    id TEXT PRIMARY KEY,
+                    agreement_type TEXT NOT NULL,
+                    grantor_organization_id TEXT NOT NULL,
+                    grantee_organization_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    reference_no TEXT,
+                    starts_at TEXT,
+                    ends_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS actions (
+                    id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    risk_level TEXT NOT NULL,
+                    visibility_granting INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS roles (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (organization_id, code)
+                );
+                CREATE TABLE IF NOT EXISTS role_rules (
+                    id TEXT PRIMARY KEY,
+                    role_id TEXT NOT NULL,
+                    effect TEXT NOT NULL,
+                    action_pattern TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS role_actions (
+                    role_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    PRIMARY KEY (role_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS role_bindings (
+                    id TEXT PRIMARY KEY,
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    subject_organization_id TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    role_id TEXT NOT NULL,
+                    agreement_id TEXT,
+                    state TEXT NOT NULL,
+                    created_by_user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS organization_closure (
+                    ancestor_organization_id TEXT NOT NULL,
+                    descendant_organization_id TEXT NOT NULL,
+                    depth INTEGER NOT NULL,
+                    PRIMARY KEY (ancestor_organization_id, descendant_organization_id)
+                );
+                CREATE TABLE IF NOT EXISTS effective_organization_plant_actions (
+                    organization_id TEXT NOT NULL,
+                    plant_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (organization_id, plant_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS effective_user_plant_actions (
+                    user_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    plant_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, organization_id, plant_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS effective_user_plant_visibility (
+                    user_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    plant_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, organization_id, plant_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_organization_memberships_org_user
+                    ON organization_memberships (organization_id, user_id);
+                CREATE INDEX IF NOT EXISTS idx_group_memberships_group_member
+                    ON group_memberships (group_id, organization_membership_id);
+                CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
+                    ON agreements (grantor_organization_id, grantee_organization_id, status);
+                CREATE INDEX IF NOT EXISTS idx_actions_code
+                    ON actions (code);
+                CREATE INDEX IF NOT EXISTS idx_roles_org_code
+                    ON roles (organization_id, code);
+                CREATE INDEX IF NOT EXISTS idx_role_rules_role
+                    ON role_rules (role_id);
+                CREATE INDEX IF NOT EXISTS idx_role_bindings_subject_resource_state
+                    ON role_bindings (subject_type, subject_id, resource_type, resource_id, state);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_role_bindings_logical_unique
+                    ON role_bindings (
+                        subject_type,
+                        subject_id,
+                        subject_organization_id,
+                        resource_type,
+                        resource_id,
+                        role_id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_organization_closure_descendant
+                    ON organization_closure (descendant_organization_id, ancestor_organization_id);
+                CREATE INDEX IF NOT EXISTS idx_effective_organization_plant_actions_org_plant
+                    ON effective_organization_plant_actions (organization_id, plant_id, action_id);
+                CREATE INDEX IF NOT EXISTS idx_effective_user_plant_actions_user_org
+                    ON effective_user_plant_actions (user_id, organization_id, plant_id, action_id);
+                CREATE INDEX IF NOT EXISTS idx_effective_user_plant_visibility_user_org
+                    ON effective_user_plant_visibility (user_id, organization_id, plant_id);
                 CREATE TABLE IF NOT EXISTS certificates (
                     id TEXT PRIMARY KEY,
-                    business_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
                     common_name TEXT NOT NULL,
                     encrypted_blob TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
                     last_used_at TEXT,
                     created_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_certificates_business_active
-                    ON certificates (business_id, active, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_certificates_organization_active
+                    ON certificates (organization_id, active, created_at DESC);
                 CREATE TABLE IF NOT EXISTS plants (
                     id TEXT PRIMARY KEY,
-                    business_id TEXT NOT NULL,
+                    facility_code TEXT NOT NULL UNIQUE,
+                    owner_organization_id TEXT NOT NULL,
+                    created_by_organization_id TEXT,
                     name TEXT NOT NULL,
-                    business_no TEXT NOT NULL,
                     contract_no TEXT NOT NULL,
                     address TEXT NOT NULL,
                     installed_kw REAL NOT NULL,
@@ -261,7 +573,7 @@ impl Database {
                 );
                 CREATE TABLE IF NOT EXISTS sync_runs (
                     id TEXT PRIMARY KEY,
-                    business_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
                     plant_id TEXT,
                     mode TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -272,6 +584,8 @@ impl Database {
                 );
                 CREATE INDEX IF NOT EXISTS idx_sync_runs_plant_started
                     ON sync_runs (plant_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_plants_owner_facility
+                    ON plants (owner_organization_id, facility_code);
                 CREATE TABLE IF NOT EXISTS generation_records (
                     plant_id TEXT NOT NULL,
                     month TEXT NOT NULL,
@@ -328,15 +642,18 @@ impl Database {
                     ON documents (plant_id, attachment_code, file_name);
                 "#
                 .to_owned(),
-            )
-            .await
-            .context("create schema")?;
-        self.ensure_bootstrap_user().await.map(|_| ())
+        )
+        .await
+        .context("create schema")?;
+        self.ensure_bootstrap_principals().await?;
+        self.ensure_action_catalog().await?;
+        self.ensure_bootstrap_authorization().await?;
+        Ok(())
     }
 
-    pub async fn ensure_bootstrap_user(&self) -> Result<User> {
+    pub async fn ensure_bootstrap_principals(&self) -> Result<User> {
         let now = now_string();
-        self.client
+        self.runtime
             .execute(
                 "INSERT INTO users (id, email, display_name, active, created_at) VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, active = excluded.active",
@@ -350,6 +667,47 @@ impl Database {
             )
             .await
             .context("upsert bootstrap user")?;
+        self.runtime
+            .execute(
+                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    business_no = excluded.business_no,
+                    name = excluded.name,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at",
+                params!(
+                    self.bootstrap_user_id.clone(),
+                    Some(self.bootstrap_user_id.clone()),
+                    self.bootstrap_user_name.clone(),
+                    Option::<String>::None,
+                    1_i64,
+                    now.clone(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert bootstrap organization")?;
+        self.runtime
+            .execute(
+                "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(organization_id, user_id) DO UPDATE SET
+                    membership_role = excluded.membership_role,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at",
+                params!(
+                    Uuid::new_v4().simple().to_string(),
+                    self.bootstrap_user_id.clone(),
+                    self.bootstrap_user_id.clone(),
+                    "owner",
+                    "active",
+                    now.clone(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert bootstrap organization membership")?;
         Ok(User {
             id: self.bootstrap_user_id.clone(),
             email: None,
@@ -358,84 +716,337 @@ impl Database {
         })
     }
 
-    pub async fn upsert_business_with_owner(
-        &self,
-        business_no: &str,
-        display_name: &str,
-        common_name: &str,
-    ) -> Result<Business> {
+    async fn ensure_bootstrap_authorization(&self) -> Result<()> {
         let now = now_string();
-        self.client
+        let role = Role {
+            id: "role-system-bootstrap-owner".to_owned(),
+            organization_id: None,
+            code: "system.bootstrap.owner".to_owned(),
+            name: "System Bootstrap Owner".to_owned(),
+            description: Some("Bootstrap organization owner capabilities".to_owned()),
+        };
+        self.upsert_role(&role).await?;
+        for action in [
+            "organization.plant.create",
+            "organization.plant.create_for_owner",
+            "organization.member.manage",
+            "organization.group.manage",
+            "organization.role.manage",
+            "organization.permission.manage",
+        ] {
+            self.upsert_role_action(&role.id, action).await?;
+        }
+        self.save_role_binding(&RoleBinding {
+            id: "binding-system-bootstrap-owner".to_owned(),
+            subject_type: RoleBindingSubjectType::User,
+            subject_id: self.bootstrap_user_id.clone(),
+            subject_organization_id: self.bootstrap_user_id.clone(),
+            resource_type: RoleBindingResourceType::Organization,
+            resource_id: self.bootstrap_user_id.clone(),
+            role_id: role.id,
+            agreement_id: None,
+            state: RoleBindingState::Active,
+            created_by_user_id: self.bootstrap_user_id.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .await
+    }
+
+    async fn ensure_action_catalog(&self) -> Result<()> {
+        let now = now_string();
+        for (code, name, risk_level, visibility_granting) in [
+            (
+                "organization.plant.create",
+                "Create Plant",
+                "medium",
+                0_i64,
+            ),
+            (
+                "organization.plant.create_for_owner",
+                "Create Plant For Owner",
+                "high",
+                0_i64,
+            ),
+            (
+                "organization.member.manage",
+                "Manage Organization Members",
+                "high",
+                0_i64,
+            ),
+            (
+                "organization.group.manage",
+                "Manage Organization Groups",
+                "high",
+                0_i64,
+            ),
+            (
+                "organization.role.manage",
+                "Manage Organization Roles",
+                "high",
+                0_i64,
+            ),
+            (
+                "organization.permission.manage",
+                "Manage Organization Permissions",
+                "critical",
+                0_i64,
+            ),
+            ("plant.profile.read", "Read Plant Profile", "low", 1_i64),
+            ("plant.profile.write", "Write Plant Profile", "medium", 0_i64),
+            ("plant.telemetry.read", "Read Plant Telemetry", "low", 0_i64),
+            ("plant.alert.read", "Read Plant Alerts", "low", 0_i64),
+            ("plant.document.read", "Read Plant Documents", "low", 0_i64),
+            ("plant.document.write", "Write Plant Documents", "medium", 0_i64),
+            ("plant.report.read", "Read Plant Reports", "low", 0_i64),
+            ("plant.report.write", "Write Plant Reports", "medium", 0_i64),
+            ("plant.rec.read", "Read Plant REC", "low", 0_i64),
+            ("plant.rate.read", "Read Plant Rates", "low", 0_i64),
+            ("plant.sync.execute", "Execute Plant Sync", "high", 0_i64),
+            ("plant.device.read", "Read Plant Device", "low", 0_i64),
+            ("plant.device.control", "Control Plant Device", "critical", 0_i64),
+            (
+                "plant.certificate.use",
+                "Use Plant Certificate",
+                "critical",
+                0_i64,
+            ),
+            (
+                "plant.permission.manage",
+                "Manage Plant Permissions",
+                "critical",
+                0_i64,
+            ),
+            (
+                "plant.ownership.transfer",
+                "Transfer Plant Ownership",
+                "critical",
+                0_i64,
+            ),
+        ] {
+            self.runtime
+                .execute(
+                    "INSERT INTO actions (id, code, name, description, risk_level, visibility_granting, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT(code) DO UPDATE SET
+                        name = excluded.name,
+                        risk_level = excluded.risk_level,
+                        visibility_granting = excluded.visibility_granting,
+                        updated_at = excluded.updated_at",
+                    params!(
+                        code.to_owned(),
+                        code.to_owned(),
+                        name.to_owned(),
+                        Option::<String>::None,
+                        risk_level.to_owned(),
+                        visibility_granting,
+                        now.clone(),
+                        now.clone()
+                    ),
+                )
+                .await
+                .with_context(|| format!("seed action {code}"))?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn upsert_organization_with_owner(
+        &self,
+        organization_id: &str,
+        display_name: &str,
+        _common_name: &str,
+    ) -> Result<Organization> {
+        let now = now_string();
+        self.runtime
             .execute(
-                "INSERT INTO businesses (id, display_name, business_no, common_name, active, created_at, updated_at)
+                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT(id) DO UPDATE SET
-                    display_name = excluded.display_name,
                     business_no = excluded.business_no,
-                    common_name = excluded.common_name,
+                    name = excluded.name,
                     active = excluded.active,
                     updated_at = excluded.updated_at",
                 params!(
-                    business_no.to_owned(),
+                    organization_id.to_owned(),
+                    Some(organization_id.to_owned()),
                     display_name.to_owned(),
-                    business_no.to_owned(),
-                    common_name.to_owned(),
+                    Option::<String>::None,
                     1_i64,
                     now.clone(),
                     now.clone()
                 ),
             )
             .await
-            .context("upsert business")?;
-        self.client
+            .context("upsert organization")?;
+        self.runtime
             .execute(
-                "INSERT INTO business_memberships (user_id, business_id, role, created_at)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT(user_id, business_id) DO UPDATE SET role = excluded.role",
+                "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(organization_id, user_id) DO UPDATE SET membership_role = excluded.membership_role, status = excluded.status, updated_at = excluded.updated_at",
                 params!(
+                    Uuid::new_v4().simple().to_string(),
+                    organization_id.to_owned(),
                     self.bootstrap_user_id.clone(),
-                    business_no.to_owned(),
                     "owner",
+                    "active",
+                    now.clone(),
                     now.clone()
                 ),
             )
             .await
-            .context("upsert business membership")?;
-        Ok(Business {
-            id: business_no.to_owned(),
-            display_name: display_name.to_owned(),
-            business_no: business_no.to_owned(),
+            .context("upsert organization membership")?;
+        Ok(Organization {
+            id: organization_id.to_owned(),
+            business_no: Some(organization_id.to_owned()),
+            name: display_name.to_owned(),
             legal_entity_id: None,
             active: true,
         })
     }
 
+    pub async fn upsert_organization_identity(
+        &self,
+        organization_id: &str,
+        business_no: Option<&str>,
+        display_name: &str,
+    ) -> Result<Organization> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    business_no = excluded.business_no,
+                    name = excluded.name,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at",
+                params!(
+                    organization_id.to_owned(),
+                    business_no.map(ToOwned::to_owned),
+                    display_name.to_owned(),
+                    Option::<String>::None,
+                    1_i64,
+                    now.clone(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert organization identity")?;
+        Ok(Organization {
+            id: organization_id.to_owned(),
+            business_no: business_no.map(ToOwned::to_owned),
+            name: display_name.to_owned(),
+            legal_entity_id: None,
+            active: true,
+        })
+    }
+
+    pub async fn upsert_role(&self, role: &Role) -> Result<()> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO roles (id, organization_id, code, name, description, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    organization_id = excluded.organization_id,
+                    code = excluded.code,
+                    name = excluded.name,
+                    description = excluded.description,
+                    updated_at = excluded.updated_at",
+                params!(
+                    role.id.clone(),
+                    role.organization_id.clone(),
+                    role.code.clone(),
+                    role.name.clone(),
+                    role.description.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("upsert role")?;
+        Ok(())
+    }
+
+    pub async fn upsert_role_action(&self, role_id: &str, action_id: &str) -> Result<()> {
+        self.runtime
+            .execute(
+                "INSERT INTO role_actions (role_id, action_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT(role_id, action_id) DO NOTHING",
+                params!(role_id.to_owned(), action_id.to_owned()),
+            )
+            .await
+            .context("upsert role action")?;
+        Ok(())
+    }
+
+    pub async fn upsert_agreement(&self, agreement: &Agreement) -> Result<()> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO agreements (
+                    id, agreement_type, grantor_organization_id, grantee_organization_id,
+                    status, title, reference_no, starts_at, ends_at, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT(id) DO UPDATE SET
+                    agreement_type = excluded.agreement_type,
+                    grantor_organization_id = excluded.grantor_organization_id,
+                    grantee_organization_id = excluded.grantee_organization_id,
+                    status = excluded.status,
+                    title = excluded.title,
+                    reference_no = excluded.reference_no,
+                    starts_at = excluded.starts_at,
+                    ends_at = excluded.ends_at,
+                    updated_at = excluded.updated_at",
+                params!(
+                    agreement.id.clone(),
+                    agreement_type_str(&agreement.agreement_type),
+                    agreement.grantor_organization_id.clone(),
+                    agreement.grantee_organization_id.clone(),
+                    agreement_status_str(&agreement.status),
+                    agreement.title.clone(),
+                    agreement.reference_no.clone(),
+                    agreement.starts_at.clone(),
+                    agreement.ends_at.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("upsert agreement")?;
+        self.rebuild_organization_expansion().await?;
+        Ok(())
+    }
+
     pub async fn save_certificate(
         &self,
-        business_no: &str,
+        organization_id: &str,
+        business_no: Option<&str>,
         common_name: &str,
         encrypted_blob: &str,
     ) -> Result<StoredCertificate> {
-        self.upsert_business_with_owner(business_no, common_name, common_name)
+        self.upsert_organization_identity(organization_id, business_no, common_name)
             .await?;
 
-        self.client
+        self.runtime
             .execute(
-                "UPDATE certificates SET active = 0 WHERE business_id = $1",
-                params!(business_no.to_owned()),
+                "UPDATE certificates SET active = 0 WHERE organization_id = $1",
+                params!(organization_id.to_owned()),
             )
             .await
             .context("deactivate prior certificates")?;
 
         let id = Uuid::new_v4().simple().to_string();
         let now = now_string();
-        self.client
+        self.runtime
             .execute(
-                "INSERT INTO certificates (id, business_id, common_name, encrypted_blob, active, last_used_at, created_at)
+                "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, active, last_used_at, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 params!(
                     id.clone(),
-                    business_no.to_owned(),
+                    organization_id.to_owned(),
                     common_name.to_owned(),
                     encrypted_blob.to_owned(),
                     1_i64,
@@ -445,18 +1056,38 @@ impl Database {
             )
             .await
             .context("insert certificate")?;
-        self.load_active_certificate(business_no).await
+        self.load_active_certificate(organization_id).await
     }
 
-    pub async fn load_active_certificate(&self, business_no: &str) -> Result<StoredCertificate> {
+    pub async fn get_organization(&self, organization_id: &str) -> Result<Organization> {
+        let rows: Vec<OrganizationRow> = self
+            .query_default_rows(
+                "SELECT id, business_no, name, legal_entity_id, active
+                 FROM organizations
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(organization_id.to_owned()),
+                "organization",
+            )
+            .await
+            .context("query organization")?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("organization not found"))?;
+        Ok(row.into())
+    }
+
+    pub async fn load_active_certificate(&self, organization_id: &str) -> Result<StoredCertificate> {
         let rows: Vec<StoredCertificate> = self
             .query_consistent_rows(
-                "SELECT id, business_id, common_name, encrypted_blob, active, last_used_at, created_at
-                 FROM certificates
-                 WHERE business_id = $1
-                 ORDER BY active DESC, created_at DESC
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.active, c.last_used_at, c.created_at
+                 FROM certificates c
+                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 WHERE c.organization_id = $1
+                 ORDER BY c.active DESC, c.created_at DESC
                  LIMIT 1",
-                params!(business_no.to_owned()),
+                params!(organization_id.to_owned()),
                 "active certificate",
             )
             .await
@@ -465,7 +1096,7 @@ impl Database {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("certificate not found"))?;
-        self.client
+        self.runtime
             .execute(
                 "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
                 params!(now_string(), cert.id.clone()),
@@ -477,19 +1108,19 @@ impl Database {
 
     pub async fn start_sync_run(
         &self,
-        business_no: &str,
+        organization_id: &str,
         plant_id: Option<&str>,
         mode: SyncMode,
     ) -> Result<SyncRun> {
         let id = Uuid::new_v4().simple().to_string();
         let started_at = now_string();
-        self.client
+        self.runtime
             .execute(
-                "INSERT INTO sync_runs (id, business_id, plant_id, mode, status, started_at, finished_at, duration_ms, error_message)
+                "INSERT INTO sync_runs (id, organization_id, plant_id, mode, status, started_at, finished_at, duration_ms, error_message)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 params!(
                     id.clone(),
-                    business_no.to_owned(),
+                    organization_id.to_owned(),
                     plant_id.map(ToOwned::to_owned),
                     sync_mode_str(&mode),
                     "running",
@@ -503,7 +1134,7 @@ impl Database {
             .context("insert sync run")?;
         Ok(SyncRun {
             id,
-            business_no: business_no.to_owned(),
+            organization_id: organization_id.to_owned(),
             plant_id: plant_id.map(ToOwned::to_owned),
             mode,
             status: "running".to_owned(),
@@ -519,9 +1150,8 @@ impl Database {
         status: &str,
         duration_ms: i64,
         error_message: Option<&str>,
-        _plant_id: Option<&str>,
     ) -> Result<()> {
-        self.client
+        self.runtime
             .execute(
                 "UPDATE sync_runs
                  SET status = $1, finished_at = $2, duration_ms = $3, error_message = $4
@@ -541,14 +1171,15 @@ impl Database {
 
     pub async fn upsert_plant(&self, plant: &Plant) -> Result<()> {
         let now = now_string();
-        self.client
+        self.runtime
             .execute(
-                "INSERT INTO plants (id, business_id, name, business_no, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                  ON CONFLICT(id) DO UPDATE SET
-                    business_id = excluded.business_id,
+                    facility_code = excluded.facility_code,
+                    owner_organization_id = excluded.owner_organization_id,
+                    created_by_organization_id = excluded.created_by_organization_id,
                     name = excluded.name,
-                    business_no = excluded.business_no,
                     contract_no = excluded.contract_no,
                     address = excluded.address,
                     installed_kw = excluded.installed_kw,
@@ -556,10 +1187,11 @@ impl Database {
                     confirm_issued = excluded.confirm_issued,
                     updated_at = excluded.updated_at",
                 params!(
-                    plant.code.clone(),
-                    plant.business_no.clone(),
+                    plant.id.clone(),
+                    plant.facility_code.clone(),
+                    plant.owner_organization_id.clone(),
+                    plant.created_by_organization_id.clone(),
                     plant.name.clone(),
-                    plant.business_no.clone(),
                     plant.contract_no.clone(),
                     plant.address.clone(),
                     plant.installed_kw,
@@ -581,21 +1213,21 @@ impl Database {
         rates: &[StoredRateRecord],
         rec: &[RecRecord],
     ) -> Result<()> {
-        self.client
+        self.runtime
             .execute(
                 "DELETE FROM generation_records WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
             )
             .await
             .context("clear generation records")?;
-        self.client
+        self.runtime
             .execute(
                 "DELETE FROM rate_records WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
             )
             .await
             .context("clear rate records")?;
-        self.client
+        self.runtime
             .execute(
                 "DELETE FROM rec_records WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
@@ -615,7 +1247,7 @@ impl Database {
     ) -> Result<()> {
         let updated_at = now_string();
         for record in records {
-            self.client
+            self.runtime
                 .execute(
                     "INSERT INTO generation_records (plant_id, month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline, updated_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -648,7 +1280,7 @@ impl Database {
     ) -> Result<()> {
         let updated_at = now_string();
         for record in records {
-            self.client
+            self.runtime
                 .execute(
                     "INSERT INTO rate_records (plant_id, month, self_rate, national_average, nearby_average, nearby_highest, published, source_control_flag, updated_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -681,7 +1313,7 @@ impl Database {
     pub async fn upsert_rec_records(&self, plant_id: &str, records: &[RecRecord]) -> Result<()> {
         let updated_at = now_string();
         for record in records {
-            self.client
+            self.runtime
                 .execute(
                     "INSERT INTO rec_records (plant_id, application_no, month, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status, updated_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -735,7 +1367,7 @@ impl Database {
         plant_id: &str,
         docs: &[PersistedDocument],
     ) -> Result<()> {
-        self.client
+        self.runtime
             .execute(
                 "DELETE FROM documents WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
@@ -744,7 +1376,7 @@ impl Database {
             .context("clear documents")?;
         let updated_at = now_string();
         for doc in docs {
-            self.client
+            self.runtime
                 .execute(
                     "INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
@@ -770,17 +1402,161 @@ impl Database {
         Ok(())
     }
 
-    pub async fn list_plants(&self, business_no: &str) -> Result<Vec<Plant>> {
+    pub async fn list_visible_plants(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+    ) -> Result<Vec<Plant>> {
         let rows: Vec<PlantRow> = self
-            .query_consistent_rows(
-                "SELECT id, name, business_no, contract_no, address, installed_kw, rec_start_date, confirm_issued
-                 FROM plants WHERE business_id = $1 ORDER BY id ASC",
-                params!(business_no.to_owned()),
-                "plants",
+            .query_default_rows(
+                "SELECT p.id, p.facility_code, p.owner_organization_id, p.created_by_organization_id,
+                        p.name, p.contract_no, p.address, p.installed_kw, p.rec_start_date,
+                        p.confirm_issued
+                 FROM effective_user_plant_visibility v
+                 JOIN plants p ON p.id = v.plant_id
+                 WHERE v.user_id = $1
+                   AND v.organization_id = $2
+                 ORDER BY p.facility_code ASC",
+                params!(user_id.to_owned(), organization_id.to_owned()),
+                "visible plants",
             )
             .await
-            .context("list plants")?;
+            .context("list visible plants")?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn has_user_plant_action(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        plant_id: &str,
+        action_id: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .query_count(
+                self.runtime.default_read_consistency(),
+                "SELECT COUNT(*) as count
+                 FROM effective_user_plant_actions
+                 WHERE user_id = $1
+                   AND organization_id = $2
+                   AND plant_id = $3
+                   AND action_id = $4",
+                params!(
+                    user_id.to_owned(),
+                    organization_id.to_owned(),
+                    plant_id.to_owned(),
+                    action_id.to_owned()
+                ),
+                "effective user plant action",
+            )
+            .await?
+            > 0)
+    }
+
+    pub async fn has_user_organization_action(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+        action_id: &str,
+    ) -> Result<bool> {
+        let consistency = self.validation_read_consistency();
+        let has_membership = self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count
+                 FROM organization_memberships
+                 WHERE user_id = $1
+                   AND organization_id = $2
+                   AND status = 'active'",
+                params!(user_id.to_owned(), organization_id.to_owned()),
+                "active organization membership",
+            )
+            .await?;
+        if !has_membership {
+            return Ok(false);
+        }
+
+        let direct_user = self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 WHERE rb.subject_type = 'user'
+                   AND rb.subject_id = $1
+                   AND rb.subject_organization_id = $2
+                   AND rb.resource_type = 'organization'
+                   AND rb.resource_id = $3
+                   AND rb.state = 'active'
+                   AND ra.action_id = $4",
+                params!(
+                    user_id.to_owned(),
+                    organization_id.to_owned(),
+                    target_organization_id.to_owned(),
+                    action_id.to_owned()
+                ),
+                "direct user organization action",
+            )
+            .await?;
+        if direct_user {
+            return Ok(true);
+        }
+
+        self.exists_row_with(
+            consistency,
+            "SELECT COUNT(*) as count
+             FROM role_bindings rb
+             JOIN role_actions ra ON ra.role_id = rb.role_id
+             JOIN group_memberships gm ON gm.group_id = rb.subject_id
+             JOIN organization_memberships om ON om.id = gm.organization_membership_id
+             WHERE rb.subject_type = 'group'
+               AND rb.subject_organization_id = $1
+               AND rb.resource_type = 'organization'
+               AND rb.resource_id = $2
+               AND rb.state = 'active'
+               AND ra.action_id = $3
+               AND om.user_id = $4
+               AND om.organization_id = $1
+               AND om.status = 'active'",
+            params!(
+                organization_id.to_owned(),
+                target_organization_id.to_owned(),
+                action_id.to_owned(),
+                user_id.to_owned()
+            ),
+            "group organization action",
+        )
+        .await
+    }
+
+    pub async fn find_active_agreement_id(
+        &self,
+        grantor_organization_id: &str,
+        grantee_organization_id: &str,
+    ) -> Result<Option<String>> {
+        let now = Utc::now().to_rfc3339();
+        let rows: Vec<AgreementIdRow> = self
+            .query_rows_with(
+                self.validation_read_consistency(),
+                "SELECT id
+                 FROM agreements
+                 WHERE grantor_organization_id = $1
+                   AND grantee_organization_id = $2
+                   AND status = 'active'
+                   AND (starts_at IS NULL OR starts_at <= $3)
+                   AND (ends_at IS NULL OR ends_at >= $3)
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                params!(
+                    grantor_organization_id.to_owned(),
+                    grantee_organization_id.to_owned(),
+                    now
+                ),
+                "active agreement id",
+            )
+            .await?;
+        Ok(rows.into_iter().next().map(|row| row.id))
     }
 
     pub async fn latest_generation_month(&self, plant_id: &str) -> Result<Option<String>> {
@@ -796,10 +1572,29 @@ impl Database {
         Ok(rows.into_iter().next().map(|row| row.month))
     }
 
-    pub async fn get_plant_summary(&self, plant_id: &str) -> Result<PlantSummary> {
+    pub async fn get_plant_by_facility_code(&self, facility_code: &str) -> Result<Plant> {
         let mut plants: Vec<PlantRow> = self
-            .query_consistent_rows(
-                "SELECT id, name, business_no, contract_no, address, installed_kw, rec_start_date, confirm_issued
+            .query_default_rows(
+                "SELECT id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued
+                 FROM plants WHERE facility_code = $1 LIMIT 1",
+                params!(facility_code.to_owned()),
+                "plant",
+            )
+            .await
+            .context("query plant")?;
+        let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
+        Ok(plant_row.into())
+    }
+
+    pub async fn get_plant_summary(&self, facility_code: &str) -> Result<PlantSummary> {
+        let plant = self.get_plant_by_facility_code(facility_code).await?;
+        self.get_plant_summary_by_id(&plant.id).await
+    }
+
+    pub async fn get_plant_summary_by_id(&self, plant_id: &str) -> Result<PlantSummary> {
+        let mut plants: Vec<PlantRow> = self
+            .query_default_rows(
+                "SELECT id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued
                  FROM plants WHERE id = $1 LIMIT 1",
                 params!(plant_id.to_owned()),
                 "plant",
@@ -807,13 +1602,14 @@ impl Database {
             .await
             .context("query plant")?;
         let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
+        let resolved_plant_id = plant_row.id.clone();
 
         let mut runs: Vec<SyncRunRow> = self
-            .query_consistent_rows(
-                "SELECT id, business_id as business_no, plant_id, mode, status, started_at, finished_at, duration_ms
+            .query_default_rows(
+                "SELECT id, organization_id, plant_id, mode, status, started_at, finished_at, duration_ms
                  FROM sync_runs WHERE plant_id = $1 AND status = 'completed'
                  ORDER BY started_at DESC LIMIT 1",
-                params!(plant_id.to_owned()),
+                params!(resolved_plant_id.clone()),
                 "latest sync run",
             )
             .await
@@ -821,43 +1617,47 @@ impl Database {
         let last_sync = runs.pop().map(Into::into);
 
         let generation = self
-            .query_consistent_row::<CountSumRow, _>(
+            .query_row_with::<CountSumRow, _>(
+                self.runtime.default_read_consistency(),
                 "SELECT COUNT(*) as count, COALESCE(SUM(generation_kwh), 0) as total
                  FROM generation_records WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
+                params!(resolved_plant_id.clone()),
                 "generation aggregate",
             )
             .await
             .context("aggregate generation")?;
         let rates = self
-            .query_consistent_row::<CountRow, _>(
+            .query_row_with::<CountRow, _>(
+                self.runtime.default_read_consistency(),
                 "SELECT COUNT(*) as count FROM rate_records WHERE plant_id = $1 AND published = 1",
-                params!(plant_id.to_owned()),
+                params!(resolved_plant_id.clone()),
                 "rates aggregate",
             )
             .await
             .context("aggregate rates")?;
         let rec = self
-            .query_consistent_row::<CountSumIntRow, _>(
+            .query_row_with::<CountSumIntRow, _>(
+                self.runtime.default_read_consistency(),
                 "SELECT COUNT(*) as count, COALESCE(SUM(rec_quantity), 0) as total
                  FROM rec_records WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
+                params!(resolved_plant_id.clone()),
                 "rec aggregate",
             )
             .await
             .context("aggregate rec")?;
         let documents = self
-            .query_consistent_row::<CountRow, _>(
+            .query_row_with::<CountRow, _>(
+                self.runtime.default_read_consistency(),
                 "SELECT COUNT(*) as count FROM documents WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
+                params!(resolved_plant_id.clone()),
                 "document aggregate",
             )
             .await
             .context("aggregate documents")?;
         let category_rows: Vec<CategoryCountRow> = self
-            .query_consistent_rows(
+            .query_default_rows(
                 "SELECT category, COUNT(*) as count FROM documents WHERE plant_id = $1 GROUP BY category ORDER BY category ASC",
-                params!(plant_id.to_owned()),
+                params!(resolved_plant_id),
                 "document category aggregate",
             )
             .await
@@ -884,7 +1684,7 @@ impl Database {
 
     pub async fn list_generation(&self, plant_id: &str) -> Result<Vec<GenerationRecord>> {
         let rows: Vec<GenerationRow> = self
-            .query_consistent_rows(
+            .query_default_rows(
                 "SELECT month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline
                  FROM generation_records WHERE plant_id = $1 ORDER BY month ASC",
                 params!(plant_id.to_owned()),
@@ -897,7 +1697,7 @@ impl Database {
 
     pub async fn list_rates(&self, plant_id: &str) -> Result<Vec<RateRecord>> {
         let rows: Vec<RateRow> = self
-            .query_consistent_rows(
+            .query_default_rows(
                 "SELECT month, self_rate, national_average, nearby_average, nearby_highest
                  FROM rate_records WHERE plant_id = $1 AND published = 1 ORDER BY month ASC",
                 params!(plant_id.to_owned()),
@@ -919,7 +1719,7 @@ impl Database {
 
     pub async fn list_rec(&self, plant_id: &str) -> Result<Vec<RecRecord>> {
         let rows: Vec<RecRow> = self
-            .query_consistent_rows(
+            .query_default_rows(
                 "SELECT month, application_no, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status
                  FROM rec_records WHERE plant_id = $1 ORDER BY month ASC, application_no ASC",
                 params!(plant_id.to_owned()),
@@ -932,8 +1732,8 @@ impl Database {
 
     pub async fn list_documents(&self, plant_id: &str) -> Result<Vec<StoredDocument>> {
         let rows: Vec<DocumentRow> = self
-            .query_consistent_rows(
-                "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
+            .query_default_rows(
+                "SELECT id, plant_id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE plant_id = $1 ORDER BY category ASC, file_name ASC",
                 params!(plant_id.to_owned()),
                 "document list",
@@ -945,6 +1745,7 @@ impl Database {
             .filter_map(|row| {
                 <DocumentCategory as DocumentCategoryExt>::from_storage(&row.category).map(
                     |category| StoredDocument {
+                        plant_id: row.plant_id,
                         artifact: DocumentArtifact {
                             id: row.id,
                             category,
@@ -966,8 +1767,8 @@ impl Database {
 
     pub async fn get_document(&self, id: &str) -> Result<StoredDocument> {
         let rows: Vec<DocumentRow> = self
-            .query_consistent_rows(
-                "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
+            .query_default_rows(
+                "SELECT id, plant_id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE id = $1 LIMIT 1",
                 params!(id.to_owned()),
                 "document",
@@ -979,6 +1780,7 @@ impl Database {
         let category = <DocumentCategory as DocumentCategoryExt>::from_storage(&row.category)
             .ok_or_else(|| anyhow!("invalid document category {}", row.category))?;
         Ok(StoredDocument {
+            plant_id: row.plant_id,
             artifact: DocumentArtifact {
                 id: row.id,
                 category,
@@ -997,7 +1799,7 @@ impl Database {
 
     pub async fn list_backup_local(&self) -> Result<Vec<BackupEntry>> {
         let items = self
-            .client
+            .runtime
             .backup_list_local()
             .await
             .context("list local backups")?;
@@ -1013,7 +1815,7 @@ impl Database {
 
     pub async fn list_backup_s3(&self) -> Result<Vec<BackupEntry>> {
         let items = self
-            .client
+            .runtime
             .backup_list_s3()
             .await
             .context("list s3 backups")?;
@@ -1028,7 +1830,641 @@ impl Database {
     }
 
     pub async fn trigger_backup(&self) -> Result<()> {
-        self.client.backup().await.context("trigger hiqlite backup")
+        self.runtime.backup().await.context("trigger hiqlite backup")
+    }
+
+    pub async fn save_role_binding(&self, binding: &RoleBinding) -> Result<()> {
+        validate_role_binding(binding)?;
+        self.validate_role_binding_refs(binding).await?;
+        self.runtime
+            .execute(
+                "INSERT INTO role_bindings (
+                    id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 ON CONFLICT(id) DO UPDATE SET
+                    subject_type = excluded.subject_type,
+                    subject_id = excluded.subject_id,
+                    subject_organization_id = excluded.subject_organization_id,
+                    resource_type = excluded.resource_type,
+                    resource_id = excluded.resource_id,
+                    role_id = excluded.role_id,
+                    agreement_id = excluded.agreement_id,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at",
+                params!(
+                    binding.id.clone(),
+                    role_binding_subject_type_str(&binding.subject_type),
+                    binding.subject_id.clone(),
+                    binding.subject_organization_id.clone(),
+                    role_binding_resource_type_str(&binding.resource_type),
+                    binding.resource_id.clone(),
+                    binding.role_id.clone(),
+                    binding.agreement_id.clone(),
+                    role_binding_state_str(&binding.state),
+                    binding.created_by_user_id.clone(),
+                    binding.created_at.clone(),
+                    binding.updated_at.clone()
+                ),
+            )
+            .await
+            .context("save role binding")?;
+        self.rebuild_organization_expansion().await?;
+        Ok(())
+    }
+
+    async fn rebuild_organization_expansion(&self) -> Result<()> {
+        let consistency = self.validation_read_consistency();
+        let org_rows: Vec<OrganizationIdRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT id FROM organizations ORDER BY id ASC",
+                vec![],
+                "organization ids for closure rebuild",
+            )
+            .await?;
+        let edge_rows: Vec<OrganizationEdgeRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT parent_organization_id, child_organization_id
+                 FROM organization_edges
+                 ORDER BY parent_organization_id ASC, child_organization_id ASC",
+                vec![],
+                "organization edges for closure rebuild",
+            )
+            .await?;
+        let seed_rows: Vec<OrganizationPlantActionSeedRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT rb.subject_id AS organization_id,
+                        rb.resource_id AS plant_id,
+                        ra.action_id AS action_id
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 LEFT JOIN agreements a ON a.id = rb.agreement_id
+                 WHERE rb.subject_type = 'organization'
+                   AND rb.resource_type = 'plant'
+                   AND rb.state = 'active'
+                   AND (
+                        rb.agreement_id IS NULL
+                        OR (
+                            a.status = 'active'
+                            AND (a.starts_at IS NULL OR a.starts_at <= $1)
+                            AND (a.ends_at IS NULL OR a.ends_at >= $1)
+                        )
+                   )
+                 ORDER BY rb.subject_id ASC, rb.resource_id ASC, ra.action_id ASC",
+                vec![now_string().into()],
+                "organization plant action seeds",
+            )
+            .await?;
+        let membership_rows: Vec<OrganizationMembershipSeedRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT id, organization_id, user_id
+                 FROM organization_memberships
+                 WHERE status = 'active'
+                 ORDER BY organization_id ASC, user_id ASC, id ASC",
+                vec![],
+                "active organization memberships for user expansion",
+            )
+            .await?;
+        let group_membership_rows: Vec<GroupMembershipSeedRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT group_id, organization_membership_id
+                 FROM group_memberships
+                 ORDER BY group_id ASC, organization_membership_id ASC",
+                vec![],
+                "group memberships for user expansion",
+            )
+            .await?;
+        let group_seed_rows: Vec<GroupPlantActionSeedRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT rb.subject_id AS group_id,
+                        rb.subject_organization_id AS organization_id,
+                        rb.resource_id AS plant_id,
+                        ra.action_id AS action_id
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 WHERE rb.subject_type = 'group'
+                   AND rb.resource_type = 'plant'
+                   AND rb.state = 'active'
+                 ORDER BY rb.subject_id ASC, rb.resource_id ASC, ra.action_id ASC",
+                vec![],
+                "group plant action seeds",
+            )
+            .await?;
+        let user_seed_rows: Vec<UserPlantActionSeedRow> = self
+            .query_rows_with(
+                consistency,
+                "SELECT rb.subject_id AS user_id,
+                        rb.subject_organization_id AS organization_id,
+                        rb.resource_id AS plant_id,
+                        ra.action_id AS action_id
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 WHERE rb.subject_type = 'user'
+                   AND rb.resource_type = 'plant'
+                   AND rb.state = 'active'
+                 ORDER BY rb.subject_id ASC, rb.resource_id ASC, ra.action_id ASC",
+                vec![],
+                "user plant action seeds",
+            )
+            .await?;
+
+        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
+        for edge in &edge_rows {
+            children_by_parent
+                .entry(edge.parent_organization_id.clone())
+                .or_default()
+                .push(edge.child_organization_id.clone());
+        }
+
+        let mut closure_rows: Vec<(String, String, i64)> = Vec::new();
+        for org in &org_rows {
+            let mut queue = VecDeque::from([(org.id.clone(), 0_i64)]);
+            let mut seen: HashSet<String> = HashSet::new();
+            while let Some((descendant, depth)) = queue.pop_front() {
+                if !seen.insert(descendant.clone()) {
+                    continue;
+                }
+                closure_rows.push((org.id.clone(), descendant.clone(), depth));
+                if let Some(children) = children_by_parent.get(&descendant) {
+                    for child in children {
+                        queue.push_back((child.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+
+        let mut ancestors_by_descendant: HashMap<String, Vec<String>> = HashMap::new();
+        for (ancestor, descendant, _) in &closure_rows {
+            ancestors_by_descendant
+                .entry(descendant.clone())
+                .or_default()
+                .push(ancestor.clone());
+        }
+
+        let mut org_action_rows: HashSet<(String, String, String)> = HashSet::new();
+        for seed in &seed_rows {
+            if let Some(ancestors) = ancestors_by_descendant.get(&seed.organization_id) {
+                for ancestor in ancestors {
+                    org_action_rows.insert((
+                        ancestor.clone(),
+                        seed.plant_id.clone(),
+                        seed.action_id.clone(),
+                    ));
+                }
+            }
+        }
+
+        let membership_by_id: HashMap<String, (String, String)> = membership_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.id.clone(),
+                    (row.user_id.clone(), row.organization_id.clone()),
+                )
+            })
+            .collect();
+        let active_membership_pairs: HashSet<(String, String)> = membership_rows
+            .iter()
+            .map(|row| (row.user_id.clone(), row.organization_id.clone()))
+            .collect();
+        let mut users_by_group: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for group_membership in &group_membership_rows {
+            if let Some((user_id, organization_id)) =
+                membership_by_id.get(&group_membership.organization_membership_id)
+            {
+                users_by_group
+                    .entry(group_membership.group_id.clone())
+                    .or_default()
+                    .push((user_id.clone(), organization_id.clone()));
+            }
+        }
+
+        let mut user_action_rows: HashSet<(String, String, String, String)> = HashSet::new();
+        for seed in &group_seed_rows {
+            if let Some(users) = users_by_group.get(&seed.group_id) {
+                for (user_id, organization_id) in users {
+                    if organization_id != &seed.organization_id {
+                        continue;
+                    }
+                    if org_action_rows.contains(&(
+                        seed.organization_id.clone(),
+                        seed.plant_id.clone(),
+                        seed.action_id.clone(),
+                    )) {
+                        user_action_rows.insert((
+                            user_id.clone(),
+                            seed.organization_id.clone(),
+                            seed.plant_id.clone(),
+                            seed.action_id.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        for seed in &user_seed_rows {
+            if !active_membership_pairs
+                .contains(&(seed.user_id.clone(), seed.organization_id.clone()))
+            {
+                continue;
+            }
+            if org_action_rows.contains(&(
+                seed.organization_id.clone(),
+                seed.plant_id.clone(),
+                seed.action_id.clone(),
+            )) {
+                user_action_rows.insert((
+                    seed.user_id.clone(),
+                    seed.organization_id.clone(),
+                    seed.plant_id.clone(),
+                    seed.action_id.clone(),
+                ));
+            }
+        }
+        let visibility_rows: HashSet<(String, String, String)> = user_action_rows
+            .iter()
+            .filter(|(_, _, _, action_id)| action_id == "plant.profile.read")
+            .map(|(user_id, organization_id, plant_id, _)| {
+                (user_id.clone(), organization_id.clone(), plant_id.clone())
+            })
+            .collect();
+
+        self.runtime
+            .batch(
+                "DELETE FROM organization_closure;
+                 DELETE FROM effective_organization_plant_actions;
+                 DELETE FROM effective_user_plant_actions;
+                 DELETE FROM effective_user_plant_visibility;",
+            )
+            .await
+            .context("clear organization expansion tables")?;
+
+        for (ancestor, descendant, depth) in closure_rows {
+            self.runtime
+                .execute(
+                    "INSERT INTO organization_closure (
+                        ancestor_organization_id, descendant_organization_id, depth
+                     ) VALUES ($1, $2, $3)",
+                    params!(ancestor, descendant, depth),
+                )
+                .await
+                .context("insert organization closure row")?;
+        }
+
+        for (organization_id, plant_id, action_id) in org_action_rows {
+            self.runtime
+                .execute(
+                    "INSERT INTO effective_organization_plant_actions (
+                        organization_id, plant_id, action_id, updated_at
+                     ) VALUES ($1, $2, $3, $4)",
+                    params!(
+                        organization_id,
+                        plant_id,
+                        action_id,
+                        Utc::now().to_rfc3339()
+                    ),
+                )
+                .await
+                .context("insert effective organization plant action")?;
+        }
+
+        for (user_id, organization_id, plant_id, action_id) in user_action_rows {
+            self.runtime
+                .execute(
+                    "INSERT INTO effective_user_plant_actions (
+                        user_id, organization_id, plant_id, action_id, updated_at
+                     ) VALUES ($1, $2, $3, $4, $5)",
+                    params!(
+                        user_id,
+                        organization_id,
+                        plant_id,
+                        action_id,
+                        Utc::now().to_rfc3339()
+                    ),
+                )
+                .await
+                .context("insert effective user plant action")?;
+        }
+
+        for (user_id, organization_id, plant_id) in visibility_rows {
+            self.runtime
+                .execute(
+                    "INSERT INTO effective_user_plant_visibility (
+                        user_id, organization_id, plant_id, updated_at
+                     ) VALUES ($1, $2, $3, $4)",
+                    params!(user_id, organization_id, plant_id, Utc::now().to_rfc3339()),
+                )
+                .await
+                .context("insert effective user plant visibility")?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn list_role_bindings_for_subject(
+        &self,
+        subject_type: RoleBindingSubjectType,
+        subject_id: &str,
+        subject_organization_id: Option<&str>,
+    ) -> Result<Vec<RoleBinding>> {
+        let mut sql = String::from(
+            "SELECT id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+             FROM role_bindings
+             WHERE subject_type = $1 AND subject_id = $2",
+        );
+        let mut sql_params = params!(
+            role_binding_subject_type_str(&subject_type),
+            subject_id.to_owned()
+        );
+        if let Some(subject_organization_id) = subject_organization_id {
+            sql.push_str(" AND subject_organization_id = $3");
+            sql_params.push(subject_organization_id.to_owned().into());
+        }
+        sql.push_str(" ORDER BY id ASC");
+
+        let rows: Vec<RoleBindingRow> = self
+            .query_default_rows(sql, sql_params, "role bindings for subject")
+            .await?;
+        rows.into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub async fn list_role_bindings_for_resource(
+        &self,
+        resource_type: RoleBindingResourceType,
+        resource_id: &str,
+    ) -> Result<Vec<RoleBinding>> {
+        let rows: Vec<RoleBindingRow> = self
+            .query_default_rows(
+                "SELECT id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                        role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 FROM role_bindings
+                 WHERE resource_type = $1 AND resource_id = $2
+                 ORDER BY id ASC",
+                params!(
+                    role_binding_resource_type_str(&resource_type),
+                    resource_id.to_owned()
+                ),
+                "role bindings for resource",
+            )
+            .await?;
+        rows.into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>>>()
+    }
+
+    async fn validate_role_binding_refs(&self, binding: &RoleBinding) -> Result<()> {
+        let consistency = self.validation_read_consistency();
+        let validation_time = Utc::now().to_rfc3339();
+
+        if !self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                params!(binding.subject_organization_id.clone()),
+                "subject organization existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "subject organization {} does not exist",
+                binding.subject_organization_id
+            ));
+        }
+
+        let role_rows = self
+            .query_rows_with::<RoleOrgRow, _>(
+                consistency.clone(),
+                "SELECT organization_id FROM roles WHERE id = $1",
+                params!(binding.role_id.clone()),
+                "role existence and ownership",
+            )
+            .await?;
+        let role_org = role_rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("role {} does not exist", binding.role_id))?
+            .organization_id;
+        if let Some(role_org) = role_org.as_deref() {
+            if role_org != binding.subject_organization_id {
+                return Err(anyhow!(
+                    "role {} belongs to organization {}, not {}",
+                    binding.role_id,
+                    role_org,
+                    binding.subject_organization_id
+                ));
+            }
+        }
+
+        if !self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count FROM users WHERE id = $1",
+                params!(binding.created_by_user_id.clone()),
+                "creator user existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "creator user {} does not exist",
+                binding.created_by_user_id
+            ));
+        }
+
+        let plant_owner = if matches!(binding.resource_type, RoleBindingResourceType::Plant) {
+            let plant_owner_rows = self
+                .query_rows_with::<PlantOwnerRow, _>(
+                    consistency.clone(),
+                    "SELECT owner_organization_id FROM plants WHERE id = $1",
+                    params!(binding.resource_id.clone()),
+                    "plant owner for role binding validation",
+                )
+                .await?;
+            Some(
+                plant_owner_rows
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("plant resource {} does not exist", binding.resource_id))?
+                    .owner_organization_id,
+            )
+        } else {
+            None
+        };
+
+        if matches!(binding.subject_type, RoleBindingSubjectType::Organization)
+            && matches!(binding.resource_type, RoleBindingResourceType::Plant)
+        {
+            let subject_is_owner = plant_owner
+                .as_deref()
+                .map(|owner| owner == binding.subject_id)
+                .unwrap_or(false);
+            if subject_is_owner {
+                if binding.agreement_id.is_some() {
+                    return Err(anyhow!(
+                        "owner organization plant binding must not carry agreement references"
+                    ));
+                }
+            } else if binding.agreement_id.is_none() {
+                return Err(anyhow!(
+                    "organization-to-plant role binding must reference an agreement unless the subject organization owns the plant"
+                ));
+            }
+        }
+
+        if let Some(agreement_id) = &binding.agreement_id {
+            let agreement_exists = self
+                .query_count(
+                    consistency.clone(),
+                    "SELECT COUNT(*) as count FROM agreements WHERE id = $1",
+                    params!(agreement_id.clone()),
+                    "agreement existence",
+                )
+                .await?;
+            if agreement_exists == 0 {
+                return Err(anyhow!("agreement {} does not exist", agreement_id));
+            }
+            let agreement_active = self
+                .query_count(
+                    consistency.clone(),
+                    "SELECT COUNT(*) as count
+                     FROM agreements
+                     WHERE id = $1
+                       AND status = 'active'
+                       AND (starts_at IS NULL OR starts_at <= $2)
+                       AND (ends_at IS NULL OR ends_at >= $2)",
+                    params!(agreement_id.clone(), validation_time.clone()),
+                    "agreement activity window",
+                )
+                .await?;
+            if agreement_active == 0 {
+                return Err(anyhow!(
+                    "agreement {} is not active for validation timestamp {}",
+                    agreement_id,
+                    validation_time
+                ));
+            }
+            if matches!(binding.subject_type, RoleBindingSubjectType::Organization)
+                && matches!(binding.resource_type, RoleBindingResourceType::Plant)
+            {
+                let agreement_matches = self
+                    .query_count(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count
+                         FROM agreements a, plants p
+                         WHERE a.id = $1
+                           AND p.id = $2
+                           AND a.grantee_organization_id = $3
+                           AND a.grantor_organization_id = p.owner_organization_id",
+                        params!(
+                            agreement_id.clone(),
+                            binding.resource_id.clone(),
+                            binding.subject_id.clone()
+                        ),
+                        "agreement plant relationship match",
+                    )
+                    .await?;
+                if agreement_matches == 0 {
+                    return Err(anyhow!(
+                        "agreement {} does not match plant {} and organization {}",
+                        agreement_id,
+                        binding.resource_id,
+                        binding.subject_id
+                    ));
+                }
+            }
+        }
+
+        match binding.subject_type {
+            RoleBindingSubjectType::Organization => {
+                if !self
+                    .exists_row_with(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                        params!(binding.subject_id.clone()),
+                        "organization subject existence",
+                    )
+                    .await?
+                {
+                    return Err(anyhow!(
+                        "organization subject {} does not exist",
+                        binding.subject_id
+                    ));
+                }
+            }
+            RoleBindingSubjectType::Group => {
+                let group_matches = self
+                    .query_count(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count FROM groups WHERE id = $1 AND organization_id = $2",
+                        params!(
+                            binding.subject_id.clone(),
+                            binding.subject_organization_id.clone()
+                        ),
+                        "group subject organization match",
+                    )
+                    .await?;
+                if group_matches == 0 {
+                    return Err(anyhow!(
+                        "group subject {} does not belong to organization {}",
+                        binding.subject_id,
+                        binding.subject_organization_id
+                    ));
+                }
+            }
+            RoleBindingSubjectType::User => {
+                let membership_matches = self
+                    .query_count(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count FROM organization_memberships WHERE user_id = $1 AND organization_id = $2",
+                        params!(
+                            binding.subject_id.clone(),
+                            binding.subject_organization_id.clone()
+                        ),
+                        "user subject organization match",
+                    )
+                    .await?;
+                if membership_matches == 0 {
+                    return Err(anyhow!(
+                        "user subject {} does not belong to organization {}",
+                        binding.subject_id,
+                        binding.subject_organization_id
+                    ));
+                }
+            }
+        }
+
+        match binding.resource_type {
+            RoleBindingResourceType::Organization => {
+                if !self
+                    .exists_row_with(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                        params!(binding.resource_id.clone()),
+                        "organization resource existence",
+                    )
+                    .await?
+                {
+                    return Err(anyhow!(
+                        "organization resource {} does not exist",
+                        binding.resource_id
+                    ));
+                }
+            }
+            RoleBindingResourceType::Plant => {
+                if plant_owner.is_none() {
+                    return Err(anyhow!("plant resource {} does not exist", binding.resource_id));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1069,7 +2505,8 @@ impl From<&mut Row<'_>> for StoredCertificate {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
-            business_id: row.get("business_id"),
+            organization_id: row.get("organization_id"),
+            business_no: row.get("business_no"),
             common_name: row.get("common_name"),
             encrypted_blob: row.get("encrypted_blob"),
             active: row.get("active"),
@@ -1109,8 +2546,10 @@ impl From<&mut Row<'_>> for PlantRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
+            facility_code: row.get("facility_code"),
+            owner_organization_id: row.get("owner_organization_id"),
+            created_by_organization_id: row.get("created_by_organization_id"),
             name: row.get("name"),
-            business_no: row.get("business_no"),
             contract_no: row.get("contract_no"),
             address: row.get("address"),
             installed_kw: row.get("installed_kw"),
@@ -1124,13 +2563,118 @@ impl From<&mut Row<'_>> for SyncRunRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
-            business_no: row.get("business_no"),
+            organization_id: row.get("organization_id"),
             plant_id: row.get("plant_id"),
             mode: row.get("mode"),
             status: row.get("status"),
             started_at: row.get("started_at"),
             finished_at: row.get("finished_at"),
             duration_ms: row.get("duration_ms"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for RoleBindingRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            subject_type: row.get("subject_type"),
+            subject_id: row.get("subject_id"),
+            subject_organization_id: row.get("subject_organization_id"),
+            resource_type: row.get("resource_type"),
+            resource_id: row.get("resource_id"),
+            role_id: row.get("role_id"),
+            agreement_id: row.get("agreement_id"),
+            state: row.get("state"),
+            created_by_user_id: row.get("created_by_user_id"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for RoleOrgRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            organization_id: row.get("organization_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for OrganizationIdRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self { id: row.get("id") }
+    }
+}
+
+impl From<&mut Row<'_>> for OrganizationRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            business_no: row.get("business_no"),
+            name: row.get("name"),
+            legal_entity_id: row.get("legal_entity_id"),
+            active: row.get("active"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for OrganizationEdgeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            parent_organization_id: row.get("parent_organization_id"),
+            child_organization_id: row.get("child_organization_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for OrganizationPlantActionSeedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            organization_id: row.get("organization_id"),
+            plant_id: row.get("plant_id"),
+            action_id: row.get("action_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for OrganizationMembershipSeedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            user_id: row.get("user_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for GroupMembershipSeedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            group_id: row.get("group_id"),
+            organization_membership_id: row.get("organization_membership_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for GroupPlantActionSeedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            group_id: row.get("group_id"),
+            organization_id: row.get("organization_id"),
+            plant_id: row.get("plant_id"),
+            action_id: row.get("action_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for UserPlantActionSeedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            user_id: row.get("user_id"),
+            organization_id: row.get("organization_id"),
+            plant_id: row.get("plant_id"),
+            action_id: row.get("action_id"),
         }
     }
 }
@@ -1180,6 +2724,7 @@ impl From<&mut Row<'_>> for DocumentRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
+            plant_id: row.get("plant_id"),
             category: row.get("category"),
             file_class: row.get("file_class"),
             file_sec_name: row.get("file_sec_name"),
@@ -1205,9 +2750,11 @@ impl From<&mut Row<'_>> for CategoryCountRow {
 impl From<PlantRow> for Plant {
     fn from(value: PlantRow) -> Self {
         Self {
-            code: value.id,
+            id: value.id,
+            facility_code: value.facility_code,
             name: value.name,
-            business_no: value.business_no,
+            owner_organization_id: value.owner_organization_id,
+            created_by_organization_id: value.created_by_organization_id,
             contract_no: value.contract_no,
             address: value.address,
             installed_kw: value.installed_kw,
@@ -1217,11 +2764,23 @@ impl From<PlantRow> for Plant {
     }
 }
 
+impl From<OrganizationRow> for Organization {
+    fn from(value: OrganizationRow) -> Self {
+        Self {
+            id: value.id,
+            business_no: value.business_no,
+            name: value.name,
+            legal_entity_id: value.legal_entity_id,
+            active: value.active == 1,
+        }
+    }
+}
+
 impl From<SyncRunRow> for SyncRun {
     fn from(value: SyncRunRow) -> Self {
         Self {
             id: value.id,
-            business_no: value.business_no,
+            organization_id: value.organization_id,
             plant_id: value.plant_id,
             mode: match value.mode.as_str() {
                 "delta" => SyncMode::Delta,
@@ -1232,6 +2791,27 @@ impl From<SyncRunRow> for SyncRun {
             finished_at: value.finished_at,
             duration_ms: value.duration_ms,
         }
+    }
+}
+
+impl TryFrom<RoleBindingRow> for RoleBinding {
+    type Error = anyhow::Error;
+
+    fn try_from(value: RoleBindingRow) -> Result<Self> {
+        Ok(Self {
+            id: value.id,
+            subject_type: role_binding_subject_type_from_str(&value.subject_type)?,
+            subject_id: value.subject_id,
+            subject_organization_id: value.subject_organization_id,
+            resource_type: role_binding_resource_type_from_str(&value.resource_type)?,
+            resource_id: value.resource_id,
+            role_id: value.role_id,
+            agreement_id: value.agreement_id,
+            state: role_binding_state_from_str(&value.state)?,
+            created_by_user_id: value.created_by_user_id,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
     }
 }
 
@@ -1261,6 +2841,129 @@ impl From<RecRow> for RecRecord {
             bank_name: value.bank_name,
             status: value.status,
         }
+    }
+}
+
+fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
+    if binding.subject_organization_id.trim().is_empty() {
+        return Err(anyhow!("role binding subject organization id must not be empty"));
+    }
+    if binding.resource_id.trim().is_empty() {
+        return Err(anyhow!("role binding resource id must not be empty"));
+    }
+    if matches!(binding.subject_type, RoleBindingSubjectType::Organization)
+        && binding.subject_id != binding.subject_organization_id
+    {
+        return Err(anyhow!(
+            "organization role binding must use the same subject id and subject organization id"
+        ));
+    }
+    if !matches!(binding.subject_type, RoleBindingSubjectType::Organization)
+        && binding.agreement_id.is_some()
+    {
+        return Err(anyhow!(
+            "group/user role bindings must not carry agreement references"
+        ));
+    }
+    if matches!(binding.resource_type, RoleBindingResourceType::Organization)
+        && binding.resource_id != binding.subject_organization_id
+    {
+        return Err(anyhow!(
+            "organization-scoped role binding must target the subject organization"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct AgreementIdRow {
+    id: String,
+}
+
+impl From<&mut Row<'_>> for AgreementIdRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get::<String>("id"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlantOwnerRow {
+    owner_organization_id: String,
+}
+
+impl From<&mut Row<'_>> for PlantOwnerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            owner_organization_id: row.get::<String>("owner_organization_id"),
+        }
+    }
+}
+
+fn role_binding_subject_type_str(subject_type: &RoleBindingSubjectType) -> &'static str {
+    match subject_type {
+        RoleBindingSubjectType::Organization => "organization",
+        RoleBindingSubjectType::Group => "group",
+        RoleBindingSubjectType::User => "user",
+    }
+}
+
+fn role_binding_subject_type_from_str(value: &str) -> Result<RoleBindingSubjectType> {
+    match value {
+        "organization" => Ok(RoleBindingSubjectType::Organization),
+        "group" => Ok(RoleBindingSubjectType::Group),
+        "user" => Ok(RoleBindingSubjectType::User),
+        other => Err(anyhow!("invalid role binding subject type {other}")),
+    }
+}
+
+fn role_binding_resource_type_str(resource_type: &RoleBindingResourceType) -> &'static str {
+    match resource_type {
+        RoleBindingResourceType::Organization => "organization",
+        RoleBindingResourceType::Plant => "plant",
+    }
+}
+
+fn role_binding_resource_type_from_str(value: &str) -> Result<RoleBindingResourceType> {
+    match value {
+        "organization" => Ok(RoleBindingResourceType::Organization),
+        "plant" => Ok(RoleBindingResourceType::Plant),
+        other => Err(anyhow!("invalid role binding resource type {other}")),
+    }
+}
+
+fn role_binding_state_str(state: &RoleBindingState) -> &'static str {
+    match state {
+        RoleBindingState::Active => "active",
+        RoleBindingState::Disabled => "disabled",
+    }
+}
+
+fn role_binding_state_from_str(value: &str) -> Result<RoleBindingState> {
+    match value {
+        "active" => Ok(RoleBindingState::Active),
+        "disabled" => Ok(RoleBindingState::Disabled),
+        other => Err(anyhow!("invalid role binding state {other}")),
+    }
+}
+
+fn agreement_type_str(agreement_type: &domain::AgreementType) -> &'static str {
+    match agreement_type {
+        domain::AgreementType::Delegation => "delegation",
+        domain::AgreementType::Epc => "epc",
+        domain::AgreementType::Om => "om",
+        domain::AgreementType::Distributor => "distributor",
+        domain::AgreementType::Dealer => "dealer",
+    }
+}
+
+fn agreement_status_str(status: &domain::AgreementStatus) -> &'static str {
+    match status {
+        domain::AgreementStatus::Draft => "draft",
+        domain::AgreementStatus::Active => "active",
+        domain::AgreementStatus::Expired => "expired",
+        domain::AgreementStatus::Terminated => "terminated",
     }
 }
 

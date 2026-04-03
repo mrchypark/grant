@@ -42,13 +42,8 @@ impl ArtifactStore {
                 access_key,
                 secret_key,
             } => {
-                let credentials = Credentials::new(
-                    access_key.clone(),
-                    secret_key.clone(),
-                    None,
-                    None,
-                    "static",
-                );
+                let credentials =
+                    Credentials::new(access_key.clone(), secret_key.clone(), None, None, "static");
 
                 let shared = aws_config::defaults(BehaviorVersion::latest())
                     .region(Region::new(region.clone()))
@@ -173,7 +168,9 @@ impl ArtifactStore {
                 match fs::remove_file(&path).await {
                     Ok(()) => Ok(()),
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(err) => Err(err).with_context(|| format!("delete object {}", path.display())),
+                    Err(err) => {
+                        Err(err).with_context(|| format!("delete object {}", path.display()))
+                    }
                 }
             }
             Self::S3 { client, bucket } => {

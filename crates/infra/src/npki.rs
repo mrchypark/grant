@@ -55,8 +55,12 @@ impl NpkiSigner {
             X509::from_der(&bundle.sign_cert_der).context("parse signCert.der as X509")?;
 
         let encrypted = parse_encrypted_private_key(&bundle.sign_pri_key)?;
-        let (key, iv) =
-            derive_npki_decryption_key(&encrypted.algorithm, &encrypted.salt, encrypted.iteration, password.as_bytes())?;
+        let (key, iv) = derive_npki_decryption_key(
+            &encrypted.algorithm,
+            &encrypted.salt,
+            encrypted.iteration,
+            password.as_bytes(),
+        )?;
         let plain_der = seed_cbc_decrypt(&key, &iv, &encrypted.cipher_text)?;
         let private_key = parse_private_key(&plain_der)?;
         let vid_random = extract_vid_random(&plain_der)?;
@@ -77,7 +81,10 @@ impl NpkiSigner {
     }
 
     pub fn certificate_pem(&self) -> Result<String> {
-        let pem = self.certificate.to_pem().context("serialize certificate to PEM")?;
+        let pem = self
+            .certificate
+            .to_pem()
+            .context("serialize certificate to PEM")?;
         String::from_utf8(pem).context("decode PEM as UTF-8")
     }
 
@@ -103,10 +110,14 @@ impl NpkiSigner {
         ensure_openssl_legacy_provider()?;
         let recipient = parse_certificate(recipient_cert_der)?;
         let mut certs = Stack::new().context("create recipient certificate stack")?;
-        certs.push(recipient).context("push recipient certificate")?;
+        certs
+            .push(recipient)
+            .context("push recipient certificate")?;
         let pkcs7 = Pkcs7::encrypt(&certs, plaintext, Cipher::seed_cbc(), Pkcs7Flags::BINARY)
             .context("build PKCS7 envelopedData")?;
-        let pem = pkcs7.to_pem().context("encode PKCS7 envelopedData to PEM")?;
+        let pem = pkcs7
+            .to_pem()
+            .context("encode PKCS7 envelopedData to PEM")?;
         String::from_utf8(pem).context("decode PKCS7 PEM as UTF-8")
     }
 }
@@ -120,10 +131,10 @@ fn parse_certificate(input: &[u8]) -> Result<X509> {
 fn ensure_openssl_legacy_provider() -> Result<()> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     match INIT.get_or_init(|| {
-        let default =
-            Provider::load(None, "default").map_err(|err| format!("load OpenSSL default provider: {err}"))?;
-        let legacy =
-            Provider::load(None, "legacy").map_err(|err| format!("load OpenSSL legacy provider: {err}"))?;
+        let default = Provider::load(None, "default")
+            .map_err(|err| format!("load OpenSSL default provider: {err}"))?;
+        let legacy = Provider::load(None, "legacy")
+            .map_err(|err| format!("load OpenSSL legacy provider: {err}"))?;
         std::mem::forget(default);
         std::mem::forget(legacy);
         Ok(())
@@ -261,8 +272,8 @@ fn seed_cbc_decrypt(key: &[u8], iv: &[u8], cipher_text: &[u8]) -> Result<Vec<u8>
         );
     }
 
-    let mut crypter =
-        Crypter::new(cipher, Mode::Decrypt, key, Some(iv)).context("initialize SEED-CBC crypter")?;
+    let mut crypter = Crypter::new(cipher, Mode::Decrypt, key, Some(iv))
+        .context("initialize SEED-CBC crypter")?;
     crypter.pad(false);
 
     let mut out = vec![0u8; cipher_text.len() + cipher.block_size()];
@@ -295,7 +306,9 @@ fn unpad_pkcs7(plain: &[u8], block_size: usize) -> Result<Vec<u8>> {
 }
 
 fn oid_matches(oid: &OID, expected: &[u64]) -> bool {
-    oid.as_vec::<u64>().map(|values| values == expected).unwrap_or(false)
+    oid.as_vec::<u64>()
+        .map(|values| values == expected)
+        .unwrap_or(false)
 }
 
 fn expect_single_sequence<'a>(blocks: &'a [ASN1Block], label: &str) -> Result<&'a [ASN1Block]> {

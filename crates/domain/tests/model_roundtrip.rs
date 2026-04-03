@@ -1,6 +1,9 @@
 use domain::{
-    Business, BusinessMembership, BusinessRole, DocumentArtifact, DocumentCategory, GenerationRecord,
-    LegalEntity, Plant, RateRecord, RecRecord, SyncMode, SyncRun, User,
+    Action, ActionRiskLevel, Agreement, AgreementStatus, AgreementType, DocumentArtifact,
+    DocumentCategory, GenerationRecord, Group, LegalEntity, MembershipRole, MembershipStatus, Organization,
+    OrganizationMembership, Plant, RateRecord, RecRecord, Role, RoleBinding,
+    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, RoleRule,
+    RoleRuleEffect, SyncMode, SyncRun, User,
 };
 
 #[test]
@@ -11,17 +14,71 @@ fn serializes_core_models() {
         display_name: "Conalog Account".into(),
         active: true,
     };
-    let business = Business {
+    let organization = Organization {
         id: "2768603291".into(),
-        display_name: "커널로그에너지".into(),
-        business_no: "2768603291".into(),
+        business_no: Some("2768603291".into()),
+        name: "커널로그에너지".into(),
         legal_entity_id: Some("legal_1".into()),
         active: true,
     };
-    let membership = BusinessMembership {
+    let membership = OrganizationMembership {
+        id: "org_mem_1".into(),
+        organization_id: organization.id.clone(),
         user_id: user.id.clone(),
-        business_id: business.id.clone(),
-        role: BusinessRole::Owner,
+        membership_role: MembershipRole::Owner,
+        status: MembershipStatus::Active,
+    };
+    let group = Group {
+        id: "group_1".into(),
+        organization_id: organization.id.clone(),
+        name: "현장팀".into(),
+        description: Some("현장 운영 그룹".into()),
+    };
+    let agreement = Agreement {
+        id: "agr_1".into(),
+        agreement_type: AgreementType::Om,
+        grantor_organization_id: organization.id.clone(),
+        grantee_organization_id: "org_2".into(),
+        status: AgreementStatus::Active,
+        title: "운영 위임 계약".into(),
+        reference_no: Some("AG-2026-001".into()),
+        starts_at: Some("2026-01-01T00:00:00Z".into()),
+        ends_at: Some("2027-01-01T00:00:00Z".into()),
+    };
+    let action = Action {
+        id: "action_1".into(),
+        code: "plant.profile.read".into(),
+        name: "Plant Profile Read".into(),
+        description: Some("Read plant profile".into()),
+        risk_level: ActionRiskLevel::Low,
+        visibility_granting: true,
+    };
+    let role = Role {
+        id: "role_1".into(),
+        organization_id: Some(organization.id.clone()),
+        code: "viewer".into(),
+        name: "Viewer".into(),
+        description: Some("Read-only access".into()),
+    };
+    let role_rule = RoleRule {
+        id: "rule_1".into(),
+        role_id: role.id.clone(),
+        effect: RoleRuleEffect::Allow,
+        action_pattern: "plant.*.read".into(),
+    };
+    let binding = RoleBinding {
+        id: "binding_1".into(),
+        subject_type: RoleBindingSubjectType::Group,
+        subject_id: group.id.clone(),
+        subject_organization_id: organization.id.clone(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant_1".into(),
+        role_id: role.id.clone(),
+        agreement_id: Some(agreement.id.clone()),
+        state: RoleBindingState::Active,
+        created_by_user_id: user.id.clone(),
+        created_at: "2026-03-31T00:00:00Z".into(),
+        updated_at: "2026-03-31T00:00:00Z".into(),
     };
     let legal = LegalEntity {
         id: "legal_1".into(),
@@ -29,9 +86,11 @@ fn serializes_core_models() {
         representative_name: Some("오복성".into()),
     };
     let plant = Plant {
-        code: "PV15-R-090795".into(),
+        id: "plant_1".into(),
+        facility_code: "PV15-R-090795".into(),
         name: "커널로그1호 태양광발전소".into(),
-        business_no: "2768603291".into(),
+        owner_organization_id: organization.id.clone(),
+        created_by_organization_id: Some("org_2".into()),
         contract_no: "5001058115".into(),
         address: "부산광역시 기장군 장안읍 명례리 907-4".into(),
         installed_kw: 221.615,
@@ -40,8 +99,8 @@ fn serializes_core_models() {
     };
     let sync = SyncRun {
         id: "run_1".into(),
-        business_no: "2768603291".into(),
-        plant_id: Some(plant.code.clone()),
+        organization_id: organization.id.clone(),
+        plant_id: Some(plant.id.clone()),
         mode: SyncMode::Delta,
         status: "completed".into(),
         started_at: Some("2026-03-31T00:00:00Z".into()),
@@ -88,8 +147,14 @@ fn serializes_core_models() {
 
     let value = serde_json::json!({
         "user": user,
-        "business": business,
+        "organization": organization,
         "membership": membership,
+        "group": group,
+        "agreement": agreement,
+        "action": action,
+        "role": role,
+        "roleRule": role_rule,
+        "binding": binding,
         "legalEntity": legal,
         "plant": plant,
         "sync": sync,
@@ -99,8 +164,20 @@ fn serializes_core_models() {
         "document": document,
     });
 
-    assert_eq!(value["business"]["businessNo"], "2768603291");
-    assert_eq!(value["membership"]["role"], "owner");
+    assert_eq!(value["organization"]["businessNo"], "2768603291");
+    assert_eq!(value["membership"]["membershipRole"], "owner");
+    assert_eq!(value["group"]["name"], "현장팀");
+    assert_eq!(value["agreement"]["agreementType"], "om");
+    assert_eq!(value["action"]["code"], "plant.profile.read");
+    assert_eq!(value["role"]["code"], "viewer");
+    assert_eq!(value["roleRule"]["actionPattern"], "plant.*.read");
+    assert_eq!(value["binding"]["resourceType"], "plant");
+    assert_eq!(value["binding"]["resourceId"], "plant_1");
     assert_eq!(value["sync"]["mode"], "delta");
+    assert_eq!(value["sync"]["organizationId"], "2768603291");
     assert_eq!(value["document"]["category"], "drawings");
+    assert_eq!(value["plant"]["id"], "plant_1");
+    assert_eq!(value["plant"]["facilityCode"], "PV15-R-090795");
+    assert_eq!(value["plant"]["ownerOrganizationId"], "2768603291");
+    assert_eq!(value["plant"]["createdByOrganizationId"], "org_2");
 }

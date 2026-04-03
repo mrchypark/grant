@@ -4,8 +4,10 @@ metadata:
   name: certd-headless
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     app: certd
+    role: voter
   ports:
     - name: http
       port: 8080
@@ -16,4 +18,3 @@ spec:
     - name: hiq-api
       port: 8200
       targetPort: 8200
-

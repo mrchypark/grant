@@ -8,6 +8,12 @@ resources:
   - app-service.yaml
   - app-pdb.yaml
   - app-statefulset.yaml
+  - app-learner-1-service.yaml
+  - app-learner-2-service.yaml
+  - app-learner-3-service.yaml
+  - app-learner-1-deployment.yaml
+  - app-learner-2-deployment.yaml
+  - app-learner-3-deployment.yaml
   - minio-headless-service.yaml
   - minio-service.yaml
   - minio-pdb.yaml

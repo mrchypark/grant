@@ -92,10 +92,10 @@ start_port_forward
 curl -sS -X POST "http://127.0.0.1:${LOCAL_PORT}/api/v1/admin/backups"
 
 ORIGINAL_REPLICAS="$(
-  kubectl -n "${NAMESPACE}" get statefulset certd -o jsonpath='{.spec.replicas}'
+  kubectl -n "${NAMESPACE}" get statefulset certd-voter -o jsonpath='{.spec.replicas}'
 )"
 if [[ -z "${ORIGINAL_REPLICAS}" ]]; then
-  echo "failed to determine current certd replica count" >&2
+  echo "failed to determine current certd-voter replica count" >&2
   exit 1
 fi
 
@@ -118,17 +118,22 @@ fi
 
 stop_port_forward
 
-kubectl -n "${NAMESPACE}" scale statefulset/certd --replicas=0
+kubectl -n "${NAMESPACE}" scale deployment/certd-learner-1 --replicas=0
+kubectl -n "${NAMESPACE}" scale deployment/certd-learner-2 --replicas=0
+kubectl -n "${NAMESPACE}" scale deployment/certd-learner-3 --replicas=0
+kubectl -n "${NAMESPACE}" scale statefulset/certd-voter --replicas=0
 kubectl -n "${NAMESPACE}" wait --for=delete pod -l app=certd --timeout=10m
 
-for ordinal in $(seq 0 $((ORIGINAL_REPLICAS - 1))); do
-  kubectl -n "${NAMESPACE}" delete pvc "data-certd-${ordinal}" --ignore-not-found=true
-done
-
-kubectl -n "${NAMESPACE}" set env statefulset/certd HQL_BACKUP_RESTORE="s3:${BACKUP_NAME}"
-kubectl -n "${NAMESPACE}" scale statefulset/certd --replicas="${ORIGINAL_REPLICAS}"
-kubectl -n "${NAMESPACE}" rollout status statefulset/certd --timeout=15m
-kubectl -n "${NAMESPACE}" set env statefulset/certd HQL_BACKUP_RESTORE-
+kubectl -n "${NAMESPACE}" set env statefulset/certd-voter HQL_BACKUP_RESTORE="s3:${BACKUP_NAME}"
+kubectl -n "${NAMESPACE}" scale statefulset/certd-voter --replicas="${ORIGINAL_REPLICAS}"
+kubectl -n "${NAMESPACE}" rollout status statefulset/certd-voter --timeout=15m
+kubectl -n "${NAMESPACE}" set env statefulset/certd-voter HQL_BACKUP_RESTORE-
+kubectl -n "${NAMESPACE}" scale deployment/certd-learner-1 --replicas=1
+kubectl -n "${NAMESPACE}" scale deployment/certd-learner-2 --replicas=1
+kubectl -n "${NAMESPACE}" scale deployment/certd-learner-3 --replicas=1
+kubectl -n "${NAMESPACE}" rollout status deployment/certd-learner-1 --timeout=15m
+kubectl -n "${NAMESPACE}" rollout status deployment/certd-learner-2 --timeout=15m
+kubectl -n "${NAMESPACE}" rollout status deployment/certd-learner-3 --timeout=15m
 
 sleep "${CERTD_STABILIZE_SECONDS}"
 start_port_forward

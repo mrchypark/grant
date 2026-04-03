@@ -5,8 +5,14 @@ metadata:
 spec:
   selector:
     app: certd
+    role: learner
   ports:
     - name: http
       port: 80
       targetPort: 8080
-
+    - name: raft
+      port: 8100
+      targetPort: 8100
+    - name: hiq-api
+      port: 8200
+      targetPort: 8200

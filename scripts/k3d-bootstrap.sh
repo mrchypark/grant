@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-certd-k3d}"
 NAMESPACE="${NAMESPACE:-certd}"
 IMAGE_NAME="${IMAGE_NAME:-certd:local}"
-AGENTS="${AGENTS:-5}"
+AGENTS="${AGENTS:-3}"
 KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/k8s}"
 
 need() {
@@ -61,8 +61,11 @@ kubectl -n "${NAMESPACE}" create secret generic minio-secrets \
 
 kustomize build "${KUSTOMIZE_DIR}" | kubectl apply -f -
 
-kubectl -n "${NAMESPACE}" rollout status statefulset/minio --timeout=15m
-kubectl -n "${NAMESPACE}" rollout status statefulset/certd --timeout=15m
+kubernetes_wait() {
+  kubectl -n "${NAMESPACE}" "$@"
+}
+
+kubernetes_wait rollout status statefulset/minio --timeout=15m
 
 kubectl -n "${NAMESPACE}" delete job minio-bootstrap --ignore-not-found
 cat <<EOF | kubectl apply -f -
@@ -102,6 +105,11 @@ spec:
 EOF
 
 kubectl -n "${NAMESPACE}" wait --for=condition=complete job/minio-bootstrap --timeout=10m
+
+kubernetes_wait rollout status statefulset/certd-voter --timeout=15m
+kubernetes_wait rollout status deployment/certd-learner-1 --timeout=15m
+kubernetes_wait rollout status deployment/certd-learner-2 --timeout=15m
+kubernetes_wait rollout status deployment/certd-learner-3 --timeout=15m
 
 cat <<EOF
 k3d cluster '${CLUSTER_NAME}' is ready.

@@ -24,8 +24,20 @@
 
 - `hiqlite`
   - `users`
-  - `businesses`
-  - `business_memberships`
+  - `organizations`
+  - `organization_edges`
+  - `organization_memberships`
+  - `groups`
+  - `group_memberships`
+  - `agreements`
+  - `actions`
+  - `roles`
+  - `role_actions`
+  - `role_bindings`
+  - `organization_closure`
+  - `effective_organization_plant_actions`
+  - `effective_user_plant_actions`
+  - `effective_user_plant_visibility`
   - `legal_entities`
   - `certificates`
   - `plants`
@@ -40,9 +52,101 @@
 
 운영 권장:
 
-- 메타데이터는 `hiqlite` 3노드 이상으로 HA
-- PDF는 filesystem PVC 또는 단일 object store로 분리 운영
+- quorum metadata는 `StatefulSet 3` 기준으로 운영
+- local read replica / sidecar는 `split` 런타임으로 운영
+- PDF는 단일 object store로 분리 운영
 - `hiqlite` backup만 S3/MinIO로 보관
+
+## 권한 모델
+
+- `organization`
+  - 사업자 조직의 기본 단위
+  - 발전사업자, 총판, 대리점, 시공사, 유지보수사 모두 포함
+- `group`
+  - 조직 내부 팀
+  - 외부 조직 관계를 표현하지 않음
+- `plant`
+  - 하나의 `owner_organization_id`에 귀속
+  - `created_by_organization_id`로 최초 생성 조직을 기록
+
+권한 규칙:
+
+- `organization.*`
+  - 조직 스코프 권한
+  - 예: `organization.plant.create`
+  - 전개 테이블이 아니라 런타임 직접 평가로 처리
+- `plant.*`
+  - 특정 발전소 권한
+  - 예: `plant.profile.read`, `plant.sync.execute`
+  - `effective_*` 전개 테이블로 조회
+
+목록 노출 규칙:
+
+- plant 목록은 `effective_user_plant_visibility`만 본다
+- 1차 구현 기준 visibility를 만드는 권한은 `plant.profile.read` 하나뿐이다
+- `plant.document.read` 같은 다른 read 권한만으로는 plant 목록에 노출되지 않는다
+
+Kubernetes 기준 권장 토폴로지:
+
+- `certd-voter`: `StatefulSet` 3개, `emptyDir`, headless service
+- `certd-learner-{1,2,3}`: `Deployment` 3개, `split + learner`
+- `minio`: `StatefulSet` 4개
+- public read path: `Service/certd` -> learner pod
+- quorum path: voter pod 간 raft/api 통신
+
+## 런타임 모드
+
+`certd`는 이제 `hiqlite` 접근 방식을 세 가지로 나눈다.
+
+- `embedded`
+  - 로컬 `hiqlite` 노드만 사용
+  - 개발/단일 노드 운영용
+- `remote`
+  - 로컬 상태 없이 원격 quorum cluster만 사용
+- `split`
+  - 로컬 읽기용 client와 원격 quorum client를 같이 사용
+  - 일반 조회는 로컬, 쓰기와 strong read는 quorum으로 보낸다
+
+관련 환경변수:
+
+```bash
+export CERTD_RUNTIME_MODE=embedded   # embedded | remote | split
+export CERTD_LOCAL_NODE_ROLE=voter   # voter | learner
+export CERTD_READ_CONSISTENCY=local  # local | strong | prefer-strong
+
+export CERTD_REMOTE_NODES=127.0.0.1:18100,127.0.0.1:18110
+export CERTD_REMOTE_TLS=false
+export CERTD_REMOTE_TLS_NO_VERIFY=false
+export CERTD_REMOTE_API_SECRET=AnotherSecureSecret42
+export CERTD_REMOTE_WITH_PROXY=false
+```
+
+`CERTD_REMOTE_NODES`는 `host:port` 형식을 권장한다. 기존 `http://...` 또는 `https://...` 값이 들어와도 앱에서 scheme를 제거하고 `hiqlite`에 전달한다.
+
+읽기 의미는 다음과 같다.
+
+- `local`
+  - 로컬 SQLite 우선
+- `strong`
+  - quorum 강일관성 읽기
+  - write 경로가 죽어 있으면 실패
+- `prefer-strong`
+  - quorum 읽기를 우선 시도
+  - quorum이 불가하면 로컬로 폴백
+
+`GET /healthz`는 아래 의미를 같이 노출한다.
+
+- `readReady`
+  - 로컬 또는 대체 read 경로가 사용 가능한지
+- `writeReady`
+  - quorum write / strong read 경로가 사용 가능한지
+- `runtimeMode`
+  - 현재 런타임 모드
+- `defaultReadConsistency`
+  - 기본 읽기 정책
+
+`CERTD_LOCAL_NODE_ROLE=learner`면 로컬 `hiqlite` 노드는 voter 승격을 시도하지 않고 learner로 유지된다.
+이 기능은 `mrchypark/hiqlite` 포크의 `main` 최신 `3e2112cd140c24730a0d1493054ad007cdabc48e` 커밋을 `crates.io` 패치로 지정해서 제공된다.
 
 ## 요구사항
 
@@ -104,6 +208,7 @@ docker run -d \
 
 ```bash
 export BUSINESS_NO=2768603291
+export ORGANIZATION_ID=2768603291
 export FACILITY_CODE=PV15-R-090795
 export CERT_PASSWORD='...'
 
@@ -111,6 +216,9 @@ export CERTD_BIND_ADDR=127.0.0.1:18080
 export CERTD_MASTER_KEY=local-dev-master-key
 export CERTD_BOOTSTRAP_USER_ID=conalog-account
 export CERTD_BOOTSTRAP_USER_NAME='Conalog Account'
+export CERTD_RUNTIME_MODE=embedded
+export CERTD_LOCAL_NODE_ROLE=voter
+export CERTD_READ_CONSISTENCY=local
 
 export ARTIFACTS_BACKEND=fs
 export ARTIFACTS_ROOT_DIR="$CERTD_ROOT/artifacts"
@@ -146,6 +254,18 @@ health check:
 curl -sS http://127.0.0.1:18080/healthz | jq
 ```
 
+예시:
+
+```json
+{
+  "status": "ok",
+  "readReady": true,
+  "writeReady": true,
+  "runtimeMode": "embedded",
+  "defaultReadConsistency": "local"
+}
+```
+
 ## API 사용 순서
 
 ### 1. 인증서 업로드
@@ -167,9 +287,9 @@ cat > /tmp/cert-upload.json <<JSON
 JSON
 
 curl -sS -X PUT \
-  "http://127.0.0.1:18080/api/v1/businesses/${BUSINESS_NO}/certificate" \
+  "http://127.0.0.1:18080/api/v1/organizations/${ORGANIZATION_ID}/certificate" \
   -H 'content-type: application/json' \
-  --data-binary @/tmp/cert-upload.json | jq
+  --data-binary "$(jq -c --arg businessNo "${BUSINESS_NO}" '. + {businessNo: $businessNo}' /tmp/cert-upload.json)" | jq
 ```
 
 응답 예시:
@@ -177,6 +297,7 @@ curl -sS -X PUT \
 ```json
 {
   "id": "75c4b33393cb4375b1e66e38cb22c25e",
+  "organizationId": "2768603291",
   "businessNo": "2768603291",
   "commonName": "커널로그에너지"
 }
@@ -188,7 +309,7 @@ curl -sS -X PUT \
 
 ```bash
 curl -sS -X POST \
-  "http://127.0.0.1:18080/api/v1/businesses/${BUSINESS_NO}/sync" \
+  "http://127.0.0.1:18080/api/v1/organizations/${ORGANIZATION_ID}/sync" \
   -H 'content-type: application/json' \
   --data-binary "{\"facilityCode\":\"${FACILITY_CODE}\",\"mode\":\"full\"}" | jq
 ```
@@ -198,7 +319,7 @@ curl -sS -X POST \
 ```json
 {
   "id": "eec4046dce084006b2e1ed40635eef7e",
-  "businessNo": "2768603291",
+  "organizationId": "2768603291",
   "plantId": "PV15-R-090795",
   "mode": "full",
   "status": "completed",
@@ -214,7 +335,7 @@ curl -sS -X POST \
 
 ```bash
 curl -sS -X POST \
-  "http://127.0.0.1:18080/api/v1/businesses/${BUSINESS_NO}/sync" \
+  "http://127.0.0.1:18080/api/v1/organizations/${ORGANIZATION_ID}/sync" \
   -H 'content-type: application/json' \
   --data-binary "{\"facilityCode\":\"${FACILITY_CODE}\",\"mode\":\"delta\"}" | jq
 ```
@@ -224,7 +345,7 @@ curl -sS -X POST \
 ```json
 {
   "id": "01b37be6efa94f25ae0c34c7813f714e",
-  "businessNo": "2768603291",
+  "organizationId": "2768603291",
   "plantId": "PV15-R-090795",
   "mode": "delta",
   "status": "completed",
@@ -477,7 +598,7 @@ export CERT_PASSWORD='...'
 - [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh)
   - `cert-backups` 버킷 보장
   - backup 생성
-  - PVC 삭제 + `HQL_BACKUP_RESTORE`
+  - `HQL_BACKUP_RESTORE`
   - restore 후 plant/documents 확인
   - replay 재실행
 
