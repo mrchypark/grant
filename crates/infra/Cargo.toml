@@ -1,0 +1,39 @@
+[package]
+name = "infra"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+aes-gcm.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-s3.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+curl.workspace = true
+domain = { path = "../domain" }
+hex.workspace = true
+hiqlite.workspace = true
+openraft.workspace = true
+openssl.workspace = true
+rand.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+simple_asn1.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+urlencoding.workspace = true
+uuid.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

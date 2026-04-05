@@ -1,0 +1,522 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NAMESPACE="${NAMESPACE:-certd}"
+LOCAL_PORT="${LOCAL_PORT:-18080}"
+TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL:-trailbase-user@example.com}"
+TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD:-secret}"
+BOOTSTRAP_ORGANIZATION_ID="${BOOTSTRAP_ORGANIZATION_ID:-conalog-account}"
+PLANT_FACILITY_CODE="${PLANT_FACILITY_CODE:-TB-CHAOS-001}"
+PLANT_NAME="${PLANT_NAME:-TrailBase Baseline Plant}"
+PLANT_CONTRACT_NO="${PLANT_CONTRACT_NO:-TB-CHAOS-CONTRACT-001}"
+PLANT_ADDRESS="${PLANT_ADDRESS:-Seoul}"
+PLANT_INSTALLED_KW="${PLANT_INSTALLED_KW:-50.0}"
+PLANT_REC_START_DATE="${PLANT_REC_START_DATE:-2026-01-01}"
+PLANT_CONFIRM_ISSUED="${PLANT_CONFIRM_ISSUED:-Y}"
+CERT_DIR="${CERT_DIR:-$ROOT_DIR/secrets/cert}"
+CERT_PASSWORD="${CERT_PASSWORD:-}"
+CERT_BUSINESS_NO="${CERT_BUSINESS_NO:-}"
+CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
+CERTD_TRAILBASE_CACHE_TTL_SECONDS="${CERTD_TRAILBASE_CACHE_TTL_SECONDS:-}"
+CACHE_TTL_GRACE_SECONDS="${CACHE_TTL_GRACE_SECONDS:-5}"
+POST_RESTART_STABILIZE_SECONDS="${POST_RESTART_STABILIZE_SECONDS:-10}"
+VOTER_POD="${VOTER_POD:-certd-voter-0}"
+LEARNER_DEPLOYMENT="${LEARNER_DEPLOYMENT:-certd-learner-1}"
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing command: $1" >&2
+    exit 1
+  }
+}
+
+need kubectl
+need curl
+need jq
+need base64
+
+if [[ -z "${CERTD_TRAILBASE_CACHE_TTL_SECONDS}" ]]; then
+  CERTD_TRAILBASE_CACHE_TTL_SECONDS="$(
+    kubectl -n "${NAMESPACE}" get configmap certd-config \
+      -o jsonpath='{.data.CERTD_TRAILBASE_CACHE_TTL_SECONDS}' 2>/dev/null || true
+  )"
+fi
+CERTD_TRAILBASE_CACHE_TTL_SECONDS="${CERTD_TRAILBASE_CACHE_TTL_SECONDS:-45}"
+
+pf_pid=""
+port_forward_log="$(mktemp)"
+
+cleanup() {
+  if [[ -n "${pf_pid}" ]]; then
+    kill "${pf_pid}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${port_forward_log}"
+}
+trap cleanup EXIT
+
+wait_for_http() {
+  local url="$1"
+  local attempts="${2:-60}"
+  local delay="${3:-2}"
+  for _ in $(seq 1 "${attempts}"); do
+    if curl -fsS "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "${delay}"
+  done
+  echo "timed out waiting for ${url}" >&2
+  exit 1
+}
+
+ensure_local_api() {
+  if ! curl -fsS "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+    start_port_forward
+  fi
+}
+
+ensure_trailbase_online() {
+  local replicas
+  replicas="$(kubectl -n "${NAMESPACE}" get deployment trailbase -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")"
+  if [[ "${replicas}" != "1" ]]; then
+    kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=1 >/dev/null
+  fi
+  kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m >/dev/null
+}
+
+start_port_forward() {
+  if [[ -n "${pf_pid}" ]]; then
+    kill "${pf_pid}" >/dev/null 2>&1 || true
+    pf_pid=""
+  fi
+  kubectl -n "${NAMESPACE}" port-forward svc/certd "${LOCAL_PORT}:80" >"${port_forward_log}" 2>&1 &
+  pf_pid=$!
+  wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz"
+}
+
+curl_certd() {
+  local output
+  local status=0
+
+  set +e
+  output="$(curl -fsS "$@" 2>/tmp/k3d-chaos.curl.err)"
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    printf '%s' "${output}"
+    return 0
+  fi
+
+  start_port_forward
+  set +e
+  output="$(curl -fsS "$@" 2>/tmp/k3d-chaos.curl.err)"
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    printf '%s' "${output}"
+    return 0
+  fi
+
+  return "${status}"
+}
+
+seed_trailbase_user() {
+  TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL}" \
+  TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD}" \
+  NAMESPACE="${NAMESPACE}" \
+    bash "${ROOT_DIR}/scripts/k3d-seed-trailbase-user.sh"
+}
+
+login_trailbase() {
+  ensure_local_api
+  curl_certd -X POST \
+    "http://127.0.0.1:${LOCAL_PORT}/api/auth/v1/login" \
+    -H 'content-type: application/json' \
+    --data-binary "$(jq -n \
+      --arg email "${TRAILBASE_USER_EMAIL}" \
+      --arg password "${TRAILBASE_USER_PASSWORD}" \
+      '{email: $email, password: $password}')" \
+    | jq -r '.auth_token // .authToken // empty'
+}
+
+bootstrap_owner() {
+  local auth_token="$1"
+  ensure_local_api
+  curl_certd -X POST \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/admin/bootstrap/trailbase-owner" \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-certd-master-key: ${CERTD_MASTER_KEY}"
+}
+
+current_user() {
+  local auth_token="$1"
+  local active_org="$2"
+  ensure_local_api
+  curl_certd \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/me" \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}"
+}
+
+list_plants() {
+  local auth_token="$1"
+  local active_org="$2"
+  ensure_local_api
+  curl_certd \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/plants" \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}"
+}
+
+create_plant() {
+  local auth_token="$1"
+  local active_org="$2"
+  ensure_local_api
+  curl_certd -X POST \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/organizations/${active_org}/plants" \
+    -H 'content-type: application/json' \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}" \
+    --data-binary "$(jq -n \
+      --arg facilityCode "${PLANT_FACILITY_CODE}" \
+      --arg name "${PLANT_NAME}" \
+      --arg contractNo "${PLANT_CONTRACT_NO}" \
+      --arg address "${PLANT_ADDRESS}" \
+      --arg recStartDate "${PLANT_REC_START_DATE}" \
+      --arg confirmIssued "${PLANT_CONFIRM_ISSUED}" \
+      --arg ownerOrganizationId "${active_org}" \
+      --argjson installedKw "${PLANT_INSTALLED_KW}" \
+      '{
+        facilityCode: $facilityCode,
+        name: $name,
+        contractNo: $contractNo,
+        address: $address,
+        installedKw: $installedKw,
+        recStartDate: $recStartDate,
+        confirmIssued: $confirmIssued,
+        ownerOrganizationId: $ownerOrganizationId
+      }')"
+}
+
+inspect_plant() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  ensure_local_api
+  curl_certd \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/plants/${facility_code}" \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}"
+}
+
+sync_plant() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  ensure_local_api
+  curl_certd -X POST \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/organizations/${active_org}/sync" \
+    -H 'content-type: application/json' \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}" \
+    --data-binary "$(jq -n \
+      --arg facilityCode "${facility_code}" \
+      '{facilityCode: $facilityCode, mode: "full"}')"
+}
+
+maybe_upload_certificate_and_sync() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  local sign_cert="${CERT_DIR}/signCert.der"
+  local sign_pri="${CERT_DIR}/signPri.key"
+  local km_cert="${CERT_DIR}/kmCert.der"
+  local km_pri="${CERT_DIR}/kmPri.key"
+
+  if [[ ! -f "${sign_cert}" || ! -f "${sign_pri}" || ! -f "${km_cert}" || ! -f "${km_pri}" ]]; then
+    echo "certificate bundle not present; skipping cert upload and sync"
+    return 0
+  fi
+
+  if [[ -z "${CERT_PASSWORD}" ]]; then
+    echo "CERT_PASSWORD not set; skipping cert upload and sync"
+    return 0
+  fi
+
+  local payload
+  payload="$(jq -n \
+    --arg businessNo "${CERT_BUSINESS_NO}" \
+    --arg password "${CERT_PASSWORD}" \
+    --arg signCertDerBase64 "$(base64 < "${sign_cert}" | tr -d '\n')" \
+    --arg signPriKeyBase64 "$(base64 < "${sign_pri}" | tr -d '\n')" \
+    --arg kmCertDerBase64 "$(base64 < "${km_cert}" | tr -d '\n')" \
+    --arg kmPriKeyBase64 "$(base64 < "${km_pri}" | tr -d '\n')" \
+    '{
+      businessNo: ($businessNo | select(length > 0)),
+      password: $password,
+      signCertDerBase64: $signCertDerBase64,
+      signPriKeyBase64: $signPriKeyBase64,
+      kmCertDerBase64: $kmCertDerBase64,
+      kmPriKeyBase64: $kmPriKeyBase64
+    }')"
+
+  echo "[write] uploading cert bundle for organization ${active_org}"
+  ensure_local_api
+  curl_certd -X PUT \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/organizations/${active_org}/certificate" \
+    -H 'content-type: application/json' \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}" \
+    --data-binary "${payload}" | jq
+
+  echo "[write] syncing facility ${facility_code}"
+  sync_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+}
+
+trigger_backup() {
+  ensure_local_api
+  echo "[backup] trigger"
+  curl_certd -X POST "http://127.0.0.1:${LOCAL_PORT}/api/v1/admin/backups" \
+    -H "x-certd-master-key: ${CERTD_MASTER_KEY}" | jq
+  echo "[backup] local"
+  curl_certd "http://127.0.0.1:${LOCAL_PORT}/api/v1/admin/backups" \
+    -H "x-certd-master-key: ${CERTD_MASTER_KEY}" | jq
+  echo "[backup] s3"
+  curl_certd "http://127.0.0.1:${LOCAL_PORT}/api/v1/admin/backups/s3" \
+    -H "x-certd-master-key: ${CERTD_MASTER_KEY}" | jq
+}
+
+resolve_baseline_plant() {
+  local auth_token="$1"
+  local active_org="$2"
+  local plants_json baseline_json
+  plants_json="$(list_plants "${auth_token}" "${active_org}")"
+  baseline_json="$(jq -c --arg code "${PLANT_FACILITY_CODE}" '
+    [ .[] | select((.facilityCode // .facility_code) == $code) ] | .[0] // empty
+  ' <<<"${plants_json}")"
+  if [[ -n "${baseline_json}" && "${baseline_json}" != "null" ]]; then
+    echo "${baseline_json}"
+    return 0
+  fi
+
+  echo "[baseline] creating plant ${PLANT_FACILITY_CODE}"
+  create_plant "${auth_token}" "${active_org}"
+}
+
+expect_failure() {
+  local description="$1"
+  shift
+  local status=0
+  "$@" >/tmp/k3d-chaos.expect-failure.out 2>/tmp/k3d-chaos.expect-failure.err || status=$?
+  if [[ "${status}" -eq 0 ]]; then
+    echo "expected failure: ${description}" >&2
+    echo "stdout:" >&2
+    sed 's/^/  /' /tmp/k3d-chaos.expect-failure.out >&2 || true
+    echo "stderr:" >&2
+    sed 's/^/  /' /tmp/k3d-chaos.expect-failure.err >&2 || true
+    exit 1
+  fi
+  echo "[expected-failure] ${description}" >&2
+}
+
+observe_core_api() {
+  local label="$1"
+  local auth_token="$2"
+  local active_org="$3"
+  local me_json plants_json observed_org visible_count
+
+  me_json="$(current_user "${auth_token}" "${active_org}")"
+  observed_org="$(jq -r '.activeOrganizationId // .active_organization_id // empty' <<<"${me_json}")"
+  if [[ -z "${observed_org}" ]]; then
+    observed_org="${active_org}"
+  fi
+  if [[ "${observed_org}" != "${active_org}" ]]; then
+    echo "unexpected active organization for ${label}: expected ${active_org}, got ${observed_org}" >&2
+    exit 1
+  fi
+
+  plants_json="$(list_plants "${auth_token}" "${active_org}")"
+  visible_count="$(jq 'length' <<<"${plants_json}")"
+
+  echo "[${label}] /api/v1/me"
+  echo "${me_json}" | jq
+  echo "[${label}] /api/v1/plants count=${visible_count}"
+  echo "${plants_json}" | jq
+}
+
+wait_for_no_pods_with_label() {
+  local label_selector="$1"
+  local attempts="${2:-60}"
+  local delay="${3:-2}"
+  for _ in $(seq 1 "${attempts}"); do
+    local names
+    names="$(kubectl -n "${NAMESPACE}" get pods -l "${label_selector}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+    if [[ -z "${names}" ]]; then
+      return 0
+    fi
+    sleep "${delay}"
+  done
+  echo "timed out waiting for pods with selector ${label_selector} to disappear" >&2
+  exit 1
+}
+
+wait_for_expected_failure() {
+  local description="$1"
+  local attempts="${2:-60}"
+  local delay="${3:-2}"
+  shift 3
+
+  local status=0
+  for _ in $(seq 1 "${attempts}"); do
+    status=0
+    "$@" >/tmp/k3d-chaos.wait-failure.out 2>/tmp/k3d-chaos.wait-failure.err || status=$?
+    if [[ "${status}" -ne 0 ]]; then
+      echo "[expected-failure] ${description}" >&2
+      return 0
+    fi
+    sleep "${delay}"
+  done
+
+  echo "timed out waiting for expected failure: ${description}" >&2
+  echo "stdout:" >&2
+  sed 's/^/  /' /tmp/k3d-chaos.wait-failure.out >&2 || true
+  echo "stderr:" >&2
+  sed 's/^/  /' /tmp/k3d-chaos.wait-failure.err >&2 || true
+  exit 1
+}
+
+scenario_voter_delete() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+
+  echo "[chaos] voter pod delete: ${VOTER_POD}"
+  kubectl -n "${NAMESPACE}" delete pod "${VOTER_POD}" --wait=false
+  kubectl -n "${NAMESPACE}" rollout status statefulset/certd-voter --timeout=10m
+  sleep "${POST_RESTART_STABILIZE_SECONDS}"
+  observe_core_api "voter-delete" "${auth_token}" "${active_org}"
+  inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+}
+
+scenario_learner_restart() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  local learner_pod
+
+  echo "[chaos] learner pod delete for deployment/${LEARNER_DEPLOYMENT}"
+  learner_pod="$(kubectl -n "${NAMESPACE}" get pods -l "app=certd,role=learner,instance=${LEARNER_DEPLOYMENT#certd-}" -o jsonpath='{.items[0].metadata.name}')"
+  kubectl -n "${NAMESPACE}" delete pod "${learner_pod}" --wait=false
+  kubectl -n "${NAMESPACE}" rollout status "deployment/${LEARNER_DEPLOYMENT}" --timeout=10m
+  sleep "${POST_RESTART_STABILIZE_SECONDS}"
+  observe_core_api "learner-restart" "${auth_token}" "${active_org}"
+  inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+}
+
+scenario_trailbase_cache_ttl() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+
+  echo "[chaos] trailbase scale down + auth cache ttl" >&2
+  kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=0 >/dev/null
+  wait_for_expected_failure "new login while trailbase is offline" 120 2 login_trailbase
+  observe_core_api "trailbase-down-cache-alive" "${auth_token}" "${active_org}" >&2
+
+  local ttl_wait
+  ttl_wait="$((CERTD_TRAILBASE_CACHE_TTL_SECONDS + CACHE_TTL_GRACE_SECONDS))"
+  echo "[trailbase] waiting ${ttl_wait}s for auth cache expiry" >&2
+  sleep "${ttl_wait}"
+
+  expect_failure "cached bearer token after TTL" current_user "${auth_token}" "${active_org}"
+  expect_failure "plant list after TTL" list_plants "${auth_token}" "${active_org}"
+
+  echo "[trailbase] restoring deployment" >&2
+  kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=1 >/dev/null
+  kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m >/dev/null
+  local recovered_token
+  recovered_token="$(login_trailbase || true)"
+  if [[ -z "${recovered_token}" || "${recovered_token}" == "null" ]]; then
+    echo "[trailbase] restored user login failed; attempting reseed fallback" >&2
+    seed_trailbase_user >&2
+    recovered_token="$(login_trailbase)"
+    if [[ -z "${recovered_token}" || "${recovered_token}" == "null" ]]; then
+      echo "failed to login after trailbase recovery" >&2
+      exit 1
+    fi
+  fi
+  observe_core_api "trailbase-recovered" "${recovered_token}" "${active_org}" >&2
+  inspect_plant "${recovered_token}" "${active_org}" "${facility_code}" | jq >&2
+
+  printf '%s\n' "${recovered_token}"
+}
+
+scenario_minio_restart() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  local minio_pod
+
+  echo "[chaos] minio restart"
+  minio_pod="$(kubectl -n "${NAMESPACE}" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}')"
+  kubectl -n "${NAMESPACE}" delete pod "${minio_pod}" --wait=false
+  kubectl -n "${NAMESPACE}" rollout status statefulset/minio --timeout=15m
+  sleep "${POST_RESTART_STABILIZE_SECONDS}"
+  start_port_forward
+  observe_core_api "minio-restart" "${auth_token}" "${active_org}"
+  inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  trigger_backup
+}
+
+main() {
+  local auth_token me_json active_org baseline_plant baseline_facility_code
+
+  ensure_trailbase_online
+  start_port_forward
+  seed_trailbase_user
+
+  auth_token="$(login_trailbase)"
+  if [[ -z "${auth_token}" || "${auth_token}" == "null" ]]; then
+    echo "failed to obtain TrailBase auth token" >&2
+    exit 1
+  fi
+
+  local bootstrap_json
+  bootstrap_json="$(bootstrap_owner "${auth_token}")"
+  local bootstrap_active_org
+  bootstrap_active_org="$(jq -r '.organizationId // .organization_id // empty' <<<"${bootstrap_json}")"
+  if [[ -z "${bootstrap_active_org}" ]]; then
+    bootstrap_active_org="${BOOTSTRAP_ORGANIZATION_ID}"
+  fi
+
+  me_json="$(current_user "${auth_token}" "${bootstrap_active_org}")"
+  active_org="$(jq -r '.activeOrganizationId // .active_organization_id // empty' <<<"${me_json}")"
+  if [[ -z "${active_org}" ]]; then
+    active_org="${bootstrap_active_org}"
+  fi
+
+  echo "[baseline] /api/v1/me"
+  echo "${me_json}" | jq
+
+  baseline_plant="$(resolve_baseline_plant "${auth_token}" "${active_org}")"
+  baseline_facility_code="$(jq -r '.facilityCode // .facility_code // empty' <<<"${baseline_plant}")"
+  if [[ -z "${baseline_facility_code}" || "${baseline_facility_code}" == "null" ]]; then
+    echo "failed to resolve baseline facility code" >&2
+    exit 1
+  fi
+
+  echo "[baseline] plant"
+  echo "${baseline_plant}" | jq
+  inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}" | jq
+  trigger_backup
+  maybe_upload_certificate_and_sync "${auth_token}" "${active_org}" "${baseline_facility_code}"
+
+  scenario_voter_delete "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  scenario_learner_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  auth_token="$(scenario_trailbase_cache_ttl "${auth_token}" "${active_org}" "${baseline_facility_code}")"
+  scenario_minio_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
+
+  echo "chaos test completed"
+}
+
+main "$@"

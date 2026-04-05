@@ -1,0 +1,35 @@
+FROM rust:1.91.1-bookworm AS builder
+WORKDIR /workspace
+ENV CARGO_BUILD_JOBS=1
+ENV CARGO_INCREMENTAL=0
+ENV CARGO_PROFILE_DEV_DEBUG=0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang libclang-dev pkg-config protobuf-compiler libprotobuf-dev nodejs \
+    && npm install -g pnpm \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY crates/trailbase-auth-bridge ./crates/trailbase-auth-bridge
+
+RUN cargo build -j 1 --manifest-path crates/trailbase-auth-bridge/Cargo.toml
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /workspace/crates/trailbase-auth-bridge/target/debug/trailbase-auth-bridge /usr/local/bin/trailbase-auth-bridge
+
+ENV TRAILBASE_ADDRESS=0.0.0.0:4000
+ENV TRAILBASE_DEV=true
+EXPOSE 4000
+
+CMD ["trailbase-auth-bridge"]

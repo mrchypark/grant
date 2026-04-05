@@ -1,0 +1,91 @@
+# Generated for certd external-system E2E recording/replay.
+path: ".keploy"
+appId: 0
+appName: "certd-external-e2e"
+command: ""
+templatize:
+  testSets: []
+port: 18080
+proxyPort: 16789
+incomingProxyPort: 36789
+dnsPort: 26789
+debug: false
+disableANSI: false
+disableTele: false
+generateGithubActions: false
+containerName: "certd-keploy"
+networkName: "keploy-network"
+buildDelay: 30
+test:
+  selectedTests: {}
+  ignoredTests: {}
+  globalNoise:
+    global:
+      body:
+        id: []
+        startedAt: []
+        finishedAt: []
+        durationMs: []
+        lastSyncedAt: []
+        lastSync.id: []
+        lastSync.startedAt: []
+        lastSync.finishedAt: []
+        lastSync.durationMs: []
+      header:
+        Date: []
+        Etag: []
+    test-sets: {}
+  replaceWith:
+    global: {}
+    test-sets: {}
+  delay: 10
+  host: "127.0.0.1"
+  port: 18080
+  grpcPort: 0
+  apiTimeout: 120
+  skipCoverage: true
+  coverageReportPath: ""
+  ignoreOrdering: true
+  mongoPassword: "default@123"
+  language: ""
+  removeUnusedMocks: false
+  fallBackOnMiss: false
+  jacocoAgentPath: ""
+  basePath: ""
+  mocking: true
+  disableLineCoverage: true
+  disableMockUpload: true
+  useLocalMock: true
+  updateTemplate: false
+  mustPass: false
+  maxFailAttempts: 5
+  maxFlakyChecks: 1
+  protoFile: ""
+  protoDir: ""
+  protoInclude: []
+  compareAll: false
+  updateTestMapping: false
+record:
+  recordTimer: 0s
+  filters:
+    - path: "/healthz"
+      urlMethods: ["GET"]
+configPath: ".keploy"
+bypassRules: []
+disableMapping: true
+contract:
+  driven: "consumer"
+  mappings:
+    servicesMapping: {}
+    self: "s1"
+  services: []
+  tests: []
+  path: ""
+  download: false
+  generate: false
+inCi: false
+cmdType: "docker"
+enableTesting: false
+inDocker: false
+keployContainer: "keploy-v3"
+keployNetwork: "keploy-network"
