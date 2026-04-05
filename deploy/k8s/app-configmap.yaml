@@ -9,6 +9,9 @@ data:
   ARTIFACTS_REGION: "us-east-1"
   ARTIFACTS_ENDPOINT: "http://minio.certd.svc.cluster.local:9000"
   ARTIFACTS_PATH_STYLE: "true"
+  CERTD_TRAILBASE_BASE_URL: "http://trailbase.certd.svc.cluster.local:4000"
+  CERTD_TRAILBASE_INTROSPECT_PATH: "/api/certd/introspect"
+  CERTD_TRAILBASE_CACHE_TTL_SECONDS: "45"
   HQL_NODES: |
     1 certd-voter-0.certd-headless.certd.svc.cluster.local:8100 certd-voter-0.certd-headless.certd.svc.cluster.local:8200
     2 certd-voter-1.certd-headless.certd.svc.cluster.local:8100 certd-voter-1.certd-headless.certd.svc.cluster.local:8200

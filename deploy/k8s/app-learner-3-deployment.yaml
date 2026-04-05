@@ -4,6 +4,8 @@ metadata:
   name: certd-learner-3
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: certd
@@ -16,9 +18,20 @@ spec:
         role: learner
         instance: learner-3
     spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       terminationGracePeriodSeconds: 30
       containers:
         - name: certd
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: false
           image: certd:local
           imagePullPolicy: IfNotPresent
           envFrom:
@@ -33,6 +46,11 @@ spec:
               value: learner
             - name: CERTD_READ_CONSISTENCY
               value: prefer-strong
+            - name: CERTD_TRAILBASE_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: certd-secrets
+                  key: TRAILBASE_CERTD_INTERNAL_SECRET
             - name: CERTD_REMOTE_NODES
               value: certd-voter-0.certd-headless.certd.svc.cluster.local:8200,certd-voter-1.certd-headless.certd.svc.cluster.local:8200,certd-voter-2.certd-headless.certd.svc.cluster.local:8200
             - name: CERTD_REMOTE_API_SECRET
@@ -52,6 +70,14 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/certd
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+            limits:
+              memory: 256Mi
+              ephemeral-storage: 256Mi
           readinessProbe:
             httpGet:
               path: /healthz

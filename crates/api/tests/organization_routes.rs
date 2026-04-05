@@ -1,3 +1,5 @@
+mod support;
+
 use std::sync::Arc;
 
 use axum::{
@@ -55,6 +57,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 async fn test_service() -> (Arc<AppService>, Database, TempDir) {
+    let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, dir) = test_runtime().await;
     let artifacts_root = dir.path().join("artifacts");
     let app_cfg = AppConfig {
@@ -66,6 +69,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
+        auth: support::trailbase_auth_config(trailbase_base_url),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root,
@@ -149,8 +153,10 @@ async fn organization_sync_route_replaces_business_route() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/organizations/org-1/sync")
+                .uri("/api/v1/organizations/bootstrap-user/sync")
                 .header("content-type", "application/json")
+                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header("x-organization-id", "bootstrap-user")
                 .body(Body::from(
                     json!({
                         "mode": "bogus"

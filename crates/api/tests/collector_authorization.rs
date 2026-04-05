@@ -1,3 +1,5 @@
+mod support;
+
 use std::sync::Arc;
 
 use axum::{
@@ -57,6 +59,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 async fn test_service() -> (Arc<AppService>, Database, TempDir) {
+    let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, dir) = test_runtime().await;
     let artifacts_root = dir.path().join("artifacts");
     let app_cfg = AppConfig {
@@ -68,6 +71,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
+        auth: support::trailbase_auth_config(trailbase_base_url),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root,
@@ -98,12 +102,12 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
     (service, db_for_tests, dir)
 }
 
-fn sync_request(organization_id: &str, user_id: &str, active_organization_id: &str) -> Request<Body> {
+fn sync_request(organization_id: &str, token: &str, active_organization_id: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(format!("/api/v1/organizations/{organization_id}/sync"))
         .header("content-type", "application/json")
-        .header("x-user-id", user_id)
+        .header("authorization", support::bearer_header(token))
         .header("x-organization-id", active_organization_id)
         .body(Body::from(
             json!({

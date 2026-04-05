@@ -1,4 +1,5 @@
 use crate::{
+    auth::{AuthResolver, AuthenticatedPrincipal, ExternalIdentity},
     artifacts::ArtifactStore,
     bridge::{self, BridgeDocument, BridgeOptions, BridgeRateRecord},
     config::AppConfig,
@@ -15,9 +16,9 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
-    DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Plant, RateRecord,
-    RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
-    RoleBindingSubjectType, SyncMode, SyncRun,
+    DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization, Plant,
+    RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
+    RoleBindingSubjectType, SyncMode, SyncRun, User,
 };
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
@@ -29,6 +30,7 @@ pub struct AppService {
     cfg: AppConfig,
     db: Database,
     artifacts: ArtifactStore,
+    auth: AuthResolver,
 }
 
 #[derive(Debug, Clone)]
@@ -84,9 +86,28 @@ pub struct BackupInfo {
     pub size: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CurrentUserView {
+    pub provider: String,
+    pub external_user_id: String,
+    pub user: User,
+    pub organizations: Vec<Organization>,
+    pub active_organization_id: Option<String>,
+}
+
 impl AppService {
     pub fn new(cfg: AppConfig, db: Database, artifacts: ArtifactStore) -> Self {
-        Self { cfg, db, artifacts }
+        let auth = AuthResolver::new(&cfg.auth);
+        Self {
+            cfg,
+            db,
+            artifacts,
+            auth,
+        }
+    }
+
+    pub async fn migrate_schema(&self) -> Result<()> {
+        self.db.ensure_schema_only().await
     }
 
     pub async fn initialize(&self) -> Result<()> {
@@ -95,6 +116,77 @@ impl AppService {
 
     pub async fn health_status(&self) -> HealthStatus {
         self.db.health_status().await
+    }
+
+    pub fn master_key(&self) -> &str {
+        &self.cfg.security.master_key
+    }
+
+    pub fn trailbase_base_url(&self) -> &str {
+        &self.cfg.auth.trailbase.base_url
+    }
+
+    pub async fn authenticate_request(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: Option<&str>,
+    ) -> Result<AuthenticatedPrincipal> {
+        self.auth
+            .resolve(&self.db, bearer_token, organization_id)
+            .await
+    }
+
+    pub async fn bootstrap_trailbase_owner(
+        &self,
+        bearer_token: Option<&str>,
+    ) -> Result<AuthenticatedPrincipal> {
+        let identity = self.auth.resolve_external_identity(None, bearer_token).await?;
+        let user = self
+            .db
+            .bind_identity_to_user(
+                &self.cfg.security.bootstrap_user_id,
+                &identity.provider,
+                &identity.external_user_id,
+                identity.email.as_deref(),
+                &identity.display_name,
+                identity.active,
+                true,
+            )
+            .await?;
+        Ok(AuthenticatedPrincipal {
+            user_id: user.id,
+            organization_id: self.cfg.security.bootstrap_user_id.clone(),
+        })
+    }
+
+    pub async fn current_user(
+        &self,
+        bearer_token: Option<&str>,
+        active_organization_id: Option<&str>,
+    ) -> Result<CurrentUserView> {
+        let identity = self
+            .auth
+            .resolve_external_identity(Some(&self.db), bearer_token)
+            .await?;
+        let user = self
+            .db
+            .resolve_or_create_user_identity(
+                &identity.provider,
+                &identity.external_user_id,
+                identity.email.as_deref(),
+                &identity.display_name,
+                identity.active,
+            )
+            .await?;
+        let organizations = self.db.list_active_organizations_for_user(&user.id).await?;
+        let active_organization_id = normalize_active_organization(active_organization_id, &identity, &organizations)?;
+        Ok(CurrentUserView {
+            provider: identity.provider,
+            external_user_id: identity.external_user_id,
+            user,
+            organizations,
+            active_organization_id,
+        })
     }
 
     pub async fn put_certificate(&self, input: PutCertificateInput) -> Result<StoredCertificate> {
@@ -868,6 +960,27 @@ impl AppService {
         }
         Ok(persisted)
     }
+}
+
+fn normalize_active_organization(
+    requested_organization_id: Option<&str>,
+    identity: &ExternalIdentity,
+    organizations: &[Organization],
+) -> Result<Option<String>> {
+    let requested = requested_organization_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    if organizations.iter().any(|org| org.id == requested) {
+        return Ok(Some(requested.to_owned()));
+    }
+    anyhow::bail!(
+        "forbidden: trailbase user {} is not an active member of organization {}",
+        identity.external_user_id,
+        requested
+    );
 }
 
 fn require_non_empty(field_name: &str, value: &str) -> Result<String> {

@@ -104,6 +104,7 @@ async fn ensure_schema_creates_authorization_tables() {
     let names: std::collections::BTreeSet<String> = rows.into_iter().map(|row| row.name).collect();
 
     for table in [
+        "user_identities",
         "organizations",
         "organization_edges",
         "organization_memberships",
@@ -186,6 +187,7 @@ async fn ensure_schema_creates_authorization_tables() {
         "idx_certificates_organization_active",
         "idx_plants_owner_facility",
         "idx_sync_runs_plant_started",
+        "idx_user_identities_provider_external",
     ] {
         assert!(index_names.contains(index), "missing index {index}");
     }

@@ -1,3 +1,5 @@
+mod support;
+
 use std::sync::Arc;
 use std::{fs, path::Path};
 
@@ -60,6 +62,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 fn test_config(artifacts_root: &std::path::Path) -> AppConfig {
+    let trailbase_base_url = "http://127.0.0.1:0".to_owned();
     AppConfig {
         server: ServerConfig {
             bind_addr: "127.0.0.1:0".to_owned(),
@@ -69,6 +72,7 @@ fn test_config(artifacts_root: &std::path::Path) -> AppConfig {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
+        auth: support::trailbase_auth_config(trailbase_base_url),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root.to_path_buf(),
@@ -88,9 +92,11 @@ fn test_config(artifacts_root: &std::path::Path) -> AppConfig {
 }
 
 async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir, TempDir) {
+    let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, db_dir) = test_runtime().await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
-    let cfg = test_config(artifacts_dir.path());
+    let mut cfg = test_config(artifacts_dir.path());
+    cfg.auth = support::trailbase_auth_config(trailbase_base_url);
     let db = Database::new(
         runtime.clone(),
         cfg.security.bootstrap_user_id.clone(),
@@ -567,7 +573,7 @@ async fn plant_routes_require_context_and_apply_visibility() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -587,7 +593,7 @@ async fn plant_routes_require_context_and_apply_visibility() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -601,7 +607,7 @@ async fn plant_routes_require_context_and_apply_visibility() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-DOCUMENT")
-                .header("x-user-id", "direct-user")
+                .header("authorization", support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -645,7 +651,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/generation")
-                .header("x-user-id", "direct-user")
+                .header("authorization", support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -659,7 +665,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/generation")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -673,7 +679,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/rates")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -687,7 +693,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/rec")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -701,7 +707,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/documents")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -715,7 +721,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-DOCUMENT/documents")
-                .header("x-user-id", "direct-user")
+                .header("authorization", support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -751,7 +757,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/documents/doc-1/download")
-                .header("x-user-id", "group-user")
+                .header("authorization", support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -764,7 +770,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/documents/doc-1/download")
-                .header("x-user-id", "direct-user")
+                .header("authorization", support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -776,4 +782,102 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .await
         .expect("download bytes");
     assert_eq!(&bytes[..], b"test-pdf-bytes");
+}
+
+#[tokio::test]
+async fn plant_detail_handles_integer_generation_aggregates() {
+    let (service, db, runtime, _db_dir, artifacts_dir) = build_service().await;
+    seed_authorization_fixture(&db, &runtime, artifacts_dir.path()).await;
+
+    runtime
+        .execute(
+            "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            vec![
+                "plant-integer".into(),
+                "FAC-INTEGER".into(),
+                "owner-org".into(),
+                Option::<String>::Some("worker-org".to_owned()).into(),
+                "Plant Integer".into(),
+                "CN-300".into(),
+                "Incheon".into(),
+                10.0_f64.into(),
+                "2026-01-01".into(),
+                "Y".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert integer plant");
+
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "worker-org".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-integer".to_owned(),
+        role_id: "role-org-profile".to_owned(),
+        agreement_id: Some("agreement-profile".to_owned()),
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save integer org binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Group,
+        subject_id: "field-team".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-integer".to_owned(),
+        role_id: "role-group-profile".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save integer group binding");
+
+    runtime
+        .execute(
+            "INSERT INTO generation_records (plant_id, month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "plant-integer".into(),
+                "2026-03".into(),
+                1000_i64.into(),
+                Option::<f64>::None.into(),
+                900_i64.into(),
+                Option::<String>::None.into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert integer generation");
+
+    let router = api::build_router(service);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/plants/FAC-INTEGER")
+                .header("authorization", support::bearer_header("group-user"))
+                .header("x-organization-id", "worker-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("integer detail response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("detail body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("detail json");
+    assert_eq!(json["generation"]["count"], 1);
+    assert_eq!(json["generation"]["totalKwh"], 1000.0);
 }

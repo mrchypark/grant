@@ -14,6 +14,19 @@ pub struct SecurityConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrailbaseAuthConfig {
+    pub base_url: String,
+    pub introspect_path: String,
+    pub internal_secret: String,
+    pub cache_ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthConfig {
+    pub trailbase: TrailbaseAuthConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactBackendConfig {
     FileSystem {
         root_dir: PathBuf,
@@ -69,6 +82,7 @@ pub struct HiqliteConfig {
 pub struct AppConfig {
     pub server: ServerConfig,
     pub security: SecurityConfig,
+    pub auth: AuthConfig,
     pub artifacts: ArtifactConfig,
     pub hiqlite: HiqliteConfig,
 }
@@ -85,6 +99,7 @@ impl AppConfig {
                 bootstrap_user_id: env_or("CERTD_BOOTSTRAP_USER_ID", "conalog-account"),
                 bootstrap_user_name: env_or("CERTD_BOOTSTRAP_USER_NAME", "Conalog Account"),
             },
+            auth: auth_config()?,
             artifacts: ArtifactConfig {
                 backend: artifact_backend(&current_dir)?,
             },
@@ -114,6 +129,20 @@ fn hiqlite_config() -> HiqliteConfig {
     }
 }
 
+fn auth_config() -> Result<AuthConfig> {
+    Ok(AuthConfig {
+        trailbase: TrailbaseAuthConfig {
+            base_url: env_or("CERTD_TRAILBASE_BASE_URL", "http://127.0.0.1:4000"),
+            introspect_path: env_or("CERTD_TRAILBASE_INTROSPECT_PATH", "/api/certd/introspect"),
+            internal_secret: required_env("CERTD_TRAILBASE_INTERNAL_SECRET")?,
+            cache_ttl_seconds: env::var("CERTD_TRAILBASE_CACHE_TTL_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30),
+        },
+    })
+}
+
 fn artifact_backend(current_dir: &PathBuf) -> Result<ArtifactBackendConfig> {
     let backend = env_or("ARTIFACTS_BACKEND", "fs");
     match backend.trim().to_ascii_lowercase().as_str() {
@@ -140,6 +169,14 @@ fn artifact_backend(current_dir: &PathBuf) -> Result<ArtifactBackendConfig> {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+fn required_env(key: &str) -> Result<String> {
+    let value = env::var(key).with_context(|| format!("missing required environment variable {key}"))?;
+    if value.trim().is_empty() {
+        anyhow::bail!("{key} must not be empty");
+    }
+    Ok(value)
 }
 
 fn env_or_fallback(primary: &str, fallback: &str, default: &str) -> String {

@@ -19,6 +19,9 @@
   - Axum HTTP API
 - `crates/app`
   - 실행 바이너리
+- `crates/trailbase-auth-bridge`
+  - 별도 TrailBase auth bridge 바이너리
+  - `certd`용 `/api/certd/introspect` 제공
 
 저장 계층:
 
@@ -90,9 +93,12 @@ Kubernetes 기준 권장 토폴로지:
 
 - `certd-voter`: `StatefulSet` 3개, `emptyDir`, headless service
 - `certd-learner-{1,2,3}`: `Deployment` 3개, `split + learner`
+- `trailbase`: 단일 `Deployment`, `emptyDir`, Litestream restore-then-run
 - `minio`: `StatefulSet` 4개
 - public read path: `Service/certd` -> learner pod
+- auth path: `certd` -> in-cluster `trailbase`
 - quorum path: voter pod 간 raft/api 통신
+- auth recovery path: TrailBase local SQLite -> Litestream -> MinIO
 
 ## 런타임 모드
 
@@ -174,11 +180,165 @@ cp /Volumes/Lexar/NPKI/.../kmPri.key    ./secrets/cert/
 
 ## 로컬 실행
 
+### 빈 상태로 TrailBase + certd 같이 띄우기
+
+기존 인증서와 수집 데이터를 쓰지 않고 완전히 빈 상태로 시작하려면 아래 스크립트를 사용한다.
+
+```bash
+./scripts/dev-empty-up.sh
+./scripts/dev-empty-seed-user.sh <root> <email> <password>
+./scripts/dev-empty-bootstrap-owner.sh <root> <email> <password>
+```
+
+설명:
+
+- `dev-empty-up.sh`
+  - TrailBase auth bridge와 `certd`를 새 데이터 디렉터리로 기동
+- `dev-empty-seed-user.sh`
+  - TrailBase verified 사용자를 생성
+  - 빈 상태에서도 바로 로그인 가능한 첫 owner 계정 준비용
+- `dev-empty-bootstrap-owner.sh`
+  - 해당 TrailBase 사용자를 `certd` bootstrap organization owner로 연결
+
+종료:
+
+```bash
+./scripts/dev-empty-down.sh <root>
+```
+
+빈 상태 스택에서 기본 주소는 다음과 같다.
+- 실제 주소와 포트는 `<root>/env.sh`에 기록된다.
+- 대표 변수:
+  - `TRAILBASE_URL`
+  - `CERTD_URL`
+
+로그인 UI:
+- `$TRAILBASE_URL/_/auth/login`
+
+초기 owner bootstrap은 `x-certd-master-key`로 보호되는 admin endpoint를 사용한다.
+
+```bash
+POST /api/v1/admin/bootstrap/trailbase-owner
+```
+
+이 라우트는 TrailBase bearer token의 사용자 identity를 local bootstrap owner에 바인딩한다.
+
+### docker-compose로 빈 스택 띄우기
+
+재현 가능한 로컬 토폴로지가 필요하면 compose를 사용한다. 이 구성은 `TrailBase + certd + MinIO`를 함께 띄우고,
+
+- PDF artifact는 MinIO `cert-artifacts`
+- `hiqlite` backup은 MinIO `cert-backups`
+
+를 사용한다.
+
+```bash
+docker-compose -f docker-compose.empty.yml up -d --build
+```
+
+주소:
+
+- certd auth facade UI: `http://127.0.0.1:18080/auth/login`
+- TrailBase UI/API: `http://127.0.0.1:4000`
+- certd API: `http://127.0.0.1:18080`
+- MinIO API: `http://127.0.0.1:9000`
+- MinIO Console: `http://127.0.0.1:9001`
+
+첫 owner 계정 생성:
+
+```bash
+docker-compose -f docker-compose.empty.yml exec trailbase \
+  trailbase-auth-bridge seed-user \
+  --data-dir /data/trailbase \
+  --email owner@example.com \
+  --password secret123
+```
+
+owner bootstrap:
+
+```bash
+TOKEN="$(curl -sS -X POST http://127.0.0.1:4000/api/auth/v1/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"owner@example.com","password":"secret123"}' | jq -r '.auth_token')"
+
+curl -sS -X POST http://127.0.0.1:18080/api/v1/admin/bootstrap/trailbase-owner \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'x-certd-master-key: dev-only-master-key'
+```
+
+빈 발전소 목록 확인:
+
+```bash
+curl -sS http://127.0.0.1:18080/api/v1/plants \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'x-organization-id: conalog-account' | jq
+```
+
+현재 사용자와 조직 확인:
+
+```bash
+curl -sS http://127.0.0.1:18080/api/v1/me \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'x-organization-id: conalog-account' | jq
+```
+
+발전소 생성:
+
+```bash
+curl -sS -X POST http://127.0.0.1:18080/api/v1/organizations/conalog-account/plants \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'x-organization-id: conalog-account' \
+  -H 'content-type: application/json' \
+  -d '{
+    "facilityCode":"LOCAL-PLANT-001",
+    "name":"빈스택 테스트 발전소",
+    "contractNo":"LOCAL-CONTRACT-001",
+    "address":"서울시 테스트구 테스트로 1",
+    "installedKw":99.9,
+    "recStartDate":"2026-01-01",
+    "confirmIssued":"N"
+  }' | jq
+```
+
+종료:
+
+```bash
+docker compose -f docker-compose.empty.yml down -v
+```
+
 로컬 기준 구성:
 
 - 메타데이터: `hiqlite` 단일 노드
-- PDF 저장: 로컬 filesystem
+- PDF 저장: MinIO
 - backup: MinIO
+
+### production compose
+
+릴리즈용 이미지는 별도 compose와 env 파일 예시를 사용한다.
+
+파일:
+
+- `docker-compose.prod.yml`
+- `.env.prod.example`
+
+시작 전 `.env.prod.example`를 복사해서 실제 값으로 채운다.
+
+```bash
+cp .env.prod.example .env.prod
+```
+
+그 다음:
+
+```bash
+docker-compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+이 구성은 다음을 전제로 한다.
+
+- `certd`는 `8080`
+- 내부 `trailbase`는 외부에 publish하지 않음
+- MinIO bucket은 `cert-artifacts`, `cert-backups`
+- 운영 비밀값은 `.env.prod`에서만 주입
 
 ### 1. 작업 디렉터리 준비
 
@@ -585,6 +745,77 @@ export CERT_PASSWORD='...'
 
 이 스크립트는 `kubectl port-forward svc/certd 18080:80`를 열고, Keploy를 Docker 모드로 실행한 뒤 `--host 127.0.0.1 --port 18080` 기준으로 기존 testcase를 재생한다. `--base-path`는 현재 Keploy 버전에서 agent lifecycle과 충돌해 쓰지 않는다.
 
+### k3d TrailBase + certd chaos topology
+
+현재 k3d 검증은 `certd` 데이터 평면과 `TrailBase` 인증 평면을 분리해서 본다.
+
+- `certd-voter`
+  - `StatefulSet` 3개
+  - `emptyDir`
+  - quorum과 backup/restore 담당
+- `certd-learner-{1,2,3}`
+  - `Deployment` 3개
+  - `split + learner`
+  - read path 담당
+- `trailbase`
+  - 단일 `Deployment`
+  - Litestream restore-then-run
+  - MinIO로 local SQLite fast recovery
+- `minio`
+  - `cert-artifacts`
+  - `cert-backups`
+
+운영 흐름은 아래 순서다.
+
+1. TrailBase user seed
+2. `certd` bootstrap owner 연결
+3. plant/list/read/sync e2e
+4. quorum 및 auth cache chaos
+5. `hiqlite` backup 또는 restore
+6. TrailBase restore check
+
+주요 스크립트:
+
+- [scripts/k3d-bootstrap.sh](/Users/cypark/Documents/work/cert/scripts/k3d-bootstrap.sh)
+  - k3d 토폴로지 부팅
+  - MinIO bucket bootstrap
+  - TrailBase rollout 대기
+  - `certd` quorum/learner rollout 대기
+- [scripts/k3d-e2e.sh](/Users/cypark/Documents/work/cert/scripts/k3d-e2e.sh)
+  - TrailBase user seed
+  - login
+  - bootstrap owner
+  - 기본 plant/read/write e2e
+- [scripts/k3d-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-chaos.sh)
+  - voter kill
+  - learner restart
+  - TrailBase pod delete
+  - auth cache TTL 검증
+  - MinIO restart
+- [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh)
+  - `certd` full restore from MinIO backup
+  - restore 후 plant/documents 확인
+- [scripts/k3d-prod-restore-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-prod-restore-chaos.sh)
+  - 외부 API로 phase1/phase2 데이터 생성
+  - `backup1`, `backup2` point-in-time restore 검증
+  - TrailBase latest restore 후 다중 user login 검증
+- [scripts/k3d-trailbase-restore-check.sh](/Users/cypark/Documents/work/cert/scripts/k3d-trailbase-restore-check.sh)
+  - Litestream restore
+  - TrailBase login 회복
+- [scripts/k3d-seed-trailbase-user.sh](/Users/cypark/Documents/work/cert/scripts/k3d-seed-trailbase-user.sh)
+  - TrailBase verified user 생성
+
+자주 쓰는 명령:
+
+```bash
+./scripts/k3d-bootstrap.sh
+./scripts/k3d-e2e.sh
+./scripts/k3d-chaos.sh
+./scripts/k3d-backup-restore.sh
+./scripts/k3d-prod-restore-chaos.sh
+./scripts/k3d-trailbase-restore-check.sh
+```
+
 카오스/복구 스크립트도 이 경로를 기준으로 검증한다.
 
 - [scripts/k3d-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-chaos.sh)
@@ -601,11 +832,18 @@ export CERT_PASSWORD='...'
   - `HQL_BACKUP_RESTORE`
   - restore 후 plant/documents 확인
   - replay 재실행
+- [scripts/k3d-prod-restore-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-prod-restore-chaos.sh)
+  - public API로 다중 plant 생성
+  - named backup object 기준 restore
+  - backup1 시점/backup2 시점 기대 데이터 검증
+  - TrailBase pod delete 후 latest auth restore 검증
 
 최근 검증 결과:
 
 - [scripts/k3d-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-chaos.sh): 통과
 - [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh): 통과
+- [scripts/k3d-prod-restore-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-prod-restore-chaos.sh): 통과
+- [scripts/k3d-trailbase-restore-check.sh](/Users/cypark/Documents/work/cert/scripts/k3d-trailbase-restore-check.sh): TrailBase restore 확인용
 - restore 후 `GET /api/v1/plants/PV15-R-090795` 정상
 - restore 후 대표 PDF `HEAD` 정상
 - restore 후 Keploy replay `2 / 2` 통과

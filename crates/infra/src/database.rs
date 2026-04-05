@@ -85,6 +85,53 @@ struct CountSumIntRow {
 }
 
 #[derive(Debug, Clone)]
+struct UserIdentityJoinRow {
+    identity_id: String,
+    user_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserIdentityLookupRow {
+    user_id: String,
+}
+
+impl From<&mut Row<'_>> for UserIdentityLookupRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            user_id: row.get("user_id"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserLookupRow {
+    id: String,
+    email: Option<String>,
+    display_name: String,
+    active: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedExternalIdentity {
+    pub provider: String,
+    pub external_user_id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub active: bool,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct AuthIdentityCacheRow {
+    provider: String,
+    external_user_id: String,
+    email: Option<String>,
+    display_name: String,
+    active: i64,
+    expires_at: String,
+}
+
+#[derive(Debug, Clone)]
 struct PlantRow {
     id: String,
     facility_code: String,
@@ -377,7 +424,7 @@ impl Database {
         self.runtime.readiness().await
     }
 
-    pub async fn ensure_schema(&self) -> Result<()> {
+    pub async fn ensure_schema_only(&self) -> Result<()> {
         self.runtime
             .batch(
                 r#"
@@ -387,6 +434,27 @@ impl Database {
                     display_name TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS user_identities (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    external_user_id TEXT NOT NULL,
+                    email_snapshot TEXT,
+                    display_name_snapshot TEXT,
+                    last_seen_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS auth_identity_cache (
+                    token_hash TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    external_user_id TEXT NOT NULL,
+                    email TEXT,
+                    display_name TEXT NOT NULL,
+                    active INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS organizations (
                     id TEXT PRIMARY KEY,
@@ -517,6 +585,10 @@ impl Database {
                 );
                 CREATE INDEX IF NOT EXISTS idx_organization_memberships_org_user
                     ON organization_memberships (organization_id, user_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_user_identities_provider_external
+                    ON user_identities (provider, external_user_id);
+                CREATE INDEX IF NOT EXISTS idx_auth_identity_cache_expires_at
+                    ON auth_identity_cache (expires_at);
                 CREATE INDEX IF NOT EXISTS idx_group_memberships_group_member
                     ON group_memberships (group_id, organization_membership_id);
                 CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
@@ -645,6 +717,11 @@ impl Database {
         )
         .await
         .context("create schema")?;
+        Ok(())
+    }
+
+    pub async fn ensure_schema(&self) -> Result<()> {
+        self.ensure_schema_only().await?;
         self.ensure_bootstrap_principals().await?;
         self.ensure_action_catalog().await?;
         self.ensure_bootstrap_authorization().await?;
@@ -940,6 +1017,405 @@ impl Database {
             legal_entity_id: None,
             active: true,
         })
+    }
+
+    pub async fn resolve_or_create_user_identity(
+        &self,
+        provider: &str,
+        external_user_id: &str,
+        email: Option<&str>,
+        display_name: &str,
+        active: bool,
+    ) -> Result<User> {
+        let now = now_string();
+        let existing: Option<UserIdentityJoinRow> = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT ui.id as identity_id,
+                        ui.user_id as user_id
+                 FROM user_identities ui
+                 WHERE ui.provider = $1 AND ui.external_user_id = $2",
+                params!(provider.to_owned(), external_user_id.to_owned()),
+            )
+            .await
+            .context("query user identity")?
+            .into_iter()
+            .next();
+
+        let email_user = if existing.is_none() {
+            match email {
+                Some(email) => self.find_user_by_identity_or_email(provider, email).await?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let existing_user = if existing.is_none() && email_user.is_none() {
+            self.find_user_by_id(external_user_id).await?
+        } else {
+            None
+        };
+
+        let user_id = existing
+            .as_ref()
+            .map(|row| row.user_id.clone())
+            .or_else(|| email_user.as_ref().map(|user| user.id.clone()))
+            .or_else(|| existing_user.as_ref().map(|user| user.id.clone()))
+            .unwrap_or_else(|| format!("{provider}:{external_user_id}"));
+        let identity_id = existing
+            .as_ref()
+            .map(|row| row.identity_id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+
+        self.runtime
+            .execute(
+                "INSERT INTO users (id, email, display_name, active, created_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    email = excluded.email,
+                    display_name = excluded.display_name,
+                    active = excluded.active",
+                params!(
+                    user_id.clone(),
+                    email.map(ToOwned::to_owned),
+                    display_name.to_owned(),
+                    if active { 1_i64 } else { 0_i64 },
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert user from identity")?;
+
+        self.runtime
+            .execute(
+                "INSERT INTO user_identities (
+                    id, user_id, provider, external_user_id, email_snapshot, display_name_snapshot, last_seen_at, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(provider, external_user_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    email_snapshot = excluded.email_snapshot,
+                    display_name_snapshot = excluded.display_name_snapshot,
+                    last_seen_at = excluded.last_seen_at,
+                    updated_at = excluded.updated_at",
+                params!(
+                    identity_id,
+                    user_id.clone(),
+                    provider.to_owned(),
+                    external_user_id.to_owned(),
+                    email.map(ToOwned::to_owned),
+                    Some(display_name.to_owned()),
+                    Some(now.clone()),
+                    now.clone(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert user identity")?;
+
+        Ok(User {
+            id: user_id,
+            email: email.map(ToOwned::to_owned),
+            display_name: display_name.to_owned(),
+            active,
+        })
+    }
+
+    pub async fn bind_identity_to_user(
+        &self,
+        user_id: &str,
+        provider: &str,
+        external_user_id: &str,
+        email: Option<&str>,
+        display_name: &str,
+        active: bool,
+        allow_rebind: bool,
+    ) -> Result<User> {
+        let now = now_string();
+        let existing: Option<UserIdentityJoinRow> = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT ui.id as identity_id,
+                        ui.user_id as user_id
+                 FROM user_identities ui
+                 WHERE ui.provider = $1 AND ui.external_user_id = $2",
+                params!(provider.to_owned(), external_user_id.to_owned()),
+            )
+            .await
+            .context("query user identity for binding")?
+            .into_iter()
+            .next();
+
+        if !allow_rebind
+            && let Some(existing) = existing.as_ref()
+            && existing.user_id != user_id
+        {
+            anyhow::bail!(
+                "identity {}:{} is already bound to another user {}",
+                provider,
+                external_user_id,
+                existing.user_id
+            );
+        }
+
+        let target_user = self
+            .find_user_by_id(user_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("target user {} does not exist", user_id))?;
+
+        let identity_id = existing
+            .as_ref()
+            .map(|row| row.identity_id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+
+        self.runtime
+            .execute(
+                "INSERT INTO users (id, email, display_name, active, created_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    email = excluded.email,
+                    display_name = excluded.display_name,
+                    active = excluded.active",
+                params!(
+                    target_user.id.clone(),
+                    email.map(ToOwned::to_owned).or(target_user.email.clone()),
+                    display_name.to_owned(),
+                    if active { 1_i64 } else { 0_i64 },
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert user for identity binding")?;
+
+        self.runtime
+            .execute(
+                "INSERT INTO user_identities (
+                    id, user_id, provider, external_user_id, email_snapshot, display_name_snapshot, last_seen_at, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(provider, external_user_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    email_snapshot = excluded.email_snapshot,
+                    display_name_snapshot = excluded.display_name_snapshot,
+                    last_seen_at = excluded.last_seen_at,
+                    updated_at = excluded.updated_at",
+                params!(
+                    identity_id,
+                    user_id.to_owned(),
+                    provider.to_owned(),
+                    external_user_id.to_owned(),
+                    email.map(ToOwned::to_owned),
+                    Some(display_name.to_owned()),
+                    Some(now.clone()),
+                    now.clone(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("bind identity to user")?;
+
+        Ok(User {
+            id: user_id.to_owned(),
+            email: email.map(ToOwned::to_owned).or(target_user.email),
+            display_name: display_name.to_owned(),
+            active,
+        })
+    }
+
+    async fn find_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
+        let rows: Vec<UserLookupRow> = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT id, email, display_name, active
+                 FROM users
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(user_id.to_owned()),
+            )
+            .await
+            .context("find user by id")?;
+        Ok(rows.into_iter().next().map(|row| User {
+            id: row.id,
+            email: row.email,
+            display_name: row.display_name,
+            active: row.active != 0,
+        }))
+    }
+
+    async fn find_user_by_identity_or_email(
+        &self,
+        provider: &str,
+        email: &str,
+    ) -> Result<Option<User>> {
+        let identity_rows: Vec<UserIdentityLookupRow> = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT ui.user_id
+                 FROM user_identities ui
+                 WHERE ui.provider = $1
+                   AND ui.email_snapshot = $2
+                 ORDER BY ui.updated_at DESC, ui.created_at DESC
+                 LIMIT 2",
+                params!(provider.to_owned(), email.to_owned()),
+            )
+            .await
+            .context("find user identity by provider/email")?;
+        if identity_rows.len() > 1 {
+            anyhow::bail!(
+                "multiple local users matched {} identity email {}",
+                provider,
+                email
+            );
+        }
+        if let Some(row) = identity_rows.into_iter().next() {
+            return self.find_user_by_id(&row.user_id).await;
+        }
+
+        let user_rows: Vec<UserLookupRow> = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT id, email, display_name, active
+                 FROM users
+                 WHERE email = $1
+                 ORDER BY created_at ASC, id ASC
+                 LIMIT 2",
+                params!(email.to_owned()),
+            )
+            .await
+            .context("find user by email")?;
+        if user_rows.len() > 1 {
+            anyhow::bail!("multiple local users matched email {}", email);
+        }
+        Ok(user_rows.into_iter().next().map(|row| User {
+            id: row.id,
+            email: row.email,
+            display_name: row.display_name,
+            active: row.active != 0,
+        }))
+    }
+
+    pub async fn get_cached_external_identity(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<CachedExternalIdentity>> {
+        self.runtime
+            .execute(
+                "DELETE FROM auth_identity_cache WHERE expires_at <= $1",
+                params!(now.to_rfc3339()),
+            )
+            .await
+            .context("purge expired auth identity cache")?;
+
+        let rows: Vec<AuthIdentityCacheRow> = self
+            .runtime
+            .query_rows(
+                crate::config::ReadConsistency::Strong,
+                "SELECT provider, external_user_id, email, display_name, active, expires_at
+                 FROM auth_identity_cache
+                 WHERE token_hash = $1 AND expires_at > $2
+                 LIMIT 1",
+                params!(token_hash.to_owned(), now.to_rfc3339()),
+            )
+            .await
+            .context("query shared auth identity cache")?;
+
+        Ok(rows.into_iter().next().map(|row| CachedExternalIdentity {
+            provider: row.provider,
+            external_user_id: row.external_user_id,
+            email: row.email,
+            display_name: row.display_name,
+            active: row.active != 0,
+            expires_at: DateTime::parse_from_rfc3339(&row.expires_at)
+                .map(|ts| ts.with_timezone(&Utc))
+                .unwrap_or(now),
+        }))
+    }
+
+    pub async fn put_cached_external_identity(
+        &self,
+        token_hash: &str,
+        identity: &CachedExternalIdentity,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO auth_identity_cache (
+                    token_hash, provider, external_user_id, email, display_name, active, expires_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT(token_hash) DO UPDATE SET
+                    provider = excluded.provider,
+                    external_user_id = excluded.external_user_id,
+                    email = excluded.email,
+                    display_name = excluded.display_name,
+                    active = excluded.active,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at",
+                params!(
+                    token_hash.to_owned(),
+                    identity.provider.clone(),
+                    identity.external_user_id.clone(),
+                    identity.email.clone(),
+                    identity.display_name.clone(),
+                    if identity.active { 1_i64 } else { 0_i64 },
+                    expires_at.to_rfc3339(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("upsert shared auth identity cache")?;
+        Ok(())
+    }
+
+    pub async fn has_active_organization_membership(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+    ) -> Result<bool> {
+        let row: CountRow = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT COUNT(*) as count
+                 FROM organization_memberships
+                 WHERE user_id = $1 AND organization_id = $2 AND status = 'active'",
+                params!(user_id.to_owned(), organization_id.to_owned()),
+            )
+            .await
+            .context("check organization membership")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("membership count query returned no row"))?;
+        Ok(row.count > 0)
+    }
+
+    pub async fn get_user(&self, user_id: &str) -> Result<User> {
+        self.find_user_by_id(user_id)
+            .await?
+            .ok_or_else(|| anyhow!("user not found: {user_id}"))
+    }
+
+    pub async fn list_active_organizations_for_user(&self, user_id: &str) -> Result<Vec<Organization>> {
+        let rows: Vec<OrganizationRow> = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency(),
+                "SELECT o.id, o.business_no, o.name, o.legal_entity_id, o.active
+                 FROM organizations o
+                 JOIN organization_memberships om ON om.organization_id = o.id
+                 WHERE om.user_id = $1
+                   AND om.status = 'active'
+                   AND o.active = 1
+                 ORDER BY o.name ASC, o.id ASC",
+                params!(user_id.to_owned()),
+            )
+            .await
+            .context("list active organizations for user")?;
+        Ok(rows.into_iter().map(Organization::from).collect())
     }
 
     pub async fn upsert_role(&self, role: &Role) -> Result<()> {
@@ -1619,7 +2095,7 @@ impl Database {
         let generation = self
             .query_row_with::<CountSumRow, _>(
                 self.runtime.default_read_consistency(),
-                "SELECT COUNT(*) as count, COALESCE(SUM(generation_kwh), 0) as total
+                "SELECT COUNT(*) as count, CAST(COALESCE(SUM(generation_kwh), 0) AS REAL) as total
                  FROM generation_records WHERE plant_id = $1",
                 params!(resolved_plant_id.clone()),
                 "generation aggregate",
@@ -2538,6 +3014,39 @@ impl From<&mut Row<'_>> for CountSumIntRow {
         Self {
             count: row.get("count"),
             total: row.get("total"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for UserIdentityJoinRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            identity_id: row.get("identity_id"),
+            user_id: row.get("user_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for UserLookupRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            email: row.get("email"),
+            display_name: row.get("display_name"),
+            active: row.get("active"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for AuthIdentityCacheRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            provider: row.get("provider"),
+            external_user_id: row.get("external_user_id"),
+            email: row.get("email"),
+            display_name: row.get("display_name"),
+            active: row.get("active"),
+            expires_at: row.get("expires_at"),
         }
     }
 }

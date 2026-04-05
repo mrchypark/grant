@@ -9,6 +9,8 @@ axum.workspace = true
 chrono.workspace = true
 domain = { path = "../domain" }
 infra = { path = "../infra" }
+openraft.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tower-http.workspace = true
@@ -18,6 +20,7 @@ urlencoding.workspace = true
 [dev-dependencies]
 http-body-util = "0.1"
 hiqlite.workspace = true
+openraft.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tower = "0.5"

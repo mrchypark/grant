@@ -17,6 +17,7 @@ curl.workspace = true
 domain = { path = "../domain" }
 hex.workspace = true
 hiqlite.workspace = true
+openraft.workspace = true
 openssl.workspace = true
 rand.workspace = true
 regex.workspace = true

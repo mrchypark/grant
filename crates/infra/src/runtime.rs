@@ -150,16 +150,22 @@ impl HiqliteRuntime {
             .map_err(Into::into)
     }
 
-    pub async fn batch<S>(&self, sql: S) -> Result<Vec<Result<usize>>>
+    pub async fn batch<S>(&self, sql: S) -> Result<Vec<usize>>
     where
         S: Into<Cow<'static, str>>,
     {
-        self.write_client()
+        let rows = self
+            .write_client()
             .ok_or_else(|| anyhow!("no write-capable hiqlite client configured"))?
             .batch(sql)
             .await
-            .map(|rows| rows.into_iter().map(|row| row.map_err(Into::into)).collect())
-            .map_err(Into::into)
+            .map_err(anyhow::Error::from)?;
+
+        let mut applied = Vec::with_capacity(rows.len());
+        for row in rows {
+            applied.push(row.map_err(anyhow::Error::from)?);
+        }
+        Ok(applied)
     }
 
     pub async fn query_rows<T, S>(

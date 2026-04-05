@@ -1,3 +1,5 @@
+mod support;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -58,6 +60,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 async fn test_service() -> (Arc<AppService>, Database, TempDir) {
+    let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, dir) = test_runtime().await;
     let artifacts_root = dir.path().join("artifacts");
     let app_cfg = AppConfig {
@@ -69,6 +72,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
+        auth: support::trailbase_auth_config(trailbase_base_url),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root,
@@ -250,11 +254,11 @@ async fn seed_user_visible_plant(service: &Arc<AppService>, db: &Database) {
         .expect("save document role binding");
 }
 
-fn app_request(method: &str, path: &str, user_id: &str, organization_id: &str) -> Request<Body> {
+fn app_request(method: &str, path: &str, token: &str, organization_id: &str) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(path)
-        .header("x-user-id", user_id)
+        .header("authorization", support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .body(Body::empty())
         .expect("request")

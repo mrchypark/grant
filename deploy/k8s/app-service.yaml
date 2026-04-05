@@ -3,9 +3,13 @@ kind: Service
 metadata:
   name: certd
 spec:
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
   selector:
     app: certd
-    role: learner
+    role: voter
   ports:
     - name: http
       port: 80

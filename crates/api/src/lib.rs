@@ -1,14 +1,15 @@
 use anyhow::anyhow;
 use axum::{
     Json, Router,
+    body::{Body, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
-    routing::{get, post, put},
+    response::{IntoResponse, Redirect, Response},
+    routing::{any, get, post, put},
 };
 use domain::{
-    DocumentArtifact, GenerationRecord, HealthStatus, Plant, RateRecord, RecRecord, SyncMode,
-    SyncRun,
+    DocumentArtifact, GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord,
+    SyncMode, SyncRun, User,
 };
 use infra::{
     database::StoredCertificate,
@@ -20,6 +21,11 @@ use std::sync::Arc;
 pub fn build_router(service: Arc<AppService>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/auth", get(auth_root))
+        .route("/auth/{*trailbasePath}", any(proxy_trailbase_auth_ui))
+        .route("/_/auth/{*trailbasePath}", any(proxy_trailbase_passthrough))
+        .route("/api/auth/v1/{*trailbasePath}", any(proxy_trailbase_passthrough))
+        .route("/api/v1/me", get(get_current_user))
         .route(
             "/api/v1/organizations/{organizationId}/certificate",
             put(put_organization_certificate),
@@ -50,11 +56,19 @@ pub fn build_router(service: Arc<AppService>) -> Router {
             get(list_backups_local).post(trigger_backup),
         )
         .route("/api/v1/admin/backups/s3", get(list_backups_s3))
+        .route(
+            "/api/v1/admin/bootstrap/trailbase-owner",
+            post(bootstrap_trailbase_owner),
+        )
         .with_state(service)
 }
 
 async fn healthz(State(service): State<Arc<AppService>>) -> Json<HealthStatus> {
     Json(service.health_status().await)
+}
+
+async fn auth_root() -> Redirect {
+    Redirect::temporary("/auth/login")
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +179,23 @@ struct BackupItemResponse {
     size: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapOwnerResponse {
+    user_id: String,
+    organization_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CurrentUserResponse {
+    provider: String,
+    external_user_id: String,
+    user: User,
+    organizations: Vec<Organization>,
+    active_organization_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct RequestContext {
     user_id: String,
@@ -191,13 +222,32 @@ async fn put_organization_certificate(
     Ok(Json(map_certificate(cert)))
 }
 
+async fn get_current_user(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<CurrentUserResponse>> {
+    let bearer_token = bearer_token(&headers)?;
+    let active_organization_id = optional_header_value(&headers, "x-organization-id")?;
+    let current = service
+        .current_user(bearer_token.as_deref(), active_organization_id.as_deref())
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(CurrentUserResponse {
+        provider: current.provider,
+        external_user_id: current.external_user_id,
+        user: current.user,
+        organizations: current.organizations,
+        active_organization_id: current.active_organization_id,
+    }))
+}
+
 async fn sync_organization(
     State(service): State<Arc<AppService>>,
     Path(organization_id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<SyncRequest>,
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     if organization_id != ctx.organization_id {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -229,7 +279,7 @@ async fn list_plants(
     State(service): State<Arc<AppService>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Plant>>> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let plants = service
         .list_visible_plants(&ctx.user_id, &ctx.organization_id)
         .await
@@ -242,7 +292,7 @@ async fn get_plant(
     Path(facility_code): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<PlantResponse>> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let plant = service
         .get_plant_profile(&ctx.user_id, &ctx.organization_id, &facility_code)
         .await
@@ -256,7 +306,7 @@ async fn create_plant(
     headers: HeaderMap,
     Json(body): Json<CreatePlantRequest>,
 ) -> ApiResult<(StatusCode, Json<Plant>)> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     if path_organization_id != ctx.organization_id {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -292,7 +342,7 @@ async fn list_plant_generation(
     Path(facility_code): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<GenerationRecord>>> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let items = service
         .list_generation_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
         .await
@@ -305,7 +355,7 @@ async fn list_plant_rates(
     Path(facility_code): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<RateRecord>>> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let items = service
         .list_rates_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
         .await
@@ -318,7 +368,7 @@ async fn list_plant_rec(
     Path(facility_code): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<RecRecord>>> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let items = service
         .list_rec_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
         .await
@@ -331,7 +381,7 @@ async fn list_plant_documents(
     Path(facility_code): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<DocumentArtifact>>> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let items = service
         .list_documents_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
         .await
@@ -344,7 +394,7 @@ async fn download_document(
     Path(document_id): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let ctx = request_context(&headers)?;
+    let ctx = request_context(service.as_ref(), &headers).await?;
     let (doc, bytes) = service
         .download_document_authorized(&ctx.user_id, &ctx.organization_id, &document_id)
         .await
@@ -366,14 +416,20 @@ async fn download_document(
     Ok((headers, bytes).into_response())
 }
 
-async fn trigger_backup(State(service): State<Arc<AppService>>) -> ApiResult<StatusCode> {
+async fn trigger_backup(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    require_master_key(service.as_ref(), &headers)?;
     service.trigger_backup().await.map_err(ApiError::internal)?;
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn list_backups_local(
     State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
 ) -> ApiResult<Json<BackupListResponse>> {
+    require_master_key(service.as_ref(), &headers)?;
     let items = service
         .list_backups_local()
         .await
@@ -385,7 +441,9 @@ async fn list_backups_local(
 
 async fn list_backups_s3(
     State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
 ) -> ApiResult<Json<BackupListResponse>> {
+    require_master_key(service.as_ref(), &headers)?;
     let items = service
         .list_backups_s3()
         .await
@@ -393,6 +451,100 @@ async fn list_backups_s3(
     Ok(Json(BackupListResponse {
         items: items.into_iter().map(map_backup).collect(),
     }))
+}
+
+async fn bootstrap_trailbase_owner(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+) -> ApiResult<(StatusCode, Json<BootstrapOwnerResponse>)> {
+    require_master_key(service.as_ref(), &headers)?;
+    let bearer_token = bearer_token(&headers)?;
+    let principal = service
+        .bootstrap_trailbase_owner(bearer_token.as_deref())
+        .await
+        .map_err(ApiError::from_auth)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(BootstrapOwnerResponse {
+            user_id: principal.user_id,
+            organization_id: principal.organization_id,
+        }),
+    ))
+}
+
+async fn proxy_trailbase_auth_ui(
+    State(service): State<Arc<AppService>>,
+    Path(trailbase_path): Path<String>,
+    request: axum::extract::Request,
+) -> ApiResult<Response> {
+    proxy_trailbase_request(
+        service.as_ref(),
+        request,
+        &format!("/_/auth/{}", trailbase_path.trim_start_matches('/')),
+    )
+    .await
+}
+
+async fn proxy_trailbase_passthrough(
+    State(service): State<Arc<AppService>>,
+    Path(trailbase_path): Path<String>,
+    request: axum::extract::Request,
+) -> ApiResult<Response> {
+    let original_path = request.uri().path();
+    let upstream_path = if original_path.starts_with("/_/auth/") {
+        format!("/_/auth/{}", trailbase_path.trim_start_matches('/'))
+    } else {
+        format!("/api/auth/v1/{}", trailbase_path.trim_start_matches('/'))
+    };
+    proxy_trailbase_request(service.as_ref(), request, &upstream_path).await
+}
+
+async fn proxy_trailbase_request(
+    service: &AppService,
+    request: axum::extract::Request,
+    upstream_path: &str,
+) -> ApiResult<Response> {
+    let (parts, body) = request.into_parts();
+    let mut url = format!("{}{}", service.trailbase_base_url().trim_end_matches('/'), upstream_path);
+    if let Some(query) = parts.uri.query() {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let body_bytes = to_bytes(body, 10 * 1024 * 1024)
+        .await
+        .map_err(ApiError::internal)?;
+    let client = reqwest::Client::new();
+    let mut upstream = client.request(parts.method.clone(), url);
+    for (name, value) in &parts.headers {
+        if name == header::HOST || name == header::CONTENT_LENGTH {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+    let upstream_response = upstream
+        .body(body_bytes.clone())
+        .send()
+        .await
+        .map_err(ApiError::internal)?;
+
+    let status = upstream_response.status();
+    let headers = upstream_response.headers().clone();
+    let bytes = upstream_response
+        .bytes()
+        .await
+        .map_err(ApiError::internal)?;
+
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = StatusCode::from_u16(status.as_u16()).map_err(ApiError::internal)?;
+    let response_headers = response.headers_mut();
+    for (name, value) in &headers {
+        if name == header::CONTENT_LENGTH {
+            continue;
+        }
+        response_headers.append(name, value.clone());
+    }
+    Ok(response)
 }
 
 fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
@@ -464,19 +616,42 @@ fn map_backup(item: BackupInfo) -> BackupItemResponse {
     }
 }
 
-fn request_context(headers: &HeaderMap) -> ApiResult<RequestContext> {
-    let user_id = header_value(headers, "x-user-id")?;
+async fn request_context(service: &AppService, headers: &HeaderMap) -> ApiResult<RequestContext> {
     let organization_id = header_value(headers, "x-organization-id")?;
+    let bearer_token = bearer_token(headers)?;
+    let principal = service
+        .authenticate_request(bearer_token.as_deref(), Some(&organization_id))
+        .await
+        .map_err(ApiError::from_auth)?;
     Ok(RequestContext {
-        user_id,
-        organization_id,
+        user_id: principal.user_id,
+        organization_id: principal.organization_id,
     })
 }
 
+fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
+    let provided = header_value(headers, "x-certd-master-key")?;
+    if provided != service.master_key() {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "unauthorized: invalid master key".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
+    optional_header_value(headers, key)?.ok_or_else(|| {
+        ApiError::bad_request(anyhow!("missing {key} header"))
+    })
+}
+
+fn optional_header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<Option<String>> {
     let value = headers
-        .get(key)
-        .ok_or_else(|| ApiError::bad_request(anyhow!("missing {key} header")))?;
+        .get(key);
+    let Some(value) = value else {
+        return Ok(None);
+    };
     let value = value
         .to_str()
         .map_err(|_| ApiError::bad_request(anyhow!("{key} header is not valid UTF-8")))?;
@@ -484,7 +659,34 @@ fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
     if trimmed.is_empty() {
         return Err(ApiError::bad_request(anyhow!("{key} header must not be empty")));
     }
-    Ok(trimmed.to_owned())
+    Ok(Some(trimmed.to_owned()))
+}
+
+fn bearer_token(headers: &HeaderMap) -> ApiResult<Option<String>> {
+    let value = match headers.get(header::AUTHORIZATION) {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::bad_request(anyhow!("authorization header is not valid UTF-8")))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request(anyhow!(
+            "authorization header must not be empty"
+        )));
+    }
+    let token = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .ok_or_else(|| ApiError::bad_request(anyhow!("authorization header must use Bearer")))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(ApiError::bad_request(anyhow!(
+            "authorization bearer token must not be empty"
+        )));
+    }
+    Ok(Some(token.to_owned()))
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -533,6 +735,20 @@ impl ApiError {
             StatusCode::FORBIDDEN
         } else if message.contains("not found") {
             StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        Self { status, message }
+    }
+
+    fn from_auth(err: anyhow::Error) -> Self {
+        let message = err.to_string();
+        let status = if message.contains("unauthorized:") {
+            StatusCode::UNAUTHORIZED
+        } else if message.contains("forbidden:") {
+            StatusCode::FORBIDDEN
+        } else if message.contains("missing ") || message.contains("header") {
+            StatusCode::BAD_REQUEST
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };

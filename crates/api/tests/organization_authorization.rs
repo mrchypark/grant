@@ -1,3 +1,5 @@
+mod support;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -57,6 +59,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 async fn test_service() -> (Arc<AppService>, Database, TempDir) {
+    let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, dir) = test_runtime().await;
     let artifacts_root = dir.path().join("artifacts");
     let app_cfg = AppConfig {
@@ -68,6 +71,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
+        auth: support::trailbase_auth_config(trailbase_base_url),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root,
@@ -100,7 +104,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
 
 fn app_request(
     path: &str,
-    user_id: &str,
+    token: &str,
     organization_id: &str,
     body: Value,
 ) -> Request<Body> {
@@ -108,7 +112,7 @@ fn app_request(
         .method("POST")
         .uri(path)
         .header("content-type", "application/json")
-        .header("x-user-id", user_id)
+        .header("authorization", support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .body(Body::from(body.to_string()))
         .expect("request")
