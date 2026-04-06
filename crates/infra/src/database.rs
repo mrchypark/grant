@@ -407,7 +407,7 @@ impl Database {
         }
     }
 
-    fn default_read_consistency_with_override(
+    pub(crate) fn default_read_consistency_with_override(
         &self,
         override_consistency: Option<ReadConsistency>,
     ) -> ReadConsistency {

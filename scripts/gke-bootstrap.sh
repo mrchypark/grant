@@ -39,6 +39,23 @@ kubectl_ctx() {
   kubectl --context "${KUBE_CONTEXT}" "$@"
 }
 
+render_or_apply_secret_generic() {
+  local name="$1"
+  shift
+
+  if [[ "${RENDER_ONLY}" == "1" ]]; then
+    kubectl create secret generic "${name}" \
+      -n "${NAMESPACE}" \
+      "$@" \
+      --dry-run=client -o yaml > "${RENDER_OUTPUT_DIR}/${name}.yaml"
+    return 0
+  fi
+
+  kubectl_ctx -n "${NAMESPACE}" create secret generic "${name}" \
+    "$@" \
+    --dry-run=client -o yaml | kubectl_ctx apply "${kubectl_apply_args[@]}" -f -
+}
+
 apply_namespaced() {
   local file_path="$1"
   if [[ "${RENDER_ONLY}" == "1" ]]; then
@@ -118,29 +135,24 @@ else
   kubectl_ctx create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_ctx apply "${kubectl_apply_args[@]}" -f -
 fi
 
-if [[ "${RENDER_ONLY}" != "1" ]]; then
-  kubectl_ctx -n "${NAMESPACE}" create secret generic certd-secrets \
-    --from-literal=CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
-    --from-literal=HQL_SECRET_RAFT="${HQL_SECRET_RAFT}" \
-    --from-literal=HQL_SECRET_API="${HQL_SECRET_API}" \
-    --from-literal=TRAILBASE_CERTD_INTERNAL_SECRET="${TRAILBASE_CERTD_INTERNAL_SECRET}" \
-    --from-literal=ENC_KEYS="${ENC_KEYS}" \
-    --from-literal=ENC_KEY_ACTIVE="${ENC_KEY_ACTIVE}" \
-    --from-literal=HQL_S3_KEY="${MINIO_ROOT_USER}" \
-    --from-literal=HQL_S3_SECRET="${MINIO_ROOT_PASSWORD}" \
-    --dry-run=client -o yaml | kubectl_ctx apply "${kubectl_apply_args[@]}" -f -
+render_or_apply_secret_generic certd-secrets \
+  --from-literal=CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
+  --from-literal=HQL_SECRET_RAFT="${HQL_SECRET_RAFT}" \
+  --from-literal=HQL_SECRET_API="${HQL_SECRET_API}" \
+  --from-literal=TRAILBASE_CERTD_INTERNAL_SECRET="${TRAILBASE_CERTD_INTERNAL_SECRET}" \
+  --from-literal=ENC_KEYS="${ENC_KEYS}" \
+  --from-literal=ENC_KEY_ACTIVE="${ENC_KEY_ACTIVE}" \
+  --from-literal=HQL_S3_KEY="${MINIO_ROOT_USER}" \
+  --from-literal=HQL_S3_SECRET="${MINIO_ROOT_PASSWORD}"
 
-  kubectl_ctx -n "${NAMESPACE}" create secret generic trailbase-backup-secret \
-    --from-literal=TRAILBASE_CERTD_INTERNAL_SECRET="${TRAILBASE_CERTD_INTERNAL_SECRET}" \
-    --from-literal=LITESTREAM_ACCESS_KEY_ID="${MINIO_ROOT_USER}" \
-    --from-literal=LITESTREAM_SECRET_ACCESS_KEY="${MINIO_ROOT_PASSWORD}" \
-    --dry-run=client -o yaml | kubectl_ctx apply "${kubectl_apply_args[@]}" -f -
+render_or_apply_secret_generic trailbase-backup-secret \
+  --from-literal=TRAILBASE_CERTD_INTERNAL_SECRET="${TRAILBASE_CERTD_INTERNAL_SECRET}" \
+  --from-literal=LITESTREAM_ACCESS_KEY_ID="${MINIO_ROOT_USER}" \
+  --from-literal=LITESTREAM_SECRET_ACCESS_KEY="${MINIO_ROOT_PASSWORD}"
 
-  kubectl_ctx -n "${NAMESPACE}" create secret generic minio-secrets \
-    --from-literal=MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
-    --from-literal=MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD}" \
-    --dry-run=client -o yaml | kubectl_ctx apply "${kubectl_apply_args[@]}" -f -
-fi
+render_or_apply_secret_generic minio-secrets \
+  --from-literal=MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
+  --from-literal=MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD}"
 
 apply_namespaced "${KUSTOMIZE_DIR}/minio-headless-service.yaml"
 apply_namespaced "${KUSTOMIZE_DIR}/minio-service.yaml"

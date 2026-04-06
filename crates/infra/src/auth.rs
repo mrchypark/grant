@@ -101,7 +101,9 @@ impl AuthResolver {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))?;
-        let should_sync = should_sync_identity(read_consistency.as_ref());
+        let effective_read_consistency =
+            db.default_read_consistency_with_override(read_consistency.clone());
+        let should_sync = should_sync_identity(Some(&effective_read_consistency));
         let identity = self
             .trailbase
             .introspect(db, token, read_consistency.clone(), should_sync)
@@ -162,12 +164,14 @@ impl AuthResolver {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))?;
         let identity = if let Some(db) = db {
+            let effective_read_consistency =
+                db.default_read_consistency_with_override(read_consistency.clone());
             self.trailbase
                 .introspect(
                     db,
                     token,
                     read_consistency.clone(),
-                    should_sync_identity(read_consistency.as_ref()),
+                    should_sync_identity(Some(&effective_read_consistency)),
                 )
                 .await?
         } else {

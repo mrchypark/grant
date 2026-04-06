@@ -171,11 +171,14 @@ impl AppService {
         active_organization_id: Option<&str>,
         read_consistency: Option<ReadConsistency>,
     ) -> Result<CurrentUserView> {
+        let effective_read_consistency = self
+            .db
+            .default_read_consistency_with_override(read_consistency.clone());
         let identity = self
             .auth
             .resolve_external_identity(Some(&self.db), bearer_token, read_consistency.clone())
             .await?;
-        let user = if matches!(read_consistency, Some(ReadConsistency::Strong)) {
+        let user = if matches!(effective_read_consistency, ReadConsistency::Strong) {
             self.db
                 .resolve_or_create_user_identity_with_consistency(
                     &identity.provider,

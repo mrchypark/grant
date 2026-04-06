@@ -57,7 +57,7 @@ fn free_local_addr() -> String {
     addr.to_string()
 }
 
-async fn test_runtime() -> (HiqliteRuntime, TempDir) {
+async fn test_runtime(default_read_consistency: ReadConsistency) -> (HiqliteRuntime, TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let api_addr = free_local_addr();
     let raft_addr = free_local_addr();
@@ -80,14 +80,20 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 
     let client = hiqlite::start_node(cfg).await.expect("start hiqlite");
     (
-        HiqliteRuntime::embedded(client, ReadConsistency::Local),
+        HiqliteRuntime::embedded(client, default_read_consistency),
         dir,
     )
 }
 
 async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir, TempDir) {
+    build_service_with_default_consistency(ReadConsistency::Local).await
+}
+
+async fn build_service_with_default_consistency(
+    default_read_consistency: ReadConsistency,
+) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir, TempDir) {
     let trailbase_base_url = support::start_mock_trailbase().await;
-    let (runtime, db_dir) = test_runtime().await;
+    let (runtime, db_dir) = test_runtime(default_read_consistency.clone()).await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
     let cfg = AppConfig {
         server: ServerConfig {
@@ -107,7 +113,7 @@ async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir,
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
-            default_read_consistency: ReadConsistency::Local,
+            default_read_consistency,
             remote_nodes: Vec::new(),
             remote_tls: false,
             remote_tls_no_verify: false,
@@ -881,6 +887,174 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
             "SELECT COUNT(*) as count
              FROM auth_identity_cache",
             Vec::new(),
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn voter_default_strong_current_user_syncs_identity_without_query_override() {
+    let (service, _db, runtime, _db_dir, _artifacts_dir) =
+        build_service_with_default_consistency(ReadConsistency::Strong).await;
+    runtime
+        .execute(
+            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "strong-org".into(),
+                Option::<String>::None.into(),
+                "Strong Org".into(),
+                Option::<String>::None.into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "strong-user".into(),
+                "strong-user@trailbase.test".into(),
+                "strong-user".into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-strong-user".into(),
+                "strong-org".into(),
+                "strong-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert membership");
+
+    let app = api::build_router(service);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::bearer_header("strong-user"))
+                .header("x-organization-id", "strong-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM user_identities
+             WHERE provider = $1 AND external_user_id = $2",
+            vec!["trailbase".into(), "strong-user".into()],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM auth_identity_cache",
+            Vec::new(),
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn voter_default_strong_authenticated_read_syncs_identity_without_query_override() {
+    let (service, _db, runtime, _db_dir, _artifacts_dir) =
+        build_service_with_default_consistency(ReadConsistency::Strong).await;
+    runtime
+        .execute(
+            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "strong-org".into(),
+                Option::<String>::None.into(),
+                "Strong Org".into(),
+                Option::<String>::None.into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "strong-user".into(),
+                "strong-user@trailbase.test".into(),
+                "strong-user".into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-strong-user".into(),
+                "strong-org".into(),
+                "strong-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert membership");
+
+    let app = api::build_router(service);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/plants")
+                .header("authorization", support::bearer_header("strong-user"))
+                .header("x-organization-id", "strong-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM user_identities
+             WHERE provider = $1 AND external_user_id = $2",
+            vec!["trailbase".into(), "strong-user".into()],
         )
         .await,
         1

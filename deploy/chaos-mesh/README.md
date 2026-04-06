@@ -54,7 +54,7 @@ kubectl --context gke_ied-cluster get pods -n chaos-mesh \
 
 The controller and CRDs are cluster-level Chaos Mesh components. This repo does not
 try to install them. The RBAC in
-[rbac/experiment-runner-rbac.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/rbac/experiment-runner-rbac.yaml)
+[rbac/experiment-runner-rbac.yaml](rbac/experiment-runner-rbac.yaml)
 is only for a namespace-scoped service account that creates and manages experiment
 objects in `certd-chaos`.
 
@@ -62,7 +62,7 @@ Apply it if you want a dedicated service account for scripted experiments:
 
 ```bash
 kubectl --context gke_ied-cluster apply -f \
-  /Users/cypark/Documents/work/account/deploy/chaos-mesh/rbac/experiment-runner-rbac.yaml
+  deploy/chaos-mesh/rbac/experiment-runner-rbac.yaml
 ```
 
 ## Supported static examples
@@ -70,13 +70,13 @@ kubectl --context gke_ied-cluster apply -f \
 These manifests are directly usable after Chaos Mesh is installed:
 
 - learner restart:
-  [pod/learner-1-restart.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/pod/learner-1-restart.yaml)
+  [pod/learner-1-restart.yaml](pod/learner-1-restart.yaml)
 - TrailBase outage:
-  [pod/trailbase-down.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/pod/trailbase-down.yaml)
+  [pod/trailbase-down.yaml](pod/trailbase-down.yaml)
 - learner-1 to all voters partition:
-  [network/learner-1-to-voters-partition.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/network/learner-1-to-voters-partition.yaml)
+  [network/learner-1-to-voters-partition.yaml](network/learner-1-to-voters-partition.yaml)
 - a safe serial workflow that avoids dynamic leader/follower targeting:
-  [workflow/gke-safe-sequence.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/workflow/gke-safe-sequence.yaml)
+  [workflow/gke-safe-sequence.yaml](workflow/gke-safe-sequence.yaml)
 
 ## Voter delete: do not guess leader or follower
 
@@ -86,13 +86,13 @@ use a pod-list selector and set the pod name after checking cluster state.
 Templates:
 
 - follower candidate:
-  [pod/follower-delete-template.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/pod/follower-delete-template.yaml)
+  [pod/follower-delete-template.yaml](pod/follower-delete-template.yaml)
 - leader target:
-  [pod/leader-delete-template.yaml](/Users/cypark/Documents/work/account/deploy/chaos-mesh/pod/leader-delete-template.yaml)
+  [pod/leader-delete-template.yaml](pod/leader-delete-template.yaml)
 
 Leader/follower selection procedure:
 
-- [guides/leader-delete.md](/Users/cypark/Documents/work/account/deploy/chaos-mesh/guides/leader-delete.md)
+- [guides/leader-delete.md](guides/leader-delete.md)
 
 ## Recommended usage
 
