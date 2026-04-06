@@ -27,10 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("init artifact store")?;
     let service = Arc::new(AppService::new(config.clone(), db, artifacts));
-    service
-        .migrate_schema()
-        .await
-        .context("migrate schema")?;
+    service.migrate_schema().await.context("migrate schema")?;
     if should_initialize_service(&config) {
         service.initialize().await.context("initialize service")?;
     } else {
@@ -42,7 +39,11 @@ async fn main() -> anyhow::Result<()> {
     }
     spawn_k8s_reconcile_task(service.clone(), &config);
 
-    let router = api::build_router(service);
+    let router = if matches!(config.hiqlite.local_node_role, LocalNodeRole::Learner) {
+        api::build_learner_router(service)
+    } else {
+        api::build_router(service)
+    };
     let listener = tokio::net::TcpListener::bind(&config.server.bind_addr)
         .await
         .with_context(|| format!("bind {}", config.server.bind_addr))?;
@@ -67,8 +68,14 @@ fn spawn_k8s_reconcile_task(service: Arc<AppService>, config: &AppConfig) {
         match async {
             // After the voter has rejoined the cluster, push schema updates
             // through the write path so leader-backed DDL exists cluster-wide.
-            service.migrate_schema().await.context("reconcile migrate schema")?;
-            service.initialize().await.context("reconcile initialize service")
+            service
+                .migrate_schema()
+                .await
+                .context("reconcile migrate schema")?;
+            service
+                .initialize()
+                .await
+                .context("reconcile initialize service")
         }
         .await
         {
@@ -128,7 +135,8 @@ async fn clear_hiqlite_restore_lock_if_needed() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let data_dir = std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/certd/hiqlite".to_string());
+    let data_dir =
+        std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/certd/hiqlite".to_string());
     let lock_path = Path::new(&data_dir).join("state_machine").join("lock");
 
     match fs::remove_file(&lock_path).await {
@@ -137,14 +145,18 @@ async fn clear_hiqlite_restore_lock_if_needed() -> anyhow::Result<()> {
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => {
-            fs::remove_dir_all(&lock_path)
-                .await
-                .with_context(|| format!("remove stale hiqlite restore lock dir {}", lock_path.display()))?;
+            fs::remove_dir_all(&lock_path).await.with_context(|| {
+                format!(
+                    "remove stale hiqlite restore lock dir {}",
+                    lock_path.display()
+                )
+            })?;
             tracing::info!(path = %lock_path.display(), "removed stale hiqlite restore lock dir");
         }
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("remove stale hiqlite restore lock {}", lock_path.display()));
+            return Err(err).with_context(|| {
+                format!("remove stale hiqlite restore lock {}", lock_path.display())
+            });
         }
     }
 
@@ -178,7 +190,10 @@ fn init_tracing() {
 }
 
 fn should_initialize_service(config: &AppConfig) -> bool {
-    match (&config.hiqlite.runtime_mode, &config.hiqlite.local_node_role) {
+    match (
+        &config.hiqlite.runtime_mode,
+        &config.hiqlite.local_node_role,
+    ) {
         (RuntimeMode::Split, LocalNodeRole::Learner) => false,
         (RuntimeMode::Embedded, LocalNodeRole::Learner) => false,
         (RuntimeMode::Embedded, LocalNodeRole::Voter) if is_k8s_node_id_source() => {
@@ -208,7 +223,8 @@ fn is_bootstrap_voter_pod() -> bool {
 }
 
 fn needs_bootstrap_initialization() -> bool {
-    let data_dir = std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/certd/hiqlite".to_string());
+    let data_dir =
+        std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/certd/hiqlite".to_string());
     let state_machine_dir = Path::new(&data_dir).join("state_machine");
     !state_machine_dir.exists()
 }

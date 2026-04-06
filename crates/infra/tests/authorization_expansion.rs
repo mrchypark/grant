@@ -2,11 +2,7 @@ use std::collections::HashSet;
 
 use domain::{RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType};
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
-use infra::{
-    config::ReadConsistency,
-    database::Database,
-    runtime::HiqliteRuntime,
-};
+use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -210,7 +206,9 @@ async fn expands_parent_organization_access_without_user_actions() {
         created_at: "2026-04-03T00:00:00Z".to_owned(),
         updated_at: "2026-04-03T00:00:00Z".to_owned(),
     };
-    db.save_role_binding(&binding).await.expect("save role binding");
+    db.save_role_binding(&binding)
+        .await
+        .expect("save role binding");
 
     let closure_rows: Vec<ClosureRow> = runtime
         .query_rows(

@@ -29,7 +29,8 @@ COPY crates/trailbase-auth-bridge /workspace/crates/trailbase-auth-bridge
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/crates/trailbase-auth-bridge/target \
-    cargo build --release
+    cargo build --release \
+    && cp /workspace/crates/trailbase-auth-bridge/target/release/trailbase-auth-bridge /workspace/trailbase-auth-bridge
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
@@ -41,7 +42,7 @@ RUN apt-get update \
     && chown -R 10001:10001 /app /data/trailbase /tmp
 
 WORKDIR /app
-COPY --from=builder --chown=10001:10001 /workspace/crates/trailbase-auth-bridge/target/release/trailbase-auth-bridge /usr/local/bin/trailbase-auth-bridge
+COPY --from=builder --chown=10001:10001 /workspace/trailbase-auth-bridge /usr/local/bin/trailbase-auth-bridge
 
 USER 10001:10001
 ENV TRAILBASE_ADDRESS=0.0.0.0:4000

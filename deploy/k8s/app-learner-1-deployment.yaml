@@ -45,7 +45,7 @@ spec:
             - name: CERTD_LOCAL_NODE_ROLE
               value: learner
             - name: CERTD_READ_CONSISTENCY
-              value: prefer-strong
+              value: local
             - name: CERTD_TRAILBASE_INTERNAL_SECRET
               valueFrom:
                 secretKeyRef:

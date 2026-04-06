@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAMESPACE="${NAMESPACE:-certd}"
 LOCAL_PORT="${LOCAL_PORT:-18080}"
+LEARNER_LOCAL_PORT="${LEARNER_LOCAL_PORT:-18081}"
 TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL:-trailbase-user@example.com}"
 TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD:-secret}"
 BOOTSTRAP_ORGANIZATION_ID="${BOOTSTRAP_ORGANIZATION_ID:-conalog-account}"
@@ -22,7 +23,17 @@ CERTD_TRAILBASE_CACHE_TTL_SECONDS="${CERTD_TRAILBASE_CACHE_TTL_SECONDS:-}"
 CACHE_TTL_GRACE_SECONDS="${CACHE_TTL_GRACE_SECONDS:-5}"
 POST_RESTART_STABILIZE_SECONDS="${POST_RESTART_STABILIZE_SECONDS:-10}"
 VOTER_POD="${VOTER_POD:-certd-voter-0}"
+FOLLOWER_VOTER_POD="${FOLLOWER_VOTER_POD:-}"
+LEADER_VOTER_POD="${LEADER_VOTER_POD:-}"
 LEARNER_DEPLOYMENT="${LEARNER_DEPLOYMENT:-certd-learner-1}"
+CERTD_CHAOS_INCLUDE_MINIO="${CERTD_CHAOS_INCLUDE_MINIO:-0}"
+CERTD_CHAOS_INCLUDE_LEARNER_PARTITION="${CERTD_CHAOS_INCLUDE_LEARNER_PARTITION:-0}"
+CERTD_CHAOS_WITH_LOAD="${CERTD_CHAOS_WITH_LOAD:-0}"
+CERTD_CHAOS_LOAD_LOG_FILE="${CERTD_CHAOS_LOAD_LOG_FILE:-}"
+CERTD_CHAOS_LOAD_PHASE_FILE="${CERTD_CHAOS_LOAD_PHASE_FILE:-}"
+LEARNER_REMOTE_API_PORT="${LEARNER_REMOTE_API_PORT:-8200}"
+LEARNER_SERVICE_CURL_TIMEOUT_SECONDS="${LEARNER_SERVICE_CURL_TIMEOUT_SECONDS:-5}"
+HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -36,6 +47,23 @@ need curl
 need jq
 need base64
 
+retry_capture() {
+  local attempts="$1"
+  local delay="$2"
+  shift 2
+
+  local output=""
+  for _ in $(seq 1 "${attempts}"); do
+    if output="$("$@")"; then
+      printf '%s' "${output}"
+      return 0
+    fi
+    sleep "${delay}"
+  done
+
+  return 1
+}
+
 if [[ -z "${CERTD_TRAILBASE_CACHE_TTL_SECONDS}" ]]; then
   CERTD_TRAILBASE_CACHE_TTL_SECONDS="$(
     kubectl -n "${NAMESPACE}" get configmap certd-config \
@@ -46,21 +74,39 @@ CERTD_TRAILBASE_CACHE_TTL_SECONDS="${CERTD_TRAILBASE_CACHE_TTL_SECONDS:-45}"
 
 pf_pid=""
 port_forward_log="$(mktemp)"
+learner_pf_pid=""
+learner_port_forward_log="$(mktemp)"
+chaos_load_pid=""
+chaos_phase_file=""
 
 cleanup() {
+  if [[ -n "${chaos_load_pid}" ]]; then
+    kill "${chaos_load_pid}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${pf_pid}" ]]; then
     kill "${pf_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${learner_pf_pid}" ]]; then
+    kill "${learner_pf_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${chaos_phase_file}" ]]; then
+    rm -f "${chaos_phase_file}"
+  fi
   rm -f "${port_forward_log}"
+  rm -f "${learner_port_forward_log}"
 }
 trap cleanup EXIT
+
+hiqlite_api_secret() {
+  kubectl -n "${NAMESPACE}" get secret certd-secrets -o jsonpath='{.data.HQL_SECRET_API}' | base64 -d
+}
 
 wait_for_http() {
   local url="$1"
   local attempts="${2:-60}"
   local delay="${3:-2}"
   for _ in $(seq 1 "${attempts}"); do
-    if curl -fsS "${url}" >/dev/null 2>&1; then
+    if curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "${url}" >/dev/null 2>&1; then
       return 0
     fi
     sleep "${delay}"
@@ -69,9 +115,44 @@ wait_for_http() {
   exit 1
 }
 
+retry_json_query() {
+  local attempts="$1"
+  local delay="$2"
+  shift 2
+
+  local output=""
+  for _ in $(seq 1 "${attempts}"); do
+    if output="$("$@")" && [[ -n "${output}" ]]; then
+      printf '%s' "${output}"
+      return 0
+    fi
+    sleep "${delay}"
+  done
+
+  return 1
+}
+
 ensure_local_api() {
-  if ! curl -fsS "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+  if curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -n "${pf_pid}" ]] && kill -0 "${pf_pid}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1; then
     start_port_forward
+  fi
+}
+
+ensure_learner_api() {
+  if curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -n "${learner_pf_pid}" ]] && kill -0 "${learner_pf_pid}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+    start_learner_port_forward
   fi
 }
 
@@ -84,6 +165,60 @@ ensure_trailbase_online() {
   kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m >/dev/null
 }
 
+ensure_no_restore_mode() {
+  local restore_value
+  restore_value="$(
+    kubectl -n "${NAMESPACE}" get statefulset certd-voter -o json \
+      | jq -r '
+          (.spec.template.spec.containers[] | select(.name == "certd") | .env // [])
+          | map(select(.name == "HQL_BACKUP_RESTORE") | .value // "")
+          | .[0] // empty
+        '
+  )"
+
+  if [[ -n "${restore_value}" ]]; then
+    cat >&2 <<EOF
+chaos preflight failed: statefulset/certd-voter still has HQL_BACKUP_RESTORE=${restore_value}.
+With emptyDir voters, deleting a voter pod in this state re-enters restore mode and pollutes the chaos result.
+Rebuild a clean disposable baseline with:
+  ${ROOT_DIR}/scripts/k3d-bootstrap.sh
+or run the chained disposable harness:
+  ${ROOT_DIR}/scripts/k3d-backup-restore-chaos.sh
+EOF
+    exit 1
+  fi
+}
+
+set_chaos_phase() {
+  local phase="$1"
+  if [[ -n "${chaos_phase_file}" ]]; then
+    printf '%s' "${phase}" >"${chaos_phase_file}"
+  fi
+}
+
+start_chaos_load() {
+  if [[ "${CERTD_CHAOS_WITH_LOAD}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -n "${chaos_load_pid}" ]]; then
+    return 0
+  fi
+
+  chaos_phase_file="${CERTD_CHAOS_LOAD_PHASE_FILE:-$(mktemp "${TMPDIR:-/tmp}/k3d-chaos-phase.XXXXXX")}"
+  set_chaos_phase "pre-disruption"
+
+  WORKLOAD_LOG_FILE="${CERTD_CHAOS_LOAD_LOG_FILE}" \
+  WORKLOAD_PHASE_FILE="${chaos_phase_file}" \
+  CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
+  TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL}" \
+  TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD}" \
+  BOOTSTRAP_ORGANIZATION_ID="${BOOTSTRAP_ORGANIZATION_ID}" \
+  NAMESPACE="${NAMESPACE}" \
+    bash "${ROOT_DIR}/scripts/k3d-chaos-load.sh" &
+  chaos_load_pid=$!
+}
+
 start_port_forward() {
   if [[ -n "${pf_pid}" ]]; then
     kill "${pf_pid}" >/dev/null 2>&1 || true
@@ -92,6 +227,77 @@ start_port_forward() {
   kubectl -n "${NAMESPACE}" port-forward svc/certd "${LOCAL_PORT}:80" >"${port_forward_log}" 2>&1 &
   pf_pid=$!
   wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz"
+}
+
+start_learner_port_forward() {
+  if [[ -n "${learner_pf_pid}" ]]; then
+    kill "${learner_pf_pid}" >/dev/null 2>&1 || true
+    learner_pf_pid=""
+  fi
+  kubectl -n "${NAMESPACE}" port-forward "svc/${LEARNER_DEPLOYMENT}" "${LEARNER_LOCAL_PORT}:8080" >"${learner_port_forward_log}" 2>&1 &
+  learner_pf_pid=$!
+  wait_for_http "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz"
+}
+
+fetch_voter_metrics() {
+  local pod_name="$1"
+  local api_secret="$2"
+
+  kubectl -n "${NAMESPACE}" exec "${pod_name}" -- sh -lc \
+    "curl -fsS -H 'X-API-SECRET: ${api_secret}' -H 'accept: application/json' http://127.0.0.1:8200/cluster/metrics/sqlite"
+}
+
+resolve_voter_role_pods() {
+  local api_secret pods pod metrics_json state
+  api_secret="$(hiqlite_api_secret)"
+  pods="$(kubectl -n "${NAMESPACE}" get pods -l app=certd,role=voter -o jsonpath='{.items[*].metadata.name}')"
+
+  RESOLVED_LEADER_VOTER_POD=""
+  RESOLVED_FOLLOWER_VOTER_POD=""
+
+  for pod in ${pods}; do
+    metrics_json="$(retry_json_query 10 1 fetch_voter_metrics "${pod}" "${api_secret}" || true)"
+    if [[ -z "${metrics_json}" ]]; then
+      continue
+    fi
+    state="$(jq -r '.state // empty' <<<"${metrics_json}")"
+    case "${state}" in
+      Leader)
+        RESOLVED_LEADER_VOTER_POD="${pod}"
+        ;;
+      Follower)
+        if [[ -z "${RESOLVED_FOLLOWER_VOTER_POD}" ]]; then
+          RESOLVED_FOLLOWER_VOTER_POD="${pod}"
+        fi
+        ;;
+    esac
+  done
+
+  if [[ -z "${RESOLVED_LEADER_VOTER_POD}" ]]; then
+    echo "failed to resolve current leader voter pod" >&2
+    exit 1
+  fi
+  if [[ -z "${RESOLVED_FOLLOWER_VOTER_POD}" ]]; then
+    echo "failed to resolve follower voter pod" >&2
+    exit 1
+  fi
+}
+
+delete_voter_pod_and_verify() {
+  local phase="$1"
+  local pod_name="$2"
+  local auth_token="$3"
+  local active_org="$4"
+  local facility_code="$5"
+
+  set_chaos_phase "${phase}"
+  echo "[chaos] ${phase}: ${pod_name}"
+  kubectl -n "${NAMESPACE}" delete pod "${pod_name}" --wait=false
+  kubectl -n "${NAMESPACE}" rollout status statefulset/certd-voter --timeout=10m
+  sleep "${POST_RESTART_STABILIZE_SECONDS}"
+  retry_capture 20 2 observe_core_api "${phase}" "${auth_token}" "${active_org}"
+  retry_capture 20 2 inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  set_chaos_phase "post-${phase}"
 }
 
 curl_certd() {
@@ -299,7 +505,7 @@ resolve_baseline_plant() {
     return 0
   fi
 
-  echo "[baseline] creating plant ${PLANT_FACILITY_CODE}"
+  echo "[baseline] creating plant ${PLANT_FACILITY_CODE}" >&2
   create_plant "${auth_token}" "${active_org}"
 }
 
@@ -382,20 +588,178 @@ wait_for_expected_failure() {
   sed 's/^/  /' /tmp/k3d-chaos.wait-failure.out >&2 || true
   echo "stderr:" >&2
   sed 's/^/  /' /tmp/k3d-chaos.wait-failure.err >&2 || true
-  exit 1
+  return 1
 }
 
-scenario_voter_delete() {
+learner_pod_name() {
+  kubectl -n "${NAMESPACE}" get pods \
+    -l "app=certd,role=learner,instance=${LEARNER_DEPLOYMENT#certd-}" \
+    -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' \
+    | awk '{print $1}'
+}
+
+learner_pod_ip() {
+  local pod_name="$1"
+  kubectl -n "${NAMESPACE}" get pod "${pod_name}" -o jsonpath='{.status.podIP}'
+}
+
+learner_node_name() {
+  local pod_name="$1"
+  kubectl -n "${NAMESPACE}" get pod "${pod_name}" -o jsonpath='{.spec.nodeName}'
+}
+
+docker_node_name_for_k8s_node() {
+  local k8s_node_name="$1"
+  printf '%s' "${k8s_node_name}"
+}
+
+voter_pod_ips() {
+  kubectl -n "${NAMESPACE}" get pods -l app=certd,role=voter -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}'
+}
+
+insert_partition_rule() {
+  local docker_node_name="$1"
+  local source_ip="$2"
+  local destination_ip="$3"
+  docker exec "${docker_node_name}" iptables -I FORWARD 1 \
+    -s "${source_ip}" -d "${destination_ip}" -p tcp --dport "${LEARNER_REMOTE_API_PORT}" -j DROP
+}
+
+delete_partition_rule() {
+  local docker_node_name="$1"
+  local source_ip="$2"
+  local destination_ip="$3"
+  docker exec "${docker_node_name}" iptables -D FORWARD \
+    -s "${source_ip}" -d "${destination_ip}" -p tcp --dport "${LEARNER_REMOTE_API_PORT}" -j DROP
+}
+
+drop_partition_connections() {
+  local docker_node_name="$1"
+  local source_ip="$2"
+  local destination_ip="$3"
+
+  docker exec "${docker_node_name}" conntrack -D \
+    -s "${source_ip}" -d "${destination_ip}" -p tcp --dport "${LEARNER_REMOTE_API_PORT}" \
+    >/dev/null 2>&1 || true
+  docker exec "${docker_node_name}" conntrack -D \
+    -s "${destination_ip}" -d "${source_ip}" -p tcp --sport "${LEARNER_REMOTE_API_PORT}" \
+    >/dev/null 2>&1 || true
+}
+
+learner_current_user_via_service() {
+  local auth_token="$1"
+  local active_org="$2"
+  curl_certd \
+    "http://127.0.0.1:${LOCAL_PORT}/api/v1/me?consistency=strong" \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}"
+}
+
+learner_service_probe() {
+  local path="$1"
+  local auth_token="$2"
+  local active_org="$3"
+  ensure_learner_api
+  curl -fsS --max-time "${LEARNER_SERVICE_CURL_TIMEOUT_SECONDS}" \
+    "http://127.0.0.1:${LEARNER_LOCAL_PORT}${path}" \
+    -H "authorization: Bearer ${auth_token}" \
+    -H "x-organization-id: ${active_org}"
+}
+
+scenario_learner_voter_partition() {
   local auth_token="$1"
   local active_org="$2"
   local facility_code="$3"
+  local learner_pod learner_ip learner_node docker_node
+  local cleanup_needed=0
+  local failure=0
 
-  echo "[chaos] voter pod delete: ${VOTER_POD}"
-  kubectl -n "${NAMESPACE}" delete pod "${VOTER_POD}" --wait=false
-  kubectl -n "${NAMESPACE}" rollout status statefulset/certd-voter --timeout=10m
-  sleep "${POST_RESTART_STABILIZE_SECONDS}"
-  observe_core_api "voter-delete" "${auth_token}" "${active_org}"
-  inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  learner_pod="$(learner_pod_name)"
+  if [[ -z "${learner_pod}" ]]; then
+    echo "failed to resolve running learner pod for ${LEARNER_DEPLOYMENT}" >&2
+    exit 1
+  fi
+  learner_ip="$(learner_pod_ip "${learner_pod}")"
+  learner_node="$(learner_node_name "${learner_pod}")"
+  docker_node="$(docker_node_name_for_k8s_node "${learner_node}")"
+
+  set_chaos_phase "learner-voter-partition"
+  echo "[chaos] learner-voter partition via node iptables: pod=${learner_pod} ip=${learner_ip} node=${docker_node}"
+
+  while read -r voter_ip; do
+    [[ -n "${voter_ip}" ]] || continue
+    insert_partition_rule "${docker_node}" "${learner_ip}" "${voter_ip}"
+    drop_partition_connections "${docker_node}" "${learner_ip}" "${voter_ip}"
+    cleanup_needed=1
+  done < <(voter_pod_ips)
+
+  set +e
+  retry_capture 10 1 learner_service_probe "/api/v1/me" "${auth_token}" "${active_org}" >/dev/null
+  [[ $? -eq 0 ]] || failure=1
+  retry_capture 10 1 learner_service_probe "/api/v1/plants" "${auth_token}" "${active_org}" >/dev/null
+  [[ $? -eq 0 ]] || failure=1
+  retry_capture 10 1 learner_service_probe "/api/v1/plants/${facility_code}" "${auth_token}" "${active_org}" >/dev/null
+  [[ $? -eq 0 ]] || failure=1
+
+  wait_for_expected_failure \
+    "learner current-user strong read while quorum is unreachable" 10 1 \
+    learner_service_probe "/api/v1/me?consistency=strong" "${auth_token}" "${active_org}"
+  [[ $? -eq 0 ]] || failure=1
+  wait_for_expected_failure \
+    "learner plant list strong read while quorum is unreachable" 10 1 \
+    learner_service_probe "/api/v1/plants?consistency=strong" "${auth_token}" "${active_org}"
+  [[ $? -eq 0 ]] || failure=1
+  wait_for_expected_failure \
+    "learner plant inspect strong read while quorum is unreachable" 10 1 \
+    learner_service_probe "/api/v1/plants/${facility_code}?consistency=strong" "${auth_token}" "${active_org}"
+  [[ $? -eq 0 ]] || failure=1
+  set -e
+
+  if [[ "${cleanup_needed}" -eq 1 ]]; then
+    while read -r voter_ip; do
+      [[ -n "${voter_ip}" ]] || continue
+      delete_partition_rule "${docker_node}" "${learner_ip}" "${voter_ip}" || true
+    done < <(voter_pod_ips)
+  fi
+
+  set_chaos_phase "learner-voter-partition-recovery"
+  retry_capture 20 1 learner_service_probe "/api/v1/me?consistency=strong" "${auth_token}" "${active_org}" | jq
+  retry_capture 20 1 learner_service_probe "/api/v1/plants?consistency=strong" "${auth_token}" "${active_org}" | jq
+  retry_capture 20 1 learner_service_probe "/api/v1/plants/${facility_code}?consistency=strong" "${auth_token}" "${active_org}" | jq
+  set_chaos_phase "post-learner-voter-partition"
+
+  if [[ "${failure}" -ne 0 ]]; then
+    echo "learner-voter-partition checks failed" >&2
+    exit 1
+  fi
+}
+
+scenario_follower_delete() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  local follower_pod="${FOLLOWER_VOTER_POD:-}"
+
+  if [[ -z "${follower_pod}" ]]; then
+    resolve_voter_role_pods
+    follower_pod="${RESOLVED_FOLLOWER_VOTER_POD}"
+  fi
+
+  delete_voter_pod_and_verify "follower-delete" "${follower_pod}" "${auth_token}" "${active_org}" "${facility_code}"
+}
+
+scenario_leader_delete() {
+  local auth_token="$1"
+  local active_org="$2"
+  local facility_code="$3"
+  local leader_pod="${LEADER_VOTER_POD:-}"
+
+  if [[ -z "${leader_pod}" ]]; then
+    resolve_voter_role_pods
+    leader_pod="${RESOLVED_LEADER_VOTER_POD}"
+  fi
+
+  delete_voter_pod_and_verify "leader-delete" "${leader_pod}" "${auth_token}" "${active_org}" "${facility_code}"
 }
 
 scenario_learner_restart() {
@@ -404,13 +768,15 @@ scenario_learner_restart() {
   local facility_code="$3"
   local learner_pod
 
+  set_chaos_phase "learner-restart"
   echo "[chaos] learner pod delete for deployment/${LEARNER_DEPLOYMENT}"
   learner_pod="$(kubectl -n "${NAMESPACE}" get pods -l "app=certd,role=learner,instance=${LEARNER_DEPLOYMENT#certd-}" -o jsonpath='{.items[0].metadata.name}')"
   kubectl -n "${NAMESPACE}" delete pod "${learner_pod}" --wait=false
   kubectl -n "${NAMESPACE}" rollout status "deployment/${LEARNER_DEPLOYMENT}" --timeout=10m
   sleep "${POST_RESTART_STABILIZE_SECONDS}"
-  observe_core_api "learner-restart" "${auth_token}" "${active_org}"
-  inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  retry_capture 20 2 observe_core_api "learner-restart" "${auth_token}" "${active_org}"
+  retry_capture 20 2 inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  set_chaos_phase "post-learner-restart"
 }
 
 scenario_trailbase_cache_ttl() {
@@ -418,6 +784,7 @@ scenario_trailbase_cache_ttl() {
   local active_org="$2"
   local facility_code="$3"
 
+  set_chaos_phase "trailbase-down"
   echo "[chaos] trailbase scale down + auth cache ttl" >&2
   kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=0 >/dev/null
   wait_for_expected_failure "new login while trailbase is offline" 120 2 login_trailbase
@@ -431,6 +798,7 @@ scenario_trailbase_cache_ttl() {
   expect_failure "cached bearer token after TTL" current_user "${auth_token}" "${active_org}"
   expect_failure "plant list after TTL" list_plants "${auth_token}" "${active_org}"
 
+  set_chaos_phase "trailbase-recovery"
   echo "[trailbase] restoring deployment" >&2
   kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=1 >/dev/null
   kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m >/dev/null
@@ -447,6 +815,7 @@ scenario_trailbase_cache_ttl() {
   fi
   observe_core_api "trailbase-recovered" "${recovered_token}" "${active_org}" >&2
   inspect_plant "${recovered_token}" "${active_org}" "${facility_code}" | jq >&2
+  set_chaos_phase "post-trailbase-recovery"
 
   printf '%s\n' "${recovered_token}"
 }
@@ -471,25 +840,26 @@ scenario_minio_restart() {
 main() {
   local auth_token me_json active_org baseline_plant baseline_facility_code
 
+  ensure_no_restore_mode
   ensure_trailbase_online
   start_port_forward
   seed_trailbase_user
 
-  auth_token="$(login_trailbase)"
+  auth_token="$(retry_capture 20 2 login_trailbase)"
   if [[ -z "${auth_token}" || "${auth_token}" == "null" ]]; then
     echo "failed to obtain TrailBase auth token" >&2
     exit 1
   fi
 
   local bootstrap_json
-  bootstrap_json="$(bootstrap_owner "${auth_token}")"
+  bootstrap_json="$(retry_capture 20 2 bootstrap_owner "${auth_token}")"
   local bootstrap_active_org
   bootstrap_active_org="$(jq -r '.organizationId // .organization_id // empty' <<<"${bootstrap_json}")"
   if [[ -z "${bootstrap_active_org}" ]]; then
     bootstrap_active_org="${BOOTSTRAP_ORGANIZATION_ID}"
   fi
 
-  me_json="$(current_user "${auth_token}" "${bootstrap_active_org}")"
+  me_json="$(retry_capture 20 2 current_user "${auth_token}" "${bootstrap_active_org}")"
   active_org="$(jq -r '.activeOrganizationId // .active_organization_id // empty' <<<"${me_json}")"
   if [[ -z "${active_org}" ]]; then
     active_org="${bootstrap_active_org}"
@@ -498,7 +868,7 @@ main() {
   echo "[baseline] /api/v1/me"
   echo "${me_json}" | jq
 
-  baseline_plant="$(resolve_baseline_plant "${auth_token}" "${active_org}")"
+  baseline_plant="$(retry_capture 20 2 resolve_baseline_plant "${auth_token}" "${active_org}")"
   baseline_facility_code="$(jq -r '.facilityCode // .facility_code // empty' <<<"${baseline_plant}")"
   if [[ -z "${baseline_facility_code}" || "${baseline_facility_code}" == "null" ]]; then
     echo "failed to resolve baseline facility code" >&2
@@ -507,14 +877,25 @@ main() {
 
   echo "[baseline] plant"
   echo "${baseline_plant}" | jq
-  inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}" | jq
-  trigger_backup
+  retry_capture 20 2 inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}" | jq
+  retry_capture 20 2 trigger_backup
   maybe_upload_certificate_and_sync "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  start_chaos_load
 
-  scenario_voter_delete "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  scenario_follower_delete "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  scenario_leader_delete "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  if [[ "${CERTD_CHAOS_INCLUDE_LEARNER_PARTITION}" == "1" ]]; then
+    scenario_learner_voter_partition "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  else
+    echo "[skip] learner-voter partition scenario disabled; set CERTD_CHAOS_INCLUDE_LEARNER_PARTITION=1 to include it"
+  fi
   scenario_learner_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
   auth_token="$(scenario_trailbase_cache_ttl "${auth_token}" "${active_org}" "${baseline_facility_code}")"
-  scenario_minio_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  if [[ "${CERTD_CHAOS_INCLUDE_MINIO}" == "1" ]]; then
+    scenario_minio_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  else
+    echo "[skip] minio restart scenario disabled; set CERTD_CHAOS_INCLUDE_MINIO=1 to include it"
+  fi
 
   echo "chaos test completed"
 }

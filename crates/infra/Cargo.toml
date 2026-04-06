@@ -36,4 +36,5 @@ uuid.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
+rusqlite = "0.39"
 serde_json.workspace = true

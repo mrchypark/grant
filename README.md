@@ -92,13 +92,15 @@
 Kubernetes 기준 권장 토폴로지:
 
 - `certd-voter`: `StatefulSet` 3개, `emptyDir`, headless service
-- `certd-learner-{1,2,3}`: `Deployment` 3개, `split + learner`
+- `certd-learner-{1,2,3}`: `Deployment` 3개, `split + learner + local`
 - `trailbase`: 단일 `Deployment`, `emptyDir`, Litestream restore-then-run
 - `minio`: `StatefulSet` 4개
-- public read path: `Service/certd` -> learner pod
+- public API path: `Service/certd` -> voter pod
 - auth path: `certd` -> in-cluster `trailbase`
 - quorum path: voter pod 간 raft/api 통신
 - auth recovery path: TrailBase local SQLite -> Litestream -> MinIO
+- learner path: 다른 시스템에 sidecar로 붙여 로컬 authz/read 평가에 사용
+- learner HTTP surface: auth passthrough + read/authz 중심, write/admin은 voter 전용
 
 ## 런타임 모드
 
@@ -111,7 +113,8 @@ Kubernetes 기준 권장 토폴로지:
   - 로컬 상태 없이 원격 quorum cluster만 사용
 - `split`
   - 로컬 읽기용 client와 원격 quorum client를 같이 사용
-  - 일반 조회는 로컬, 쓰기와 strong read는 quorum으로 보낸다
+  - learner sidecar는 일반 조회/authz를 로컬로 처리하고, voter만 full write/admin surface를 가진다
+  - 읽기는 기본 local이고, 최신성이 꼭 필요한 요청만 명시적으로 strong을 요청한다
 
 관련 환경변수:
 
@@ -140,6 +143,14 @@ export CERTD_REMOTE_WITH_PROXY=false
   - quorum 읽기를 우선 시도
   - quorum이 불가하면 로컬로 폴백
 
+HTTP read 계약은 더 좁게 잡는다.
+
+- 기본값은 local read다.
+- 읽기 요청에서만 `?consistency=strong`을 붙여 quorum read를 명시적으로 요청할 수 있다.
+- `?consistency=strong`은 실패 시 실패하며, 로컬로 숨은 폴백을 하지 않는다.
+- `consistency` query는 현재 `strong`만 허용하고, 다른 값은 `400`이다.
+- write 후 최신 상태가 꼭 필요하면 follow-up read를 `?consistency=strong`으로 호출한다.
+
 `GET /healthz`는 아래 의미를 같이 노출한다.
 
 - `readReady`
@@ -151,8 +162,15 @@ export CERTD_REMOTE_WITH_PROXY=false
 - `defaultReadConsistency`
   - 기본 읽기 정책
 
-`CERTD_LOCAL_NODE_ROLE=learner`면 로컬 `hiqlite` 노드는 voter 승격을 시도하지 않고 learner로 유지된다.
+`CERTD_LOCAL_NODE_ROLE=learner`면 로컬 `hiqlite` 노드는 voter 승격을 시도하지 않고 learner로 유지된다. Kubernetes 배포 기준 learner 기본 읽기 정책은 `local`로 둔다.
 이 기능은 `mrchypark/hiqlite` 포크의 `main` 최신 `3e2112cd140c24730a0d1493054ad007cdabc48e` 커밋을 `crates.io` 패치로 지정해서 제공된다.
+
+운영 판단 기준:
+
+- `certd` public API는 voter quorum 상태를 직접 탄다.
+- learner는 public API endpoint가 아니라 sidecar/보조 read 경로로 본다.
+- learner 장애는 disposable replica 재생성 문제다.
+- voter 장애는 quorum 유지 여부가 기준이다.
 
 ## 요구사항
 

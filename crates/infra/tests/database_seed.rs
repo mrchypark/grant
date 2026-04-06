@@ -1,9 +1,5 @@
-use infra::{
-    config::ReadConsistency,
-    database::Database,
-    runtime::HiqliteRuntime,
-};
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
+use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
 
 #[derive(Debug)]
@@ -168,7 +164,10 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
         .expect("organizations");
     assert_eq!(organizations.len(), 1);
     assert_eq!(organizations[0].id, "conalog-account");
-    assert_eq!(organizations[0].business_no.as_deref(), Some("conalog-account"));
+    assert_eq!(
+        organizations[0].business_no.as_deref(),
+        Some("conalog-account")
+    );
     assert_eq!(organizations[0].name, "Conalog Account");
 
     let memberships: Vec<MembershipRow> = runtime

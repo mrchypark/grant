@@ -2,9 +2,12 @@ mod support;
 
 use std::sync::Arc;
 
-use axum::{body::Body, http::{Request, StatusCode}};
-use http_body_util::BodyExt;
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
+use http_body_util::BodyExt;
 use infra::{
     artifacts::ArtifactStore,
     config::{
@@ -15,9 +18,37 @@ use infra::{
     runtime::HiqliteRuntime,
     service::AppService,
 };
-use tempfile::TempDir;
 use serde_json::Value;
+use tempfile::TempDir;
 use tower::ServiceExt;
+
+#[derive(Debug, Clone)]
+struct CountRow {
+    count: i64,
+}
+
+impl From<&mut hiqlite::Row<'_>> for CountRow {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserIdentityMetaRow {
+    updated_at: String,
+    last_seen_at: Option<String>,
+}
+
+impl From<&mut hiqlite::Row<'_>> for UserIdentityMetaRow {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self {
+            updated_at: row.get("updated_at"),
+            last_seen_at: row.get("last_seen_at"),
+        }
+    }
+}
 
 fn free_local_addr() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -97,6 +128,37 @@ async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir,
     (service, db, runtime, db_dir, artifacts_dir)
 }
 
+async fn query_count(runtime: &HiqliteRuntime, sql: &str, params: Vec<hiqlite::Param>) -> i64 {
+    runtime
+        .query_rows::<CountRow, _>(ReadConsistency::Strong, sql.to_owned(), params)
+        .await
+        .expect("query count")
+        .into_iter()
+        .next()
+        .expect("count row")
+        .count
+}
+
+async fn query_identity_meta(
+    runtime: &HiqliteRuntime,
+    external_user_id: &str,
+) -> UserIdentityMetaRow {
+    runtime
+        .query_rows::<UserIdentityMetaRow, _>(
+            ReadConsistency::Strong,
+            "SELECT updated_at, last_seen_at
+             FROM user_identities
+             WHERE provider = $1 AND external_user_id = $2"
+                .to_owned(),
+            vec!["trailbase".into(), external_user_id.into()],
+        )
+        .await
+        .expect("query identity meta")
+        .into_iter()
+        .next()
+        .expect("identity meta row")
+}
+
 #[tokio::test]
 async fn trailbase_bearer_token_resolves_user_and_allows_list() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
@@ -119,17 +181,36 @@ async fn trailbase_bearer_token_resolves_user_and_allows_list() {
     })
     .await
     .expect("agreement");
-    runtime.execute(
-        "INSERT INTO users (id, email, display_name, active, created_at)
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
          VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "local-user".into(),
+                "trailbase@example.com".into(),
+                "TrailBase User".into(),
+                1_i64.into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime.execute(
+        "INSERT INTO user_identities (
+            id, user_id, provider, external_user_id, email_snapshot, display_name_snapshot, last_seen_at, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         vec![
+            "identity-local-user".into(),
+            "local-user".into(),
+            "trailbase".into(),
             "local-user".into(),
             "trailbase@example.com".into(),
             "TrailBase User".into(),
-            1_i64.into(),
+            Option::<String>::Some("2026-04-03T00:00:00Z".to_owned()).into(),
+            "2026-04-03T00:00:00Z".into(),
             "2026-04-03T00:00:00Z".into(),
         ],
-    ).await.expect("insert user");
+    ).await.expect("user identity");
     runtime.execute(
         "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -167,7 +248,9 @@ async fn trailbase_bearer_token_resolves_user_and_allows_list() {
         code: "profile.reader".into(),
         name: "Profile Reader".into(),
         description: None,
-    }).await.expect("role");
+    })
+    .await
+    .expect("role");
     db.upsert_role_action("role-profile-reader", "plant.profile.read")
         .await
         .expect("role action");
@@ -184,7 +267,9 @@ async fn trailbase_bearer_token_resolves_user_and_allows_list() {
         created_by_user_id: "bootstrap-user".into(),
         created_at: "2026-04-03T00:00:00Z".into(),
         updated_at: "2026-04-03T00:00:00Z".into(),
-    }).await.expect("org binding");
+    })
+    .await
+    .expect("org binding");
     db.save_role_binding(&domain::RoleBinding {
         id: "binding-user-profile".into(),
         subject_type: domain::RoleBindingSubjectType::User,
@@ -198,7 +283,9 @@ async fn trailbase_bearer_token_resolves_user_and_allows_list() {
         created_by_user_id: "bootstrap-user".into(),
         created_at: "2026-04-03T00:00:00Z".into(),
         updated_at: "2026-04-03T00:00:00Z".into(),
-    }).await.expect("user binding");
+    })
+    .await
+    .expect("user binding");
 
     let app = api::build_router(service);
     let response = app
@@ -298,7 +385,10 @@ async fn current_user_returns_local_user_and_active_organizations() {
         )
         .await
         .expect("create shadow user");
-    for (membership_id, organization_id) in [("membership-alpha", "alpha-org"), ("membership-beta", "beta-org")] {
+    for (membership_id, organization_id) in [
+        ("membership-alpha", "alpha-org"),
+        ("membership-beta", "beta-org"),
+    ] {
         runtime.execute(
             "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -329,7 +419,12 @@ async fn current_user_returns_local_user_and_active_organizations() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let json: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(json["provider"], "trailbase");
     assert_eq!(json["externalUserId"], "me-user");
@@ -393,7 +488,10 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("restored-trailbase-user"))
+                .header(
+                    "authorization",
+                    support::bearer_header("restored-trailbase-user"),
+                )
                 .header("x-organization-id", "restore-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -402,10 +500,463 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let json: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(json["user"]["id"], Value::String(original_user.id));
     assert_eq!(json["activeOrganizationId"], "restore-org");
     let organizations = json["organizations"].as_array().expect("organizations");
     assert!(organizations.iter().any(|org| org["id"] == "restore-org"));
+}
+
+#[tokio::test]
+async fn learner_router_rejects_mutation_and_admin_endpoints() {
+    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let app = api::build_learner_router(service);
+
+    for (method, uri) in [
+        ("POST", "/api/v1/organizations/bootstrap-user/plants"),
+        ("POST", "/api/v1/admin/bootstrap/trailbase-owner"),
+        ("GET", "/api/v1/admin/backups/s3"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let json: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"], "endpoint requires voter node");
+    }
+}
+
+#[tokio::test]
+async fn learner_router_keeps_read_and_auth_routes() {
+    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let principal = service
+        .bootstrap_trailbase_owner(Some("first-user"))
+        .await
+        .expect("bootstrap owner");
+    service
+        .create_plant(
+            &principal.user_id,
+            &principal.organization_id,
+            infra::service::CreatePlantInput {
+                facility_code: "FAC-LEARNER".into(),
+                name: "Learner Plant".into(),
+                contract_no: "LEARNER-001".into(),
+                address: "Seoul".into(),
+                installed_kw: 1.0,
+                rec_start_date: "2026-01-01".into(),
+                confirm_issued: "Y".into(),
+                owner_organization_id: None,
+            },
+        )
+        .await
+        .expect("create plant");
+    let app = api::build_learner_router(service);
+
+    let me = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::bearer_header("first-user"))
+                .header("x-organization-id", "bootstrap-user")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(me.status(), StatusCode::OK);
+
+    let plants = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/plants")
+                .header("authorization", support::bearer_header("first-user"))
+                .header("x-organization-id", "bootstrap-user")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(plants.status(), StatusCode::OK);
+    let body = plants.into_body().collect().await.expect("body").to_bytes();
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    let plants = json.as_array().expect("plants");
+    assert!(
+        plants
+            .iter()
+            .any(|plant| plant["facilityCode"] == "FAC-LEARNER")
+    );
+}
+
+#[tokio::test]
+async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
+    let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    runtime
+        .execute(
+            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "local-org".into(),
+                Option::<String>::None.into(),
+                "Local Org".into(),
+                Option::<String>::None.into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "local-user".into(),
+                "local-user@trailbase.test".into(),
+                "local-user".into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-local-user".into(),
+                "local-org".into(),
+                "local-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert membership");
+
+    let app = api::build_learner_router(service);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::bearer_header("local-user"))
+                .header("x-organization-id", "local-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM user_identities
+             WHERE provider = $1 AND external_user_id = $2",
+            vec!["trailbase".into(), "local-user".into()],
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM auth_identity_cache",
+            Vec::new(),
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn learner_local_current_user_uses_existing_identity_without_mutation() {
+    let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    runtime
+        .execute(
+            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "linked-org".into(),
+                Option::<String>::None.into(),
+                "Linked Org".into(),
+                Option::<String>::None.into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "linked-user".into(),
+                "linked-user@trailbase.test".into(),
+                "linked-user".into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime
+        .execute(
+            "INSERT INTO user_identities (
+                id, user_id, provider, external_user_id, email_snapshot, display_name_snapshot, last_seen_at, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            vec![
+                "identity-linked-user".into(),
+                "linked-user".into(),
+                "trailbase".into(),
+                "linked-user".into(),
+                "linked-user@trailbase.test".into(),
+                "linked-user".into(),
+                Option::<String>::Some("2026-04-05T00:00:00Z".to_owned()).into(),
+                "2026-04-05T00:00:00Z".into(),
+                "2026-04-05T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user identity");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-linked-user".into(),
+                "linked-org".into(),
+                "linked-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert membership");
+
+    let before = query_identity_meta(&runtime, "linked-user").await;
+    let app = api::build_learner_router(service);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::bearer_header("linked-user"))
+                .header("x-organization-id", "linked-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let after = query_identity_meta(&runtime, "linked-user").await;
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(after.last_seen_at, before.last_seen_at);
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM auth_identity_cache",
+            Vec::new(),
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn learner_strong_current_user_persists_identity_and_shared_cache() {
+    let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    runtime
+        .execute(
+            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "strong-org".into(),
+                Option::<String>::None.into(),
+                "Strong Org".into(),
+                Option::<String>::None.into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "strong-user".into(),
+                "strong-user@trailbase.test".into(),
+                "strong-user".into(),
+                1_i64.into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-strong-user".into(),
+                "strong-org".into(),
+                "strong-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-06T00:00:00Z".into(),
+                "2026-04-06T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert membership");
+
+    let app = api::build_learner_router(service);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me?consistency=strong")
+                .header("authorization", support::bearer_header("strong-user"))
+                .header("x-organization-id", "strong-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM user_identities
+             WHERE provider = $1 AND external_user_id = $2",
+            vec!["trailbase".into(), "strong-user".into()],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count
+             FROM auth_identity_cache",
+            Vec::new(),
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn read_routes_reject_invalid_consistency_query() {
+    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let app = api::build_router(service);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/plants?consistency=bogus")
+                .header(
+                    "authorization",
+                    support::bearer_header("invalid-consistency-user"),
+                )
+                .header("x-organization-id", "bootstrap-user")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "invalid consistency: bogus");
+}
+
+#[tokio::test]
+async fn read_routes_allow_explicit_strong_consistency() {
+    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let app = api::build_router(service);
+
+    let bootstrap = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/admin/bootstrap/trailbase-owner")
+                .header(
+                    "authorization",
+                    support::bearer_header("strong-consistency-user"),
+                )
+                .header("x-certd-master-key", "dev-only-master-key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bootstrap.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/plants?consistency=strong")
+                .header(
+                    "authorization",
+                    support::bearer_header("strong-consistency-user"),
+                )
+                .header("x-organization-id", "bootstrap-user")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
 }

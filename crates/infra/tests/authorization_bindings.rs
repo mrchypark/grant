@@ -1,10 +1,6 @@
 use domain::{RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType};
-use infra::{
-    config::ReadConsistency,
-    database::Database,
-    runtime::HiqliteRuntime,
-};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
+use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
 
 fn free_local_addr() -> String {
@@ -382,21 +378,24 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
         .await
         .expect("plant bindings");
     assert_eq!(plant_bindings.len(), 2);
-    assert!(plant_bindings.iter().any(|binding| binding.id == "binding-org-plant"));
-    assert!(plant_bindings.iter().any(|binding| binding.id == "binding-group-plant"));
+    assert!(
+        plant_bindings
+            .iter()
+            .any(|binding| binding.id == "binding-org-plant")
+    );
+    assert!(
+        plant_bindings
+            .iter()
+            .any(|binding| binding.id == "binding-group-plant")
+    );
 
     let organization_resource_bindings = db
-        .list_role_bindings_for_resource(
-            RoleBindingResourceType::Organization,
-            "conalog-account",
-        )
+        .list_role_bindings_for_resource(RoleBindingResourceType::Organization, "conalog-account")
         .await
         .expect("organization resource bindings");
-    assert!(
-        organization_resource_bindings
-            .iter()
-            .any(|binding| binding.id == "binding-user-org" && binding.state == RoleBindingState::Active)
-    );
+    assert!(organization_resource_bindings.iter().any(
+        |binding| binding.id == "binding-user-org" && binding.state == RoleBindingState::Active
+    ));
 
     let updated_user_binding = RoleBinding {
         created_by_user_id: "operator-user".to_owned(),
@@ -548,10 +547,9 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
         .save_role_binding(&mismatched_agreement)
         .await
         .expect_err("binding should reject unrelated agreement");
-    assert!(
-        err.to_string()
-            .contains("agreement agreement-mismatch does not match plant plant-1 and organization epc-org")
-    );
+    assert!(err.to_string().contains(
+        "agreement agreement-mismatch does not match plant plant-1 and organization epc-org"
+    ));
 
     let inactive_agreement = RoleBinding {
         id: "binding-inactive-agreement".to_owned(),

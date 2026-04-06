@@ -115,12 +115,7 @@ fn hiqlite_config() -> HiqliteConfig {
         default_read_consistency: read_consistency_from_env("CERTD_READ_CONSISTENCY"),
         remote_nodes: env::var("CERTD_REMOTE_NODES")
             .ok()
-            .map(|value| {
-                value
-                    .split(',')
-                    .filter_map(normalize_remote_node)
-                    .collect()
-            })
+            .map(|value| value.split(',').filter_map(normalize_remote_node).collect())
             .unwrap_or_default(),
         remote_tls: env_bool("CERTD_REMOTE_TLS", false),
         remote_tls_no_verify: env_bool("CERTD_REMOTE_TLS_NO_VERIFY", false),
@@ -172,7 +167,8 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 fn required_env(key: &str) -> Result<String> {
-    let value = env::var(key).with_context(|| format!("missing required environment variable {key}"))?;
+    let value =
+        env::var(key).with_context(|| format!("missing required environment variable {key}"))?;
     if value.trim().is_empty() {
         anyhow::bail!("{key} must not be empty");
     }

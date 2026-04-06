@@ -1,4 +1,6 @@
-use infra::config::{AppConfig, ArtifactBackendConfig, LocalNodeRole, ReadConsistency, RuntimeMode};
+use infra::config::{
+    AppConfig, ArtifactBackendConfig, LocalNodeRole, ReadConsistency, RuntimeMode,
+};
 use std::sync::{Mutex, OnceLock};
 
 fn env_lock() -> &'static Mutex<()> {
@@ -67,10 +69,7 @@ fn loads_trailbase_auth_config_from_env() {
         cfg.auth.trailbase.base_url,
         "http://trailbase.internal:4000"
     );
-    assert_eq!(
-        cfg.auth.trailbase.introspect_path,
-        "/api/certd/introspect"
-    );
+    assert_eq!(cfg.auth.trailbase.introspect_path, "/api/certd/introspect");
     assert_eq!(
         cfg.auth.trailbase.internal_secret,
         "shared-secret".to_owned()
@@ -84,9 +83,7 @@ fn missing_trailbase_internal_secret_is_rejected() {
     clear_certd_env();
 
     let err = AppConfig::from_env().expect_err("missing internal secret should fail");
-    assert!(err
-        .to_string()
-        .contains("CERTD_TRAILBASE_INTERNAL_SECRET"));
+    assert!(err.to_string().contains("CERTD_TRAILBASE_INTERNAL_SECRET"));
 }
 
 #[test]
@@ -119,7 +116,10 @@ fn loads_split_runtime_config_from_env() {
     );
     assert!(cfg.hiqlite.remote_tls);
     assert!(cfg.hiqlite.remote_tls_no_verify);
-    assert_eq!(cfg.hiqlite.remote_api_secret.as_deref(), Some("secret-token"));
+    assert_eq!(
+        cfg.hiqlite.remote_api_secret.as_deref(),
+        Some("secret-token")
+    );
     assert!(cfg.hiqlite.remote_with_proxy);
 }
 

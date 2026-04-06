@@ -1,8 +1,10 @@
 use crate::{
-    auth::{AuthResolver, AuthenticatedPrincipal, ExternalIdentity},
     artifacts::ArtifactStore,
+    auth::{
+        AuthResolver, AuthenticatedPrincipal, ExternalIdentity, map_strong_identity_sync_error,
+    },
     bridge::{self, BridgeDocument, BridgeOptions, BridgeRateRecord},
-    config::AppConfig,
+    config::{AppConfig, ReadConsistency},
     crypto::{
         CertificateBundle, decode_base64, decrypt_bundle, encrypt_bundle, extract_common_name,
         normalize_business_no,
@@ -130,9 +132,10 @@ impl AppService {
         &self,
         bearer_token: Option<&str>,
         organization_id: Option<&str>,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<AuthenticatedPrincipal> {
         self.auth
-            .resolve(&self.db, bearer_token, organization_id)
+            .resolve(&self.db, bearer_token, organization_id, read_consistency)
             .await
     }
 
@@ -140,7 +143,10 @@ impl AppService {
         &self,
         bearer_token: Option<&str>,
     ) -> Result<AuthenticatedPrincipal> {
-        let identity = self.auth.resolve_external_identity(None, bearer_token).await?;
+        let identity = self
+            .auth
+            .resolve_external_identity(None, bearer_token, None)
+            .await?;
         let user = self
             .db
             .bind_identity_to_user(
@@ -163,23 +169,46 @@ impl AppService {
         &self,
         bearer_token: Option<&str>,
         active_organization_id: Option<&str>,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<CurrentUserView> {
         let identity = self
             .auth
-            .resolve_external_identity(Some(&self.db), bearer_token)
+            .resolve_external_identity(Some(&self.db), bearer_token, read_consistency.clone())
             .await?;
-        let user = self
+        let user = if matches!(read_consistency, Some(ReadConsistency::Strong)) {
+            self.db
+                .resolve_or_create_user_identity_with_consistency(
+                    &identity.provider,
+                    &identity.external_user_id,
+                    identity.email.as_deref(),
+                    &identity.display_name,
+                    identity.active,
+                    read_consistency.clone(),
+                )
+                .await
+                .map_err(map_strong_identity_sync_error)?
+        } else {
+            self.db
+                .resolve_existing_user_identity_with_consistency(
+                    &identity.provider,
+                    &identity.external_user_id,
+                    read_consistency.clone(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "forbidden: no local user identity available for {}:{}",
+                        identity.provider,
+                        identity.external_user_id
+                    )
+                })?
+        };
+        let organizations = self
             .db
-            .resolve_or_create_user_identity(
-                &identity.provider,
-                &identity.external_user_id,
-                identity.email.as_deref(),
-                &identity.display_name,
-                identity.active,
-            )
+            .list_active_organizations_for_user_with_consistency(&user.id, read_consistency)
             .await?;
-        let organizations = self.db.list_active_organizations_for_user(&user.id).await?;
-        let active_organization_id = normalize_active_organization(active_organization_id, &identity, &organizations)?;
+        let active_organization_id =
+            normalize_active_organization(active_organization_id, &identity, &organizations)?;
         Ok(CurrentUserView {
             provider: identity.provider,
             external_user_id: identity.external_user_id,
@@ -211,7 +240,12 @@ impl AppService {
         };
         let encrypted = encrypt_bundle(&self.cfg.security.master_key, &bundle)?;
         self.db
-            .save_certificate(&organization_id, Some(&business_no), &common_name, &encrypted)
+            .save_certificate(
+                &organization_id,
+                Some(&business_no),
+                &common_name,
+                &encrypted,
+            )
             .await
     }
 
@@ -297,15 +331,19 @@ impl AppService {
                 let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
 
                 if effective_mode == SyncMode::Full {
-                    info!(plant_code = plant.facility_code, "replacing canonical full records");
+                    info!(
+                        plant_code = plant.facility_code,
+                        "replacing canonical full records"
+                    );
                     self.db
                         .replace_full_records(&plant.facility_code, &generation, &rates, &rec)
                         .await?;
-                    info!(plant_code = plant.facility_code, "listing stale document objects");
-                    let existing_objects = self
-                        .db
-                        .list_document_objects(&plant.facility_code)
-                        .await?;
+                    info!(
+                        plant_code = plant.facility_code,
+                        "listing stale document objects"
+                    );
+                    let existing_objects =
+                        self.db.list_document_objects(&plant.facility_code).await?;
                     for object_key in existing_objects {
                         if let Err(err) = self.artifacts.delete_object(&object_key).await {
                             warn!("delete stale object {} failed: {}", object_key, err);
@@ -423,8 +461,11 @@ impl AppService {
         &self,
         user_id: &str,
         organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Vec<Plant>> {
-        self.db.list_visible_plants(user_id, organization_id).await
+        self.db
+            .list_visible_plants_with_consistency(user_id, organization_id, read_consistency)
+            .await
     }
 
     pub async fn get_plant(&self, facility_code: &str) -> Result<PlantView> {
@@ -437,6 +478,7 @@ impl AppService {
         user_id: &str,
         organization_id: &str,
         facility_code: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<PlantView> {
         let plant = self
             .authorize_plant_action_by_facility_code(
@@ -445,10 +487,14 @@ impl AppService {
                 facility_code,
                 "plant.profile.read",
                 "read plant profile",
+                read_consistency.clone(),
             )
             .await?;
 
-        let summary = self.db.get_plant_summary_by_id(&plant.id).await?;
+        let summary = self
+            .db
+            .get_plant_summary_by_id_with_consistency(&plant.id, read_consistency)
+            .await?;
         Ok(map_plant_summary(summary))
     }
 
@@ -508,7 +554,12 @@ impl AppService {
             }
         }
 
-        if self.db.get_plant_by_facility_code(&facility_code).await.is_ok() {
+        if self
+            .db
+            .get_plant_by_facility_code(&facility_code)
+            .await
+            .is_ok()
+        {
             anyhow::bail!("plant {} already exists", facility_code);
         }
 
@@ -559,6 +610,7 @@ impl AppService {
         user_id: &str,
         organization_id: &str,
         facility_code: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Vec<GenerationRecord>> {
         let plant = self
             .authorize_plant_action_by_facility_code(
@@ -567,9 +619,12 @@ impl AppService {
                 facility_code,
                 "plant.telemetry.read",
                 "read plant generation",
+                read_consistency.clone(),
             )
             .await?;
-        self.db.list_generation(&plant.id).await
+        self.db
+            .list_generation_with_consistency(&plant.id, read_consistency)
+            .await
     }
 
     pub async fn list_rates_authorized(
@@ -577,6 +632,7 @@ impl AppService {
         user_id: &str,
         organization_id: &str,
         facility_code: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Vec<RateRecord>> {
         let plant = self
             .authorize_plant_action_by_facility_code(
@@ -585,9 +641,12 @@ impl AppService {
                 facility_code,
                 "plant.rate.read",
                 "read plant rates",
+                read_consistency.clone(),
             )
             .await?;
-        self.db.list_rates(&plant.id).await
+        self.db
+            .list_rates_with_consistency(&plant.id, read_consistency)
+            .await
     }
 
     pub async fn list_rec_authorized(
@@ -595,6 +654,7 @@ impl AppService {
         user_id: &str,
         organization_id: &str,
         facility_code: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Vec<RecRecord>> {
         let plant = self
             .authorize_plant_action_by_facility_code(
@@ -603,9 +663,12 @@ impl AppService {
                 facility_code,
                 "plant.rec.read",
                 "read plant rec",
+                read_consistency.clone(),
             )
             .await?;
-        self.db.list_rec(&plant.id).await
+        self.db
+            .list_rec_with_consistency(&plant.id, read_consistency)
+            .await
     }
 
     pub async fn list_documents_authorized(
@@ -613,6 +676,7 @@ impl AppService {
         user_id: &str,
         organization_id: &str,
         facility_code: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Vec<DocumentArtifact>> {
         let plant = self
             .authorize_plant_action_by_facility_code(
@@ -621,9 +685,13 @@ impl AppService {
                 facility_code,
                 "plant.document.read",
                 "read plant documents",
+                read_consistency.clone(),
             )
             .await?;
-        let docs = self.db.list_documents(&plant.id).await?;
+        let docs = self
+            .db
+            .list_documents_with_consistency(&plant.id, read_consistency)
+            .await?;
         Ok(docs
             .into_iter()
             .map(|mut doc| {
@@ -639,14 +707,19 @@ impl AppService {
         user_id: &str,
         organization_id: &str,
         document_id: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<(StoredDocument, bytes::Bytes)> {
-        let doc = self.db.get_document(document_id).await?;
+        let doc = self
+            .db
+            .get_document_with_consistency(document_id, read_consistency.clone())
+            .await?;
         self.authorize_plant_action_by_id(
             user_id,
             organization_id,
             &doc.plant_id,
             "plant.document.read",
             &format!("read document {}", doc.artifact.file_name),
+            read_consistency,
         )
         .await?;
         let bytes = self.artifacts.get_bytes(&doc.object_key).await?;
@@ -664,14 +737,19 @@ impl AppService {
         facility_code: &str,
         action_id: &str,
         action_label: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Plant> {
-        let plant = self.db.get_plant_by_facility_code(facility_code).await?;
+        let plant = self
+            .db
+            .get_plant_by_facility_code_with_consistency(facility_code, read_consistency.clone())
+            .await?;
         self.authorize_plant_action_by_id(
             user_id,
             organization_id,
             &plant.id,
             action_id,
             &format!("{action_label} {}", facility_code),
+            read_consistency,
         )
         .await?;
         Ok(plant)
@@ -684,10 +762,17 @@ impl AppService {
         plant_id: &str,
         action_id: &str,
         target_label: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<()> {
         let allowed = self
             .db
-            .has_user_plant_action(user_id, organization_id, plant_id, action_id)
+            .has_user_plant_action_with_consistency(
+                user_id,
+                organization_id,
+                plant_id,
+                action_id,
+                read_consistency,
+            )
             .await?;
         if !allowed {
             anyhow::bail!(

@@ -4,7 +4,10 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use domain::{Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType};
+use domain::{
+    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
+};
+use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
     artifacts::ArtifactStore,
@@ -13,14 +16,13 @@ use infra::{
         ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
     },
     database::Database,
-    service::AppService,
     runtime::HiqliteRuntime,
+    service::AppService,
 };
-use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use serde_json::Value;
+use serial_test::serial;
 use std::sync::Arc;
 use tempfile::TempDir;
-use serial_test::serial;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -282,7 +284,12 @@ async fn plant_list_is_driven_by_effective_visibility() {
 
     let router = api::build_router(service.clone());
     let response = router
-        .oneshot(app_request("GET", "/api/v1/plants", "bootstrap-user", "viewer-org"))
+        .oneshot(app_request(
+            "GET",
+            "/api/v1/plants",
+            "bootstrap-user",
+            "viewer-org",
+        ))
         .await
         .expect("router response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -345,7 +352,12 @@ async fn document_read_alone_does_not_make_a_plant_visible() {
 
     let router = api::build_router(service.clone());
     let response = router
-        .oneshot(app_request("GET", "/api/v1/plants", "bootstrap-user", "viewer-org"))
+        .oneshot(app_request(
+            "GET",
+            "/api/v1/plants",
+            "bootstrap-user",
+            "viewer-org",
+        ))
         .await
         .expect("router response");
     assert_eq!(response.status(), StatusCode::OK);
