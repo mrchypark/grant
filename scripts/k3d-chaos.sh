@@ -218,6 +218,9 @@ start_chaos_load() {
 
   WORKLOAD_LOG_FILE="${CERTD_CHAOS_LOAD_LOG_FILE}" \
   WORKLOAD_PHASE_FILE="${chaos_phase_file}" \
+  WORKLOAD_VOTER_LOCAL_PORT="${LOCAL_PORT}" \
+  WORKLOAD_LEARNER_LOCAL_PORT="${LEARNER_LOCAL_PORT}" \
+  WORKLOAD_MANAGE_PORT_FORWARD=0 \
   CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
   TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL}" \
   TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD}" \
@@ -260,13 +263,52 @@ start_learner_port_forward() {
 fetch_voter_metrics() {
   local pod_name="$1"
   local api_secret="$2"
+  local metrics_port="${METRICS_LOCAL_PORT:-18200}"
+  local metrics_log
+  local metrics_pf_pid=""
+  local ready=0
+  local output=""
+  local status=0
+  metrics_log="$(mktemp)"
 
-  kubectl -n "${NAMESPACE}" exec "${pod_name}" -- sh -lc \
-    "curl -fsS -H 'X-API-SECRET: ${api_secret}' -H 'accept: application/json' http://127.0.0.1:8200/cluster/metrics/sqlite"
+  cleanup_metrics_port_forward() {
+    if [[ -n "${metrics_pf_pid}" ]]; then
+      kill "${metrics_pf_pid}" >/dev/null 2>&1 || true
+      wait "${metrics_pf_pid}" 2>/dev/null || true
+    fi
+    rm -f "${metrics_log}"
+  }
+
+  kubectl -n "${NAMESPACE}" port-forward "pod/${pod_name}" "${metrics_port}:8200" >"${metrics_log}" 2>&1 &
+  metrics_pf_pid=$!
+
+  for _ in $(seq 1 30); do
+    if output="$(
+      curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
+        -H "X-API-SECRET: ${api_secret}" \
+        -H 'accept: application/json' \
+        "http://127.0.0.1:${metrics_port}/cluster/metrics/sqlite" 2>/dev/null
+    )"; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ "${ready}" -eq 1 ]]; then
+    status=0
+  else
+    status=1
+  fi
+  cleanup_metrics_port_forward
+  if [[ "${status}" -eq 0 ]]; then
+    printf '%s' "${output}"
+  fi
+  return "${status}"
 }
 
 resolve_voter_role_pods() {
-  local api_secret pods pod metrics_json state
+  local api_secret pods pod metrics_json leader_addr
   api_secret="$(hiqlite_api_secret)"
   pods="$(kubectl -n "${NAMESPACE}" get pods -l app=certd,role=voter -o jsonpath='{.items[*].metadata.name}')"
 
@@ -278,25 +320,30 @@ resolve_voter_role_pods() {
     if [[ -z "${metrics_json}" ]]; then
       continue
     fi
-    state="$(jq -r '.state // empty' <<<"${metrics_json}")"
-    case "${state}" in
-      Leader)
-        RESOLVED_LEADER_VOTER_POD="${pod}"
-        ;;
-      Follower)
-        if [[ -z "${RESOLVED_FOLLOWER_VOTER_POD}" ]]; then
-          RESOLVED_FOLLOWER_VOTER_POD="${pod}"
-        fi
-        ;;
-    esac
+    leader_addr="$(
+      jq -r '.membership_config.membership.nodes[(.current_leader | tostring)].addr_api // empty' \
+        <<<"${metrics_json}"
+    )"
+    if [[ -n "${leader_addr}" ]]; then
+      RESOLVED_LEADER_VOTER_POD="${leader_addr%%.*}"
+      break
+    fi
   done
 
   if [[ -z "${RESOLVED_LEADER_VOTER_POD}" ]]; then
     echo "failed to resolve current leader voter pod" >&2
     exit 1
   fi
+
+  for pod in ${pods}; do
+    if [[ "${pod}" != "${RESOLVED_LEADER_VOTER_POD}" ]]; then
+      RESOLVED_FOLLOWER_VOTER_POD="${pod}"
+      break
+    fi
+  done
+
   if [[ -z "${RESOLVED_FOLLOWER_VOTER_POD}" ]]; then
-    echo "failed to resolve follower voter pod" >&2
+    echo "failed to resolve follower voter pod from voter set: ${pods}" >&2
     exit 1
   fi
 }

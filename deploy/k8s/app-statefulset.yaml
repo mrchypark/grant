@@ -107,6 +107,12 @@ spec:
             limits:
               memory: 512Mi
               ephemeral-storage: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /healthz

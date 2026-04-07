@@ -15,6 +15,7 @@ WORKLOAD_VOTER_LOCAL_PORT="${WORKLOAD_VOTER_LOCAL_PORT:-18090}"
 WORKLOAD_LEARNER_LOCAL_PORT="${WORKLOAD_LEARNER_LOCAL_PORT:-18091}"
 WORKLOAD_VOTER_SERVICE="${WORKLOAD_VOTER_SERVICE:-certd}"
 WORKLOAD_LEARNER_SERVICE="${WORKLOAD_LEARNER_SERVICE:-certd-learner-1}"
+WORKLOAD_MANAGE_PORT_FORWARD="${WORKLOAD_MANAGE_PORT_FORWARD:-1}"
 WORKLOAD_LOG_FILE="${WORKLOAD_LOG_FILE:-$(mktemp "${TMPDIR:-/tmp}/k3d-chaos-load.XXXXXX")}"
 WORKLOAD_PHASE_FILE="${WORKLOAD_PHASE_FILE:-}"
 HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"
@@ -105,6 +106,9 @@ ensure_target_api() {
         --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
         --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
         "http://127.0.0.1:${WORKLOAD_VOTER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+        if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" != "1" ]]; then
+          return 1
+        fi
         start_port_forward "${WORKLOAD_VOTER_SERVICE}" "${WORKLOAD_VOTER_LOCAL_PORT}" 80 "${voter_pf_log}" voter_pf_pid
       fi
       ;;
@@ -113,6 +117,9 @@ ensure_target_api() {
         --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
         --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
         "http://127.0.0.1:${WORKLOAD_LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+        if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" != "1" ]]; then
+          return 1
+        fi
         start_port_forward "${WORKLOAD_LEARNER_SERVICE}" "${WORKLOAD_LEARNER_LOCAL_PORT}" 8080 "${learner_pf_log}" learner_pf_pid
       fi
       ;;
@@ -274,7 +281,7 @@ request_api() {
   body_file="$(mktemp)"
   err_file="$(mktemp)"
 
-  ensure_target_api "${target}"
+  ensure_target_api "${target}" || return 1
 
   set +e
   curl_meta="$(
@@ -287,7 +294,7 @@ request_api() {
   set -e
 
   if [[ "${curl_status}" -ne 0 ]]; then
-    ensure_target_api "${target}"
+    ensure_target_api "${target}" || return 1
     set +e
     curl_meta="$(
       curl -sS -o "${body_file}" -w '%{http_code} %{time_total}' \
@@ -344,7 +351,7 @@ request_api_expect_error() {
   body_file="$(mktemp)"
   err_file="$(mktemp)"
 
-  ensure_target_api "${target}"
+  ensure_target_api "${target}" || return 1
 
   set +e
   curl_meta="$(
@@ -357,7 +364,7 @@ request_api_expect_error() {
   set -e
 
   if [[ "${curl_status}" -ne 0 ]]; then
-    ensure_target_api "${target}"
+    ensure_target_api "${target}" || return 1
     set +e
     curl_meta="$(
       curl -sS -o "${body_file}" -w '%{http_code} %{time_total}' \
@@ -675,8 +682,10 @@ main() {
   mkdir -p "$(dirname "${WORKLOAD_LOG_FILE}")"
   : >"${WORKLOAD_LOG_FILE}"
 
-  start_port_forward "${WORKLOAD_VOTER_SERVICE}" "${WORKLOAD_VOTER_LOCAL_PORT}" 80 "${voter_pf_log}" voter_pf_pid
-  start_port_forward "${WORKLOAD_LEARNER_SERVICE}" "${WORKLOAD_LEARNER_LOCAL_PORT}" 8080 "${learner_pf_log}" learner_pf_pid
+  if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" == "1" ]]; then
+    start_port_forward "${WORKLOAD_VOTER_SERVICE}" "${WORKLOAD_VOTER_LOCAL_PORT}" 80 "${voter_pf_log}" voter_pf_pid
+    start_port_forward "${WORKLOAD_LEARNER_SERVICE}" "${WORKLOAD_LEARNER_LOCAL_PORT}" 8080 "${learner_pf_log}" learner_pf_pid
+  fi
 
   local voter_base learner_base voter_org learner_org
   voter_base="$(target_base_url voter)"
