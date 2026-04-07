@@ -79,9 +79,26 @@ require_contains "scripts/k3d-chaos-load.sh" 'HTTP_CURL_TIMEOUT_SECONDS="${HTTP_
 require_contains "scripts/k3d-chaos-load.sh" '--max-time "${HTTP_CURL_TIMEOUT_SECONDS}"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos-load.sh" '--connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}"'
+# shellcheck disable=SC2016
+require_contains "scripts/k3d-chaos.sh" 'HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"'
+# shellcheck disable=SC2016
+require_contains "scripts/k3d-chaos.sh" '--max-time "${HTTP_CURL_TIMEOUT_SECONDS}"'
+# shellcheck disable=SC2016
+require_contains "scripts/k3d-chaos.sh" '--connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}"'
+# shellcheck disable=SC2016
+require_contains "scripts/k3d-chaos.sh" 'capture_file="$(mktemp "${TMPDIR:-/tmp}/retry-capture.XXXXXX")"'
+# shellcheck disable=SC2016
+require_contains "scripts/k3d-chaos.sh" 'if "$@" >"${capture_file}"; then'
+require_not_contains "scripts/k3d-chaos.sh" 'retry_json_query()'
 require_contains "scripts/vind-bootstrap.sh" 'minio-statefulset-ephemeral.yaml'
 require_contains "scripts/vind-bootstrap.sh" 'dump_minio_debug'
 require_contains "scripts/vind-bootstrap.sh" 'kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers'
+require_contains "scripts/vind-bootstrap.sh" "vcluster.cp.%s"
+require_contains "scripts/vind-bootstrap.sh" 'ctr -n k8s.io images import -'
+# shellcheck disable=SC2016
+require_contains "scripts/vind-bootstrap.sh" 'ensure_runtime_image "${IMAGE_NAME}"'
+# shellcheck disable=SC2016
+require_contains "scripts/vind-bootstrap.sh" 'ensure_runtime_image "${TRAILBASE_IMAGE}"'
 # shellcheck disable=SC2016
 require_contains "scripts/vind-cluster.sh" 'VIND_UNTAINT_CONTROL_PLANE_NODES="${VIND_UNTAINT_CONTROL_PLANE_NODES:-1}"'
 require_contains "scripts/vind-cluster.sh" 'kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-'

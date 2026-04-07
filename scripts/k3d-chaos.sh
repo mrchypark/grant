@@ -34,6 +34,7 @@ CERTD_CHAOS_LOAD_PHASE_FILE="${CERTD_CHAOS_LOAD_PHASE_FILE:-}"
 LEARNER_REMOTE_API_PORT="${LEARNER_REMOTE_API_PORT:-8200}"
 LEARNER_SERVICE_CURL_TIMEOUT_SECONDS="${LEARNER_SERVICE_CURL_TIMEOUT_SECONDS:-5}"
 HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"
+HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -48,19 +49,34 @@ need jq
 need base64
 
 retry_capture() {
-  local attempts="$1"
-  local delay="$2"
-  shift 2
+  local captured_output=""
+  retry_capture_into captured_output "$@"
+  printf '%s' "${captured_output}"
+}
 
-  local output=""
+retry_capture_into() {
+  local __result_var="$1"
+  local attempts="$2"
+  local delay="$3"
+  shift 3
+
+  local capture_file
+  capture_file="$(mktemp "${TMPDIR:-/tmp}/retry-capture.XXXXXX")"
   for _ in $(seq 1 "${attempts}"); do
-    if output="$("$@")"; then
-      printf '%s' "${output}"
+    if "$@" >"${capture_file}"; then
+      printf -v "${__result_var}" '%s' "$(cat "${capture_file}")"
+      rm -f "${capture_file}"
       return 0
     fi
+    start_port_forward >/dev/null 2>&1 || true
+    if [[ -n "${learner_pf_pid}" ]]; then
+      start_learner_port_forward >/dev/null 2>&1 || true
+    fi
+    : >"${capture_file}"
     sleep "${delay}"
   done
 
+  rm -f "${capture_file}"
   return 1
 }
 
@@ -119,49 +135,24 @@ stop_port_forward() {
   local pid="$1"
   if [[ -n "${pid}" ]]; then
     kill "${pid}" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${pid}" >/dev/null 2>&1; then
+        wait "${pid}" 2>/dev/null || true
+        return 0
+      fi
+      sleep 0.2
+    done
+    kill -9 "${pid}" >/dev/null 2>&1 || true
     wait "${pid}" 2>/dev/null || true
   fi
 }
 
-retry_json_query() {
-  local attempts="$1"
-  local delay="$2"
-  shift 2
-
-  local output=""
-  for _ in $(seq 1 "${attempts}"); do
-    if output="$("$@")" && [[ -n "${output}" ]]; then
-      printf '%s' "${output}"
-      return 0
-    fi
-    sleep "${delay}"
-  done
-
-  return 1
-}
-
 ensure_local_api() {
-  if curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ -n "${pf_pid}" ]] && kill -0 "${pf_pid}" >/dev/null 2>&1; then
-    return 0
-  fi
-  if ! curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1; then
-    start_port_forward
-  fi
+  curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1
 }
 
 ensure_learner_api() {
-  if curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ -n "${learner_pf_pid}" ]] && kill -0 "${learner_pf_pid}" >/dev/null 2>&1; then
-    return 0
-  fi
-  if ! curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
-    start_learner_port_forward
-  fi
+  curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1
 }
 
 ensure_trailbase_online() {
@@ -212,6 +203,11 @@ start_chaos_load() {
   if [[ -n "${chaos_load_pid}" ]]; then
     return 0
   fi
+
+  start_port_forward
+  start_learner_port_forward
+  ensure_local_api
+  ensure_learner_api
 
   chaos_phase_file="${CERTD_CHAOS_LOAD_PHASE_FILE:-$(mktemp "${TMPDIR:-/tmp}/k3d-chaos-phase.XXXXXX")}"
   set_chaos_phase "pre-disruption"
@@ -273,8 +269,7 @@ fetch_voter_metrics() {
 
   cleanup_metrics_port_forward() {
     if [[ -n "${metrics_pf_pid}" ]]; then
-      kill "${metrics_pf_pid}" >/dev/null 2>&1 || true
-      wait "${metrics_pf_pid}" 2>/dev/null || true
+      stop_port_forward "${metrics_pf_pid}"
     fi
     rm -f "${metrics_log}"
   }
@@ -307,8 +302,17 @@ fetch_voter_metrics() {
   return "${status}"
 }
 
+fetch_voter_leader_pod() {
+  local pod_name="$1"
+  local api_secret="$2"
+
+  fetch_voter_metrics "${pod_name}" "${api_secret}" \
+    | jq -r '.membership_config.membership.nodes[(.current_leader | tostring)].addr_api // empty' \
+    | awk -F. 'NF > 0 { print $1; exit }'
+}
+
 resolve_voter_role_pods() {
-  local api_secret pods pod metrics_json leader_addr
+  local api_secret pods pod leader_pod
   api_secret="$(hiqlite_api_secret)"
   pods="$(kubectl -n "${NAMESPACE}" get pods -l app=certd,role=voter -o jsonpath='{.items[*].metadata.name}')"
 
@@ -316,18 +320,14 @@ resolve_voter_role_pods() {
   RESOLVED_FOLLOWER_VOTER_POD=""
 
   for pod in ${pods}; do
-    metrics_json="$(retry_json_query 10 1 fetch_voter_metrics "${pod}" "${api_secret}" || true)"
-    if [[ -z "${metrics_json}" ]]; then
+    echo "[chaos] resolving leader via ${pod}" >&2
+    leader_pod=""
+    retry_capture_into leader_pod 10 1 fetch_voter_leader_pod "${pod}" "${api_secret}" || true
+    if [[ -z "${leader_pod}" ]]; then
       continue
     fi
-    leader_addr="$(
-      jq -r '.membership_config.membership.nodes[(.current_leader | tostring)].addr_api // empty' \
-        <<<"${metrics_json}"
-    )"
-    if [[ -n "${leader_addr}" ]]; then
-      RESOLVED_LEADER_VOTER_POD="${leader_addr%%.*}"
-      break
-    fi
+    RESOLVED_LEADER_VOTER_POD="${leader_pod}"
+    break
   done
 
   if [[ -z "${RESOLVED_LEADER_VOTER_POD}" ]]; then
@@ -360,35 +360,20 @@ delete_voter_pod_and_verify() {
   kubectl -n "${NAMESPACE}" delete pod "${pod_name}" --wait=false
   kubectl -n "${NAMESPACE}" rollout status statefulset/certd-voter --timeout=10m
   sleep "${POST_RESTART_STABILIZE_SECONDS}"
+  start_port_forward
   retry_capture 20 2 observe_core_api "${phase}" "${auth_token}" "${active_org}"
-  retry_capture 20 2 inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  local inspect_json
+  retry_capture_into inspect_json 20 2 inspect_plant "${auth_token}" "${active_org}" "${facility_code}"
+  printf '%s\n' "${inspect_json}" | jq
   set_chaos_phase "post-${phase}"
 }
 
 curl_certd() {
-  local output
-  local status=0
-
-  set +e
-  output="$(curl -fsS "$@" 2>/tmp/k3d-chaos.curl.err)"
-  status=$?
-  set -e
-  if [[ "${status}" -eq 0 ]]; then
-    printf '%s' "${output}"
-    return 0
-  fi
-
-  start_port_forward
-  set +e
-  output="$(curl -fsS "$@" 2>/tmp/k3d-chaos.curl.err)"
-  status=$?
-  set -e
-  if [[ "${status}" -eq 0 ]]; then
-    printf '%s' "${output}"
-    return 0
-  fi
-
-  return "${status}"
+  ensure_local_api || return 1
+  curl -fsS \
+    --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+    --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
+    "$@"
 }
 
 seed_trailbase_user() {
@@ -560,11 +545,14 @@ trigger_backup() {
 resolve_baseline_plant() {
   local auth_token="$1"
   local active_org="$2"
-  local plants_json baseline_json
+  local plants_json baseline_json plants_file
   plants_json="$(list_plants "${auth_token}" "${active_org}")"
+  plants_file="$(mktemp "${TMPDIR:-/tmp}/plants-json.XXXXXX")"
+  printf '%s' "${plants_json}" >"${plants_file}"
   baseline_json="$(jq -c --arg code "${PLANT_FACILITY_CODE}" '
     [ .[] | select((.facilityCode // .facility_code) == $code) ] | .[0] // empty
-  ' <<<"${plants_json}")"
+  ' < "${plants_file}")"
+  rm -f "${plants_file}"
   if [[ -n "${baseline_json}" && "${baseline_json}" != "null" ]]; then
     echo "${baseline_json}"
     return 0
@@ -597,7 +585,7 @@ observe_core_api() {
   local me_json plants_json observed_org visible_count
 
   me_json="$(current_user "${auth_token}" "${active_org}")"
-  observed_org="$(jq -r '.activeOrganizationId // .active_organization_id // empty' <<<"${me_json}")"
+  observed_org="$(printf '%s' "${me_json}" | jq -r '.activeOrganizationId // .active_organization_id // empty')"
   if [[ -z "${observed_org}" ]]; then
     observed_org="${active_org}"
   fi
@@ -607,7 +595,7 @@ observe_core_api() {
   fi
 
   plants_json="$(list_plants "${auth_token}" "${active_org}")"
-  visible_count="$(jq 'length' <<<"${plants_json}")"
+  visible_count="$(printf '%s' "${plants_json}" | jq 'length')"
 
   echo "[${label}] /api/v1/me"
   echo "${me_json}" | jq
@@ -724,7 +712,10 @@ learner_service_probe() {
   local path="$1"
   local auth_token="$2"
   local active_org="$3"
-  ensure_learner_api
+  if [[ -z "${learner_pf_pid}" ]]; then
+    start_learner_port_forward
+  fi
+  ensure_learner_api || return 1
   curl -fsS --max-time "${LEARNER_SERVICE_CURL_TIMEOUT_SECONDS}" \
     "http://127.0.0.1:${LEARNER_LOCAL_PORT}${path}" \
     -H "authorization: Bearer ${auth_token}" \
@@ -794,9 +785,13 @@ scenario_learner_voter_partition() {
   fi
 
   set_chaos_phase "learner-voter-partition-recovery"
-  retry_capture 20 1 learner_service_probe "/api/v1/me?consistency=strong" "${auth_token}" "${active_org}" | jq
-  retry_capture 20 1 learner_service_probe "/api/v1/plants?consistency=strong" "${auth_token}" "${active_org}" | jq
-  retry_capture 20 1 learner_service_probe "/api/v1/plants/${facility_code}?consistency=strong" "${auth_token}" "${active_org}" | jq
+  local learner_me_json learner_plants_json learner_inspect_json
+  retry_capture_into learner_me_json 20 1 learner_service_probe "/api/v1/me?consistency=strong" "${auth_token}" "${active_org}"
+  retry_capture_into learner_plants_json 20 1 learner_service_probe "/api/v1/plants?consistency=strong" "${auth_token}" "${active_org}"
+  retry_capture_into learner_inspect_json 20 1 learner_service_probe "/api/v1/plants/${facility_code}?consistency=strong" "${auth_token}" "${active_org}"
+  printf '%s\n' "${learner_me_json}" | jq
+  printf '%s\n' "${learner_plants_json}" | jq
+  printf '%s\n' "${learner_inspect_json}" | jq
   set_chaos_phase "post-learner-voter-partition"
 
   if [[ "${failure}" -ne 0 ]]; then
@@ -846,7 +841,9 @@ scenario_learner_restart() {
   kubectl -n "${NAMESPACE}" rollout status "deployment/${LEARNER_DEPLOYMENT}" --timeout=10m
   sleep "${POST_RESTART_STABILIZE_SECONDS}"
   retry_capture 20 2 observe_core_api "learner-restart" "${auth_token}" "${active_org}"
-  retry_capture 20 2 inspect_plant "${auth_token}" "${active_org}" "${facility_code}" | jq
+  local inspect_json
+  retry_capture_into inspect_json 20 2 inspect_plant "${auth_token}" "${active_org}" "${facility_code}"
+  printf '%s\n' "${inspect_json}" | jq
   set_chaos_phase "post-learner-restart"
 }
 
@@ -916,22 +913,22 @@ main() {
   start_port_forward
   seed_trailbase_user
 
-  auth_token="$(retry_capture 20 2 login_trailbase)"
+  retry_capture_into auth_token 20 2 login_trailbase
   if [[ -z "${auth_token}" || "${auth_token}" == "null" ]]; then
     echo "failed to obtain TrailBase auth token" >&2
     exit 1
   fi
 
   local bootstrap_json
-  bootstrap_json="$(retry_capture 20 2 bootstrap_owner "${auth_token}")"
+  retry_capture_into bootstrap_json 20 2 bootstrap_owner "${auth_token}"
   local bootstrap_active_org
-  bootstrap_active_org="$(jq -r '.organizationId // .organization_id // empty' <<<"${bootstrap_json}")"
+  bootstrap_active_org="$(printf '%s' "${bootstrap_json}" | jq -r '.organizationId // .organization_id // empty')"
   if [[ -z "${bootstrap_active_org}" ]]; then
     bootstrap_active_org="${BOOTSTRAP_ORGANIZATION_ID}"
   fi
 
-  me_json="$(retry_capture 20 2 current_user "${auth_token}" "${bootstrap_active_org}")"
-  active_org="$(jq -r '.activeOrganizationId // .active_organization_id // empty' <<<"${me_json}")"
+  retry_capture_into me_json 20 2 current_user "${auth_token}" "${bootstrap_active_org}"
+  active_org="$(printf '%s' "${me_json}" | jq -r '.activeOrganizationId // .active_organization_id // empty')"
   if [[ -z "${active_org}" ]]; then
     active_org="${bootstrap_active_org}"
   fi
@@ -939,8 +936,8 @@ main() {
   echo "[baseline] /api/v1/me"
   echo "${me_json}" | jq
 
-  baseline_plant="$(retry_capture 20 2 resolve_baseline_plant "${auth_token}" "${active_org}")"
-  baseline_facility_code="$(jq -r '.facilityCode // .facility_code // empty' <<<"${baseline_plant}")"
+  retry_capture_into baseline_plant 20 2 resolve_baseline_plant "${auth_token}" "${active_org}"
+  baseline_facility_code="$(printf '%s' "${baseline_plant}" | jq -r '.facilityCode // .facility_code // empty')"
   if [[ -z "${baseline_facility_code}" || "${baseline_facility_code}" == "null" ]]; then
     echo "failed to resolve baseline facility code" >&2
     exit 1
@@ -948,7 +945,9 @@ main() {
 
   echo "[baseline] plant"
   echo "${baseline_plant}" | jq
-  retry_capture 20 2 inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}" | jq
+  local inspect_json
+  retry_capture_into inspect_json 20 2 inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  printf '%s\n' "${inspect_json}" | jq
   retry_capture 20 2 trigger_backup
   maybe_upload_certificate_and_sync "${auth_token}" "${active_org}" "${baseline_facility_code}"
   start_chaos_load

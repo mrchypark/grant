@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLUSTER_NAME="${CLUSTER_NAME:-certd-ci}"
 NAMESPACE="${NAMESPACE:-certd}"
 IMAGE_NAME="${IMAGE_NAME:-certd:local}"
 TRAILBASE_IMAGE="${TRAILBASE_IMAGE:-trailbase-auth-bridge:local}"
@@ -20,6 +21,53 @@ need() {
 
 need docker
 need kubectl
+
+cluster_container_name() {
+  printf 'vcluster.cp.%s' "${CLUSTER_NAME}"
+}
+
+import_image_with_ctr() {
+  local image="$1"
+  local container_name
+  local tar_file
+
+  container_name="$(cluster_container_name)"
+  docker inspect "${container_name}" >/dev/null 2>&1 || {
+    echo "missing vcluster container ${container_name}" >&2
+    exit 1
+  }
+
+  tar_file="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.image.XXXXXX")"
+  docker save "${image}" -o "${tar_file}"
+  docker exec -i "${container_name}" ctr -n k8s.io images import - >/dev/null <"${tar_file}"
+  rm -f "${tar_file}"
+}
+
+ensure_runtime_image() {
+  local image="$1"
+  local container_name
+  local -a refs_to_match
+
+  container_name="$(cluster_container_name)"
+  refs_to_match=("${image}")
+  if [[ "${image%%/*}" == "${image}" ]]; then
+    refs_to_match+=("docker.io/library/${image}")
+  fi
+
+  if docker exec "${container_name}" ctr -n k8s.io images ls -q \
+    | grep -F -x -f <(printf '%s\n' "${refs_to_match[@]}") >/dev/null 2>&1; then
+    echo "[vind] image already present in runtime: ${image}"
+    return 0
+  fi
+
+  echo "[vind] importing image into runtime: ${image}"
+  import_image_with_ctr "${image}"
+  docker exec "${container_name}" ctr -n k8s.io images ls -q \
+    | grep -F -x -f <(printf '%s\n' "${refs_to_match[@]}") >/dev/null 2>&1 || {
+    echo "failed to import image into vcluster runtime: ${image}" >&2
+    exit 1
+  }
+}
 
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
 HQL_SECRET_RAFT="${HQL_SECRET_RAFT:-SuperSecureSecret1337}"
@@ -46,6 +94,9 @@ docker image inspect "${TRAILBASE_IMAGE}" >/dev/null 2>&1 || {
   echo "missing image ${TRAILBASE_IMAGE}. run: docker build -f Dockerfile.trailbase-auth-bridge -t ${TRAILBASE_IMAGE} ." >&2
   exit 1
 }
+
+ensure_runtime_image "${IMAGE_NAME}"
+ensure_runtime_image "${TRAILBASE_IMAGE}"
 
 apply_resource() {
   kubectl -n "${NAMESPACE}" apply -f "$1"

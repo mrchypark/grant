@@ -68,7 +68,7 @@ docker image inspect "${LITESTREAM_IMAGE}" >/dev/null 2>&1 || {
 import_image_with_ctr() {
   local image="$1"
   local tar_file
-  tar_file="$(mktemp "/tmp/${CLUSTER_NAME}.image.XXXXXX.tar")"
+  tar_file="$(mktemp "/tmp/${CLUSTER_NAME}.image.XXXXXX")"
   docker save "${image}" -o "${tar_file}"
 
   local nodes
