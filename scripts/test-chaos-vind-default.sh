@@ -50,6 +50,11 @@ require_contains "scripts/ci-chaos-local.sh" 'CI_CLUSTER_BACKEND="${CI_CLUSTER_B
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"'
 # shellcheck disable=SC2016
+require_contains "scripts/ci-chaos-local.sh" 'CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"'
+require_contains "scripts/ci-chaos-local.sh" 'docker builder prune -af >/dev/null || true'
+require_contains "scripts/ci-chaos-local.sh" 'docker image prune -f >/dev/null || true'
+require_contains "scripts/ci-chaos-local.sh" 'log_storage_state'
+# shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"'
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/k3d-e2e.sh"'
@@ -62,8 +67,10 @@ require_not_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/kind
 require_not_contains "scripts/ci-chaos-local.sh" 'need kind'
 
 require_contains ".github/workflows/chaos-local.yml" 'Install vCluster CLI'
+require_contains ".github/workflows/chaos-local.yml" 'Reclaim runner disk'
 require_contains ".github/workflows/chaos-local.yml" 'vcluster version'
 require_contains ".github/workflows/chaos-local.yml" 'CI_CLUSTER_BACKEND: vind'
+require_contains ".github/workflows/chaos-local.yml" 'CI_DOCKER_BUILDER_PRUNE: "1"'
 require_not_contains ".github/workflows/chaos-local.yml" 'Install kind'
 require_not_contains ".github/workflows/chaos-local.yml" 'setup-vind'
 # shellcheck disable=SC2016

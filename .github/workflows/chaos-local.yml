@@ -25,6 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reclaim runner disk
+        run: |
+          echo "[storage] before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af --volumes || true
+          echo "[storage] after cleanup"
+          df -h
+          docker system df || true
+
       - name: Install kubectl
         run: |
           curl -fsSL -o kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
@@ -92,6 +103,7 @@ jobs:
         env:
           CLUSTER_NAME: certd-vind-ci
           CI_CLUSTER_BACKEND: vind
+          CI_DOCKER_BUILDER_PRUNE: "1"
           NAMESPACE: certd
           CERTD_MASTER_KEY: local-dev-master-key
           RESET_CLUSTER: "1"

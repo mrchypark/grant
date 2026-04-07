@@ -13,6 +13,7 @@ RESET_CLUSTER="${RESET_CLUSTER:-1}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
 VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"
+CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -26,6 +27,13 @@ need kubectl
 need curl
 need jq
 need vcluster
+
+log_storage_state() {
+  echo "[storage] filesystem usage"
+  df -h || true
+  echo "[storage] docker usage"
+  docker system df || true
+}
 
 if [[ "${CI_CLUSTER_BACKEND}" != "vind" ]]; then
   echo "unsupported CI_CLUSTER_BACKEND=${CI_CLUSTER_BACKEND}; only vind is supported" >&2
@@ -41,8 +49,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+log_storage_state
 docker buildx build --load --network "${BUILD_NETWORK}" -t "${IMAGE_NAME}" .
 docker buildx build --load -f Dockerfile.trailbase-auth-bridge --network "${BUILD_NETWORK}" -t "${TRAILBASE_IMAGE}" .
+if [[ "${CI_DOCKER_BUILDER_PRUNE}" == "1" ]]; then
+  echo "[storage] pruning buildkit cache before cluster bootstrap"
+  docker builder prune -af >/dev/null || true
+  docker image prune -f >/dev/null || true
+fi
+log_storage_state
 
 CLUSTER_NAME="${CLUSTER_NAME}" \
 RESET_CLUSTER="${RESET_CLUSTER}" \
