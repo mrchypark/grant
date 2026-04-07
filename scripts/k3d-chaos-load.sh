@@ -67,6 +67,14 @@ wait_for_http() {
   return 1
 }
 
+stop_port_forward() {
+  local pid="$1"
+  if [[ -n "${pid}" ]]; then
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" 2>/dev/null || true
+  fi
+}
+
 start_port_forward() {
   local service_name="$1"
   local local_port="$2"
@@ -76,12 +84,17 @@ start_port_forward() {
   local current_pid="${!pid_var_name:-}"
 
   if [[ -n "${current_pid}" ]]; then
-    kill "${current_pid}" >/dev/null 2>&1 || true
+    stop_port_forward "${current_pid}"
   fi
 
+  : >"${log_file}"
   kubectl -n "${NAMESPACE}" port-forward "svc/${service_name}" "${local_port}:${target_port}" >"${log_file}" 2>&1 &
   printf -v "${pid_var_name}" '%s' "$!"
-  wait_for_http "http://127.0.0.1:${local_port}/healthz"
+  if ! wait_for_http "http://127.0.0.1:${local_port}/healthz"; then
+    echo "[workload] port-forward failed for svc/${service_name}" >&2
+    tail -n 50 "${log_file}" >&2 || true
+    return 1
+  fi
 }
 
 ensure_target_api() {

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-certd-ci}"
-VIND_DRIVER="${VIND_DRIVER:-docker}"
 RESET_CLUSTER="${RESET_CLUSTER:-0}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
+VIND_UNTAINT_CONTROL_PLANE_NODES="${VIND_UNTAINT_CONTROL_PLANE_NODES:-1}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -68,7 +68,7 @@ EOF
 }
 
 use_driver() {
-  vcluster use driver "${VIND_DRIVER}" >/dev/null
+  vcluster use driver docker >/dev/null
 }
 
 cluster_exists() {
@@ -85,13 +85,32 @@ delete_cluster() {
 
 connect_cluster() {
   use_driver
-  vcluster connect "${CLUSTER_NAME}" --driver "${VIND_DRIVER}" >/dev/null
+  CLUSTER_NAME="${CLUSTER_NAME}" \
+  VIND_UNTAINT_CONTROL_PLANE_NODES="${VIND_UNTAINT_CONTROL_PLANE_NODES}" \
+    bash "$(dirname "${BASH_SOURCE[0]}")/vind-exec.sh" bash -lc '
+      kubectl wait --for=condition=Ready nodes --all --timeout=120s >/dev/null
+      echo "[vind] node taints before normalization:" >&2
+      kubectl get nodes -o jsonpath='"'"'{range .items[*]}{.metadata.name}{"\t"}{range .spec.taints[*]}{.key}{"="}{.effect}{","}{end}{"\n"}{end}'"'"' 2>/dev/null >&2 || true
+      if [[ "${VIND_UNTAINT_CONTROL_PLANE_NODES:-1}" == "1" ]]; then
+        kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- >/dev/null 2>&1 || true
+        kubectl taint nodes --all node-role.kubernetes.io/master:NoSchedule- >/dev/null 2>&1 || true
+        if kubectl get nodes -o jsonpath='"'"'{range .items[*]}{range .spec.taints[*]}{.key}{"="}{.effect}{"\n"}{end}{end}'"'"' \
+          | grep -Eq "^node-role\\.kubernetes\\.io/(control-plane|master)=NoSchedule$"; then
+          echo "vind cluster nodes remain NoSchedule-tainted after normalization" >&2
+          kubectl get nodes -o jsonpath='"'"'{range .items[*]}{.metadata.name}{"\t"}{range .spec.taints[*]}{.key}{"="}{.effect}{","}{end}{"\n"}{end}'"'"' >&2 || true
+          exit 1
+        fi
+      fi
+      echo "[vind] node taints after normalization:" >&2
+      kubectl get nodes -o jsonpath='"'"'{range .items[*]}{.metadata.name}{"\t"}{range .spec.taints[*]}{.key}{"="}{.effect}{","}{end}{"\n"}{end}'"'"' 2>/dev/null >&2 || true
+      kubectl config current-context
+    '
 }
 
 create_cluster() {
   use_driver
 
-  vcluster create "${CLUSTER_NAME}" --driver "${VIND_DRIVER}" >/dev/null
+  vcluster create "${CLUSTER_NAME}" --driver docker --connect=false >/dev/null
 }
 
 ensure_context() {
@@ -105,10 +124,8 @@ ensure_context() {
     connect_cluster
   else
     create_cluster
+    connect_cluster
   fi
-
-  kubectl wait --for=condition=Ready nodes --all --timeout=120s >/dev/null
-  kubectl config current-context
 }
 
 main() {

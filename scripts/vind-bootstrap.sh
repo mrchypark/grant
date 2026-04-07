@@ -9,6 +9,7 @@ KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/k8s}"
 VIND_SKIP_MINIO="${VIND_SKIP_MINIO:-0}"
 VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-persistent}"
 KUBECONTEXT="${KUBECONTEXT:-}"
+VIND_EXEC_ACTIVE="${VIND_EXEC_ACTIVE:-0}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -20,11 +21,6 @@ need() {
 need docker
 need kubectl
 
-if [[ -z "${KUBECONTEXT}" ]]; then
-  echo "missing KUBECONTEXT" >&2
-  exit 1
-fi
-
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
 HQL_SECRET_RAFT="${HQL_SECRET_RAFT:-SuperSecureSecret1337}"
 HQL_SECRET_API="${HQL_SECRET_API:-AnotherSecureSecret42}"
@@ -34,7 +30,12 @@ ENC_KEY_ACTIVE="${ENC_KEY_ACTIVE:-devkey01}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 
-kubectl config use-context "${KUBECONTEXT}" >/dev/null
+if [[ -n "${KUBECONTEXT}" ]]; then
+  kubectl config use-context "${KUBECONTEXT}" >/dev/null
+elif [[ "${VIND_EXEC_ACTIVE}" != "1" ]]; then
+  echo "missing KUBECONTEXT; run via scripts/vind-exec.sh or pass KUBECONTEXT explicitly" >&2
+  exit 1
+fi
 
 docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1 || {
   echo "missing image ${IMAGE_NAME}. run: docker build -t ${IMAGE_NAME} ." >&2
@@ -53,6 +54,9 @@ apply_resource() {
 dump_minio_debug() {
   echo "[minio-debug] storage mode=${VIND_MINIO_STORAGE_MODE}" >&2
   kubectl get storageclass >&2 || true
+  kubectl get nodes -o wide >&2 || true
+  kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers >&2 || true
+  kubectl describe nodes >&2 || true
   kubectl -n "${NAMESPACE}" get pods,pvc >&2 || true
   kubectl -n "${NAMESPACE}" describe statefulset/minio >&2 || true
   kubectl -n "${NAMESPACE}" describe pod -l app=minio >&2 || true
@@ -168,7 +172,7 @@ done
 cat <<EOF
 vind bootstrap completed.
 
-Context: ${KUBECONTEXT}
+Context: ${KUBECONTEXT:-$(kubectl config current-context)}
 Namespace: ${NAMESPACE}
 Image: ${IMAGE_NAME}
 TrailBase Image: ${TRAILBASE_IMAGE}

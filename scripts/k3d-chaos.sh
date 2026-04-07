@@ -112,7 +112,15 @@ wait_for_http() {
     sleep "${delay}"
   done
   echo "timed out waiting for ${url}" >&2
-  exit 1
+  return 1
+}
+
+stop_port_forward() {
+  local pid="$1"
+  if [[ -n "${pid}" ]]; then
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" 2>/dev/null || true
+  fi
 }
 
 retry_json_query() {
@@ -221,22 +229,32 @@ start_chaos_load() {
 
 start_port_forward() {
   if [[ -n "${pf_pid}" ]]; then
-    kill "${pf_pid}" >/dev/null 2>&1 || true
+    stop_port_forward "${pf_pid}"
     pf_pid=""
   fi
+  : >"${port_forward_log}"
   kubectl -n "${NAMESPACE}" port-forward svc/certd "${LOCAL_PORT}:80" >"${port_forward_log}" 2>&1 &
   pf_pid=$!
-  wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz"
+  if ! wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz"; then
+    echo "[chaos] voter port-forward failed" >&2
+    tail -n 50 "${port_forward_log}" >&2 || true
+    return 1
+  fi
 }
 
 start_learner_port_forward() {
   if [[ -n "${learner_pf_pid}" ]]; then
-    kill "${learner_pf_pid}" >/dev/null 2>&1 || true
+    stop_port_forward "${learner_pf_pid}"
     learner_pf_pid=""
   fi
+  : >"${learner_port_forward_log}"
   kubectl -n "${NAMESPACE}" port-forward "svc/${LEARNER_DEPLOYMENT}" "${LEARNER_LOCAL_PORT}:8080" >"${learner_port_forward_log}" 2>&1 &
   learner_pf_pid=$!
-  wait_for_http "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz"
+  if ! wait_for_http "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz"; then
+    echo "[chaos] learner port-forward failed" >&2
+    tail -n 50 "${learner_port_forward_log}" >&2 || true
+    return 1
+  fi
 }
 
 fetch_voter_metrics() {
@@ -694,25 +712,31 @@ scenario_learner_voter_partition() {
   done < <(voter_pod_ips)
 
   set +e
-  retry_capture 10 1 learner_service_probe "/api/v1/me" "${auth_token}" "${active_org}" >/dev/null
-  [[ $? -eq 0 ]] || failure=1
-  retry_capture 10 1 learner_service_probe "/api/v1/plants" "${auth_token}" "${active_org}" >/dev/null
-  [[ $? -eq 0 ]] || failure=1
-  retry_capture 10 1 learner_service_probe "/api/v1/plants/${facility_code}" "${auth_token}" "${active_org}" >/dev/null
-  [[ $? -eq 0 ]] || failure=1
+  if ! retry_capture 10 1 learner_service_probe "/api/v1/me" "${auth_token}" "${active_org}" >/dev/null; then
+    failure=1
+  fi
+  if ! retry_capture 10 1 learner_service_probe "/api/v1/plants" "${auth_token}" "${active_org}" >/dev/null; then
+    failure=1
+  fi
+  if ! retry_capture 10 1 learner_service_probe "/api/v1/plants/${facility_code}" "${auth_token}" "${active_org}" >/dev/null; then
+    failure=1
+  fi
 
-  wait_for_expected_failure \
+  if ! wait_for_expected_failure \
     "learner current-user strong read while quorum is unreachable" 10 1 \
-    learner_service_probe "/api/v1/me?consistency=strong" "${auth_token}" "${active_org}"
-  [[ $? -eq 0 ]] || failure=1
-  wait_for_expected_failure \
+    learner_service_probe "/api/v1/me?consistency=strong" "${auth_token}" "${active_org}"; then
+    failure=1
+  fi
+  if ! wait_for_expected_failure \
     "learner plant list strong read while quorum is unreachable" 10 1 \
-    learner_service_probe "/api/v1/plants?consistency=strong" "${auth_token}" "${active_org}"
-  [[ $? -eq 0 ]] || failure=1
-  wait_for_expected_failure \
+    learner_service_probe "/api/v1/plants?consistency=strong" "${auth_token}" "${active_org}"; then
+    failure=1
+  fi
+  if ! wait_for_expected_failure \
     "learner plant inspect strong read while quorum is unreachable" 10 1 \
-    learner_service_probe "/api/v1/plants/${facility_code}?consistency=strong" "${auth_token}" "${active_org}"
-  [[ $? -eq 0 ]] || failure=1
+    learner_service_probe "/api/v1/plants/${facility_code}?consistency=strong" "${auth_token}" "${active_org}"; then
+    failure=1
+  fi
   set -e
 
   if [[ "${cleanup_needed}" -eq 1 ]]; then

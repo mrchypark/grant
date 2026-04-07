@@ -9,6 +9,26 @@ fail() {
   exit 1
 }
 
+expect_direct_invocation_failure() {
+  local script="$1"
+  local expected_text="$2"
+  local err_file
+  err_file="$(mktemp)"
+
+  if bash "${script}" >/dev/null 2>"${err_file}"; then
+    rm -f "${err_file}"
+    fail "${script} unexpectedly succeeded without explicit vcluster context"
+  fi
+
+  if ! grep -Fq -- "${expected_text}" "${err_file}"; then
+    cat "${err_file}" >&2
+    rm -f "${err_file}"
+    fail "${script} did not fail with expected message: ${expected_text}"
+  fi
+
+  rm -f "${err_file}"
+}
+
 require_contains() {
   local file="$1"
   local pattern="$2"
@@ -30,9 +50,11 @@ require_contains "scripts/ci-chaos-local.sh" 'CI_CLUSTER_BACKEND="${CI_CLUSTER_B
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"'
 # shellcheck disable=SC2016
-require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"'
+require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"'
 # shellcheck disable=SC2016
-require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-chaos.sh"'
+require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/k3d-e2e.sh"'
+# shellcheck disable=SC2016
+require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-chaos.sh"'
 # shellcheck disable=SC2016
 require_not_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/kind-bootstrap.sh"'
 # shellcheck disable=SC2016
@@ -52,6 +74,19 @@ require_contains "scripts/k3d-chaos-load.sh" '--max-time "${HTTP_CURL_TIMEOUT_SE
 require_contains "scripts/k3d-chaos-load.sh" '--connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}"'
 require_contains "scripts/vind-bootstrap.sh" 'minio-statefulset-ephemeral.yaml'
 require_contains "scripts/vind-bootstrap.sh" 'dump_minio_debug'
+require_contains "scripts/vind-bootstrap.sh" 'kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers'
+# shellcheck disable=SC2016
+require_contains "scripts/vind-cluster.sh" 'VIND_UNTAINT_CONTROL_PLANE_NODES="${VIND_UNTAINT_CONTROL_PLANE_NODES:-1}"'
+require_contains "scripts/vind-cluster.sh" 'kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-'
+require_contains "scripts/vind-cluster.sh" 'kubectl taint nodes --all node-role.kubernetes.io/master:NoSchedule-'
+require_contains "scripts/vind-cluster.sh" 'remain NoSchedule-tainted after normalization'
+# shellcheck disable=SC2016
+require_contains "scripts/vind-cluster.sh" 'vcluster create "${CLUSTER_NAME}" --driver docker --connect=false'
+require_contains "scripts/vind-exec.sh" '--background-proxy=false'
+require_contains "scripts/vind-exec.sh" 'VIND_EXEC_ACTIVE=1'
+
+expect_direct_invocation_failure "scripts/vind-bootstrap.sh" 'run via scripts/vind-exec.sh or pass KUBECONTEXT explicitly'
+expect_direct_invocation_failure "scripts/vind-chaos.sh" 'run via scripts/vind-exec.sh or pass KUBE_CONTEXT explicitly'
 
 if [[ -f ".github/workflows/chaos-vind.yml" ]]; then
   fail ".github/workflows/chaos-vind.yml should be removed once vind is the default workflow"

@@ -44,28 +44,28 @@ trap cleanup EXIT
 docker buildx build --load --network "${BUILD_NETWORK}" -t "${IMAGE_NAME}" .
 docker buildx build --load -f Dockerfile.trailbase-auth-bridge --network "${BUILD_NETWORK}" -t "${TRAILBASE_IMAGE}" .
 
-kubectl_context="$(
-  CLUSTER_NAME="${CLUSTER_NAME}" \
-  RESET_CLUSTER="${RESET_CLUSTER}" \
-  VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX}" \
-    bash "${ROOT_DIR}/scripts/vind-cluster.sh" ensure-context
-)"
+CLUSTER_NAME="${CLUSTER_NAME}" \
+RESET_CLUSTER="${RESET_CLUSTER}" \
+VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX}" \
+  bash "${ROOT_DIR}/scripts/vind-cluster.sh" ensure-context
 
-KUBECONTEXT="${kubectl_context}" \
+CLUSTER_NAME="${CLUSTER_NAME}" \
+env \
 NAMESPACE="${NAMESPACE}" \
 IMAGE_NAME="${IMAGE_NAME}" \
 TRAILBASE_IMAGE="${TRAILBASE_IMAGE}" \
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
 VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE}" \
-  bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"
+  bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"
 
-kubectl config use-context "${kubectl_context}" >/dev/null
-
+CLUSTER_NAME="${CLUSTER_NAME}" \
+env \
 NAMESPACE="${NAMESPACE}" \
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
-  bash "${ROOT_DIR}/scripts/k3d-e2e.sh"
+  bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/k3d-e2e.sh"
 
-KUBE_CONTEXT="${kubectl_context}" \
+CLUSTER_NAME="${CLUSTER_NAME}" \
+env \
 NAMESPACE="${NAMESPACE}" \
 CERTD_CHAOS_WITH_LOAD="${CERTD_CHAOS_WITH_LOAD:-1}" \
-  bash "${ROOT_DIR}/scripts/vind-chaos.sh"
+  bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-chaos.sh"
