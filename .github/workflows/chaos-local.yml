@@ -1,0 +1,60 @@
+name: chaos-local
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/chaos-local.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "Dockerfile.trailbase-auth-bridge"
+      - "README.md"
+      - "crates/**"
+      - "deploy/**"
+      - "scripts/**"
+
+concurrency:
+  group: chaos-local-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        run: |
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Verify toolchain
+        run: |
+          docker version
+          kubectl version --client
+          kind version
+          jq --version
+
+      - name: Run local chaos regression
+        env:
+          CLUSTER_NAME: certd-ci
+          NAMESPACE: certd
+          CERTD_MASTER_KEY: local-dev-master-key
+          RESET_CLUSTER: "1"
+          KEEP_CLUSTER: "0"
+          CERTD_CHAOS_WITH_LOAD: "1"
+        run: bash scripts/ci-chaos-local.sh
