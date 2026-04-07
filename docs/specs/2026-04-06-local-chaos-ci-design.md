@@ -9,6 +9,7 @@ Superseded on 2026-04-07: after a full local `vind` bootstrap + e2e + reduced-ch
 - `vind` has now completed the reduced local chaos subset in this repo: bootstrap, e2e, follower delete, leader delete, learner restart, TrailBase outage, TTL expiry, and recovery.
 - `vind` removes `kind load docker-image` from the shared path and keeps the same Docker-backed image visibility model locally and in CI.
 - The main runtime-specific risk is `br_netfilter` on Colima, which is now handled as an explicit `vind` preflight concern rather than a reason to maintain a second backend.
+- The local/CI bootstrap path uses an ephemeral MinIO manifest, because MinIO is only a disposable S3 emulator for single-run backup verification in this regression path; production persistence remains unchanged.
 
 ## Vind feasibility notes
 

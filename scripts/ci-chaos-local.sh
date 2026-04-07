@@ -12,6 +12,7 @@ BUILD_NETWORK="${BUILD_NETWORK:-default}"
 RESET_CLUSTER="${RESET_CLUSTER:-1}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
+VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -55,6 +56,7 @@ NAMESPACE="${NAMESPACE}" \
 IMAGE_NAME="${IMAGE_NAME}" \
 TRAILBASE_IMAGE="${TRAILBASE_IMAGE}" \
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
+VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE}" \
   bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"
 
 kubectl config use-context "${kubectl_context}" >/dev/null

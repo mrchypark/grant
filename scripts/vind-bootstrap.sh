@@ -7,6 +7,7 @@ IMAGE_NAME="${IMAGE_NAME:-certd:local}"
 TRAILBASE_IMAGE="${TRAILBASE_IMAGE:-trailbase-auth-bridge:local}"
 KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/k8s}"
 VIND_SKIP_MINIO="${VIND_SKIP_MINIO:-0}"
+VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-persistent}"
 KUBECONTEXT="${KUBECONTEXT:-}"
 
 need() {
@@ -47,6 +48,16 @@ docker image inspect "${TRAILBASE_IMAGE}" >/dev/null 2>&1 || {
 
 apply_resource() {
   kubectl -n "${NAMESPACE}" apply -f "$1"
+}
+
+dump_minio_debug() {
+  echo "[minio-debug] storage mode=${VIND_MINIO_STORAGE_MODE}" >&2
+  kubectl get storageclass >&2 || true
+  kubectl -n "${NAMESPACE}" get pods,pvc >&2 || true
+  kubectl -n "${NAMESPACE}" describe statefulset/minio >&2 || true
+  kubectl -n "${NAMESPACE}" describe pod -l app=minio >&2 || true
+  kubectl -n "${NAMESPACE}" logs -l app=minio --all-containers --tail=200 >&2 || true
+  kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 40 >&2 || true
 }
 
 wait_for_resource() {
@@ -91,15 +102,22 @@ kubectl -n "${NAMESPACE}" create secret generic minio-secrets \
 apply_resource "${KUSTOMIZE_DIR}/namespace.yaml"
 
 if [[ "${VIND_SKIP_MINIO}" != "1" ]]; then
+  minio_statefulset_manifest="${KUSTOMIZE_DIR}/minio-statefulset.yaml"
+  if [[ "${VIND_MINIO_STORAGE_MODE}" == "ephemeral" ]]; then
+    minio_statefulset_manifest="${KUSTOMIZE_DIR}/minio-statefulset-ephemeral.yaml"
+  fi
   apply_resource "${KUSTOMIZE_DIR}/minio-headless-service.yaml"
   apply_resource "${KUSTOMIZE_DIR}/minio-service.yaml"
   apply_resource "${KUSTOMIZE_DIR}/minio-pdb.yaml"
-  apply_resource "${KUSTOMIZE_DIR}/minio-statefulset.yaml"
+  apply_resource "${minio_statefulset_manifest}"
 fi
 
 if [[ "${VIND_SKIP_MINIO}" != "1" ]]; then
   wait_for_resource statefulset minio
-  kubectl -n "${NAMESPACE}" rollout status statefulset/minio --timeout=15m
+  if ! kubectl -n "${NAMESPACE}" rollout status statefulset/minio --timeout=15m; then
+    dump_minio_debug
+    exit 1
+  fi
 
   kubectl -n "${NAMESPACE}" delete job minio-bootstrap --ignore-not-found
   for _ in $(seq 1 60); do

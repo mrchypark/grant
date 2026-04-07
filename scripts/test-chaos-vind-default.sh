@@ -28,6 +28,8 @@ require_not_contains() {
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'CI_CLUSTER_BACKEND="${CI_CLUSTER_BACKEND:-vind}"'
 # shellcheck disable=SC2016
+require_contains "scripts/ci-chaos-local.sh" 'VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"'
+# shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"'
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-chaos.sh"'
@@ -48,6 +50,8 @@ require_contains "scripts/k3d-chaos-load.sh" 'HTTP_CURL_TIMEOUT_SECONDS="${HTTP_
 require_contains "scripts/k3d-chaos-load.sh" '--max-time "${HTTP_CURL_TIMEOUT_SECONDS}"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos-load.sh" '--connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}"'
+require_contains "scripts/vind-bootstrap.sh" 'minio-statefulset-ephemeral.yaml'
+require_contains "scripts/vind-bootstrap.sh" 'dump_minio_debug'
 
 if [[ -f ".github/workflows/chaos-vind.yml" ]]; then
   fail ".github/workflows/chaos-vind.yml should be removed once vind is the default workflow"
