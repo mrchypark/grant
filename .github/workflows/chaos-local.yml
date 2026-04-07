@@ -31,11 +31,27 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/kubectl
 
-      - name: Install kind
+      - name: Install vCluster CLI
         run: |
-          curl -fsSL -o kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
-          chmod +x kind
-          sudo mv kind /usr/local/bin/kind
+          VCLUSTER_VERSION="0.33.1"
+          ARCH="$(uname -m)"
+          case "${ARCH}" in
+            x86_64) ARCH="amd64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            *)
+              echo "unsupported architecture: ${ARCH}" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o vcluster "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"
+          chmod +x vcluster
+          sudo mv vcluster /usr/local/bin/vcluster
+
+      - name: Preload kernel modules
+        run: |
+          sudo modprobe br_netfilter
+          sudo modprobe bridge || true
+          sudo modprobe overlay || true
 
       - name: Install jq
         run: |
@@ -46,12 +62,13 @@ jobs:
         run: |
           docker version
           kubectl version --client
-          kind version
+          vcluster version
           jq --version
 
       - name: Run local chaos regression
         env:
-          CLUSTER_NAME: certd-ci
+          CLUSTER_NAME: certd-vind-ci
+          CI_CLUSTER_BACKEND: vind
           NAMESPACE: certd
           CERTD_MASTER_KEY: local-dev-master-key
           RESET_CLUSTER: "1"

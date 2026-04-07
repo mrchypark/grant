@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAMESPACE="${NAMESPACE:-certd}"
 TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL:-trailbase-user@example.com}"
 TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD:-secret}"
@@ -16,8 +15,10 @@ WORKLOAD_VOTER_LOCAL_PORT="${WORKLOAD_VOTER_LOCAL_PORT:-18090}"
 WORKLOAD_LEARNER_LOCAL_PORT="${WORKLOAD_LEARNER_LOCAL_PORT:-18091}"
 WORKLOAD_VOTER_SERVICE="${WORKLOAD_VOTER_SERVICE:-certd}"
 WORKLOAD_LEARNER_SERVICE="${WORKLOAD_LEARNER_SERVICE:-certd-learner-1}"
-WORKLOAD_LOG_FILE="${WORKLOAD_LOG_FILE:-$(mktemp "${TMPDIR:-/tmp}/k3d-chaos-load.XXXXXX.jsonl")}"
+WORKLOAD_LOG_FILE="${WORKLOAD_LOG_FILE:-$(mktemp "${TMPDIR:-/tmp}/k3d-chaos-load.XXXXXX")}"
 WORKLOAD_PHASE_FILE="${WORKLOAD_PHASE_FILE:-}"
+HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"
+HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"
 SANITIZED_RUN_ID="${WORKLOAD_RUN_ID//[^[:alnum:]]/}"
 
 need() {
@@ -55,7 +56,10 @@ wait_for_http() {
   local attempts="${2:-60}"
   local delay="${3:-1}"
   for _ in $(seq 1 "${attempts}"); do
-    if curl -fsS "${url}" >/dev/null 2>&1; then
+    if curl -fsS \
+      --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+      --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
+      "${url}" >/dev/null 2>&1; then
       return 0
     fi
     sleep "${delay}"
@@ -84,12 +88,18 @@ ensure_target_api() {
   local target="$1"
   case "${target}" in
     voter)
-      if ! curl -fsS "http://127.0.0.1:${WORKLOAD_VOTER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+      if ! curl -fsS \
+        --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+        --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
+        "http://127.0.0.1:${WORKLOAD_VOTER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
         start_port_forward "${WORKLOAD_VOTER_SERVICE}" "${WORKLOAD_VOTER_LOCAL_PORT}" 80 "${voter_pf_log}" voter_pf_pid
       fi
       ;;
     learner)
-      if ! curl -fsS "http://127.0.0.1:${WORKLOAD_LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+      if ! curl -fsS \
+        --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+        --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
+        "http://127.0.0.1:${WORKLOAD_LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
         start_port_forward "${WORKLOAD_LEARNER_SERVICE}" "${WORKLOAD_LEARNER_LOCAL_PORT}" 8080 "${learner_pf_log}" learner_pf_pid
       fi
       ;;
@@ -256,6 +266,8 @@ request_api() {
   set +e
   curl_meta="$(
     curl -sS -o "${body_file}" -w '%{http_code} %{time_total}' \
+      --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+      --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
       -X "${method}" "${base_url}${endpoint}" "$@" 2>"${err_file}"
   )"
   curl_status=$?
@@ -266,6 +278,8 @@ request_api() {
     set +e
     curl_meta="$(
       curl -sS -o "${body_file}" -w '%{http_code} %{time_total}' \
+        --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+        --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
         -X "${method}" "${base_url}${endpoint}" "$@" 2>"${err_file}"
     )"
     curl_status=$?
@@ -322,6 +336,8 @@ request_api_expect_error() {
   set +e
   curl_meta="$(
     curl -sS -o "${body_file}" -w '%{http_code} %{time_total}' \
+      --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+      --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
       -X "${method}" "${base_url}${endpoint}" "$@" 2>"${err_file}"
   )"
   curl_status=$?
@@ -332,6 +348,8 @@ request_api_expect_error() {
     set +e
     curl_meta="$(
       curl -sS -o "${body_file}" -w '%{http_code} %{time_total}' \
+        --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
+        --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
         -X "${method}" "${base_url}${endpoint}" "$@" 2>"${err_file}"
     )"
     curl_status=$?

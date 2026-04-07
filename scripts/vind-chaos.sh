@@ -18,7 +18,8 @@ need() {
 need kubectl
 
 if [[ -z "${KUBE_CONTEXT}" ]]; then
-  KUBE_CONTEXT="$(kubectl config current-context)"
+  echo "missing KUBE_CONTEXT" >&2
+  exit 1
 fi
 
 kubectl config use-context "${KUBE_CONTEXT}" >/dev/null

@@ -20,7 +20,8 @@ need docker
 need kubectl
 
 if [[ -z "${KUBECONTEXT}" ]]; then
-  KUBECONTEXT="$(kubectl config current-context)"
+  echo "missing KUBECONTEXT" >&2
+  exit 1
 fi
 
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
@@ -111,42 +112,10 @@ if [[ "${VIND_SKIP_MINIO}" != "1" ]]; then
     echo "timed out waiting for minio-bootstrap job deletion" >&2
     exit 1
   fi
-  kubectl -n "${NAMESPACE}" apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: minio-bootstrap
-  namespace: ${NAMESPACE}
-spec:
-  backoffLimit: 6
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: mc
-          image: minio/mc:latest
-          env:
-            - name: MINIO_ROOT_USER
-              valueFrom:
-                secretKeyRef:
-                  name: minio-secrets
-                  key: MINIO_ROOT_USER
-            - name: MINIO_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: minio-secrets
-                  key: MINIO_ROOT_PASSWORD
-          command: ["/bin/sh", "-lc"]
-          args:
-            - |
-              set -e
-              until mc alias set local http://minio.${NAMESPACE}.svc.cluster.local:9000 "\$MINIO_ROOT_USER" "\$MINIO_ROOT_PASSWORD"; do
-                sleep 2
-              done
-              mc mb -p local/cert-artifacts || true
-              mc mb -p local/cert-backups || true
-              mc mb -p local/trailbase-backups || true
-EOF
+  minio_job_file="$(mktemp "${TMPDIR:-/tmp}/minio-bootstrap.XXXXXX")"
+  sed "s/__NAMESPACE__/${NAMESPACE}/g" "${KUSTOMIZE_DIR}/minio-bootstrap-job.yaml" >"${minio_job_file}"
+  kubectl -n "${NAMESPACE}" apply -f "${minio_job_file}"
+  rm -f "${minio_job_file}"
 
   kubectl -n "${NAMESPACE}" wait --for=condition=complete job/minio-bootstrap --timeout=10m
 else
