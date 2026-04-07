@@ -64,6 +64,15 @@ dump_minio_debug() {
   kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 40 >&2 || true
 }
 
+dump_trailbase_debug() {
+  echo "[trailbase-debug] deployment state" >&2
+  kubectl -n "${NAMESPACE}" get deploy,pods >&2 || true
+  kubectl -n "${NAMESPACE}" describe deployment/trailbase >&2 || true
+  kubectl -n "${NAMESPACE}" describe pod -l app=trailbase >&2 || true
+  kubectl -n "${NAMESPACE}" logs -l app=trailbase --all-containers --tail=200 >&2 || true
+  kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 60 >&2 || true
+}
+
 wait_for_resource() {
   local kind_name="$1"
   local name="$2"
@@ -148,7 +157,10 @@ apply_resource "${KUSTOMIZE_DIR}/trailbase-configmap.yaml"
 apply_resource "${KUSTOMIZE_DIR}/trailbase-service.yaml"
 apply_resource "${KUSTOMIZE_DIR}/trailbase-deployment.yaml"
 wait_for_resource deployment trailbase
-kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m
+if ! kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m; then
+  dump_trailbase_debug
+  exit 1
+fi
 
 apply_resource "${KUSTOMIZE_DIR}/app-configmap.yaml"
 apply_resource "${KUSTOMIZE_DIR}/app-headless-service.yaml"
