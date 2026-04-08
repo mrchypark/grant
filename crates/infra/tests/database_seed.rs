@@ -258,3 +258,73 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
     assert_eq!(binding.role_id, "role-system-bootstrap-owner");
     assert_eq!(binding.state, "active");
 }
+
+#[tokio::test]
+async fn certificate_gateway_rows_round_trip() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+
+    let cert = db
+        .save_certificate(
+            "conalog-account",
+            Some("2768603291"),
+            "Test Certificate",
+            "encrypted-blob",
+            b"wrapped-dek",
+            "kms-key-v1",
+        )
+        .await
+        .expect("save certificate");
+    assert_eq!(cert.kms_key_id, "kms-key-v1");
+    assert_eq!(cert.wrapped_dek, b"wrapped-dek");
+
+    let challenge = db
+        .create_cert_gateway_challenge(
+            "conalog-account",
+            "ephemeral",
+            "nonce-1",
+            "payload-hash-1",
+            Some("FAC-001"),
+            "2099-01-01T00:00:00Z",
+            "conalog-account",
+        )
+        .await
+        .expect("create challenge");
+    assert_eq!(challenge.mode, "ephemeral");
+    assert_eq!(challenge.consumed_at, None);
+
+    let consumed = db
+        .consume_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("consume challenge");
+    assert!(consumed.consumed_at.is_some());
+
+    let token = db
+        .issue_crawl_task_token(
+            "conalog-account",
+            Some(&cert.id),
+            "token-hash-1",
+            "{\"facilityCode\":\"FAC-001\"}",
+            "2099-01-01T00:01:00Z",
+            "conalog-account",
+        )
+        .await
+        .expect("issue crawl task token");
+    assert_eq!(token.used_at, None);
+
+    let consumed_token = db
+        .consume_crawl_task_token("token-hash-1")
+        .await
+        .expect("consume crawl task token");
+    assert!(consumed_token.used_at.is_some());
+    assert_eq!(
+        consumed_token.certificate_id.as_deref(),
+        Some(cert.id.as_str())
+    );
+}

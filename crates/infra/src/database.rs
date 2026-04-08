@@ -3,6 +3,7 @@ use crate::{
     runtime::{HiqliteRuntime, Readiness},
 };
 use anyhow::{Context, Result, anyhow};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use domain::{
     Agreement, DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization,
@@ -34,8 +35,37 @@ pub struct StoredCertificate {
     pub business_no: Option<String>,
     pub common_name: String,
     pub encrypted_blob: String,
+    pub wrapped_dek: Vec<u8>,
+    pub kms_key_id: String,
     pub active: i64,
     pub last_used_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CertGatewayChallenge {
+    pub id: String,
+    pub organization_id: String,
+    pub mode: String,
+    pub nonce: String,
+    pub payload_hash: String,
+    pub facility_code: Option<String>,
+    pub expires_at: String,
+    pub consumed_at: Option<String>,
+    pub created_by_user_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrawlTaskToken {
+    pub id: String,
+    pub organization_id: String,
+    pub certificate_id: Option<String>,
+    pub token_hash: String,
+    pub scope_json: String,
+    pub expires_at: String,
+    pub used_at: Option<String>,
+    pub created_by_user_id: String,
     pub created_at: String,
 }
 
@@ -82,6 +112,20 @@ struct CountSumRow {
 struct CountSumIntRow {
     count: i64,
     total: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredCertificateRow {
+    id: String,
+    organization_id: String,
+    business_no: Option<String>,
+    common_name: String,
+    encrypted_blob: String,
+    wrapped_dek_b64: String,
+    kms_key_id: String,
+    active: i64,
+    last_used_at: Option<String>,
+    created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +308,33 @@ struct RecRow {
     virtual_account: Option<String>,
     bank_name: Option<String>,
     status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CertGatewayChallengeRow {
+    id: String,
+    organization_id: String,
+    mode: String,
+    nonce: String,
+    payload_hash: String,
+    facility_code: Option<String>,
+    expires_at: String,
+    consumed_at: Option<String>,
+    created_by_user_id: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct CrawlTaskTokenRow {
+    id: String,
+    organization_id: String,
+    certificate_id: Option<String>,
+    token_hash: String,
+    scope_json: String,
+    expires_at: String,
+    used_at: Option<String>,
+    created_by_user_id: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -624,12 +695,43 @@ impl Database {
                     organization_id TEXT NOT NULL,
                     common_name TEXT NOT NULL,
                     encrypted_blob TEXT NOT NULL,
+                    wrapped_dek TEXT NOT NULL,
+                    kms_key_id TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
                     last_used_at TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_certificates_organization_active
                     ON certificates (organization_id, active, created_at DESC);
+                CREATE TABLE IF NOT EXISTS cert_gateway_challenges (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    nonce TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    facility_code TEXT,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    created_by_user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_cert_gateway_challenges_org_expires
+                    ON cert_gateway_challenges (organization_id, expires_at DESC);
+                CREATE TABLE IF NOT EXISTS crawl_task_tokens (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    certificate_id TEXT,
+                    token_hash TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT,
+                    created_by_user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_crawl_task_tokens_token_hash
+                    ON crawl_task_tokens (token_hash);
+                CREATE INDEX IF NOT EXISTS idx_crawl_task_tokens_org_expires
+                    ON crawl_task_tokens (organization_id, expires_at DESC);
                 CREATE TABLE IF NOT EXISTS plants (
                     id TEXT PRIMARY KEY,
                     facility_code TEXT NOT NULL UNIQUE,
@@ -1598,6 +1700,8 @@ impl Database {
         business_no: Option<&str>,
         common_name: &str,
         encrypted_blob: &str,
+        wrapped_dek: &[u8],
+        kms_key_id: &str,
     ) -> Result<StoredCertificate> {
         self.upsert_organization_identity(organization_id, business_no, common_name)
             .await?;
@@ -1614,13 +1718,15 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, active, last_used_at, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 params!(
                     id.clone(),
                     organization_id.to_owned(),
                     common_name.to_owned(),
                     encrypted_blob.to_owned(),
+                    STANDARD.encode(wrapped_dek),
+                    kms_key_id.to_owned(),
                     1_i64,
                     Option::<String>::None,
                     now
@@ -1654,9 +1760,9 @@ impl Database {
         &self,
         organization_id: &str,
     ) -> Result<StoredCertificate> {
-        let rows: Vec<StoredCertificate> = self
+        let rows: Vec<StoredCertificateRow> = self
             .query_consistent_rows(
-                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.active, c.last_used_at, c.created_at
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
                  FROM certificates c
                  LEFT JOIN organizations o ON o.id = c.organization_id
                  WHERE c.organization_id = $1
@@ -1667,10 +1773,11 @@ impl Database {
             )
             .await
             .context("query active certificate")?;
-        let cert = rows
+        let cert: StoredCertificate = rows
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("certificate not found"))?;
+            .ok_or_else(|| anyhow!("certificate not found"))?
+            .try_into()?;
         self.runtime
             .execute(
                 "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
@@ -1679,6 +1786,136 @@ impl Database {
             .await
             .context("update certificate last_used_at")?;
         Ok(cert)
+    }
+
+    pub async fn create_cert_gateway_challenge(
+        &self,
+        organization_id: &str,
+        mode: &str,
+        nonce: &str,
+        payload_hash: &str,
+        facility_code: Option<&str>,
+        expires_at: &str,
+        created_by_user_id: &str,
+    ) -> Result<CertGatewayChallenge> {
+        let id = Uuid::new_v4().simple().to_string();
+        let created_at = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO cert_gateway_challenges (id, organization_id, mode, nonce, payload_hash, facility_code, expires_at, consumed_at, created_by_user_id, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                params!(
+                    id.clone(),
+                    organization_id.to_owned(),
+                    mode.to_owned(),
+                    nonce.to_owned(),
+                    payload_hash.to_owned(),
+                    facility_code.map(str::to_owned),
+                    expires_at.to_owned(),
+                    Option::<String>::None,
+                    created_by_user_id.to_owned(),
+                    created_at
+                ),
+            )
+            .await
+            .context("insert cert gateway challenge")?;
+        self.load_cert_gateway_challenge(&id).await
+    }
+
+    pub async fn consume_cert_gateway_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Result<CertGatewayChallenge> {
+        self.runtime
+            .execute(
+                "UPDATE cert_gateway_challenges
+                 SET consumed_at = COALESCE(consumed_at, $1)
+                 WHERE id = $2",
+                params!(now_string(), challenge_id.to_owned()),
+            )
+            .await
+            .context("consume cert gateway challenge")?;
+        self.load_cert_gateway_challenge(challenge_id).await
+    }
+
+    pub async fn issue_crawl_task_token(
+        &self,
+        organization_id: &str,
+        certificate_id: Option<&str>,
+        token_hash: &str,
+        scope_json: &str,
+        expires_at: &str,
+        created_by_user_id: &str,
+    ) -> Result<CrawlTaskToken> {
+        let id = Uuid::new_v4().simple().to_string();
+        let created_at = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO crawl_task_tokens (id, organization_id, certificate_id, token_hash, scope_json, expires_at, used_at, created_by_user_id, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                params!(
+                    id.clone(),
+                    organization_id.to_owned(),
+                    certificate_id.map(str::to_owned),
+                    token_hash.to_owned(),
+                    scope_json.to_owned(),
+                    expires_at.to_owned(),
+                    Option::<String>::None,
+                    created_by_user_id.to_owned(),
+                    created_at
+                ),
+            )
+            .await
+            .context("insert crawl task token")?;
+        self.load_crawl_task_token_by_hash(token_hash).await
+    }
+
+    pub async fn consume_crawl_task_token(&self, token_hash: &str) -> Result<CrawlTaskToken> {
+        self.runtime
+            .execute(
+                "UPDATE crawl_task_tokens
+                 SET used_at = COALESCE(used_at, $1)
+                 WHERE token_hash = $2",
+                params!(now_string(), token_hash.to_owned()),
+            )
+            .await
+            .context("consume crawl task token")?;
+        self.load_crawl_task_token_by_hash(token_hash).await
+    }
+
+    async fn load_cert_gateway_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Result<CertGatewayChallenge> {
+        let row: CertGatewayChallengeRow = self
+            .query_row_with(
+                ReadConsistency::Strong,
+                "SELECT id, organization_id, mode, nonce, payload_hash, facility_code, expires_at, consumed_at, created_by_user_id, created_at
+                 FROM cert_gateway_challenges
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(challenge_id.to_owned()),
+                "cert gateway challenge",
+            )
+            .await
+            .context("query cert gateway challenge")?;
+        Ok(row.into())
+    }
+
+    async fn load_crawl_task_token_by_hash(&self, token_hash: &str) -> Result<CrawlTaskToken> {
+        let row: CrawlTaskTokenRow = self
+            .query_row_with(
+                ReadConsistency::Strong,
+                "SELECT id, organization_id, certificate_id, token_hash, scope_json, expires_at, used_at, created_by_user_id, created_at
+                 FROM crawl_task_tokens
+                 WHERE token_hash = $1
+                 LIMIT 1",
+                params!(token_hash.to_owned()),
+                "crawl task token",
+            )
+            .await
+            .context("query crawl task token")?;
+        Ok(row.into())
     }
 
     pub async fn start_sync_run(
@@ -3262,7 +3499,7 @@ fn now_string() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
 }
 
-impl From<&mut Row<'_>> for StoredCertificate {
+impl From<&mut Row<'_>> for StoredCertificateRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
@@ -3270,9 +3507,98 @@ impl From<&mut Row<'_>> for StoredCertificate {
             business_no: row.get("business_no"),
             common_name: row.get("common_name"),
             encrypted_blob: row.get("encrypted_blob"),
+            wrapped_dek_b64: row.get("wrapped_dek"),
+            kms_key_id: row.get("kms_key_id"),
             active: row.get("active"),
             last_used_at: row.get("last_used_at"),
             created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl TryFrom<StoredCertificateRow> for StoredCertificate {
+    type Error = anyhow::Error;
+
+    fn try_from(row: StoredCertificateRow) -> Result<Self> {
+        Ok(Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            business_no: row.business_no,
+            common_name: row.common_name,
+            encrypted_blob: row.encrypted_blob,
+            wrapped_dek: STANDARD
+                .decode(row.wrapped_dek_b64)
+                .context("decode wrapped_dek from base64")?,
+            kms_key_id: row.kms_key_id,
+            active: row.active,
+            last_used_at: row.last_used_at,
+            created_at: row.created_at,
+        })
+    }
+}
+
+impl From<&mut Row<'_>> for CertGatewayChallengeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            mode: row.get("mode"),
+            nonce: row.get("nonce"),
+            payload_hash: row.get("payload_hash"),
+            facility_code: row.get("facility_code"),
+            expires_at: row.get("expires_at"),
+            consumed_at: row.get("consumed_at"),
+            created_by_user_id: row.get("created_by_user_id"),
+            created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl From<CertGatewayChallengeRow> for CertGatewayChallenge {
+    fn from(row: CertGatewayChallengeRow) -> Self {
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            mode: row.mode,
+            nonce: row.nonce,
+            payload_hash: row.payload_hash,
+            facility_code: row.facility_code,
+            expires_at: row.expires_at,
+            consumed_at: row.consumed_at,
+            created_by_user_id: row.created_by_user_id,
+            created_at: row.created_at,
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CrawlTaskTokenRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            certificate_id: row.get("certificate_id"),
+            token_hash: row.get("token_hash"),
+            scope_json: row.get("scope_json"),
+            expires_at: row.get("expires_at"),
+            used_at: row.get("used_at"),
+            created_by_user_id: row.get("created_by_user_id"),
+            created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl From<CrawlTaskTokenRow> for CrawlTaskToken {
+    fn from(row: CrawlTaskTokenRow) -> Self {
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            certificate_id: row.certificate_id,
+            token_hash: row.token_hash,
+            scope_json: row.scope_json,
+            expires_at: row.expires_at,
+            used_at: row.used_at,
+            created_by_user_id: row.created_by_user_id,
+            created_at: row.created_at,
         }
     }
 }

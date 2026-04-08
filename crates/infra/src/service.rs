@@ -13,6 +13,7 @@ use crate::{
         Database, PersistedDocument, PlantSummary, StoredCertificate, StoredDocument,
         StoredRateRecord,
     },
+    kms::{EnvKmsProvider, KmsProvider},
 };
 use anyhow::{Context, Result};
 use chrono::{Datelike, Utc};
@@ -253,12 +254,16 @@ impl AppService {
             km_pri_key,
         };
         let encrypted = encrypt_bundle(&self.cfg.security.master_key, &bundle)?;
+        let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
+        let wrapped_dek = kms.wrap(self.cfg.security.master_key.as_bytes())?;
         self.db
             .save_certificate(
                 &organization_id,
                 Some(&business_no),
                 &common_name,
                 &encrypted,
+                &wrapped_dek,
+                &self.cfg.kms.active_key_id,
             )
             .await
     }
