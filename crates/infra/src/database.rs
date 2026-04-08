@@ -1184,7 +1184,6 @@ impl Database {
                 .find_user_by_id(&existing.user_id, consistency.clone())
                 .await;
         }
-        let _ = external_user_id;
         Ok(None)
     }
 

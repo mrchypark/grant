@@ -127,4 +127,6 @@ spec:
             periodSeconds: 20
       volumes:
         - name: data
+          # Intentionally ephemeral: voter recovery is validated through remote backup/restore,
+          # not local PVC reattachment.
           emptyDir: {}

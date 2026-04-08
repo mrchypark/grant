@@ -92,6 +92,7 @@
 Kubernetes 기준 권장 토폴로지:
 
 - `certd-voter`: `StatefulSet` 3개, `emptyDir`, headless service
+  - 의도적으로 PVC 대신 backup/restore 기반 복구를 기본 경로로 검증한다
 - `certd-learner-{1,2,3}`: `Deployment` 3개, `split + learner + local`
 - `trailbase`: 단일 `Deployment`, `emptyDir`, Litestream restore-then-run
 - `minio`: `StatefulSet` 4개
