@@ -204,12 +204,12 @@ for _ in $(seq 1 20); do
     during_strong_code=""
     during_strong_body=""
   fi
-  if [[ "${during_strong_code}" == "500" ]]; then
+  if [[ "${during_strong_code}" == "${EXPECTED_STRONG_STATUS}" ]]; then
     break
   fi
   sleep 1
 done
-if [[ "${during_strong_code}" != "500" ]]; then
+if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
   echo "during strong stayed available; restarting learner under active partition" >&2
   restart_learner_under_partition
   if during_healthz="$(healthz_json 2>/dev/null)"; then
@@ -232,11 +232,11 @@ if [[ "${during_strong_code}" != "500" ]]; then
       during_strong_code=""
       during_strong_body=""
     fi
-  if [[ "${during_strong_code}" == "${EXPECTED_STRONG_STATUS}" ]]; then
-    break
-  fi
-  sleep 1
-done
+    if [[ "${during_strong_code}" == "${EXPECTED_STRONG_STATUS}" ]]; then
+      break
+    fi
+    sleep 1
+  done
 fi
 echo "during strong response: ${during_strong_body}"
 if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
@@ -264,7 +264,12 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 echo "during plants strong response: ${during_plants_body}"
-if [[ "${during_plants_code}" == "${EXPECTED_STRONG_STATUS}" ]] && ! jq -e --arg expected "${EXPECTED_STRONG_ERROR}" '.error == $expected' >/dev/null <<<"${during_plants_body}"; then
+if [[ "${during_plants_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
+  echo "expected strong plant list to fail with ${EXPECTED_STRONG_STATUS} during partition" >&2
+  printf '%s\n' "${during_plants_strong}" >&2
+  exit 1
+fi
+if ! jq -e --arg expected "${EXPECTED_STRONG_ERROR}" '.error == $expected' >/dev/null <<<"${during_plants_body}"; then
   echo "unexpected strong plant list error body during partition" >&2
   printf '%s\n' "${during_plants_strong}" >&2
   exit 1
