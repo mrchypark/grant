@@ -1,15 +1,20 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use domain::{
     Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
     RoleBindingState, RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
-use infra::{
-    config::ReadConsistency,
-    database::Database,
-    runtime::HiqliteRuntime,
-};
+use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -234,7 +239,9 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         starts_at: None,
         ends_at: None,
     };
-    db.upsert_agreement(&agreement).await.expect("upsert agreement");
+    db.upsert_agreement(&agreement)
+        .await
+        .expect("upsert agreement");
 
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
@@ -347,7 +354,10 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         )
         .await
         .expect("organization action rows after termination");
-    assert!(org_rows_after.is_empty(), "agreement termination should remove inherited organization access");
+    assert!(
+        org_rows_after.is_empty(),
+        "agreement termination should remove inherited organization access"
+    );
 
     let user_rows_after: Vec<UserPlantActionRow> = runtime
         .query_rows(
@@ -359,7 +369,10 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         )
         .await
         .expect("user action rows after termination");
-    assert!(user_rows_after.is_empty(), "agreement termination should remove user actions");
+    assert!(
+        user_rows_after.is_empty(),
+        "agreement termination should remove user actions"
+    );
 
     let visibility_rows_after: Vec<UserPlantVisibilityRow> = runtime
         .query_rows(
@@ -371,5 +384,299 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         )
         .await
         .expect("visibility rows after termination");
-    assert!(visibility_rows_after.is_empty(), "agreement termination should remove plant visibility");
+    assert!(
+        visibility_rows_after.is_empty(),
+        "agreement termination should remove plant visibility"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuild_keeps_existing_visibility_readable_during_save_role_binding() {
+    let (runtime, dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+        .await
+        .expect("upsert owner org");
+    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+        .await
+        .expect("upsert worker org");
+
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "worker-user".into(),
+                "worker@example.com".into(),
+                "Worker User".into(),
+                1_i64.into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert user");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-worker-user".into(),
+                "worker-org".into(),
+                "worker-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert membership");
+
+    db.upsert_role(&Role {
+        id: "role-plant-profile-reader".to_owned(),
+        organization_id: None,
+        code: "plant.profile.reader".to_owned(),
+        name: "Plant Profile Reader".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert role");
+    db.upsert_role_action("role-plant-profile-reader", "plant.profile.read")
+        .await
+        .expect("upsert role action");
+
+    runtime
+        .execute(
+            "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            vec![
+                "plant-baseline".into(),
+                "FAC-BASELINE".into(),
+                "worker-org".into(),
+                Option::<String>::Some("owner-org".to_owned()).into(),
+                "Baseline Plant".into(),
+                "CN-BASELINE".into(),
+                "Seoul".into(),
+                50.0_f64.into(),
+                "2026-01-01".into(),
+                "Y".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert baseline plant");
+
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "worker-org".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-baseline".to_owned(),
+        role_id: "role-plant-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save org role binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "worker-user".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-baseline".to_owned(),
+        role_id: "role-plant-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save baseline user role binding");
+
+    for idx in 0..250 {
+        let plant_id = format!("plant-bulk-{idx:04}");
+        runtime
+            .execute(
+                "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                vec![
+                    plant_id.clone().into(),
+                    format!("FAC-BULK-{idx:04}").into(),
+                    "worker-org".into(),
+                    Option::<String>::Some("owner-org".to_owned()).into(),
+                    format!("Bulk Plant {idx}").into(),
+                    format!("CN-BULK-{idx:04}").into(),
+                    "Busan".into(),
+                    75.0_f64.into(),
+                    "2026-01-01".into(),
+                    "Y".into(),
+                    "2026-04-03T00:00:00Z".into(),
+                    "2026-04-03T00:00:00Z".into(),
+                ],
+            )
+            .await
+            .expect("insert bulk plant");
+
+        runtime
+            .execute(
+                "INSERT INTO role_bindings (
+                    id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                vec![
+                    format!("org-bulk-binding-{idx:04}").into(),
+                    "organization".into(),
+                    "worker-org".into(),
+                    "worker-org".into(),
+                    "plant".into(),
+                    plant_id.clone().into(),
+                    "role-plant-profile-reader".into(),
+                    Option::<String>::None.into(),
+                    "active".into(),
+                    "bootstrap-user".into(),
+                    "2026-04-03T00:00:00Z".into(),
+                    "2026-04-03T00:00:00Z".into(),
+                ],
+            )
+            .await
+            .expect("insert bulk org binding");
+        runtime
+            .execute(
+                "INSERT INTO role_bindings (
+                    id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                vec![
+                    format!("user-bulk-binding-{idx:04}").into(),
+                    "user".into(),
+                    "worker-user".into(),
+                    "worker-org".into(),
+                    "plant".into(),
+                    plant_id.into(),
+                    "role-plant-profile-reader".into(),
+                    Option::<String>::None.into(),
+                    "active".into(),
+                    "bootstrap-user".into(),
+                    "2026-04-03T00:00:00Z".into(),
+                    "2026-04-03T00:00:00Z".into(),
+                ],
+            )
+            .await
+            .expect("insert bulk user binding");
+    }
+
+    runtime
+        .execute(
+            "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            vec![
+                "plant-trigger".into(),
+                "FAC-TRIGGER".into(),
+                "worker-org".into(),
+                Option::<String>::Some("owner-org".to_owned()).into(),
+                "Trigger Plant".into(),
+                "CN-TRIGGER".into(),
+                "Daegu".into(),
+                80.0_f64.into(),
+                "2026-01-01".into(),
+                "Y".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert trigger plant");
+    runtime
+        .execute(
+            "INSERT INTO role_bindings (
+                id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            vec![
+                "org-trigger-binding".into(),
+                "organization".into(),
+                "worker-org".into(),
+                "worker-org".into(),
+                "plant".into(),
+                "plant-trigger".into(),
+                "role-plant-profile-reader".into(),
+                Option::<String>::None.into(),
+                "active".into(),
+                "bootstrap-user".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert trigger org binding");
+
+    let saw_gap = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let db_path = sqlite_db_path(dir.path());
+    let saw_gap_reader = saw_gap.clone();
+    let stop_reader = stop.clone();
+    let reader = thread::spawn(move || {
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open sqlite reader");
+        let started = Instant::now();
+        while !stop_reader.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(10) {
+            let visible = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM effective_user_plant_visibility
+                     WHERE user_id = ?1 AND organization_id = ?2 AND plant_id = ?3",
+                    rusqlite::params!["worker-user", "worker-org", "plant-baseline"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read baseline visibility");
+            if visible == 0 {
+                saw_gap_reader.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    });
+
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "worker-user".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-trigger".to_owned(),
+        role_id: "role-plant-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save trigger role binding");
+
+    stop.store(true, Ordering::Relaxed);
+    reader.join().expect("join visibility reader");
+
+    assert!(
+        !saw_gap.load(Ordering::Relaxed),
+        "rebuild should not expose missing baseline visibility to concurrent readers"
+    );
+}
+
+fn sqlite_db_path(root: &std::path::Path) -> PathBuf {
+    root.join("state_machine").join("db").join("test.sqlite")
 }

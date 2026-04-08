@@ -1,5 +1,6 @@
 use crate::{
     config::AuthConfig,
+    config::ReadConsistency,
     database::{CachedExternalIdentity, Database},
 };
 use anyhow::{Context, Result, anyhow};
@@ -89,6 +90,7 @@ impl AuthResolver {
         db: &Database,
         bearer_token: Option<&str>,
         organization_id: Option<&str>,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<AuthenticatedPrincipal> {
         let organization_id = organization_id
             .map(str::trim)
@@ -99,18 +101,50 @@ impl AuthResolver {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))?;
-        let identity = self.trailbase.introspect(db, token).await?;
-        let user = db
-            .resolve_or_create_user_identity(
+        let effective_read_consistency =
+            db.default_read_consistency_with_override(read_consistency.clone());
+        let effective_read_consistency_override = Some(effective_read_consistency.clone());
+        let should_sync = should_sync_identity(Some(&effective_read_consistency));
+        let identity = self
+            .trailbase
+            .introspect(
+                db,
+                token,
+                effective_read_consistency_override.clone(),
+                should_sync,
+            )
+            .await?;
+        let user = if should_sync {
+            db.resolve_or_create_user_identity_with_consistency(
                 "trailbase",
                 &identity.external_user_id,
                 identity.email.as_deref(),
                 &identity.display_name,
                 identity.active,
+                effective_read_consistency_override.clone(),
             )
-            .await?;
+            .await
+            .map_err(map_strong_identity_sync_error)?
+        } else {
+            db.resolve_existing_user_identity_with_consistency(
+                "trailbase",
+                &identity.external_user_id,
+                effective_read_consistency_override.clone(),
+            )
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "forbidden: no local user identity available for trailbase user {}",
+                    identity.external_user_id
+                )
+            })?
+        };
         let is_member = db
-            .has_active_organization_membership(&user.id, organization_id)
+            .has_active_organization_membership_with_consistency(
+                &user.id,
+                organization_id,
+                effective_read_consistency_override,
+            )
             .await?;
         if !is_member {
             anyhow::bail!(
@@ -129,13 +163,23 @@ impl AuthResolver {
         &self,
         db: Option<&Database>,
         bearer_token: Option<&str>,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<ExternalIdentity> {
         let token = bearer_token
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))?;
         let identity = if let Some(db) = db {
-            self.trailbase.introspect(db, token).await?
+            let effective_read_consistency =
+                db.default_read_consistency_with_override(read_consistency.clone());
+            self.trailbase
+                .introspect(
+                    db,
+                    token,
+                    Some(effective_read_consistency.clone()),
+                    should_sync_identity(Some(&effective_read_consistency)),
+                )
+                .await?
         } else {
             self.trailbase.introspect_without_db(token).await?
         };
@@ -150,7 +194,13 @@ impl AuthResolver {
 }
 
 impl TrailbaseResolver {
-    async fn introspect(&self, db: &Database, token: &str) -> Result<TrailbaseIdentity> {
+    async fn introspect(
+        &self,
+        db: &Database,
+        token: &str,
+        read_consistency: Option<ReadConsistency>,
+        persist_shared_cache: bool,
+    ) -> Result<TrailbaseIdentity> {
         let cache_key = token_cache_key(token);
         if let Some(identity) = self.read_cache(&cache_key).await {
             return Ok(identity);
@@ -167,7 +217,10 @@ impl TrailbaseResolver {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                if let Some(identity) = self.read_shared_cache(db, &cache_key).await? {
+                if let Some(identity) = self
+                    .read_shared_cache(db, &cache_key, read_consistency.clone())
+                    .await?
+                {
                     return Ok(identity);
                 }
                 return Err(error).context("call TrailBase introspect");
@@ -181,7 +234,10 @@ impl TrailbaseResolver {
         let response = match response.error_for_status() {
             Ok(response) => response,
             Err(error) => {
-                if let Some(identity) = self.read_shared_cache(db, &cache_key).await? {
+                if let Some(identity) = self
+                    .read_shared_cache(db, &cache_key, read_consistency.clone())
+                    .await?
+                {
                     return Ok(identity);
                 }
                 return Err(error).context("TrailBase introspect returned error status");
@@ -209,7 +265,9 @@ impl TrailbaseResolver {
             active: payload.active,
         };
         self.write_cache(cache_key, identity.clone()).await;
-        self.write_shared_cache(db, token, &identity).await?;
+        if persist_shared_cache {
+            self.write_shared_cache(db, token, &identity).await?;
+        }
         Ok(identity)
     }
 
@@ -273,7 +331,12 @@ impl TrailbaseResolver {
             .await;
     }
 
-    async fn write_cache_until(&self, key: String, identity: TrailbaseIdentity, expires_at: Instant) {
+    async fn write_cache_until(
+        &self,
+        key: String,
+        identity: TrailbaseIdentity,
+        expires_at: Instant,
+    ) {
         let mut cache = self.cache.lock().await;
         cache.insert(
             key,
@@ -288,9 +351,12 @@ impl TrailbaseResolver {
         &self,
         db: &Database,
         token_hash: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<Option<TrailbaseIdentity>> {
         let now = Utc::now();
-        let cached = db.get_cached_external_identity(token_hash, now).await?;
+        let cached = db
+            .get_cached_external_identity(token_hash, now, read_consistency)
+            .await?;
         let Some(cached) = cached else {
             return Ok(None);
         };
@@ -305,8 +371,12 @@ impl TrailbaseResolver {
             .signed_duration_since(now)
             .to_std()
             .unwrap_or_else(|_| Duration::from_secs(0));
-        self.write_cache_until(token_hash.to_owned(), identity.clone(), Instant::now() + ttl)
-            .await;
+        self.write_cache_until(
+            token_hash.to_owned(),
+            identity.clone(),
+            Instant::now() + ttl,
+        )
+        .await;
         Ok(Some(identity))
     }
 
@@ -331,6 +401,54 @@ impl TrailbaseResolver {
             expires_at,
         )
         .await
+    }
+}
+
+fn should_sync_identity(read_consistency: Option<&ReadConsistency>) -> bool {
+    matches!(
+        read_consistency,
+        Some(ReadConsistency::Strong | ReadConsistency::PreferStrong)
+    )
+}
+
+pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Error {
+    let message = err.to_string();
+    if message.contains("unauthorized:") || message.contains("forbidden:") {
+        err
+    } else {
+        anyhow!(
+            "unavailable: strong consistency requested but quorum-backed identity sync is unavailable"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_strong_identity_sync_error, should_sync_identity};
+    use crate::config::ReadConsistency;
+    use anyhow::anyhow;
+
+    #[test]
+    fn wraps_internal_identity_sync_failures_with_quorum_message() {
+        let err = map_strong_identity_sync_error(anyhow!("query user identity"));
+        assert_eq!(
+            err.to_string(),
+            "unavailable: strong consistency requested but quorum-backed identity sync is unavailable"
+        );
+    }
+
+    #[test]
+    fn preserves_auth_failures_when_wrapping_identity_sync_errors() {
+        let err = map_strong_identity_sync_error(anyhow!("forbidden: no local user identity"));
+        assert_eq!(err.to_string(), "forbidden: no local user identity");
+    }
+
+    #[test]
+    fn sync_gate_treats_prefer_strong_as_sync_capable() {
+        assert!(should_sync_identity(Some(&ReadConsistency::Strong)));
+        assert!(should_sync_identity(Some(&ReadConsistency::PreferStrong)));
+        assert!(!should_sync_identity(Some(&ReadConsistency::Local)));
+        assert!(!should_sync_identity(None));
     }
 }
 

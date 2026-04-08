@@ -4,9 +4,12 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use domain::{Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType};
-use http_body_util::BodyExt;
+use domain::{
+    Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
+    RoleBindingState, RoleBindingSubjectType,
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
+use http_body_util::BodyExt;
 use infra::{
     artifacts::ArtifactStore,
     config::{
@@ -102,12 +105,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
     (service, db_for_tests, dir)
 }
 
-fn app_request(
-    path: &str,
-    token: &str,
-    organization_id: &str,
-    body: Value,
-) -> Request<Body> {
+fn app_request(path: &str, token: &str, organization_id: &str, body: Value) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(path)
@@ -289,7 +287,12 @@ async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let payload: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(payload["facilityCode"], "FAC-003");
     assert_eq!(payload["ownerOrganizationId"], "owner-org");
@@ -306,7 +309,7 @@ async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
     );
 
     let visible = service
-        .list_visible_plants("bootstrap-user", "creator-org")
+        .list_visible_plants("bootstrap-user", "creator-org", None)
         .await
         .expect("creator visibility");
     assert!(
@@ -315,7 +318,12 @@ async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
     );
 
     let can_sync = db
-        .has_user_plant_action("bootstrap-user", "creator-org", "FAC-003", "plant.sync.execute")
+        .has_user_plant_action(
+            "bootstrap-user",
+            "creator-org",
+            "FAC-003",
+            "plant.sync.execute",
+        )
         .await
         .expect("sync action lookup");
     assert!(

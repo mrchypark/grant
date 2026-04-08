@@ -1,9 +1,9 @@
 use domain::{
     Action, ActionRiskLevel, Agreement, AgreementStatus, AgreementType, DocumentArtifact,
-    DocumentCategory, GenerationRecord, Group, LegalEntity, MembershipRole, MembershipStatus, Organization,
-    OrganizationMembership, Plant, RateRecord, RecRecord, Role, RoleBinding,
-    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, RoleRule,
-    RoleRuleEffect, SyncMode, SyncRun, User,
+    DocumentCategory, GenerationRecord, Group, LegalEntity, MembershipRole, MembershipStatus,
+    Organization, OrganizationMembership, Plant, RateRecord, RecRecord, Role, RoleBinding,
+    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, RoleRule, RoleRuleEffect,
+    SyncMode, SyncRun, User,
 };
 
 #[test]

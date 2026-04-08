@@ -518,5 +518,7 @@ CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
   bash "${ROOT_DIR}/scripts/k3d-trailbase-restore-check.sh"
 
 echo "auth-aware restore checks completed"
-echo "NOTE: HQL_BACKUP_RESTORE remains set on certd-voter to avoid a post-restore rolling restart in this disposable k3d harness."
+echo "NOTE: HQL_BACKUP_RESTORE remains set on certd-voter in this disposable harness."
+echo "NOTE: certd-voter uses emptyDir, so clearing the env on the StatefulSet would trigger pod recreation and wipe the restored local state."
+echo "NOTE: before running chaos on the same disposable environment, rebuild the baseline with scripts/k3d-bootstrap.sh or use scripts/k3d-backup-restore-chaos.sh."
 echo "backup/restore completed with ${BACKUP_NAME}"

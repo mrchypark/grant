@@ -2,48 +2,49 @@
 
 FROM rust:1.91.1-bookworm AS chef
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && apt-get install -y --no-install-recommends binutils ca-certificates clang curl gnupg libclang-dev pkg-config protobuf-compiler libprotobuf-dev \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends clang libclang-dev pkg-config protobuf-compiler libprotobuf-dev nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && npm install -g pnpm \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install --locked cargo-chef
 WORKDIR /workspace/crates/trailbase-auth-bridge
 
 FROM chef AS planner
-COPY crates/trailbase-auth-bridge /workspace/crates/trailbase-auth-bridge
+COPY --link crates/trailbase-auth-bridge /workspace/crates/trailbase-auth-bridge
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /workspace/crates/trailbase-auth-bridge/recipe.json recipe.json
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/crates/trailbase-auth-bridge/target \
-    cargo chef cook --release --recipe-path recipe.json
-COPY crates/trailbase-auth-bridge /workspace/crates/trailbase-auth-bridge
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/crates/trailbase-auth-bridge/target \
-    cargo build --release
+RUN --mount=type=cache,id=trailbase-bridge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=trailbase-bridge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=trailbase-bridge-target,target=/workspace/crates/trailbase-auth-bridge/target,sharing=locked \
+    cargo chef cook --release --locked --recipe-path recipe.json
+COPY --link crates/trailbase-auth-bridge /workspace/crates/trailbase-auth-bridge
+RUN --mount=type=cache,id=trailbase-bridge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=trailbase-bridge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=trailbase-bridge-target,target=/workspace/crates/trailbase-auth-bridge/target,sharing=locked \
+    cargo build --release --locked \
+    && strip /workspace/crates/trailbase-auth-bridge/target/release/trailbase-auth-bridge \
+    && cp /workspace/crates/trailbase-auth-bridge/target/release/trailbase-auth-bridge /workspace/trailbase-auth-bridge
 
-FROM debian:bookworm-slim AS runtime
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl openssl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 trailbase \
-    && useradd --system --uid 10001 --gid 10001 --home /app --shell /usr/sbin/nologin trailbase \
-    && mkdir -p /app /data/trailbase /tmp \
-    && chown -R 10001:10001 /app /data/trailbase /tmp
+FROM debian:bookworm-slim AS runtime-prep
+RUN install -d -o 65532 -g 65532 /app /data/trailbase /tmp
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
 WORKDIR /app
-COPY --from=builder --chown=10001:10001 /workspace/crates/trailbase-auth-bridge/target/release/trailbase-auth-bridge /usr/local/bin/trailbase-auth-bridge
+COPY --link --from=runtime-prep --chown=65532:65532 /app /app
+COPY --link --from=runtime-prep --chown=65532:65532 /data /data
+COPY --link --from=runtime-prep --chown=65532:65532 /tmp /tmp
+COPY --link --from=builder --chown=65532:65532 /workspace/trailbase-auth-bridge /usr/local/bin/trailbase-auth-bridge
 
-USER 10001:10001
+USER 65532:65532
 ENV TRAILBASE_ADDRESS=0.0.0.0:4000
 ENV TRAILBASE_DATA_DIR=/data/trailbase
 ENV TRAILBASE_DEV=false

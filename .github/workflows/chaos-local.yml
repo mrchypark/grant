@@ -1,0 +1,112 @@
+name: chaos-local
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/chaos-local.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "Dockerfile.trailbase-auth-bridge"
+      - "README.md"
+      - "crates/**"
+      - "deploy/**"
+      - "scripts/**"
+
+concurrency:
+  group: chaos-local-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Reclaim runner disk
+        run: |
+          echo "[storage] before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af --volumes || true
+          echo "[storage] after cleanup"
+          df -h
+          docker system df || true
+
+      - name: Install kubectl
+        run: |
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+
+      - name: Install vCluster CLI
+        run: |
+          VCLUSTER_VERSION="0.33.1"
+          ARCH="$(uname -m)"
+          case "${ARCH}" in
+            x86_64) ARCH="amd64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            *)
+              echo "unsupported architecture: ${ARCH}" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o vcluster "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"
+          chmod +x vcluster
+          sudo mv vcluster /usr/local/bin/vcluster
+
+      - name: Preload kernel modules
+        run: |
+          sudo modprobe br_netfilter
+          sudo modprobe bridge || true
+          sudo modprobe overlay || true
+
+      - name: Install jq and shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck
+
+      - name: Verify toolchain
+        run: |
+          docker version
+          kubectl version --client
+          vcluster version
+          jq --version
+          shellcheck --version
+
+      - name: Verify chaos script wiring
+        run: |
+          bash scripts/test-chaos-vind-default.sh
+          bash -n \
+            scripts/vind-exec.sh \
+            scripts/vind-cluster.sh \
+            scripts/ci-chaos-local.sh \
+            scripts/vind-bootstrap.sh \
+            scripts/vind-chaos.sh \
+            scripts/k3d-chaos.sh \
+            scripts/k3d-chaos-load.sh \
+            scripts/test-chaos-vind-default.sh
+          shellcheck \
+            scripts/vind-exec.sh \
+            scripts/vind-cluster.sh \
+            scripts/ci-chaos-local.sh \
+            scripts/vind-bootstrap.sh \
+            scripts/vind-chaos.sh \
+            scripts/k3d-chaos.sh \
+            scripts/k3d-chaos-load.sh \
+            scripts/test-chaos-vind-default.sh
+
+      - name: Run local chaos regression
+        env:
+          CLUSTER_NAME: certd-vind-ci
+          CI_CLUSTER_BACKEND: vind
+          CI_DOCKER_BUILDER_PRUNE: "1"
+          NAMESPACE: certd
+          CERTD_MASTER_KEY: local-dev-master-key
+          RESET_CLUSTER: "1"
+          KEEP_CLUSTER: "0"
+          CERTD_CHAOS_WITH_LOAD: "1"
+        run: bash scripts/ci-chaos-local.sh

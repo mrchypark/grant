@@ -2,11 +2,7 @@ use std::collections::HashSet;
 
 use domain::{RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType};
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
-use infra::{
-    config::ReadConsistency,
-    database::Database,
-    runtime::HiqliteRuntime,
-};
+use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
 use uuid::Uuid;
 

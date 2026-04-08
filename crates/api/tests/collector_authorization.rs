@@ -6,7 +6,10 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use domain::{Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType};
+use domain::{
+    Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
+    RoleBindingState, RoleBindingSubjectType,
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use infra::{
     artifacts::ArtifactStore,
@@ -171,7 +174,9 @@ async fn seed_sync_fixture(db: &Database) {
         installed_kw: 100.0,
         rec_start_date: "2026-01-01".to_owned(),
         confirm_issued: "Y".to_owned(),
-    }).await.expect("upsert plant");
+    })
+    .await
+    .expect("upsert plant");
 }
 
 #[tokio::test]
@@ -181,7 +186,11 @@ async fn sync_requires_plant_sync_execute() {
     let app = api::build_router(service);
 
     let response = app
-        .oneshot(sync_request("operator-org", "bootstrap-user", "operator-org"))
+        .oneshot(sync_request(
+            "operator-org",
+            "bootstrap-user",
+            "operator-org",
+        ))
         .await
         .expect("response");
 
@@ -228,11 +237,7 @@ async fn sync_authorization_allows_plant_sync_execute_binding() {
     .expect("save user binding");
 
     service
-        .authorize_sync(
-            "bootstrap-user",
-            "operator-org",
-            Some("FAC-SYNC-001"),
-        )
+        .authorize_sync("bootstrap-user", "operator-org", Some("FAC-SYNC-001"))
         .await
         .expect("sync authorization should pass");
 }

@@ -71,6 +71,33 @@ PDF 저장소는 배포 형태에 따라 다르게 본다.
 
 `CERTD_LOCAL_NODE_ROLE=learner`를 주면 로컬 `hiqlite`는 learner로만 기동한다. 이 경우 `writeReady`는 원격 quorum 경로 상태를 뜻하고, `readReady`는 로컬 learner 복제본 상태를 뜻한다.
 
+중요:
+
+- `Service/certd`는 voter를 바라본다. 즉 public read/write path는 quorum 경로를 직접 탄다.
+- learner는 다른 시스템 sidecar나 보조 read/authz 평가용 복제본으로 본다.
+- 따라서 learner 장애는 public API 생존성보다 sidecar read/authz 여유 문제에 가깝다.
+
+## 자동 복구 경계
+
+PVC 없는 voter 기준에서는 아래처럼 나눈다.
+
+1. self-heal 기대 가능
+   - voter 1개 장애, 나머지 2개 정상
+   - leader 1개 장애 후 재선출
+   - learner 1개 이상 장애
+2. restore orchestration 필요
+   - voter 2개 이상 동시 손실
+   - voter pod 재생성/노드 이동으로 local raft 상태 유실
+   - 전체 voter cluster 손실
+
+이 경계는 앱 내부에서 자동으로 판단해 restore를 실행하는 문제가 아니라, 외부 절차가 실행해야 하는 문제로 본다.
+
+이유:
+
+- 일시적인 네트워크 단절과 실제 local state 유실을 앱 프로세스가 안전하게 구분하기 어렵다.
+- 잘못된 자동 restore는 살아 있는 더 최신 quorum 상태를 오래된 backup으로 덮어쓸 수 있다.
+- restore는 learner stop, voter full stop, restore target 고정, quorum 회복 확인, restore flag 제거 순서를 요구한다.
+
 ## 전체 클러스터 손실
 
 `hiqlite` 공식 restore 절차:

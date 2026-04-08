@@ -1,0 +1,12 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: certd-voter-follower-delete
+  namespace: certd-chaos
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    pods:
+      certd-chaos:
+        - REPLACE_WITH_FOLLOWER_POD

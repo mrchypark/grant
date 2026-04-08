@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{any, get, post, put},
@@ -12,31 +12,77 @@ use domain::{
     SyncMode, SyncRun, User,
 };
 use infra::{
+    config::ReadConsistency,
     database::StoredCertificate,
-    service::{AppService, BackupInfo, CreatePlantInput, PlantView, PutCertificateInput, SyncInput},
+    service::{
+        AppService, BackupInfo, CreatePlantInput, PlantView, PutCertificateInput, SyncInput,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub fn build_router(service: Arc<AppService>) -> Router {
+    build_shared_router()
+        .route(
+            "/api/v1/organizations/{organizationId}/certificate",
+            put(put_organization_certificate),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/sync",
+            post(sync_organization),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/plants",
+            post(create_plant),
+        )
+        .route(
+            "/api/v1/admin/backups",
+            get(list_backups_local).post(trigger_backup),
+        )
+        .route("/api/v1/admin/backups/s3", get(list_backups_s3))
+        .route(
+            "/api/v1/admin/bootstrap/trailbase-owner",
+            post(bootstrap_trailbase_owner),
+        )
+        .with_state(service)
+}
+
+pub fn build_learner_router(service: Arc<AppService>) -> Router {
+    build_shared_router()
+        .route(
+            "/api/v1/organizations/{organizationId}/certificate",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/sync",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/plants",
+            any(requires_voter_node),
+        )
+        .route("/api/v1/admin/backups", any(requires_voter_node))
+        .route("/api/v1/admin/backups/s3", any(requires_voter_node))
+        .route(
+            "/api/v1/admin/bootstrap/trailbase-owner",
+            any(requires_voter_node),
+        )
+        .with_state(service)
+}
+
+fn build_shared_router() -> Router<Arc<AppService>> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/auth", get(auth_root))
         .route("/auth/{*trailbasePath}", any(proxy_trailbase_auth_ui))
         .route("/_/auth/{*trailbasePath}", any(proxy_trailbase_passthrough))
-        .route("/api/auth/v1/{*trailbasePath}", any(proxy_trailbase_passthrough))
-        .route("/api/v1/me", get(get_current_user))
         .route(
-            "/api/v1/organizations/{organizationId}/certificate",
-            put(put_organization_certificate),
+            "/api/auth/v1/{*trailbasePath}",
+            any(proxy_trailbase_passthrough),
         )
-        .route("/api/v1/organizations/{organizationId}/sync", post(sync_organization))
+        .route("/api/v1/me", get(get_current_user))
         .route("/api/v1/plants", get(list_plants))
         .route("/api/v1/plants/{facilityCode}", get(get_plant))
-        .route(
-            "/api/v1/organizations/{organizationId}/plants",
-            post(create_plant),
-        )
         .route(
             "/api/v1/plants/{facilityCode}/generation",
             get(list_plant_generation),
@@ -51,16 +97,6 @@ pub fn build_router(service: Arc<AppService>) -> Router {
             "/api/v1/documents/{documentId}/download",
             get(download_document),
         )
-        .route(
-            "/api/v1/admin/backups",
-            get(list_backups_local).post(trigger_backup),
-        )
-        .route("/api/v1/admin/backups/s3", get(list_backups_s3))
-        .route(
-            "/api/v1/admin/bootstrap/trailbase-owner",
-            post(bootstrap_trailbase_owner),
-        )
-        .with_state(service)
 }
 
 async fn healthz(State(service): State<Arc<AppService>>) -> Json<HealthStatus> {
@@ -202,6 +238,11 @@ struct RequestContext {
     organization_id: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ReadConsistencyQuery {
+    consistency: Option<String>,
+}
+
 async fn put_organization_certificate(
     State(service): State<Arc<AppService>>,
     Path(organization_id): Path<String>,
@@ -224,12 +265,18 @@ async fn put_organization_certificate(
 
 async fn get_current_user(
     State(service): State<Arc<AppService>>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<CurrentUserResponse>> {
     let bearer_token = bearer_token(&headers)?;
     let active_organization_id = optional_header_value(&headers, "x-organization-id")?;
+    let read_consistency = read_consistency_override(&query)?;
     let current = service
-        .current_user(bearer_token.as_deref(), active_organization_id.as_deref())
+        .current_user(
+            bearer_token.as_deref(),
+            active_organization_id.as_deref(),
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(CurrentUserResponse {
@@ -247,7 +294,7 @@ async fn sync_organization(
     headers: HeaderMap,
     Json(body): Json<SyncRequest>,
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     if organization_id != ctx.organization_id {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -277,11 +324,13 @@ async fn sync_organization(
 
 async fn list_plants(
     State(service): State<Arc<AppService>>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Plant>>> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let plants = service
-        .list_visible_plants(&ctx.user_id, &ctx.organization_id)
+        .list_visible_plants(&ctx.user_id, &ctx.organization_id, read_consistency)
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(plants))
@@ -290,11 +339,18 @@ async fn list_plants(
 async fn get_plant(
     State(service): State<Arc<AppService>>,
     Path(facility_code): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<PlantResponse>> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let plant = service
-        .get_plant_profile(&ctx.user_id, &ctx.organization_id, &facility_code)
+        .get_plant_profile(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &facility_code,
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(map_plant(plant)))
@@ -306,7 +362,7 @@ async fn create_plant(
     headers: HeaderMap,
     Json(body): Json<CreatePlantRequest>,
 ) -> ApiResult<(StatusCode, Json<Plant>)> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     if path_organization_id != ctx.organization_id {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -340,11 +396,18 @@ async fn create_plant(
 async fn list_plant_generation(
     State(service): State<Arc<AppService>>,
     Path(facility_code): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<GenerationRecord>>> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let items = service
-        .list_generation_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
+        .list_generation_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &facility_code,
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(items))
@@ -353,11 +416,18 @@ async fn list_plant_generation(
 async fn list_plant_rates(
     State(service): State<Arc<AppService>>,
     Path(facility_code): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<RateRecord>>> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let items = service
-        .list_rates_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
+        .list_rates_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &facility_code,
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(items))
@@ -366,11 +436,18 @@ async fn list_plant_rates(
 async fn list_plant_rec(
     State(service): State<Arc<AppService>>,
     Path(facility_code): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<RecRecord>>> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let items = service
-        .list_rec_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
+        .list_rec_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &facility_code,
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(items))
@@ -379,11 +456,18 @@ async fn list_plant_rec(
 async fn list_plant_documents(
     State(service): State<Arc<AppService>>,
     Path(facility_code): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<DocumentArtifact>>> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let items = service
-        .list_documents_authorized(&ctx.user_id, &ctx.organization_id, &facility_code)
+        .list_documents_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &facility_code,
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(items))
@@ -392,11 +476,18 @@ async fn list_plant_documents(
 async fn download_document(
     State(service): State<Arc<AppService>>,
     Path(document_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let ctx = request_context(service.as_ref(), &headers).await?;
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     let (doc, bytes) = service
-        .download_document_authorized(&ctx.user_id, &ctx.organization_id, &document_id)
+        .download_document_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &document_id,
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_domain)?;
 
@@ -472,6 +563,10 @@ async fn bootstrap_trailbase_owner(
     ))
 }
 
+async fn requires_voter_node() -> ApiResult<StatusCode> {
+    Err(ApiError::requires_voter())
+}
+
 async fn proxy_trailbase_auth_ui(
     State(service): State<Arc<AppService>>,
     Path(trailbase_path): Path<String>,
@@ -505,7 +600,11 @@ async fn proxy_trailbase_request(
     upstream_path: &str,
 ) -> ApiResult<Response> {
     let (parts, body) = request.into_parts();
-    let mut url = format!("{}{}", service.trailbase_base_url().trim_end_matches('/'), upstream_path);
+    let mut url = format!(
+        "{}{}",
+        service.trailbase_base_url().trim_end_matches('/'),
+        upstream_path
+    );
     if let Some(query) = parts.uri.query() {
         url.push('?');
         url.push_str(query);
@@ -616,17 +715,37 @@ fn map_backup(item: BackupInfo) -> BackupItemResponse {
     }
 }
 
-async fn request_context(service: &AppService, headers: &HeaderMap) -> ApiResult<RequestContext> {
+async fn request_context(
+    service: &AppService,
+    headers: &HeaderMap,
+    read_consistency: Option<ReadConsistency>,
+) -> ApiResult<RequestContext> {
     let organization_id = header_value(headers, "x-organization-id")?;
     let bearer_token = bearer_token(headers)?;
     let principal = service
-        .authenticate_request(bearer_token.as_deref(), Some(&organization_id))
+        .authenticate_request(
+            bearer_token.as_deref(),
+            Some(&organization_id),
+            read_consistency,
+        )
         .await
         .map_err(ApiError::from_auth)?;
     Ok(RequestContext {
         user_id: principal.user_id,
         organization_id: principal.organization_id,
     })
+}
+
+fn read_consistency_override(query: &ReadConsistencyQuery) -> ApiResult<Option<ReadConsistency>> {
+    let Some(value) = query.consistency.as_deref() else {
+        return Ok(None);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "strong" => Ok(Some(ReadConsistency::Strong)),
+        other => Err(ApiError::bad_request(anyhow!(
+            "invalid consistency: {other}"
+        ))),
+    }
 }
 
 fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
@@ -641,14 +760,12 @@ fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()
 }
 
 fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
-    optional_header_value(headers, key)?.ok_or_else(|| {
-        ApiError::bad_request(anyhow!("missing {key} header"))
-    })
+    optional_header_value(headers, key)?
+        .ok_or_else(|| ApiError::bad_request(anyhow!("missing {key} header")))
 }
 
 fn optional_header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<Option<String>> {
-    let value = headers
-        .get(key);
+    let value = headers.get(key);
     let Some(value) = value else {
         return Ok(None);
     };
@@ -657,7 +774,9 @@ fn optional_header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<Op
         .map_err(|_| ApiError::bad_request(anyhow!("{key} header is not valid UTF-8")))?;
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(ApiError::bad_request(anyhow!("{key} header must not be empty")));
+        return Err(ApiError::bad_request(anyhow!(
+            "{key} header must not be empty"
+        )));
     }
     Ok(Some(trimmed.to_owned()))
 }
@@ -698,6 +817,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn requires_voter() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "endpoint requires voter node".to_owned(),
+        }
+    }
+
     fn bad_request(err: anyhow::Error) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -733,6 +859,8 @@ impl ApiError {
         let message = err.to_string();
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
+        } else if message.contains("unavailable:") {
+            StatusCode::SERVICE_UNAVAILABLE
         } else if message.contains("not found") {
             StatusCode::NOT_FOUND
         } else {
@@ -747,6 +875,8 @@ impl ApiError {
             StatusCode::UNAUTHORIZED
         } else if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
+        } else if message.contains("unavailable:") {
+            StatusCode::SERVICE_UNAVAILABLE
         } else if message.contains("missing ") || message.contains("header") {
             StatusCode::BAD_REQUEST
         } else {
@@ -762,5 +892,25 @@ impl IntoResponse for ApiError {
             "error": self.message,
         }));
         (self.status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+    use anyhow::anyhow;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn auth_unavailable_errors_map_to_service_unavailable() {
+        let err = ApiError::from_auth(anyhow!("unavailable: quorum read path is not ready"));
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn domain_unavailable_errors_map_to_service_unavailable() {
+        let err =
+            ApiError::from_domain(anyhow!("unavailable: quorum validation path is not ready"));
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

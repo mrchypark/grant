@@ -23,10 +23,7 @@ pub struct RuntimeBackupItem {
     pub size: Option<u64>,
 }
 
-pub fn resolve_read_route(
-    consistency: ReadConsistency,
-    readiness: Readiness,
-) -> Result<ReadRoute> {
+pub fn resolve_read_route(consistency: ReadConsistency, readiness: Readiness) -> Result<ReadRoute> {
     match consistency {
         ReadConsistency::Local => {
             if readiness.read_ready {
@@ -41,7 +38,9 @@ pub fn resolve_read_route(
             if readiness.write_ready {
                 Ok(ReadRoute::Strong)
             } else {
-                Err(anyhow!("strong read requested but quorum write path is not ready"))
+                Err(anyhow!(
+                    "strong read requested but quorum write path is not ready"
+                ))
             }
         }
         ReadConsistency::PreferStrong => {
@@ -83,11 +82,7 @@ impl HiqliteRuntime {
         }
     }
 
-    pub fn split(
-        local: Client,
-        remote: Client,
-        default_read_consistency: ReadConsistency,
-    ) -> Self {
+    pub fn split(local: Client, remote: Client, default_read_consistency: ReadConsistency) -> Self {
         Self {
             local: Some(local),
             remote: Some(remote),
@@ -158,6 +153,25 @@ impl HiqliteRuntime {
             .write_client()
             .ok_or_else(|| anyhow!("no write-capable hiqlite client configured"))?
             .batch(sql)
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        let mut applied = Vec::with_capacity(rows.len());
+        for row in rows {
+            applied.push(row.map_err(anyhow::Error::from)?);
+        }
+        Ok(applied)
+    }
+
+    pub async fn transaction<C, Q>(&self, queries: Q) -> Result<Vec<usize>>
+    where
+        Q: IntoIterator<Item = (C, Vec<hiqlite::Param>)>,
+        C: Into<Cow<'static, str>>,
+    {
+        let rows = self
+            .write_client()
+            .ok_or_else(|| anyhow!("no write-capable hiqlite client configured"))?
+            .txn(queries)
             .await
             .map_err(anyhow::Error::from)?;
 

@@ -2,9 +2,12 @@ mod support;
 
 use std::sync::Arc;
 
-use axum::{body::Body, http::{Request, StatusCode}};
-use http_body_util::BodyExt;
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
+use http_body_util::BodyExt;
 use infra::{
     artifacts::ArtifactStore,
     config::{
@@ -111,7 +114,12 @@ async fn auth_login_proxy_returns_trailbase_ui() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("TrailBase Login"));
     assert!(html.contains("/api/auth/v1/login"));

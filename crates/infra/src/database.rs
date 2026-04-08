@@ -366,13 +366,8 @@ impl Database {
         T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
         S: Into<Cow<'static, str>>,
     {
-        self.query_rows_with(
-            self.runtime.default_read_consistency(),
-            stmt,
-            params,
-            label,
-        )
-        .await
+        self.query_rows_with(self.runtime.default_read_consistency(), stmt, params, label)
+            .await
     }
 
     async fn query_count<S>(
@@ -401,19 +396,25 @@ impl Database {
     where
         S: Into<Cow<'static, str>>,
     {
-        Ok(self
-            .query_count(consistency, stmt, params, label)
-            .await?
-            > 0)
+        Ok(self.query_count(consistency, stmt, params, label).await? > 0)
     }
 
     fn validation_read_consistency(&self) -> ReadConsistency {
-        match self.runtime.runtime_mode() {
-            crate::config::RuntimeMode::Embedded => ReadConsistency::Local,
-            crate::config::RuntimeMode::Remote | crate::config::RuntimeMode::Split => {
-                ReadConsistency::Strong
-            }
-        }
+        validation_read_consistency_for_mode(self.runtime.runtime_mode())
+    }
+
+    pub(crate) fn default_read_consistency_with_override(
+        &self,
+        override_consistency: Option<ReadConsistency>,
+    ) -> ReadConsistency {
+        override_consistency.unwrap_or_else(|| self.runtime.default_read_consistency())
+    }
+
+    fn validation_read_consistency_with_override(
+        &self,
+        override_consistency: Option<ReadConsistency>,
+    ) -> ReadConsistency {
+        override_consistency.unwrap_or_else(|| self.validation_read_consistency())
     }
 
     pub async fn health_status(&self) -> HealthStatus {
@@ -714,9 +715,9 @@ impl Database {
                     ON documents (plant_id, attachment_code, file_name);
                 "#
                 .to_owned(),
-        )
-        .await
-        .context("create schema")?;
+            )
+            .await
+            .context("create schema")?;
         Ok(())
     }
 
@@ -833,12 +834,7 @@ impl Database {
     async fn ensure_action_catalog(&self) -> Result<()> {
         let now = now_string();
         for (code, name, risk_level, visibility_granting) in [
-            (
-                "organization.plant.create",
-                "Create Plant",
-                "medium",
-                0_i64,
-            ),
+            ("organization.plant.create", "Create Plant", "medium", 0_i64),
             (
                 "organization.plant.create_for_owner",
                 "Create Plant For Owner",
@@ -870,18 +866,33 @@ impl Database {
                 0_i64,
             ),
             ("plant.profile.read", "Read Plant Profile", "low", 1_i64),
-            ("plant.profile.write", "Write Plant Profile", "medium", 0_i64),
+            (
+                "plant.profile.write",
+                "Write Plant Profile",
+                "medium",
+                0_i64,
+            ),
             ("plant.telemetry.read", "Read Plant Telemetry", "low", 0_i64),
             ("plant.alert.read", "Read Plant Alerts", "low", 0_i64),
             ("plant.document.read", "Read Plant Documents", "low", 0_i64),
-            ("plant.document.write", "Write Plant Documents", "medium", 0_i64),
+            (
+                "plant.document.write",
+                "Write Plant Documents",
+                "medium",
+                0_i64,
+            ),
             ("plant.report.read", "Read Plant Reports", "low", 0_i64),
             ("plant.report.write", "Write Plant Reports", "medium", 0_i64),
             ("plant.rec.read", "Read Plant REC", "low", 0_i64),
             ("plant.rate.read", "Read Plant Rates", "low", 0_i64),
             ("plant.sync.execute", "Execute Plant Sync", "high", 0_i64),
             ("plant.device.read", "Read Plant Device", "low", 0_i64),
-            ("plant.device.control", "Control Plant Device", "critical", 0_i64),
+            (
+                "plant.device.control",
+                "Control Plant Device",
+                "critical",
+                0_i64,
+            ),
             (
                 "plant.certificate.use",
                 "Use Plant Certificate",
@@ -1027,11 +1038,32 @@ impl Database {
         display_name: &str,
         active: bool,
     ) -> Result<User> {
+        self.resolve_or_create_user_identity_with_consistency(
+            provider,
+            external_user_id,
+            email,
+            display_name,
+            active,
+            None,
+        )
+        .await
+    }
+
+    pub async fn resolve_or_create_user_identity_with_consistency(
+        &self,
+        provider: &str,
+        external_user_id: &str,
+        email: Option<&str>,
+        display_name: &str,
+        active: bool,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<User> {
         let now = now_string();
+        let read_consistency = self.validation_read_consistency_with_override(consistency.clone());
         let existing: Option<UserIdentityJoinRow> = self
             .runtime
             .query_rows(
-                self.validation_read_consistency(),
+                read_consistency.clone(),
                 "SELECT ui.id as identity_id,
                         ui.user_id as user_id
                  FROM user_identities ui
@@ -1045,14 +1077,18 @@ impl Database {
 
         let email_user = if existing.is_none() {
             match email {
-                Some(email) => self.find_user_by_identity_or_email(provider, email).await?,
+                Some(email) => {
+                    self.find_user_by_identity_or_email(provider, email, consistency.clone())
+                        .await?
+                }
                 None => None,
             }
         } else {
             None
         };
         let existing_user = if existing.is_none() && email_user.is_none() {
-            self.find_user_by_id(external_user_id).await?
+            self.find_user_by_id(external_user_id, consistency.clone())
+                .await?
         } else {
             None
         };
@@ -1121,6 +1157,36 @@ impl Database {
         })
     }
 
+    pub async fn resolve_existing_user_identity_with_consistency(
+        &self,
+        provider: &str,
+        external_user_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<User>> {
+        let read_consistency = self.validation_read_consistency_with_override(consistency.clone());
+        let existing: Option<UserIdentityJoinRow> = self
+            .runtime
+            .query_rows(
+                read_consistency,
+                "SELECT ui.id as identity_id,
+                        ui.user_id as user_id
+                 FROM user_identities ui
+                 WHERE ui.provider = $1 AND ui.external_user_id = $2",
+                params!(provider.to_owned(), external_user_id.to_owned()),
+            )
+            .await
+            .context("query user identity")?
+            .into_iter()
+            .next();
+
+        if let Some(existing) = existing {
+            return self
+                .find_user_by_id(&existing.user_id, consistency.clone())
+                .await;
+        }
+        Ok(None)
+    }
+
     pub async fn bind_identity_to_user(
         &self,
         user_id: &str,
@@ -1160,7 +1226,7 @@ impl Database {
         }
 
         let target_user = self
-            .find_user_by_id(user_id)
+            .find_user_by_id(user_id, None)
             .await?
             .ok_or_else(|| anyhow::anyhow!("target user {} does not exist", user_id))?;
 
@@ -1222,11 +1288,15 @@ impl Database {
         })
     }
 
-    async fn find_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
+    async fn find_user_by_id(
+        &self,
+        user_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<User>> {
         let rows: Vec<UserLookupRow> = self
             .runtime
             .query_rows(
-                self.validation_read_consistency(),
+                self.validation_read_consistency_with_override(consistency),
                 "SELECT id, email, display_name, active
                  FROM users
                  WHERE id = $1
@@ -1247,11 +1317,13 @@ impl Database {
         &self,
         provider: &str,
         email: &str,
+        consistency: Option<ReadConsistency>,
     ) -> Result<Option<User>> {
+        let read_consistency = self.validation_read_consistency_with_override(consistency.clone());
         let identity_rows: Vec<UserIdentityLookupRow> = self
             .runtime
             .query_rows(
-                self.validation_read_consistency(),
+                read_consistency.clone(),
                 "SELECT ui.user_id
                  FROM user_identities ui
                  WHERE ui.provider = $1
@@ -1270,13 +1342,15 @@ impl Database {
             );
         }
         if let Some(row) = identity_rows.into_iter().next() {
-            return self.find_user_by_id(&row.user_id).await;
+            return self
+                .find_user_by_id(&row.user_id, consistency.clone())
+                .await;
         }
 
         let user_rows: Vec<UserLookupRow> = self
             .runtime
             .query_rows(
-                self.validation_read_consistency(),
+                read_consistency,
                 "SELECT id, email, display_name, active
                  FROM users
                  WHERE email = $1
@@ -1301,19 +1375,12 @@ impl Database {
         &self,
         token_hash: &str,
         now: DateTime<Utc>,
+        consistency: Option<ReadConsistency>,
     ) -> Result<Option<CachedExternalIdentity>> {
-        self.runtime
-            .execute(
-                "DELETE FROM auth_identity_cache WHERE expires_at <= $1",
-                params!(now.to_rfc3339()),
-            )
-            .await
-            .context("purge expired auth identity cache")?;
-
         let rows: Vec<AuthIdentityCacheRow> = self
             .runtime
             .query_rows(
-                crate::config::ReadConsistency::Strong,
+                self.validation_read_consistency_with_override(consistency),
                 "SELECT provider, external_user_id, email, display_name, active, expires_at
                  FROM auth_identity_cache
                  WHERE token_hash = $1 AND expires_at > $2
@@ -1342,6 +1409,13 @@ impl Database {
         expires_at: DateTime<Utc>,
     ) -> Result<()> {
         let now = now_string();
+        self.runtime
+            .execute(
+                "DELETE FROM auth_identity_cache WHERE expires_at <= $1",
+                params!(now.clone()),
+            )
+            .await
+            .context("purge expired auth identity cache")?;
         self.runtime
             .execute(
                 "INSERT INTO auth_identity_cache (
@@ -1376,10 +1450,20 @@ impl Database {
         user_id: &str,
         organization_id: &str,
     ) -> Result<bool> {
+        self.has_active_organization_membership_with_consistency(user_id, organization_id, None)
+            .await
+    }
+
+    pub async fn has_active_organization_membership_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
         let row: CountRow = self
             .runtime
             .query_rows(
-                self.validation_read_consistency(),
+                self.validation_read_consistency_with_override(consistency),
                 "SELECT COUNT(*) as count
                  FROM organization_memberships
                  WHERE user_id = $1 AND organization_id = $2 AND status = 'active'",
@@ -1394,16 +1478,28 @@ impl Database {
     }
 
     pub async fn get_user(&self, user_id: &str) -> Result<User> {
-        self.find_user_by_id(user_id)
+        self.find_user_by_id(user_id, None)
             .await?
             .ok_or_else(|| anyhow!("user not found: {user_id}"))
     }
 
-    pub async fn list_active_organizations_for_user(&self, user_id: &str) -> Result<Vec<Organization>> {
+    pub async fn list_active_organizations_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<Organization>> {
+        self.list_active_organizations_for_user_with_consistency(user_id, None)
+            .await
+    }
+
+    pub async fn list_active_organizations_for_user_with_consistency(
+        &self,
+        user_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Organization>> {
         let rows: Vec<OrganizationRow> = self
             .runtime
             .query_rows(
-                self.validation_read_consistency(),
+                self.validation_read_consistency_with_override(consistency),
                 "SELECT o.id, o.business_no, o.name, o.legal_entity_id, o.active
                  FROM organizations o
                  JOIN organization_memberships om ON om.organization_id = o.id
@@ -1554,7 +1650,10 @@ impl Database {
         Ok(row.into())
     }
 
-    pub async fn load_active_certificate(&self, organization_id: &str) -> Result<StoredCertificate> {
+    pub async fn load_active_certificate(
+        &self,
+        organization_id: &str,
+    ) -> Result<StoredCertificate> {
         let rows: Vec<StoredCertificate> = self
             .query_consistent_rows(
                 "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.active, c.last_used_at, c.created_at
@@ -1883,8 +1982,19 @@ impl Database {
         user_id: &str,
         organization_id: &str,
     ) -> Result<Vec<Plant>> {
+        self.list_visible_plants_with_consistency(user_id, organization_id, None)
+            .await
+    }
+
+    pub async fn list_visible_plants_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Plant>> {
         let rows: Vec<PlantRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT p.id, p.facility_code, p.owner_organization_id, p.created_by_organization_id,
                         p.name, p.contract_no, p.address, p.installed_kw, p.rec_start_date,
                         p.confirm_issued
@@ -1908,9 +2018,27 @@ impl Database {
         plant_id: &str,
         action_id: &str,
     ) -> Result<bool> {
+        self.has_user_plant_action_with_consistency(
+            user_id,
+            organization_id,
+            plant_id,
+            action_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn has_user_plant_action_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        plant_id: &str,
+        action_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
         Ok(self
             .query_count(
-                self.runtime.default_read_consistency(),
+                self.default_read_consistency_with_override(consistency),
                 "SELECT COUNT(*) as count
                  FROM effective_user_plant_actions
                  WHERE user_id = $1
@@ -1936,7 +2064,25 @@ impl Database {
         target_organization_id: &str,
         action_id: &str,
     ) -> Result<bool> {
-        let consistency = self.validation_read_consistency();
+        self.has_user_organization_action_with_consistency(
+            user_id,
+            organization_id,
+            target_organization_id,
+            action_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn has_user_organization_action_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+        action_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        let consistency = self.validation_read_consistency_with_override(consistency);
         let has_membership = self
             .exists_row_with(
                 consistency.clone(),
@@ -2011,10 +2157,24 @@ impl Database {
         grantor_organization_id: &str,
         grantee_organization_id: &str,
     ) -> Result<Option<String>> {
+        self.find_active_agreement_id_with_consistency(
+            grantor_organization_id,
+            grantee_organization_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn find_active_agreement_id_with_consistency(
+        &self,
+        grantor_organization_id: &str,
+        grantee_organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<String>> {
         let now = Utc::now().to_rfc3339();
         let rows: Vec<AgreementIdRow> = self
             .query_rows_with(
-                self.validation_read_consistency(),
+                self.validation_read_consistency_with_override(consistency),
                 "SELECT id
                  FROM agreements
                  WHERE grantor_organization_id = $1
@@ -2049,8 +2209,18 @@ impl Database {
     }
 
     pub async fn get_plant_by_facility_code(&self, facility_code: &str) -> Result<Plant> {
+        self.get_plant_by_facility_code_with_consistency(facility_code, None)
+            .await
+    }
+
+    pub async fn get_plant_by_facility_code_with_consistency(
+        &self,
+        facility_code: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Plant> {
         let mut plants: Vec<PlantRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued
                  FROM plants WHERE facility_code = $1 LIMIT 1",
                 params!(facility_code.to_owned()),
@@ -2063,13 +2233,36 @@ impl Database {
     }
 
     pub async fn get_plant_summary(&self, facility_code: &str) -> Result<PlantSummary> {
-        let plant = self.get_plant_by_facility_code(facility_code).await?;
-        self.get_plant_summary_by_id(&plant.id).await
+        self.get_plant_summary_with_consistency(facility_code, None)
+            .await
+    }
+
+    pub async fn get_plant_summary_with_consistency(
+        &self,
+        facility_code: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<PlantSummary> {
+        let plant = self
+            .get_plant_by_facility_code_with_consistency(facility_code, consistency.clone())
+            .await?;
+        self.get_plant_summary_by_id_with_consistency(&plant.id, consistency)
+            .await
     }
 
     pub async fn get_plant_summary_by_id(&self, plant_id: &str) -> Result<PlantSummary> {
+        self.get_plant_summary_by_id_with_consistency(plant_id, None)
+            .await
+    }
+
+    pub async fn get_plant_summary_by_id_with_consistency(
+        &self,
+        plant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<PlantSummary> {
+        let read_consistency = self.default_read_consistency_with_override(consistency);
         let mut plants: Vec<PlantRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                read_consistency.clone(),
                 "SELECT id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued
                  FROM plants WHERE id = $1 LIMIT 1",
                 params!(plant_id.to_owned()),
@@ -2081,7 +2274,8 @@ impl Database {
         let resolved_plant_id = plant_row.id.clone();
 
         let mut runs: Vec<SyncRunRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                read_consistency.clone(),
                 "SELECT id, organization_id, plant_id, mode, status, started_at, finished_at, duration_ms
                  FROM sync_runs WHERE plant_id = $1 AND status = 'completed'
                  ORDER BY started_at DESC LIMIT 1",
@@ -2094,7 +2288,7 @@ impl Database {
 
         let generation = self
             .query_row_with::<CountSumRow, _>(
-                self.runtime.default_read_consistency(),
+                read_consistency.clone(),
                 "SELECT COUNT(*) as count, CAST(COALESCE(SUM(generation_kwh), 0) AS REAL) as total
                  FROM generation_records WHERE plant_id = $1",
                 params!(resolved_plant_id.clone()),
@@ -2104,7 +2298,7 @@ impl Database {
             .context("aggregate generation")?;
         let rates = self
             .query_row_with::<CountRow, _>(
-                self.runtime.default_read_consistency(),
+                read_consistency.clone(),
                 "SELECT COUNT(*) as count FROM rate_records WHERE plant_id = $1 AND published = 1",
                 params!(resolved_plant_id.clone()),
                 "rates aggregate",
@@ -2113,7 +2307,7 @@ impl Database {
             .context("aggregate rates")?;
         let rec = self
             .query_row_with::<CountSumIntRow, _>(
-                self.runtime.default_read_consistency(),
+                read_consistency.clone(),
                 "SELECT COUNT(*) as count, COALESCE(SUM(rec_quantity), 0) as total
                  FROM rec_records WHERE plant_id = $1",
                 params!(resolved_plant_id.clone()),
@@ -2123,7 +2317,7 @@ impl Database {
             .context("aggregate rec")?;
         let documents = self
             .query_row_with::<CountRow, _>(
-                self.runtime.default_read_consistency(),
+                read_consistency.clone(),
                 "SELECT COUNT(*) as count FROM documents WHERE plant_id = $1",
                 params!(resolved_plant_id.clone()),
                 "document aggregate",
@@ -2131,7 +2325,8 @@ impl Database {
             .await
             .context("aggregate documents")?;
         let category_rows: Vec<CategoryCountRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                read_consistency,
                 "SELECT category, COUNT(*) as count FROM documents WHERE plant_id = $1 GROUP BY category ORDER BY category ASC",
                 params!(resolved_plant_id),
                 "document category aggregate",
@@ -2159,8 +2354,17 @@ impl Database {
     }
 
     pub async fn list_generation(&self, plant_id: &str) -> Result<Vec<GenerationRecord>> {
+        self.list_generation_with_consistency(plant_id, None).await
+    }
+
+    pub async fn list_generation_with_consistency(
+        &self,
+        plant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<GenerationRecord>> {
         let rows: Vec<GenerationRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline
                  FROM generation_records WHERE plant_id = $1 ORDER BY month ASC",
                 params!(plant_id.to_owned()),
@@ -2172,8 +2376,17 @@ impl Database {
     }
 
     pub async fn list_rates(&self, plant_id: &str) -> Result<Vec<RateRecord>> {
+        self.list_rates_with_consistency(plant_id, None).await
+    }
+
+    pub async fn list_rates_with_consistency(
+        &self,
+        plant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<RateRecord>> {
         let rows: Vec<RateRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT month, self_rate, national_average, nearby_average, nearby_highest
                  FROM rate_records WHERE plant_id = $1 AND published = 1 ORDER BY month ASC",
                 params!(plant_id.to_owned()),
@@ -2194,8 +2407,17 @@ impl Database {
     }
 
     pub async fn list_rec(&self, plant_id: &str) -> Result<Vec<RecRecord>> {
+        self.list_rec_with_consistency(plant_id, None).await
+    }
+
+    pub async fn list_rec_with_consistency(
+        &self,
+        plant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<RecRecord>> {
         let rows: Vec<RecRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT month, application_no, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status
                  FROM rec_records WHERE plant_id = $1 ORDER BY month ASC, application_no ASC",
                 params!(plant_id.to_owned()),
@@ -2207,8 +2429,17 @@ impl Database {
     }
 
     pub async fn list_documents(&self, plant_id: &str) -> Result<Vec<StoredDocument>> {
+        self.list_documents_with_consistency(plant_id, None).await
+    }
+
+    pub async fn list_documents_with_consistency(
+        &self,
+        plant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<StoredDocument>> {
         let rows: Vec<DocumentRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT id, plant_id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE plant_id = $1 ORDER BY category ASC, file_name ASC",
                 params!(plant_id.to_owned()),
@@ -2242,8 +2473,17 @@ impl Database {
     }
 
     pub async fn get_document(&self, id: &str) -> Result<StoredDocument> {
+        self.get_document_with_consistency(id, None).await
+    }
+
+    pub async fn get_document_with_consistency(
+        &self,
+        id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<StoredDocument> {
         let rows: Vec<DocumentRow> = self
-            .query_default_rows(
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
                 "SELECT id, plant_id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE id = $1 LIMIT 1",
                 params!(id.to_owned()),
@@ -2306,7 +2546,10 @@ impl Database {
     }
 
     pub async fn trigger_backup(&self) -> Result<()> {
-        self.runtime.backup().await.context("trigger hiqlite backup")
+        self.runtime
+            .backup()
+            .await
+            .context("trigger hiqlite backup")
     }
 
     pub async fn save_role_binding(&self, binding: &RoleBinding) -> Result<()> {
@@ -2570,74 +2813,79 @@ impl Database {
             })
             .collect();
 
-        self.runtime
-            .batch(
-                "DELETE FROM organization_closure;
-                 DELETE FROM effective_organization_plant_actions;
-                 DELETE FROM effective_user_plant_actions;
-                 DELETE FROM effective_user_plant_visibility;",
-            )
-            .await
-            .context("clear organization expansion tables")?;
+        // HashSet iteration is non-deterministic; keep transaction input ordered so rebuilds are
+        // reproducible in tests/debugging while using the cheaper unstable sort because duplicates
+        // have already been eliminated by the sets above.
+        let mut closure_rows = closure_rows;
+        closure_rows.sort_unstable();
+
+        let mut org_action_rows: Vec<_> = org_action_rows.into_iter().collect();
+        org_action_rows.sort_unstable();
+
+        let mut user_action_rows: Vec<_> = user_action_rows.into_iter().collect();
+        user_action_rows.sort_unstable();
+
+        let mut visibility_rows: Vec<_> = visibility_rows.into_iter().collect();
+        visibility_rows.sort_unstable();
+
+        let updated_at = Utc::now().to_rfc3339();
+        let mut queries: Vec<(&'static str, Vec<hiqlite::Param>)> = Vec::with_capacity(
+            4 + closure_rows.len()
+                + org_action_rows.len()
+                + user_action_rows.len()
+                + visibility_rows.len(),
+        );
+        queries.push(("DELETE FROM organization_closure", vec![]));
+        queries.push(("DELETE FROM effective_organization_plant_actions", vec![]));
+        queries.push(("DELETE FROM effective_user_plant_actions", vec![]));
+        queries.push(("DELETE FROM effective_user_plant_visibility", vec![]));
 
         for (ancestor, descendant, depth) in closure_rows {
-            self.runtime
-                .execute(
-                    "INSERT INTO organization_closure (
-                        ancestor_organization_id, descendant_organization_id, depth
-                     ) VALUES ($1, $2, $3)",
-                    params!(ancestor, descendant, depth),
-                )
-                .await
-                .context("insert organization closure row")?;
+            queries.push((
+                "INSERT INTO organization_closure (
+                    ancestor_organization_id, descendant_organization_id, depth
+                 ) VALUES ($1, $2, $3)",
+                params!(ancestor, descendant, depth),
+            ));
         }
 
         for (organization_id, plant_id, action_id) in org_action_rows {
-            self.runtime
-                .execute(
-                    "INSERT INTO effective_organization_plant_actions (
-                        organization_id, plant_id, action_id, updated_at
-                     ) VALUES ($1, $2, $3, $4)",
-                    params!(
-                        organization_id,
-                        plant_id,
-                        action_id,
-                        Utc::now().to_rfc3339()
-                    ),
-                )
-                .await
-                .context("insert effective organization plant action")?;
+            queries.push((
+                "INSERT INTO effective_organization_plant_actions (
+                    organization_id, plant_id, action_id, updated_at
+                 ) VALUES ($1, $2, $3, $4)",
+                params!(organization_id, plant_id, action_id, updated_at.clone()),
+            ));
         }
 
         for (user_id, organization_id, plant_id, action_id) in user_action_rows {
-            self.runtime
-                .execute(
-                    "INSERT INTO effective_user_plant_actions (
-                        user_id, organization_id, plant_id, action_id, updated_at
-                     ) VALUES ($1, $2, $3, $4, $5)",
-                    params!(
-                        user_id,
-                        organization_id,
-                        plant_id,
-                        action_id,
-                        Utc::now().to_rfc3339()
-                    ),
-                )
-                .await
-                .context("insert effective user plant action")?;
+            queries.push((
+                "INSERT INTO effective_user_plant_actions (
+                    user_id, organization_id, plant_id, action_id, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5)",
+                params!(
+                    user_id,
+                    organization_id,
+                    plant_id,
+                    action_id,
+                    updated_at.clone()
+                ),
+            ));
         }
 
         for (user_id, organization_id, plant_id) in visibility_rows {
-            self.runtime
-                .execute(
-                    "INSERT INTO effective_user_plant_visibility (
-                        user_id, organization_id, plant_id, updated_at
-                     ) VALUES ($1, $2, $3, $4)",
-                    params!(user_id, organization_id, plant_id, Utc::now().to_rfc3339()),
-                )
-                .await
-                .context("insert effective user plant visibility")?;
+            queries.push((
+                "INSERT INTO effective_user_plant_visibility (
+                    user_id, organization_id, plant_id, updated_at
+                 ) VALUES ($1, $2, $3, $4)",
+                params!(user_id, organization_id, plant_id, updated_at.clone()),
+            ));
         }
+
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("rebuild organization expansion transaction")?;
 
         Ok(())
     }
@@ -2767,7 +3015,9 @@ impl Database {
                 plant_owner_rows
                     .into_iter()
                     .next()
-                    .ok_or_else(|| anyhow!("plant resource {} does not exist", binding.resource_id))?
+                    .ok_or_else(|| {
+                        anyhow!("plant resource {} does not exist", binding.resource_id)
+                    })?
                     .owner_organization_id,
             )
         } else {
@@ -2935,12 +3185,47 @@ impl Database {
             }
             RoleBindingResourceType::Plant => {
                 if plant_owner.is_none() {
-                    return Err(anyhow!("plant resource {} does not exist", binding.resource_id));
+                    return Err(anyhow!(
+                        "plant resource {} does not exist",
+                        binding.resource_id
+                    ));
                 }
             }
         }
 
         Ok(())
+    }
+}
+
+fn validation_read_consistency_for_mode(
+    runtime_mode: &crate::config::RuntimeMode,
+) -> ReadConsistency {
+    match runtime_mode {
+        crate::config::RuntimeMode::Embedded => ReadConsistency::Local,
+        crate::config::RuntimeMode::Remote => ReadConsistency::Strong,
+        crate::config::RuntimeMode::Split => ReadConsistency::Strong,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validation_read_consistency_for_mode;
+    use crate::config::{ReadConsistency, RuntimeMode};
+
+    #[test]
+    fn validation_reads_remain_strong_in_split_mode() {
+        assert_eq!(
+            validation_read_consistency_for_mode(&RuntimeMode::Split),
+            ReadConsistency::Strong
+        );
+        assert_eq!(
+            validation_read_consistency_for_mode(&RuntimeMode::Remote),
+            ReadConsistency::Strong
+        );
+        assert_eq!(
+            validation_read_consistency_for_mode(&RuntimeMode::Embedded),
+            ReadConsistency::Local
+        );
     }
 }
 
@@ -3355,7 +3640,9 @@ impl From<RecRow> for RecRecord {
 
 fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
     if binding.subject_organization_id.trim().is_empty() {
-        return Err(anyhow!("role binding subject organization id must not be empty"));
+        return Err(anyhow!(
+            "role binding subject organization id must not be empty"
+        ));
     }
     if binding.resource_id.trim().is_empty() {
         return Err(anyhow!("role binding resource id must not be empty"));

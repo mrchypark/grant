@@ -9,6 +9,8 @@ TRAILBASE_IMAGE="${TRAILBASE_IMAGE:-trailbase-auth-bridge:local}"
 LITESTREAM_IMAGE="${LITESTREAM_IMAGE:-litestream/litestream:0.3.14}"
 AGENTS="${AGENTS:-2}"
 KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/k8s}"
+K3D_NO_LB="${K3D_NO_LB:-0}"
+K3D_SKIP_MINIO="${K3D_SKIP_MINIO:-0}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -32,10 +34,18 @@ MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 
 if ! k3d cluster get "${CLUSTER_NAME}" >/dev/null 2>&1; then
-  k3d cluster create "${CLUSTER_NAME}" \
-    --servers 1 \
-    --agents "${AGENTS}" \
-    --wait
+  if [[ "${K3D_NO_LB}" == "1" ]]; then
+    k3d cluster create "${CLUSTER_NAME}" \
+      --servers 1 \
+      --agents "${AGENTS}" \
+      --no-lb \
+      --wait
+  else
+    k3d cluster create "${CLUSTER_NAME}" \
+      --servers 1 \
+      --agents "${AGENTS}" \
+      --wait
+  fi
 fi
 
 kubectl config use-context "k3d-${CLUSTER_NAME}" >/dev/null
@@ -58,7 +68,7 @@ docker image inspect "${LITESTREAM_IMAGE}" >/dev/null 2>&1 || {
 import_image_with_ctr() {
   local image="$1"
   local tar_file
-  tar_file="$(mktemp "/tmp/${CLUSTER_NAME}.image.XXXXXX.tar")"
+  tar_file="$(mktemp "/tmp/${CLUSTER_NAME}.image.XXXXXX")"
   docker save "${image}" -o "${tar_file}"
 
   local nodes
@@ -114,10 +124,12 @@ apply_resource() {
 }
 
 apply_resource "${KUSTOMIZE_DIR}/namespace.yaml"
-apply_resource "${KUSTOMIZE_DIR}/minio-headless-service.yaml"
-apply_resource "${KUSTOMIZE_DIR}/minio-service.yaml"
-apply_resource "${KUSTOMIZE_DIR}/minio-pdb.yaml"
-apply_resource "${KUSTOMIZE_DIR}/minio-statefulset.yaml"
+if [[ "${K3D_SKIP_MINIO}" != "1" ]]; then
+  apply_resource "${KUSTOMIZE_DIR}/minio-headless-service.yaml"
+  apply_resource "${KUSTOMIZE_DIR}/minio-service.yaml"
+  apply_resource "${KUSTOMIZE_DIR}/minio-pdb.yaml"
+  apply_resource "${KUSTOMIZE_DIR}/minio-statefulset.yaml"
+fi
 
 kubernetes_wait() {
   kubectl -n "${NAMESPACE}" "$@"
@@ -138,21 +150,22 @@ wait_for_resource() {
   exit 1
 }
 
-wait_for_resource statefulset minio
-kubernetes_wait rollout status statefulset/minio --timeout=15m
+if [[ "${K3D_SKIP_MINIO}" != "1" ]]; then
+  wait_for_resource statefulset minio
+  kubernetes_wait rollout status statefulset/minio --timeout=15m
 
-kubectl -n "${NAMESPACE}" delete job minio-bootstrap --ignore-not-found
-for _ in $(seq 1 60); do
-  if ! kubectl -n "${NAMESPACE}" get job minio-bootstrap >/dev/null 2>&1; then
-    break
+  kubectl -n "${NAMESPACE}" delete job minio-bootstrap --ignore-not-found
+  for _ in $(seq 1 60); do
+    if ! kubectl -n "${NAMESPACE}" get job minio-bootstrap >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if kubectl -n "${NAMESPACE}" get job minio-bootstrap >/dev/null 2>&1; then
+    echo "timed out waiting for minio-bootstrap job deletion" >&2
+    exit 1
   fi
-  sleep 1
-done
-if kubectl -n "${NAMESPACE}" get job minio-bootstrap >/dev/null 2>&1; then
-  echo "timed out waiting for minio-bootstrap job deletion" >&2
-  exit 1
-fi
-kubectl -n "${NAMESPACE}" apply -f - <<EOF
+  kubectl -n "${NAMESPACE}" apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -189,7 +202,10 @@ spec:
               mc mb -p local/trailbase-backups || true
 EOF
 
-kubectl -n "${NAMESPACE}" wait --for=condition=complete job/minio-bootstrap --timeout=10m
+  kubectl -n "${NAMESPACE}" wait --for=condition=complete job/minio-bootstrap --timeout=10m
+else
+  echo "[skip] minio deployment"
+fi
 
 apply_resource "${KUSTOMIZE_DIR}/trailbase-configmap.yaml"
 apply_resource "${KUSTOMIZE_DIR}/trailbase-service.yaml"

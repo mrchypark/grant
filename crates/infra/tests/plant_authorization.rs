@@ -3,9 +3,8 @@ use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use infra::{
     artifacts::ArtifactStore,
     config::{
-        AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig,
-        LocalNodeRole, ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
-        TrailbaseAuthConfig,
+        AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, LocalNodeRole,
+        ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig, TrailbaseAuthConfig,
     },
     database::Database,
     runtime::HiqliteRuntime,
@@ -447,15 +446,19 @@ async fn lists_only_visible_plants_and_requires_profile_read_for_detail() {
     seed_authorization_fixture(&db, &runtime).await;
 
     let visible = service
-        .list_visible_plants("group-user", "worker-org")
+        .list_visible_plants("group-user", "worker-org", None)
         .await
         .expect("visible plants");
-    assert_eq!(visible.len(), 1, "only profile-visible plants should be listed");
+    assert_eq!(
+        visible.len(),
+        1,
+        "only profile-visible plants should be listed"
+    );
     assert_eq!(visible[0].id, "plant-profile");
     assert_eq!(visible[0].facility_code, "FAC-PROFILE");
 
     let direct_visible = service
-        .list_visible_plants("direct-user", "worker-org")
+        .list_visible_plants("direct-user", "worker-org", None)
         .await
         .expect("direct visible plants");
     assert!(
@@ -464,13 +467,13 @@ async fn lists_only_visible_plants_and_requires_profile_read_for_detail() {
     );
 
     let profile = service
-        .get_plant_profile("group-user", "worker-org", "FAC-PROFILE")
+        .get_plant_profile("group-user", "worker-org", "FAC-PROFILE", None)
         .await
         .expect("authorized profile");
     assert_eq!(profile.plant.id, "plant-profile");
 
     let err = service
-        .get_plant_profile("direct-user", "worker-org", "FAC-DOCUMENT")
+        .get_plant_profile("direct-user", "worker-org", "FAC-DOCUMENT", None)
         .await
         .expect_err("document-only access should be rejected for profile read");
     assert!(

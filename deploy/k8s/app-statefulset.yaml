@@ -107,6 +107,12 @@ spec:
             limits:
               memory: 512Mi
               ephemeral-storage: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /healthz
@@ -119,13 +125,8 @@ spec:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 20
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 10Gi
-        storageClassName: local-path
+      volumes:
+        - name: data
+          # Intentionally ephemeral: voter recovery is validated through remote backup/restore,
+          # not local PVC reattachment.
+          emptyDir: {}
