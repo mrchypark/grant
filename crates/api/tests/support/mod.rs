@@ -5,7 +5,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
-use infra::config::{AuthConfig, TrailbaseAuthConfig};
+use infra::config::{AuthConfig, KmsConfig, TrailbaseAuthConfig};
 use serde_json::json;
 
 #[derive(Clone)]
@@ -19,6 +19,13 @@ pub fn trailbase_auth_config(base_url: String) -> AuthConfig {
             internal_secret: "test-trailbase-secret".to_owned(),
             cache_ttl_seconds: 30,
         },
+    }
+}
+
+pub fn test_kms_config() -> KmsConfig {
+    KmsConfig {
+        active_key_id: "local-dev-v1".to_owned(),
+        master_keys: vec![("local-dev-v1".to_owned(), b"dev-only-master-key".to_vec())],
     }
 }
 
