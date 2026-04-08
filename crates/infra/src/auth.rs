@@ -399,7 +399,10 @@ impl TrailbaseResolver {
 }
 
 fn should_sync_identity(read_consistency: Option<&ReadConsistency>) -> bool {
-    matches!(read_consistency, Some(ReadConsistency::Strong))
+    matches!(
+        read_consistency,
+        Some(ReadConsistency::Strong | ReadConsistency::PreferStrong)
+    )
 }
 
 pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Error {
@@ -413,7 +416,8 @@ pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Erro
 
 #[cfg(test)]
 mod tests {
-    use super::map_strong_identity_sync_error;
+    use super::{map_strong_identity_sync_error, should_sync_identity};
+    use crate::config::ReadConsistency;
     use anyhow::anyhow;
 
     #[test]
@@ -429,6 +433,14 @@ mod tests {
     fn preserves_auth_failures_when_wrapping_identity_sync_errors() {
         let err = map_strong_identity_sync_error(anyhow!("forbidden: no local user identity"));
         assert_eq!(err.to_string(), "forbidden: no local user identity");
+    }
+
+    #[test]
+    fn sync_gate_treats_prefer_strong_as_sync_capable() {
+        assert!(should_sync_identity(Some(&ReadConsistency::Strong)));
+        assert!(should_sync_identity(Some(&ReadConsistency::PreferStrong)));
+        assert!(!should_sync_identity(Some(&ReadConsistency::Local)));
+        assert!(!should_sync_identity(None));
     }
 }
 
