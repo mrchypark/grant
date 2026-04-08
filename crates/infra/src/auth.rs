@@ -103,10 +103,16 @@ impl AuthResolver {
             .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))?;
         let effective_read_consistency =
             db.default_read_consistency_with_override(read_consistency.clone());
+        let effective_read_consistency_override = Some(effective_read_consistency.clone());
         let should_sync = should_sync_identity(Some(&effective_read_consistency));
         let identity = self
             .trailbase
-            .introspect(db, token, read_consistency.clone(), should_sync)
+            .introspect(
+                db,
+                token,
+                effective_read_consistency_override.clone(),
+                should_sync,
+            )
             .await?;
         let user = if should_sync {
             db.resolve_or_create_user_identity_with_consistency(
@@ -115,7 +121,7 @@ impl AuthResolver {
                 identity.email.as_deref(),
                 &identity.display_name,
                 identity.active,
-                read_consistency.clone(),
+                effective_read_consistency_override.clone(),
             )
             .await
             .map_err(map_strong_identity_sync_error)?
@@ -123,7 +129,7 @@ impl AuthResolver {
             db.resolve_existing_user_identity_with_consistency(
                 "trailbase",
                 &identity.external_user_id,
-                read_consistency.clone(),
+                effective_read_consistency_override.clone(),
             )
             .await?
             .ok_or_else(|| {
@@ -137,7 +143,7 @@ impl AuthResolver {
             .has_active_organization_membership_with_consistency(
                 &user.id,
                 organization_id,
-                read_consistency,
+                effective_read_consistency_override,
             )
             .await?;
         if !is_member {
@@ -170,7 +176,7 @@ impl AuthResolver {
                 .introspect(
                     db,
                     token,
-                    read_consistency.clone(),
+                    Some(effective_read_consistency.clone()),
                     should_sync_identity(Some(&effective_read_consistency)),
                 )
                 .await?

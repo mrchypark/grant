@@ -8,7 +8,8 @@ LOCAL_PORT="${LOCAL_PORT:-18080}"
 TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL:-trailbase-user@example.com}"
 TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD:-secret}"
 BOOTSTRAP_ORGANIZATION_ID="${BOOTSTRAP_ORGANIZATION_ID:-conalog-account}"
-EXPECTED_STRONG_ERROR="${EXPECTED_STRONG_ERROR:-strong consistency requested but quorum-backed identity sync is unavailable}"
+EXPECTED_STRONG_ERROR="${EXPECTED_STRONG_ERROR:-unavailable: strong consistency requested but quorum-backed identity sync is unavailable}"
+EXPECTED_STRONG_STATUS="${EXPECTED_STRONG_STATUS:-503}"
 PARTITION_MANIFEST="${PARTITION_MANIFEST:-$ROOT_DIR/deploy/chaos-mesh/network/learner-1-to-voters-partition.yaml}"
 PARTITION_RESOURCE_NAME="${PARTITION_RESOURCE_NAME:-learner-1-to-voters-partition}"
 LEARNER_SELECTOR="${LEARNER_SELECTOR:-app=certd,role=learner,instance=learner-1}"
@@ -231,15 +232,15 @@ if [[ "${during_strong_code}" != "500" ]]; then
       during_strong_code=""
       during_strong_body=""
     fi
-    if [[ "${during_strong_code}" == "500" ]]; then
-      break
-    fi
-    sleep 1
-  done
+  if [[ "${during_strong_code}" == "${EXPECTED_STRONG_STATUS}" ]]; then
+    break
+  fi
+  sleep 1
+done
 fi
 echo "during strong response: ${during_strong_body}"
-if [[ "${during_strong_code}" != "500" ]]; then
-  echo "expected strong read to fail with 500 during partition" >&2
+if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
+  echo "expected strong read to fail with ${EXPECTED_STRONG_STATUS} during partition" >&2
   printf '%s\n' "${during_strong}" >&2
   exit 1
 fi
@@ -257,13 +258,13 @@ for _ in $(seq 1 20); do
     during_plants_code=""
     during_plants_body=""
   fi
-  if [[ "${during_plants_code}" == "500" ]]; then
+  if [[ "${during_plants_code}" == "${EXPECTED_STRONG_STATUS}" ]]; then
     break
   fi
   sleep 1
 done
 echo "during plants strong response: ${during_plants_body}"
-if [[ "${during_plants_code}" == "500" ]] && ! jq -e --arg expected "${EXPECTED_STRONG_ERROR}" '.error == $expected' >/dev/null <<<"${during_plants_body}"; then
+if [[ "${during_plants_code}" == "${EXPECTED_STRONG_STATUS}" ]] && ! jq -e --arg expected "${EXPECTED_STRONG_ERROR}" '.error == $expected' >/dev/null <<<"${during_plants_body}"; then
   echo "unexpected strong plant list error body during partition" >&2
   printf '%s\n' "${during_plants_strong}" >&2
   exit 1

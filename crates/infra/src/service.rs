@@ -174,9 +174,14 @@ impl AppService {
         let effective_read_consistency = self
             .db
             .default_read_consistency_with_override(read_consistency.clone());
+        let effective_read_consistency_override = Some(effective_read_consistency.clone());
         let identity = self
             .auth
-            .resolve_external_identity(Some(&self.db), bearer_token, read_consistency.clone())
+            .resolve_external_identity(
+                Some(&self.db),
+                bearer_token,
+                effective_read_consistency_override.clone(),
+            )
             .await?;
         let user = if matches!(
             effective_read_consistency,
@@ -189,7 +194,7 @@ impl AppService {
                     identity.email.as_deref(),
                     &identity.display_name,
                     identity.active,
-                    read_consistency.clone(),
+                    effective_read_consistency_override.clone(),
                 )
                 .await
                 .map_err(map_strong_identity_sync_error)?
@@ -198,7 +203,7 @@ impl AppService {
                 .resolve_existing_user_identity_with_consistency(
                     &identity.provider,
                     &identity.external_user_id,
-                    read_consistency.clone(),
+                    effective_read_consistency_override.clone(),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -211,7 +216,10 @@ impl AppService {
         };
         let organizations = self
             .db
-            .list_active_organizations_for_user_with_consistency(&user.id, read_consistency)
+            .list_active_organizations_for_user_with_consistency(
+                &user.id,
+                effective_read_consistency_override,
+            )
             .await?;
         let active_organization_id =
             normalize_active_organization(active_organization_id, &identity, &organizations)?;
