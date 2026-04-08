@@ -88,7 +88,7 @@ destination.write_text(source.read_text().replace("certd-chaos", namespace))
 }
 
 cleanup() {
-  kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" delete networkchaos "${PARTITION_RESOURCE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
+  delete_partition_fault
   if [[ -n "${pf_pid}" ]]; then
     kill "${pf_pid}" >/dev/null 2>&1 || true
   fi
@@ -98,6 +98,16 @@ cleanup() {
   rm -f "${port_forward_log}"
 }
 trap cleanup EXIT
+
+delete_partition_fault() {
+  kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" delete networkchaos "${PARTITION_RESOURCE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    if ! kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" get networkchaos "${PARTITION_RESOURCE_NAME}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+}
 
 kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" port-forward svc/certd "${LOCAL_PORT}:80" >"${port_forward_log}" 2>&1 &
 pf_pid=$!
@@ -165,6 +175,7 @@ if ! json_field_equals "${before_healthz}" '.writeReady' 'true'; then
   exit 1
 fi
 
+during_strong_had_http_response=0
 for _ in $(seq 1 20); do
   if before_local="$(api_call '/api/v1/me' 2>/dev/null)" \
     && [[ "$(printf '%s\n' "${before_local}" | extract_http_code)" == "200" ]]; then
@@ -225,6 +236,7 @@ for _ in $(seq 1 20); do
   if during_strong="$(api_call '/api/v1/me?consistency=strong' 2>/dev/null)"; then
     during_strong_code="$(printf '%s\n' "${during_strong}" | extract_http_code)"
     during_strong_body="$(printf '%s\n' "${during_strong}" | split_http_body)"
+    during_strong_had_http_response=1
   else
     during_strong_code=""
     during_strong_body=""
@@ -234,6 +246,10 @@ for _ in $(seq 1 20); do
   fi
   sleep 1
 done
+if [[ "${during_strong_had_http_response:-0}" != "1" ]]; then
+  echo "expected strong read to return an HTTP failure response during partition" >&2
+  exit 1
+fi
 if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
   echo "during strong stayed available; restarting learner under active partition" >&2
   restart_learner_under_partition
@@ -242,6 +258,7 @@ if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
   else
     echo "post-restart during healthz: timeout" >&2
   fi
+  during_strong_had_http_response=0
   for _ in $(seq 1 20); do
     if during_local="$(api_call '/api/v1/me' 2>/dev/null)" \
       && [[ "$(printf '%s\n' "${during_local}" | extract_http_code)" == "200" ]]; then
@@ -253,6 +270,7 @@ if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
     if during_strong="$(api_call '/api/v1/me?consistency=strong' 2>/dev/null)"; then
       during_strong_code="$(printf '%s\n' "${during_strong}" | extract_http_code)"
       during_strong_body="$(printf '%s\n' "${during_strong}" | split_http_body)"
+      during_strong_had_http_response=1
     else
       during_strong_code=""
       during_strong_body=""
@@ -262,6 +280,10 @@ if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
     fi
     sleep 1
   done
+  if [[ "${during_strong_had_http_response:-0}" != "1" ]]; then
+    echo "expected strong read to return an HTTP failure response after learner restart" >&2
+    exit 1
+  fi
 fi
 echo "during strong response: ${during_strong_body}"
 if [[ "${during_strong_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
@@ -275,10 +297,12 @@ if ! jq -e --arg expected "${EXPECTED_STRONG_ERROR}" '.error == $expected' >/dev
   exit 1
 fi
 
+during_plants_had_http_response=0
 for _ in $(seq 1 20); do
   if during_plants_strong="$(api_call '/api/v1/plants?consistency=strong' 2>/dev/null)"; then
     during_plants_code="$(printf '%s\n' "${during_plants_strong}" | extract_http_code)"
     during_plants_body="$(printf '%s\n' "${during_plants_strong}" | split_http_body)"
+    during_plants_had_http_response=1
   else
     during_plants_code=""
     during_plants_body=""
@@ -288,6 +312,10 @@ for _ in $(seq 1 20); do
   fi
   sleep 1
 done
+if [[ "${during_plants_had_http_response:-0}" != "1" ]]; then
+  echo "expected strong plant list to return an HTTP failure response during partition" >&2
+  exit 1
+fi
 echo "during plants strong response: ${during_plants_body}"
 if [[ "${during_plants_code}" != "${EXPECTED_STRONG_STATUS}" ]]; then
   echo "expected strong plant list to fail with ${EXPECTED_STRONG_STATUS} during partition" >&2
@@ -307,7 +335,7 @@ if ! json_field_equals "${unaffected_healthz}" '.writeReady' 'true'; then
   exit 1
 fi
 
-kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" delete networkchaos "${PARTITION_RESOURCE_NAME}" >/dev/null
+delete_partition_fault
 for _ in $(seq 1 30); do
   if after_healthz="$(healthz_json 2>/dev/null)" \
     && json_field_equals "${after_healthz}" '.writeReady' 'true'; then

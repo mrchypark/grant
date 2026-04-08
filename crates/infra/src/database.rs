@@ -2814,17 +2814,20 @@ impl Database {
             })
             .collect();
 
+        // HashSet iteration is non-deterministic; keep transaction input ordered so rebuilds are
+        // reproducible in tests/debugging while using the cheaper unstable sort because duplicates
+        // have already been eliminated by the sets above.
         let mut closure_rows = closure_rows;
-        closure_rows.sort();
+        closure_rows.sort_unstable();
 
         let mut org_action_rows: Vec<_> = org_action_rows.into_iter().collect();
-        org_action_rows.sort();
+        org_action_rows.sort_unstable();
 
         let mut user_action_rows: Vec<_> = user_action_rows.into_iter().collect();
-        user_action_rows.sort();
+        user_action_rows.sort_unstable();
 
         let mut visibility_rows: Vec<_> = visibility_rows.into_iter().collect();
-        visibility_rows.sort();
+        visibility_rows.sort_unstable();
 
         let updated_at = Utc::now().to_rfc3339();
         let mut queries: Vec<(&'static str, Vec<hiqlite::Param>)> = Vec::with_capacity(
