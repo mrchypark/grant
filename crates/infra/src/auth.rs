@@ -410,7 +410,9 @@ pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Erro
     if message.contains("unauthorized:") || message.contains("forbidden:") {
         err
     } else {
-        anyhow!("strong consistency requested but quorum-backed identity sync is unavailable")
+        anyhow!(
+            "unavailable: strong consistency requested but quorum-backed identity sync is unavailable"
+        )
     }
 }
 
@@ -425,7 +427,7 @@ mod tests {
         let err = map_strong_identity_sync_error(anyhow!("query user identity"));
         assert_eq!(
             err.to_string(),
-            "strong consistency requested but quorum-backed identity sync is unavailable"
+            "unavailable: strong consistency requested but quorum-backed identity sync is unavailable"
         );
     }
 

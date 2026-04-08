@@ -859,6 +859,8 @@ impl ApiError {
         let message = err.to_string();
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
+        } else if message.contains("unavailable:") {
+            StatusCode::SERVICE_UNAVAILABLE
         } else if message.contains("not found") {
             StatusCode::NOT_FOUND
         } else {
@@ -873,6 +875,8 @@ impl ApiError {
             StatusCode::UNAUTHORIZED
         } else if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
+        } else if message.contains("unavailable:") {
+            StatusCode::SERVICE_UNAVAILABLE
         } else if message.contains("missing ") || message.contains("header") {
             StatusCode::BAD_REQUEST
         } else {
@@ -888,5 +892,25 @@ impl IntoResponse for ApiError {
             "error": self.message,
         }));
         (self.status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+    use anyhow::anyhow;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn auth_unavailable_errors_map_to_service_unavailable() {
+        let err = ApiError::from_auth(anyhow!("unavailable: quorum read path is not ready"));
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn domain_unavailable_errors_map_to_service_unavailable() {
+        let err =
+            ApiError::from_domain(anyhow!("unavailable: quorum validation path is not ready"));
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

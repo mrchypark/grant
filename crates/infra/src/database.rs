@@ -400,11 +400,7 @@ impl Database {
     }
 
     fn validation_read_consistency(&self) -> ReadConsistency {
-        match self.runtime.runtime_mode() {
-            crate::config::RuntimeMode::Embedded => ReadConsistency::Local,
-            crate::config::RuntimeMode::Remote => ReadConsistency::Strong,
-            crate::config::RuntimeMode::Split => self.runtime.default_read_consistency(),
-        }
+        validation_read_consistency_for_mode(self.runtime.runtime_mode())
     }
 
     pub(crate) fn default_read_consistency_with_override(
@@ -3196,6 +3192,38 @@ impl Database {
         }
 
         Ok(())
+    }
+}
+
+fn validation_read_consistency_for_mode(
+    runtime_mode: &crate::config::RuntimeMode,
+) -> ReadConsistency {
+    match runtime_mode {
+        crate::config::RuntimeMode::Embedded => ReadConsistency::Local,
+        crate::config::RuntimeMode::Remote => ReadConsistency::Strong,
+        crate::config::RuntimeMode::Split => ReadConsistency::Strong,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validation_read_consistency_for_mode;
+    use crate::config::{ReadConsistency, RuntimeMode};
+
+    #[test]
+    fn validation_reads_remain_strong_in_split_mode() {
+        assert_eq!(
+            validation_read_consistency_for_mode(&RuntimeMode::Split),
+            ReadConsistency::Strong
+        );
+        assert_eq!(
+            validation_read_consistency_for_mode(&RuntimeMode::Remote),
+            ReadConsistency::Strong
+        );
+        assert_eq!(
+            validation_read_consistency_for_mode(&RuntimeMode::Embedded),
+            ReadConsistency::Local
+        );
     }
 }
 
