@@ -26,6 +26,52 @@ need() {
 
 need kubectl
 need skaffold
+need python3
+
+generated_overlay_dir=""
+generated_skaffold_file=""
+
+cleanup() {
+  if [[ -n "${generated_overlay_dir}" ]]; then
+    rm -rf "${generated_overlay_dir}"
+  fi
+  if [[ -n "${generated_skaffold_file}" ]]; then
+    rm -f "${generated_skaffold_file}"
+  fi
+}
+trap cleanup EXIT
+
+prepare_skaffold_config() {
+  if [[ "${SKAFFOLD_PROFILE}" != "ied" || "${NAMESPACE}" == "certd-chaos" ]]; then
+    printf '%s\n' "${ROOT_DIR}/skaffold.yaml"
+    return 0
+  fi
+
+  generated_overlay_dir="$(mktemp -d "${ROOT_DIR}/deploy/overlays/ied-render.XXXXXX")"
+  generated_skaffold_file="$(mktemp "${ROOT_DIR}/skaffold.ied-render.XXXXXX.yaml")"
+
+  cp "${ROOT_DIR}/deploy/overlays/ied/kustomization.yaml" "${generated_overlay_dir}/kustomization.yaml"
+  python3 -c '
+from pathlib import Path
+import sys
+namespace = sys.argv[1]
+overlay = Path(sys.argv[2])
+overlay.write_text(overlay.read_text().replace("certd-chaos", namespace))
+' "${NAMESPACE}" "${generated_overlay_dir}/kustomization.yaml"
+
+  python3 -c '
+from pathlib import Path
+import sys
+skaffold = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+overlay_path = Path(sys.argv[3]).relative_to(Path(sys.argv[4]))
+destination.write_text(
+    skaffold.read_text().replace("- deploy/overlays/ied", f"- {overlay_path.as_posix()}")
+)
+' "${ROOT_DIR}/skaffold.yaml" "${generated_skaffold_file}" "${generated_overlay_dir}" "${ROOT_DIR}"
+
+  printf '%s\n' "${generated_skaffold_file}"
+}
 
 kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
 
@@ -54,8 +100,10 @@ kubectl -n "${NAMESPACE}" create secret generic minio-secrets \
   --dry-run=client -o yaml | kubectl apply -f -
 
 read -r -a extra_args <<<"${SKAFFOLD_EXTRA_ARGS}"
+skaffold_config="$(prepare_skaffold_config)"
 
 skaffold run \
+  -f "${skaffold_config}" \
   --module "${SKAFFOLD_MODULE}" \
   --profile "${SKAFFOLD_PROFILE}" \
   --kube-context "${KUBE_CONTEXT}" \

@@ -27,6 +27,7 @@ need() {
 need kubectl
 need curl
 need jq
+need python3
 
 if [[ "${KUBE_CONTEXT}" != "$(kubectl config current-context 2>/dev/null || true)" ]]; then
   kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
@@ -65,11 +66,34 @@ unaffected_learner_pod() {
 
 port_forward_log="$(mktemp)"
 pf_pid=""
+partition_manifest_path=""
+
+render_partition_manifest() {
+  if [[ "${NAMESPACE}" == "certd-chaos" ]]; then
+    printf '%s\n' "${PARTITION_MANIFEST}"
+    return 0
+  fi
+
+  local rendered_manifest
+  rendered_manifest="$(mktemp "${TMPDIR:-/tmp}/gke-chaos-partition.XXXXXX.yaml")"
+  python3 -c '
+from pathlib import Path
+import sys
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+namespace = sys.argv[3]
+destination.write_text(source.read_text().replace("certd-chaos", namespace))
+' "${PARTITION_MANIFEST}" "${rendered_manifest}" "${NAMESPACE}"
+  printf '%s\n' "${rendered_manifest}"
+}
 
 cleanup() {
   kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" delete networkchaos "${PARTITION_RESOURCE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   if [[ -n "${pf_pid}" ]]; then
     kill "${pf_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${partition_manifest_path}" && "${partition_manifest_path}" != "${PARTITION_MANIFEST}" ]]; then
+    rm -f "${partition_manifest_path}"
   fi
   rm -f "${port_forward_log}"
 }
@@ -167,7 +191,8 @@ if [[ "$(printf '%s\n' "${before_strong}" | extract_http_code)" != "200" ]]; the
   exit 1
 fi
 
-kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" apply -f "${PARTITION_MANIFEST}" >/dev/null
+partition_manifest_path="$(render_partition_manifest)"
+kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" apply -f "${partition_manifest_path}" >/dev/null
 for _ in $(seq 1 20); do
   injected="$(
     kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" get networkchaos "${PARTITION_RESOURCE_NAME}" \
