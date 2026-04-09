@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -11,10 +11,24 @@ use std::{
 
 use domain::{
     Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType,
+    RoleBindingState, RoleBindingSubjectType, SyncMode,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
-use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
+use infra::{
+    artifacts::ArtifactStore,
+    config::{
+        AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, KmsConfig,
+        LocalNodeRole, ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
+        TrailbaseAuthConfig,
+    },
+    crypto::CertificateBundle,
+    database::Database,
+    runtime::HiqliteRuntime,
+    service::{
+        AppService, CreateCertGatewayChallengeInput, ExecuteEphemeralCrawlInput,
+        IssueCrawlTaskTokenInput, RegisterCertificateFromProofInput, StartCrawlWithTaskTokenInput,
+    },
+};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -104,6 +118,75 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
         HiqliteRuntime::embedded(client, ReadConsistency::Local),
         dir,
     )
+}
+
+fn test_config(artifacts_root: &Path) -> AppConfig {
+    AppConfig {
+        server: ServerConfig {
+            bind_addr: "127.0.0.1:0".to_owned(),
+        },
+        security: SecurityConfig {
+            master_key: "dev-only-master-key".to_owned(),
+            bootstrap_user_id: "bootstrap-user".to_owned(),
+            bootstrap_user_name: "Bootstrap User".to_owned(),
+        },
+        auth: AuthConfig {
+            trailbase: TrailbaseAuthConfig {
+                base_url: "http://127.0.0.1:4000".to_owned(),
+                introspect_path: "/api/certd/introspect".to_owned(),
+                internal_secret: "test-trailbase-secret".to_owned(),
+                cache_ttl_seconds: 30,
+            },
+        },
+        kms: KmsConfig {
+            active_key_id: "local-dev-v1".to_owned(),
+            master_keys: vec![("local-dev-v1".to_owned(), b"dev-only-master-key".to_vec())],
+        },
+        artifacts: ArtifactConfig {
+            backend: ArtifactBackendConfig::FileSystem {
+                root_dir: artifacts_root.to_path_buf(),
+            },
+        },
+        hiqlite: HiqliteConfig {
+            runtime_mode: RuntimeMode::Embedded,
+            local_node_role: LocalNodeRole::Voter,
+            default_read_consistency: ReadConsistency::Local,
+            remote_nodes: Vec::new(),
+            remote_tls: false,
+            remote_tls_no_verify: false,
+            remote_api_secret: None,
+            remote_with_proxy: false,
+        },
+    }
+}
+
+async fn build_service() -> (AppService, Database, TempDir, TempDir) {
+    let (runtime, db_dir) = test_runtime().await;
+    let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
+    let cfg = test_config(artifacts_dir.path());
+    let db = Database::new(
+        runtime.clone(),
+        cfg.security.bootstrap_user_id.clone(),
+        cfg.security.bootstrap_user_name.clone(),
+    );
+    let artifacts = ArtifactStore::new(&cfg.artifacts)
+        .await
+        .expect("artifact store");
+    let service = AppService::new(cfg, db.clone(), artifacts);
+    service.initialize().await.expect("initialize service");
+    (service, db, db_dir, artifacts_dir)
+}
+
+fn fake_bundle() -> CertificateBundle {
+    CertificateBundle {
+        business_no: "2768603291".to_owned(),
+        password: "secret-password".to_owned(),
+        common_name: "Test Certificate".to_owned(),
+        sign_cert_der: vec![1, 2, 3],
+        sign_pri_key: vec![4, 5, 6],
+        km_cert_der: vec![7, 8, 9],
+        km_pri_key: vec![10, 11, 12],
+    }
 }
 
 #[tokio::test]
@@ -388,6 +471,122 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         visibility_rows_after.is_empty(),
         "agreement termination should remove plant visibility"
     );
+}
+
+#[tokio::test]
+async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_tokens() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let expired = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: -60,
+        })
+        .await
+        .expect("create expired challenge");
+    let err = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: expired.id.clone(),
+            challenge_payload: expired.payload.clone(),
+            bundle: fake_bundle(),
+        })
+        .await
+        .expect_err("expired challenge should be rejected");
+    assert!(err.to_string().contains("expired"));
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-001".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id.clone(),
+            challenge_payload: stored.payload.clone(),
+            bundle: fake_bundle(),
+        })
+        .await
+        .expect("register certificate");
+    assert_eq!(cert.kms_key_id, "local-dev-v1");
+    assert!(!cert.wrapped_dek.is_empty());
+
+    let reuse_err = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id.clone(),
+            challenge_payload: stored.payload.clone(),
+            bundle: fake_bundle(),
+        })
+        .await
+        .expect_err("reused challenge should fail");
+    assert!(reuse_err.to_string().contains("consumed"));
+
+    let ephemeral = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-002".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create ephemeral challenge");
+    let run = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: ephemeral.id.clone(),
+            challenge_payload: ephemeral.payload.clone(),
+            bundle: fake_bundle(),
+            facility_code: Some("FAC-002".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("execute ephemeral crawl");
+    assert_eq!(run.status, "accepted");
+    assert_eq!(run.plant_id.as_deref(), Some("FAC-002"));
+
+    let issued = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: cert.id.clone(),
+            facility_code: Some("FAC-003".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-04".to_owned()),
+            mode: SyncMode::Full,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("issue crawl task token");
+    let started = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            token: issued.token.clone(),
+        })
+        .await
+        .expect("consume crawl task token");
+    assert_eq!(started.status, "accepted");
+    assert_eq!(started.mode, SyncMode::Full);
+    assert_eq!(started.plant_id.as_deref(), Some("FAC-003"));
+
+    let token_reuse = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            token: issued.token,
+        })
+        .await
+        .expect_err("reused crawl task token should fail");
+    assert!(token_reuse.to_string().contains("already used"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

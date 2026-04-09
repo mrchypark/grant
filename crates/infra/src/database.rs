@@ -1788,6 +1788,23 @@ impl Database {
         Ok(cert)
     }
 
+    pub async fn get_certificate_by_id(&self, certificate_id: &str) -> Result<StoredCertificate> {
+        let row: StoredCertificateRow = self
+            .query_row_with(
+                ReadConsistency::Strong,
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                 FROM certificates c
+                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 WHERE c.id = $1
+                 LIMIT 1",
+                params!(certificate_id.to_owned()),
+                "certificate by id",
+            )
+            .await
+            .context("query certificate by id")?;
+        row.try_into()
+    }
+
     pub async fn create_cert_gateway_challenge(
         &self,
         organization_id: &str,
@@ -1819,23 +1836,27 @@ impl Database {
             )
             .await
             .context("insert cert gateway challenge")?;
-        self.load_cert_gateway_challenge(&id).await
+        self.get_cert_gateway_challenge(&id).await
     }
 
     pub async fn consume_cert_gateway_challenge(
         &self,
         challenge_id: &str,
     ) -> Result<CertGatewayChallenge> {
+        let existing = self.get_cert_gateway_challenge(challenge_id).await?;
+        if existing.consumed_at.is_some() {
+            anyhow::bail!("cert gateway challenge already consumed");
+        }
         self.runtime
             .execute(
                 "UPDATE cert_gateway_challenges
-                 SET consumed_at = COALESCE(consumed_at, $1)
+                 SET consumed_at = $1
                  WHERE id = $2",
                 params!(now_string(), challenge_id.to_owned()),
             )
             .await
             .context("consume cert gateway challenge")?;
-        self.load_cert_gateway_challenge(challenge_id).await
+        self.get_cert_gateway_challenge(challenge_id).await
     }
 
     pub async fn issue_crawl_task_token(
@@ -1867,23 +1888,27 @@ impl Database {
             )
             .await
             .context("insert crawl task token")?;
-        self.load_crawl_task_token_by_hash(token_hash).await
+        self.get_crawl_task_token_by_hash(token_hash).await
     }
 
     pub async fn consume_crawl_task_token(&self, token_hash: &str) -> Result<CrawlTaskToken> {
+        let existing = self.get_crawl_task_token_by_hash(token_hash).await?;
+        if existing.used_at.is_some() {
+            anyhow::bail!("crawl task token already used");
+        }
         self.runtime
             .execute(
                 "UPDATE crawl_task_tokens
-                 SET used_at = COALESCE(used_at, $1)
+                 SET used_at = $1
                  WHERE token_hash = $2",
                 params!(now_string(), token_hash.to_owned()),
             )
             .await
             .context("consume crawl task token")?;
-        self.load_crawl_task_token_by_hash(token_hash).await
+        self.get_crawl_task_token_by_hash(token_hash).await
     }
 
-    async fn load_cert_gateway_challenge(
+    pub async fn get_cert_gateway_challenge(
         &self,
         challenge_id: &str,
     ) -> Result<CertGatewayChallenge> {
@@ -1902,7 +1927,7 @@ impl Database {
         Ok(row.into())
     }
 
-    async fn load_crawl_task_token_by_hash(&self, token_hash: &str) -> Result<CrawlTaskToken> {
+    pub async fn get_crawl_task_token_by_hash(&self, token_hash: &str) -> Result<CrawlTaskToken> {
         let row: CrawlTaskTokenRow = self
             .query_row_with(
                 ReadConsistency::Strong,
