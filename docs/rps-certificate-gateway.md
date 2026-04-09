@@ -54,6 +54,39 @@ export DESKTOP_AGENT_NPKI_DIRS="$HOME/NPKI:$HOME/Documents/NPKI"
   - `%LOCALAPPDATA%\\NPKI`
   - `%APPDATA%\\NPKI`
 
+USB에 인증서가 있을 때는 USB 루트를 직접 지정하면 된다.
+
+```bash
+export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI"
+```
+
+agent는 지정된 루트 아래를 재귀적으로 훑어서 아래 4개 파일이 같은 디렉터리에 있는 곳을 인증서 bundle로 취급한다.
+
+```text
+signCert.der
+signPri.key
+kmCert.der
+kmPri.key
+```
+
+대표적인 실제 레이아웃 예시는 다음 중 하나다.
+
+```text
+/Volumes/Lexar/NPKI/<issuer>/<type>/<subject>/signCert.der
+/Volumes/Lexar/NPKI/<issuer>/<type>/<subject>/signPri.key
+/Volumes/Lexar/NPKI/<issuer>/<type>/<subject>/kmCert.der
+/Volumes/Lexar/NPKI/<issuer>/<type>/<subject>/kmPri.key
+```
+
+또는
+
+```text
+/Volumes/Lexar/NPKI/yessign/USER/cn=<subject>/...
+/Volumes/Lexar/NPKI/crosscert/USER/cn=<subject>/...
+```
+
+macOS에서 removable volume이 `Operation not permitted`로 보이면, Codex/Terminal 앱에 Files and Folders 또는 Full Disk Access 권한이 없어서 USB 내부를 읽지 못하는 상태일 수 있다.
+
 ## 서버 API
 
 공통 조직 경로 prefix:
@@ -263,6 +296,46 @@ SDK가 내부적으로 수행하는 순서는 다음과 같다.
 2. gateway challenge 생성
 3. local agent `/sign` 호출
 4. `ephemeral`이면 즉시 실행, `stored`면 등록 요청
+
+## 로컬 검증
+
+Go desktop agent 빌드:
+
+```bash
+export PATH=/opt/homebrew/bin:$PATH
+cd desktop-agent
+go build -o ./bin/desktop-agent ./cmd/desktop-agent
+```
+
+USB 인증서를 직접 읽도록 agent 실행:
+
+```bash
+export DESKTOP_AGENT_ADDR=127.0.0.1:8765
+export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI"
+./bin/desktop-agent
+```
+
+기본 확인:
+
+```bash
+curl -i http://127.0.0.1:8765/healthz
+curl http://127.0.0.1:8765/certificates
+```
+
+JS 예시 페이지 실행:
+
+```bash
+cd packages/certd-web-sdk
+npm install
+npm run example
+```
+
+정적 빌드 검증만 하려면:
+
+```bash
+npm run example:build
+python3 -m http.server 4173 --directory ./examples/browser/dist/example
+```
 
 ## 현재 구현 상태
 
