@@ -201,8 +201,8 @@
         <span class="eyebrow">Certificate Gateway Example</span>
         <h1>공동인증서 기반 로컬 검증 페이지</h1>
         <p>
-          브라우저는 JS SDK만 사용하고, 로컬 `desktop-agent`가 인증서 탐색과 비밀번호 검증을 처리합니다.
-          이 예시는 `ephemeral` 실행과 `stored` 등록 경로를 둘 다 테스트할 수 있게 만들어졌습니다.
+          브라우저는 제품형 JS SDK만 사용하고, 로컬 `desktop-agent`가 인증서 탐색과 비밀번호 검증을 처리합니다.
+          이 예시는 프론트가 최소 입력만 넘기고 나머지 수집 범위를 서버가 결정하는 흐름을 검증하기 위한 디버그 하네스입니다.
         </p>
       </section>
 
@@ -212,44 +212,25 @@
           <div class="grid two">
             <label>
               Gateway Base URL
-              <input id="gatewayBaseUrl" value="http://127.0.0.1:18080" />
+              <input id="gatewayBaseUrl" value="/gateway" />
             </label>
             <label>
               Agent Base URL
-              <input id="agentBaseUrl" value="http://127.0.0.1:8765" />
+              <input id="agentBaseUrl" value="/agent" />
+            </label>
+            <label>
+              Bearer Token
+              <input id="bearerToken" placeholder="TrailBase login token" />
             </label>
             <label>
               Organization ID
-              <input id="organizationId" value="2768603291" />
+              <input id="organizationId" value="conalog-account" />
             </label>
             <label>
-              Facility Code
-              <input id="facilityCode" placeholder="FAC-001" />
-            </label>
-            <label>
-              Start Month
-              <input id="startMonth" placeholder="2026-01" />
-            </label>
-            <label>
-              End Month
-              <input id="endMonth" placeholder="2026-03" />
-            </label>
-            <label>
-              Mode
-              <select id="syncMode">
-                <option value="delta">delta</option>
-                <option value="full">full</option>
-              </select>
-            </label>
-            <label>
-              Certificate ID
-              <input id="certificateId" placeholder="agent에서 읽어온 경로" />
+              Business No
+              <input id="businessNo" placeholder="2768603291" />
             </label>
           </div>
-          <label style="margin-top:14px;">
-            Password
-            <input id="password" type="password" placeholder="공동인증서 비밀번호" />
-          </label>
           <div class="actions">
             <button id="healthButton" class="secondary">Agent Health</button>
             <button id="listButton" class="secondary">인증서 목록 읽기</button>
@@ -257,7 +238,13 @@
             <button id="storedButton" class="warn">Stored 등록</button>
           </div>
           <p class="hint">
-            `인증서 목록 읽기`를 누르면 `/certificates` 결과가 아래에 표시되고 첫 번째 인증서가 자동 선택됩니다.
+            `인증서 목록 읽기`는 디버그용입니다. 실제 실행 시 인증서 선택과 비밀번호 입력은 agent의 네이티브 승인 모달에서 처리됩니다.
+          </p>
+          <p class="hint">
+            gateway 호출은 `Authorization: Bearer ...` 와 `x-organization-id` 헤더가 필요합니다. 로컬 dev stack에서는 TrailBase login 후 받은 token을 넣으시면 됩니다.
+          </p>
+          <p class="hint">
+            `Business No`는 `organizationId`와 다른 값입니다. 인증서에서 사업자번호를 못 읽는 경우 이 칸에 실제 10자리 사업자번호를 입력해야 합니다.
           </p>
           <div id="status" class="status" style="margin-top:16px;">대기 중</div>
           <div id="certList" class="cert-list"></div>
@@ -267,7 +254,7 @@
           <h2>실행 로그</h2>
           <textarea id="output" readonly></textarea>
           <p class="hint">
-            agent와 gateway 호출 결과를 순서대로 기록합니다. `stored`는 등록 결과를, `ephemeral`은 수집 시작 응답을 표시합니다.
+            agent와 gateway 호출 결과를 순서대로 기록합니다. `stored`는 등록 결과를, `ephemeral`은 서버가 알아서 범위를 정한 수집 실행 결과를 표시합니다.
           </p>
         </section>
       </div>

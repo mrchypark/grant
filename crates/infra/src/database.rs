@@ -12,7 +12,7 @@ use domain::{
 };
 use hiqlite::Row;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 macro_rules! params {
@@ -223,23 +223,11 @@ struct RoleOrgRow {
 }
 
 #[derive(Debug, Clone)]
-struct OrganizationIdRow {
-    id: String,
-}
-
-#[derive(Debug, Clone)]
 struct OrganizationRow {
     id: String,
     business_no: Option<String>,
     name: String,
-    legal_entity_id: Option<String>,
-    active: i64,
-}
-
-#[derive(Debug, Clone)]
-struct OrganizationEdgeRow {
-    parent_organization_id: String,
-    child_organization_id: String,
+    inactivated_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -532,16 +520,9 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     business_no TEXT UNIQUE,
                     name TEXT NOT NULL,
-                    legal_entity_id TEXT,
-                    active INTEGER NOT NULL DEFAULT 1,
+                    inactivated_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS organization_edges (
-                    parent_organization_id TEXT NOT NULL,
-                    child_organization_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (parent_organization_id, child_organization_id)
                 );
                 CREATE TABLE IF NOT EXISTS organization_memberships (
                     id TEXT PRIMARY KEY,
@@ -627,12 +608,6 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS organization_closure (
-                    ancestor_organization_id TEXT NOT NULL,
-                    descendant_organization_id TEXT NOT NULL,
-                    depth INTEGER NOT NULL,
-                    PRIMARY KEY (ancestor_organization_id, descendant_organization_id)
-                );
                 CREATE TABLE IF NOT EXISTS effective_organization_plant_actions (
                     organization_id TEXT NOT NULL,
                     plant_id TEXT NOT NULL,
@@ -682,8 +657,6 @@ impl Database {
                         resource_id,
                         role_id
                     );
-                CREATE INDEX IF NOT EXISTS idx_organization_closure_descendant
-                    ON organization_closure (descendant_organization_id, ancestor_organization_id);
                 CREATE INDEX IF NOT EXISTS idx_effective_organization_plant_actions_org_plant
                     ON effective_organization_plant_actions (organization_id, plant_id, action_id);
                 CREATE INDEX IF NOT EXISTS idx_effective_user_plant_actions_user_org
@@ -757,8 +730,6 @@ impl Database {
                     duration_ms INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_sync_runs_plant_started
-                    ON sync_runs (plant_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_plants_owner_facility
                     ON plants (owner_organization_id, facility_code);
                 CREATE TABLE IF NOT EXISTS generation_records (
@@ -820,6 +791,14 @@ impl Database {
             )
             .await
             .context("create schema")?;
+        self.runtime
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_runs_plant_started
+                 ON sync_runs (plant_id, started_at DESC)",
+                params![],
+            )
+            .await
+            .context("create sync_runs plant index")?;
         Ok(())
     }
 
@@ -849,19 +828,18 @@ impl Database {
             .context("upsert bootstrap user")?;
         self.runtime
             .execute(
-                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    active = excluded.active,
+                    inactivated_at = excluded.inactivated_at,
                     updated_at = excluded.updated_at",
                 params!(
                     self.bootstrap_user_id.clone(),
                     Some(self.bootstrap_user_id.clone()),
                     self.bootstrap_user_name.clone(),
                     Option::<String>::None,
-                    1_i64,
                     now.clone(),
                     now.clone()
                 ),
@@ -1050,19 +1028,18 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    active = excluded.active,
+                    inactivated_at = excluded.inactivated_at,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
                     Some(organization_id.to_owned()),
                     display_name.to_owned(),
                     Option::<String>::None,
-                    1_i64,
                     now.clone(),
                     now.clone()
                 ),
@@ -1090,8 +1067,7 @@ impl Database {
             id: organization_id.to_owned(),
             business_no: Some(organization_id.to_owned()),
             name: display_name.to_owned(),
-            legal_entity_id: None,
-            active: true,
+            inactivated_at: None,
         })
     }
 
@@ -1104,19 +1080,18 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    active = excluded.active,
+                    inactivated_at = excluded.inactivated_at,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
                     business_no.map(ToOwned::to_owned),
                     display_name.to_owned(),
                     Option::<String>::None,
-                    1_i64,
                     now.clone(),
                     now.clone()
                 ),
@@ -1127,8 +1102,7 @@ impl Database {
             id: organization_id.to_owned(),
             business_no: business_no.map(ToOwned::to_owned),
             name: display_name.to_owned(),
-            legal_entity_id: None,
-            active: true,
+            inactivated_at: None,
         })
     }
 
@@ -1556,7 +1530,7 @@ impl Database {
             .await
     }
 
-    pub async fn has_active_organization_membership_with_consistency(
+    pub async fn has_organization_membership_with_consistency(
         &self,
         user_id: &str,
         organization_id: &str,
@@ -1568,7 +1542,36 @@ impl Database {
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT COUNT(*) as count
                  FROM organization_memberships
-                 WHERE user_id = $1 AND organization_id = $2 AND status = 'active'",
+                 WHERE user_id = $1
+                   AND organization_id = $2
+                   AND status = 'active'",
+                params!(user_id.to_owned(), organization_id.to_owned()),
+            )
+            .await
+            .context("check organization membership including inactive organization")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("membership count query returned no row"))?;
+        Ok(row.count > 0)
+    }
+
+    pub async fn has_active_organization_membership_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        let row: CountRow = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT COUNT(*) as count
+                 FROM organization_memberships om
+                 JOIN organizations o ON o.id = om.organization_id
+                 WHERE om.user_id = $1
+                   AND om.organization_id = $2
+                   AND om.status = 'active'
+                   AND o.inactivated_at IS NULL",
                 params!(user_id.to_owned(), organization_id.to_owned()),
             )
             .await
@@ -1602,12 +1605,12 @@ impl Database {
             .runtime
             .query_rows(
                 self.validation_read_consistency_with_override(consistency),
-                "SELECT o.id, o.business_no, o.name, o.legal_entity_id, o.active
+                "SELECT o.id, o.business_no, o.name, o.inactivated_at
                  FROM organizations o
                  JOIN organization_memberships om ON om.organization_id = o.id
                  WHERE om.user_id = $1
                    AND om.status = 'active'
-                   AND o.active = 1
+                   AND o.inactivated_at IS NULL
                  ORDER BY o.name ASC, o.id ASC",
                 params!(user_id.to_owned()),
             )
@@ -1740,7 +1743,7 @@ impl Database {
     pub async fn get_organization(&self, organization_id: &str) -> Result<Organization> {
         let rows: Vec<OrganizationRow> = self
             .query_default_rows(
-                "SELECT id, business_no, name, legal_entity_id, active
+                "SELECT id, business_no, name, inactivated_at
                  FROM organizations
                  WHERE id = $1
                  LIMIT 1",
@@ -1754,6 +1757,37 @@ impl Database {
             .next()
             .ok_or_else(|| anyhow!("organization not found"))?;
         Ok(row.into())
+    }
+
+    pub async fn deactivate_organization(&self, organization_id: &str) -> Result<Organization> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "UPDATE organizations
+                 SET inactivated_at = $1, updated_at = $2
+                 WHERE id = $3",
+                params!(now.clone(), now, organization_id.to_owned()),
+            )
+            .await
+            .context("deactivate organization")?;
+        self.get_organization(organization_id).await
+    }
+
+    pub async fn reactivate_organization(&self, organization_id: &str) -> Result<Organization> {
+        self.runtime
+            .execute(
+                "UPDATE organizations
+                 SET inactivated_at = $1, updated_at = $2
+                 WHERE id = $3",
+                params!(
+                    Option::<String>::None,
+                    now_string(),
+                    organization_id.to_owned()
+                ),
+            )
+            .await
+            .context("reactivate organization")?;
+        self.get_organization(organization_id).await
     }
 
     pub async fn load_active_certificate(
@@ -1803,6 +1837,22 @@ impl Database {
             .await
             .context("query certificate by id")?;
         row.try_into()
+    }
+
+    pub async fn list_certificates(&self, organization_id: &str) -> Result<Vec<StoredCertificate>> {
+        let rows: Vec<StoredCertificateRow> = self
+            .query_consistent_rows(
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                 FROM certificates c
+                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 WHERE c.organization_id = $1
+                 ORDER BY c.active DESC, c.created_at DESC",
+                params!(organization_id.to_owned()),
+                "organization certificates",
+            )
+            .await
+            .context("query organization certificates")?;
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     pub async fn create_cert_gateway_challenge(
@@ -2189,7 +2239,7 @@ impl Database {
     pub async fn list_document_objects(&self, plant_id: &str) -> Result<Vec<String>> {
         let rows: Vec<DocumentRow> = self
             .query_consistent_rows(
-                "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
+                "SELECT id, plant_id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
                 "document objects",
@@ -2856,24 +2906,6 @@ impl Database {
 
     async fn rebuild_organization_expansion(&self) -> Result<()> {
         let consistency = self.validation_read_consistency();
-        let org_rows: Vec<OrganizationIdRow> = self
-            .query_rows_with(
-                consistency.clone(),
-                "SELECT id FROM organizations ORDER BY id ASC",
-                vec![],
-                "organization ids for closure rebuild",
-            )
-            .await?;
-        let edge_rows: Vec<OrganizationEdgeRow> = self
-            .query_rows_with(
-                consistency.clone(),
-                "SELECT parent_organization_id, child_organization_id
-                 FROM organization_edges
-                 ORDER BY parent_organization_id ASC, child_organization_id ASC",
-                vec![],
-                "organization edges for closure rebuild",
-            )
-            .await?;
         let seed_rows: Vec<OrganizationPlantActionSeedRow> = self
             .query_rows_with(
                 consistency.clone(),
@@ -2955,50 +2987,13 @@ impl Database {
             )
             .await?;
 
-        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
-        for edge in &edge_rows {
-            children_by_parent
-                .entry(edge.parent_organization_id.clone())
-                .or_default()
-                .push(edge.child_organization_id.clone());
-        }
-
-        let mut closure_rows: Vec<(String, String, i64)> = Vec::new();
-        for org in &org_rows {
-            let mut queue = VecDeque::from([(org.id.clone(), 0_i64)]);
-            let mut seen: HashSet<String> = HashSet::new();
-            while let Some((descendant, depth)) = queue.pop_front() {
-                if !seen.insert(descendant.clone()) {
-                    continue;
-                }
-                closure_rows.push((org.id.clone(), descendant.clone(), depth));
-                if let Some(children) = children_by_parent.get(&descendant) {
-                    for child in children {
-                        queue.push_back((child.clone(), depth + 1));
-                    }
-                }
-            }
-        }
-
-        let mut ancestors_by_descendant: HashMap<String, Vec<String>> = HashMap::new();
-        for (ancestor, descendant, _) in &closure_rows {
-            ancestors_by_descendant
-                .entry(descendant.clone())
-                .or_default()
-                .push(ancestor.clone());
-        }
-
         let mut org_action_rows: HashSet<(String, String, String)> = HashSet::new();
         for seed in &seed_rows {
-            if let Some(ancestors) = ancestors_by_descendant.get(&seed.organization_id) {
-                for ancestor in ancestors {
-                    org_action_rows.insert((
-                        ancestor.clone(),
-                        seed.plant_id.clone(),
-                        seed.action_id.clone(),
-                    ));
-                }
-            }
+            org_action_rows.insert((
+                seed.organization_id.clone(),
+                seed.plant_id.clone(),
+                seed.action_id.clone(),
+            ));
         }
 
         let membership_by_id: HashMap<String, (String, String)> = membership_rows
@@ -3078,9 +3073,6 @@ impl Database {
         // HashSet iteration is non-deterministic; keep transaction input ordered so rebuilds are
         // reproducible in tests/debugging while using the cheaper unstable sort because duplicates
         // have already been eliminated by the sets above.
-        let mut closure_rows = closure_rows;
-        closure_rows.sort_unstable();
-
         let mut org_action_rows: Vec<_> = org_action_rows.into_iter().collect();
         org_action_rows.sort_unstable();
 
@@ -3092,24 +3084,11 @@ impl Database {
 
         let updated_at = Utc::now().to_rfc3339();
         let mut queries: Vec<(&'static str, Vec<hiqlite::Param>)> = Vec::with_capacity(
-            4 + closure_rows.len()
-                + org_action_rows.len()
-                + user_action_rows.len()
-                + visibility_rows.len(),
+            3 + org_action_rows.len() + user_action_rows.len() + visibility_rows.len(),
         );
-        queries.push(("DELETE FROM organization_closure", vec![]));
         queries.push(("DELETE FROM effective_organization_plant_actions", vec![]));
         queries.push(("DELETE FROM effective_user_plant_actions", vec![]));
         queries.push(("DELETE FROM effective_user_plant_visibility", vec![]));
-
-        for (ancestor, descendant, depth) in closure_rows {
-            queries.push((
-                "INSERT INTO organization_closure (
-                    ancestor_organization_id, descendant_organization_id, depth
-                 ) VALUES ($1, $2, $3)",
-                params!(ancestor, descendant, depth),
-            ));
-        }
 
         for (organization_id, plant_id, action_id) in org_action_rows {
             queries.push((
@@ -3746,29 +3725,13 @@ impl From<&mut Row<'_>> for RoleOrgRow {
     }
 }
 
-impl From<&mut Row<'_>> for OrganizationIdRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self { id: row.get("id") }
-    }
-}
-
 impl From<&mut Row<'_>> for OrganizationRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
             business_no: row.get("business_no"),
             name: row.get("name"),
-            legal_entity_id: row.get("legal_entity_id"),
-            active: row.get("active"),
-        }
-    }
-}
-
-impl From<&mut Row<'_>> for OrganizationEdgeRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            parent_organization_id: row.get("parent_organization_id"),
-            child_organization_id: row.get("child_organization_id"),
+            inactivated_at: row.get("inactivated_at"),
         }
     }
 }
@@ -3915,8 +3878,7 @@ impl From<OrganizationRow> for Organization {
             id: value.id,
             business_no: value.business_no,
             name: value.name,
-            legal_entity_id: value.legal_entity_id,
-            active: value.active == 1,
+            inactivated_at: value.inactivated_at,
         }
     }
 }

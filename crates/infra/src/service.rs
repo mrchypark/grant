@@ -25,9 +25,12 @@ use domain::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
+type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AppService {
@@ -35,6 +38,7 @@ pub struct AppService {
     db: Database,
     artifacts: ArtifactStore,
     auth: AuthResolver,
+    collector: SnapshotCollector,
 }
 
 #[derive(Debug, Clone)]
@@ -172,12 +176,26 @@ struct CrawlTaskScope {
 
 impl AppService {
     pub fn new(cfg: AppConfig, db: Database, artifacts: ArtifactStore) -> Self {
+        Self::new_with_collector(cfg, db, artifacts, bridge::collect_snapshot)
+    }
+
+    pub fn new_with_collector<F, Fut>(
+        cfg: AppConfig,
+        db: Database,
+        artifacts: ArtifactStore,
+        collector: F,
+    ) -> Self
+    where
+        F: Fn(BridgeOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bridge::BridgeRun>> + Send + 'static,
+    {
         let auth = AuthResolver::new(&cfg.auth);
         Self {
             cfg,
             db,
             artifacts,
             auth,
+            collector: Arc::new(move |opts| Box::pin(collector(opts))),
         }
     }
 
@@ -199,6 +217,10 @@ impl AppService {
 
     pub fn trailbase_base_url(&self) -> &str {
         &self.cfg.auth.trailbase.base_url
+    }
+
+    pub fn db(&self) -> &Database {
+        &self.db
     }
 
     pub async fn authenticate_request(
@@ -382,6 +404,14 @@ impl AppService {
             .await
     }
 
+    pub async fn list_stored_certificates(
+        &self,
+        organization_id: &str,
+    ) -> Result<Vec<StoredCertificate>> {
+        let organization_id = require_non_empty("organizationId", organization_id)?;
+        self.db.list_certificates(&organization_id).await
+    }
+
     pub async fn execute_ephemeral_crawl(
         &self,
         input: ExecuteEphemeralCrawlInput,
@@ -394,30 +424,20 @@ impl AppService {
             &organization_id,
         )
         .await?;
-        self.resolve_organization_business_no(&organization_id, Some(&input.bundle.business_no))
+        let business_no = self
+            .resolve_organization_business_no(&organization_id, Some(&input.bundle.business_no))
             .await?;
 
-        let run = self
-            .db
-            .start_sync_run(
-                &organization_id,
-                input.facility_code.as_deref(),
-                input.mode.clone(),
-            )
-            .await?;
-        self.db
-            .finish_sync_run(&run.id, "accepted", 0, None)
-            .await?;
-        Ok(SyncRun {
-            id: run.id,
-            organization_id,
-            plant_id: input.facility_code,
-            mode: input.mode,
-            status: "accepted".to_owned(),
-            started_at: run.started_at,
-            finished_at: Some(now_string()),
-            duration_ms: 0,
-        })
+        self.run_sync_with_bundle(
+            &organization_id,
+            business_no,
+            input.bundle,
+            input.facility_code,
+            input.start_month,
+            input.end_month,
+            input.mode,
+        )
+        .await
     }
 
     pub async fn issue_crawl_task_token(
@@ -478,29 +498,29 @@ impl AppService {
             if certificate.organization_id != consumed.organization_id {
                 anyhow::bail!("crawl task token certificate organization mismatch");
             }
-        }
+            let business_no = self
+                .resolve_organization_business_no(
+                    &consumed.organization_id,
+                    certificate.business_no.as_deref(),
+                )
+                .await?;
+            let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
+            let dek = kms.unwrap(&certificate.kms_key_id, &certificate.wrapped_dek)?;
+            let bundle = decrypt_bundle_with_key(&dek, &certificate.encrypted_blob)?;
 
-        let run = self
-            .db
-            .start_sync_run(
-                &consumed.organization_id,
-                scope.facility_code.as_deref(),
-                mode.clone(),
-            )
-            .await?;
-        self.db
-            .finish_sync_run(&run.id, "accepted", 0, None)
-            .await?;
-        Ok(SyncRun {
-            id: run.id,
-            organization_id: consumed.organization_id,
-            plant_id: scope.facility_code,
-            mode,
-            status: "accepted".to_owned(),
-            started_at: run.started_at,
-            finished_at: Some(now_string()),
-            duration_ms: 0,
-        })
+            return self
+                .run_sync_with_bundle(
+                    &consumed.organization_id,
+                    business_no,
+                    bundle,
+                    scope.facility_code,
+                    scope.start_month,
+                    scope.end_month,
+                    mode,
+                )
+                .await;
+        }
+        anyhow::bail!("crawl task token missing certificate");
     }
 
     pub async fn sync(&self, input: SyncInput) -> Result<SyncRun> {
@@ -512,6 +532,36 @@ impl AppService {
         let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
         let dek = kms.unwrap(&cert.kms_key_id, &cert.wrapped_dek)?;
         let bundle = decrypt_bundle_with_key(&dek, &cert.encrypted_blob)?;
+
+        self.run_sync_with_bundle(
+            &organization_id,
+            business_no,
+            bundle,
+            input.facility_code,
+            input.start_month,
+            input.end_month,
+            input.mode,
+        )
+        .await
+    }
+
+    async fn run_sync_with_bundle(
+        &self,
+        organization_id: &str,
+        business_no: String,
+        bundle: CertificateBundle,
+        facility_code: Option<String>,
+        start_month: Option<String>,
+        end_month: Option<String>,
+        requested_mode: SyncMode,
+    ) -> Result<SyncRun> {
+        let input = SyncInput {
+            organization_id: organization_id.to_owned(),
+            facility_code,
+            start_month,
+            end_month,
+            mode: requested_mode,
+        };
 
         let (effective_mode, start_month, end_month, skip_documents) =
             self.resolve_sync_plan(&input).await?;
@@ -561,7 +611,7 @@ impl AppService {
                     id: snapshot.facility.code.clone(),
                     facility_code: snapshot.facility.code.clone(),
                     name: snapshot.facility.name.clone(),
-                    owner_organization_id: organization_id.clone(),
+                    owner_organization_id: organization_id.to_owned(),
                     created_by_organization_id: None,
                     contract_no: snapshot.facility.contract_no.clone(),
                     address: snapshot.facility.address.clone(),
@@ -612,7 +662,7 @@ impl AppService {
                     );
                     let persisted_docs = self
                         .persist_documents(
-                            &organization_id,
+                            organization_id,
                             &plant.facility_code,
                             &snapshot.documents,
                         )
@@ -649,7 +699,7 @@ impl AppService {
 
                 Ok(SyncRun {
                     id: run.id,
-                    organization_id,
+                    organization_id: organization_id.to_owned(),
                     plant_id: Some(plant.facility_code),
                     mode: effective_mode,
                     status: "completed".to_owned(),
@@ -861,6 +911,44 @@ impl AppService {
         Ok(plant)
     }
 
+    pub async fn deactivate_organization(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+    ) -> Result<Organization> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            target_organization_id,
+            "organization.permission.manage",
+            &format!("deactivate organization {}", target_organization_id),
+        )
+        .await?;
+        self.db
+            .deactivate_organization(target_organization_id)
+            .await
+    }
+
+    pub async fn reactivate_organization(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+    ) -> Result<Organization> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            target_organization_id,
+            "organization.permission.manage",
+            &format!("reactivate organization {}", target_organization_id),
+        )
+        .await?;
+        self.db
+            .reactivate_organization(target_organization_id)
+            .await
+    }
+
     pub async fn list_generation_authorized(
         &self,
         user_id: &str,
@@ -1041,6 +1129,34 @@ impl AppService {
         Ok(())
     }
 
+    async fn authorize_organization_action(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+        action_id: &str,
+        target_label: &str,
+    ) -> Result<()> {
+        let allowed = self
+            .db
+            .has_user_organization_action(
+                user_id,
+                organization_id,
+                target_organization_id,
+                action_id,
+            )
+            .await?;
+        if !allowed {
+            anyhow::bail!(
+                "forbidden: user {} in organization {} cannot {}",
+                user_id,
+                organization_id,
+                target_label
+            );
+        }
+        Ok(())
+    }
+
     pub async fn save_role_binding(&self, binding: &RoleBinding) -> Result<()> {
         self.db.save_role_binding(binding).await
     }
@@ -1099,7 +1215,7 @@ impl AppService {
         skip_documents: bool,
         bundle: CertificateBundle,
     ) -> Result<bridge::BridgeRun> {
-        bridge::collect_snapshot(BridgeOptions {
+        (self.collector)(BridgeOptions {
             business_no,
             facility_code,
             start_month,

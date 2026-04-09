@@ -42,6 +42,23 @@ function installFetchMock(handlers: Array<(call: FetchCall) => Response | Promis
   };
 }
 
+function installLocationMock(href: string) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: new URL(href),
+  });
+  return {
+    restore() {
+      if (original) {
+        Object.defineProperty(globalThis, "location", original);
+        return;
+      }
+      delete (globalThis as { location?: Location }).location;
+    },
+  };
+}
+
 test("createChallenge() calls the gateway challenge endpoint", async () => {
   const mock = installFetchMock([
     () =>
@@ -61,7 +78,6 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
     });
     const challenge = await sdk.createChallenge("org-1", {
       mode: "ephemeral",
-      facilityCode: "FAC-001",
     });
 
     assert.equal(challenge.challengeId, "challenge-1");
@@ -75,42 +91,167 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
   }
 });
 
-test("runEphemeralExecution() checks agent health, signs locally, then starts the crawl", async () => {
+test("assertAvailable() checks agent health", async () => {
+  const mock = installFetchMock([
+    () => textResponse("ok"),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    await sdk.assertAvailable();
+
+    assert.equal(mock.calls.length, 1);
+    assert.equal(String(mock.calls[0].input), "http://127.0.0.1:8765/healthz");
+  } finally {
+    mock.restore();
+  }
+});
+
+test("runEphemeral() checks agent health then delegates approval and execution to the local agent", async () => {
   const mock = installFetchMock([
     () => textResponse("ok"),
     () =>
       jsonResponse({
-        challengeId: "challenge-ephemeral",
-        mode: "ephemeral",
-        nonce: "nonce-2",
-        payload: "payload-ephemeral",
-        expiresAt: "2026-04-09T00:00:00Z",
+        sessionToken: "agent-session-1",
+        expiresAt: "2026-04-09T00:05:00Z",
       }, 201),
     () =>
       jsonResponse({
-        certificateId: "cert-1",
-        challenge: "payload-ephemeral",
-        bundle: {
-          businessNo: "2768603291",
-          password: "secret-password",
-          commonName: "Test Certificate",
-          signCertDerBase64: "AQID",
-          signPriKeyBase64: "BAUG",
-          kmCertDerBase64: "BwgJ",
-          kmPriKeyBase64: "CgsM",
-        },
-      }),
+        id: "sync-1",
+        organizationId: "org-1",
+        plantId: "FAC-001",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 0,
+      }, 202),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    const run = await sdk.runEphemeral("org-1", { businessNo: "2768603291" });
+
+    assert.equal(run.status, "completed");
+    assert.equal(mock.calls.length, 3);
+    assert.equal(String(mock.calls[0].input), "http://127.0.0.1:8765/healthz");
+    assert.equal(String(mock.calls[1].input), "http://127.0.0.1:8765/sessions/open");
+    assert.equal(String(mock.calls[2].input), "http://127.0.0.1:8765/approve-ephemeral-run");
+    assert.deepEqual(JSON.parse(String(mock.calls[2].init?.body)), {
+      gatewayBaseUrl: "http://gateway.local",
+      organizationId: "org-1",
+      businessNo: "2768603291",
+    });
+    assert.equal((mock.calls[2].init?.headers as Record<string, string>)["x-agent-session"], "agent-session-1");
+  } finally {
+    mock.restore();
+  }
+});
+
+test("runEphemeral() resolves a relative gateway base URL before sending it to the local agent", async () => {
+  const locationMock = installLocationMock("http://127.0.0.1:4173/");
+  const mock = installFetchMock([
+    () => textResponse("ok"),
+    () =>
+      jsonResponse({
+        sessionToken: "agent-session-relative",
+        expiresAt: "2026-04-09T00:05:00Z",
+      }, 201),
+    () =>
+      jsonResponse({
+        id: "sync-relative-1",
+        organizationId: "org-1",
+        plantId: "FAC-001",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 0,
+      }, 202),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "/gateway",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    await sdk.runEphemeral("org-1", { businessNo: "2768603291" });
+
+    assert.deepEqual(JSON.parse(String(mock.calls[2].init?.body)), {
+      gatewayBaseUrl: "http://127.0.0.1:4173/gateway",
+      organizationId: "org-1",
+      businessNo: "2768603291",
+    });
+  } finally {
+    mock.restore();
+    locationMock.restore();
+  }
+});
+
+test("registerStored() delegates approval and registration to the local agent", async () => {
+  const mock = installFetchMock([
+    () => textResponse("ok"),
+    () =>
+      jsonResponse({
+        sessionToken: "agent-session-2",
+        expiresAt: "2026-04-09T00:05:00Z",
+      }, 201),
+    () =>
+      jsonResponse({
+        id: "stored-cert-1",
+        organizationId: "org-1",
+        businessNo: "2768603291",
+        commonName: "Stored Certificate",
+      }, 201),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    const certificate = await sdk.registerStored("org-1", { businessNo: "2768603291" });
+
+    assert.equal(certificate.id, "stored-cert-1");
+    assert.equal(mock.calls.length, 3);
+    assert.equal(String(mock.calls[2].input), "http://127.0.0.1:8765/approve-stored-registration");
+    assert.equal((mock.calls[2].init?.headers as Record<string, string>)["x-agent-session"], "agent-session-2");
+  } finally {
+    mock.restore();
+  }
+});
+
+test("runStored() issues a crawl task token and starts the stored crawl", async () => {
+  const mock = installFetchMock([
     () =>
       jsonResponse(
         {
-          id: "sync-1",
+          crawlTaskToken: "crawl-token-1",
+          expiresAt: "2026-04-09T00:01:00Z",
+        },
+        201,
+      ),
+    () =>
+      jsonResponse(
+        {
+          id: "sync-stored-1",
           organizationId: "org-1",
-          plantId: "FAC-001",
+          plantId: "FAC-003",
           mode: "delta",
-          status: "accepted",
+          status: "completed",
           startedAt: null,
           finishedAt: null,
-          durationMs: 0,
+          durationMs: 1234,
         },
         202,
       ),
@@ -122,70 +263,27 @@ test("runEphemeralExecution() checks agent health, signs locally, then starts th
       agentBaseUrl: "http://127.0.0.1:8765",
     });
 
-    const run = await sdk.runEphemeralExecution("org-1", {
-      certificateId: "cert-1",
-      password: "secret-password",
-      facilityCode: "FAC-001",
-      startMonth: "2026-01",
-      endMonth: "2026-03",
-      mode: "delta",
+    const run = await sdk.runStored("org-1", {
+      certificateId: "stored-cert-1",
     });
 
-    assert.equal(run.status, "accepted");
-    assert.equal(mock.calls.length, 4);
-    assert.equal(String(mock.calls[0].input), "http://127.0.0.1:8765/healthz");
-    assert.equal(String(mock.calls[2].input), "http://127.0.0.1:8765/sign");
-    assert.deepEqual(JSON.parse(String(mock.calls[2].init?.body)), {
-      certificateId: "cert-1",
-      challenge: "payload-ephemeral",
-      password: "secret-password",
-      businessNo: "org-1",
-    });
+    assert.equal(run.id, "sync-stored-1");
+    assert.equal(mock.calls.length, 2);
     assert.equal(
-      String(mock.calls[3].input),
-      "http://gateway.local/api/v1/organizations/org-1/cert-gateway/ephemeral-executions",
+      String(mock.calls[0].input),
+      "http://gateway.local/api/v1/organizations/org-1/certificates/stored-cert-1/crawl-tokens",
+    );
+    assert.equal(
+      String(mock.calls[1].input),
+      "http://gateway.local/api/v1/organizations/org-1/crawls",
     );
   } finally {
     mock.restore();
   }
 });
 
-test("registerStoredCertificate() signs locally and registers the encrypted certificate flow", async () => {
-  const mock = installFetchMock([
-    () => textResponse("ok"),
-    () =>
-      jsonResponse({
-        challengeId: "challenge-stored",
-        mode: "stored",
-        nonce: "nonce-3",
-        payload: "payload-stored",
-        expiresAt: "2026-04-09T00:00:00Z",
-      }, 201),
-    () =>
-      jsonResponse({
-        certificateId: "cert-2",
-        challenge: "payload-stored",
-        bundle: {
-          businessNo: "2768603291",
-          password: "secret-password",
-          commonName: "Stored Certificate",
-          signCertDerBase64: "AQID",
-          signPriKeyBase64: "BAUG",
-          kmCertDerBase64: "BwgJ",
-          kmPriKeyBase64: "CgsM",
-        },
-      }),
-    () =>
-      jsonResponse(
-        {
-          id: "stored-cert-1",
-          organizationId: "org-1",
-          businessNo: "2768603291",
-          commonName: "Stored Certificate",
-        },
-        201,
-      ),
-  ]);
+test("runEphemeral() rejects when businessNo is missing", async () => {
+  const mock = installFetchMock([() => textResponse("ok")]);
 
   try {
     const sdk = new CertdWebSdk({
@@ -193,24 +291,17 @@ test("registerStoredCertificate() signs locally and registers the encrypted cert
       agentBaseUrl: "http://127.0.0.1:8765",
     });
 
-    const certificate = await sdk.registerStoredCertificate("org-1", {
-      certificateId: "cert-2",
-      password: "secret-password",
-      facilityCode: "FAC-002",
-    });
-
-    assert.equal(certificate.id, "stored-cert-1");
-    assert.equal(mock.calls.length, 4);
-    assert.equal(
-      String(mock.calls[3].input),
-      "http://gateway.local/api/v1/organizations/org-1/certificates",
+    await assert.rejects(
+      () => sdk.runEphemeral("org-1", { businessNo: "" }),
+      /businessNo is required/i,
     );
+    assert.equal(mock.calls.length, 1);
   } finally {
     mock.restore();
   }
 });
 
-test("runEphemeralExecution() rejects when the local agent health check fails", async () => {
+test("runEphemeral() rejects when the local agent health check fails", async () => {
   const mock = installFetchMock([() => textResponse("down", 503)]);
 
   try {
@@ -221,10 +312,9 @@ test("runEphemeralExecution() rejects when the local agent health check fails", 
 
     await assert.rejects(
       () =>
-        sdk.runEphemeralExecution("org-1", {
+        sdk.runEphemeral("org-1", {
           certificateId: "cert-1",
           password: "secret-password",
-          facilityCode: "FAC-001",
         }),
       /agent health check failed/i,
     );

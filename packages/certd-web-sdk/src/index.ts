@@ -1,125 +1,184 @@
 import {
   DesktopAgentClient,
-  type AgentProofBundle,
-  type AgentSignRequest,
+  type AgentApprovalRequest,
 } from "./agent.ts";
 import {
   GatewayClient,
   type Challenge,
   type CreateChallengeInput,
   type StoredCertificate,
-  type SyncMode,
   type SyncRun,
 } from "./client.ts";
 
 export type CertdWebSdkOptions = {
   gatewayBaseUrl: string;
   agentBaseUrl: string;
+  bearerToken?: string;
+  activeOrganizationId?: string;
 };
 
 export type SignAndRunInput = {
-  certificateId: string;
-  password: string;
-  facilityCode?: string;
-  startMonth?: string;
-  endMonth?: string;
-  mode?: SyncMode;
+  businessNo: string;
 };
 
 export type RegisterStoredInput = {
+  businessNo: string;
+};
+
+export type RunStoredInput = {
   certificateId: string;
-  password: string;
-  facilityCode?: string;
+};
+
+export type AgentCapabilities = {
+  available: true;
+  flows: {
+    ephemeral: true;
+    stored: true;
+  };
 };
 
 export class CertdWebSdk {
-  private readonly gateway: GatewayClient;
-  private readonly agent: DesktopAgentClient;
+  readonly raw: {
+    gateway: GatewayClient;
+    agent: DesktopAgentClient;
+  };
 
   constructor(options: CertdWebSdkOptions) {
-    this.gateway = new GatewayClient(trimTrailingSlash(options.gatewayBaseUrl));
-    this.agent = new DesktopAgentClient(trimTrailingSlash(options.agentBaseUrl));
+    const gateway = new GatewayClient({
+      baseUrl: trimTrailingSlash(options.gatewayBaseUrl),
+      bearerToken: options.bearerToken,
+      activeOrganizationId: options.activeOrganizationId,
+    });
+    const agent = new DesktopAgentClient(trimTrailingSlash(options.agentBaseUrl));
+    this.raw = { gateway, agent };
   }
 
   async createChallenge(
     organizationId: string,
     input: CreateChallengeInput,
   ): Promise<Challenge> {
-    return this.gateway.createChallenge(organizationId, input);
+    return this.raw.gateway.createChallenge(organizationId, input);
   }
 
-  async runEphemeralExecution(
+  async assertAvailable(): Promise<void> {
+    await this.raw.agent.assertHealthy();
+  }
+
+  async connect(): Promise<AgentCapabilities> {
+    return this.getCapabilities();
+  }
+
+  async getCapabilities(): Promise<AgentCapabilities> {
+    await this.assertAvailable();
+    return {
+      available: true,
+      flows: {
+        ephemeral: true,
+        stored: true,
+      },
+    };
+  }
+
+  async runEphemeral(
     organizationId: string,
     input: SignAndRunInput,
   ): Promise<SyncRun> {
-    await this.agent.assertHealthy();
-    const challenge = await this.gateway.createChallenge(organizationId, {
-      mode: "ephemeral",
-      facilityCode: input.facilityCode,
-    });
-    const proof = await this.agent.sign(
-      signRequestFrom(challenge.payload, input, organizationId),
+    await this.assertAvailable();
+    const result = await this.raw.agent.approveEphemeralRun(
+      approvalRequestFrom(this.raw.gateway, organizationId, input.businessNo),
     );
-    return this.gateway.executeEphemeralExecution(organizationId, {
-      challengeId: challenge.challengeId,
-      challengePayload: challenge.payload,
-      bundle: mergePassword(proof.bundle, input.password),
-      facilityCode: input.facilityCode,
-      startMonth: input.startMonth,
-      endMonth: input.endMonth,
-      mode: input.mode,
-    });
+    return result as unknown as SyncRun;
   }
 
-  async registerStoredCertificate(
+  async registerStored(
     organizationId: string,
     input: RegisterStoredInput,
   ): Promise<StoredCertificate> {
-    await this.agent.assertHealthy();
-    const challenge = await this.gateway.createChallenge(organizationId, {
-      mode: "stored",
-      facilityCode: input.facilityCode,
-    });
-    const proof = await this.agent.sign(
-      signRequestFrom(challenge.payload, input, organizationId),
+    await this.assertAvailable();
+    const result = await this.raw.agent.approveStoredRegistration(
+      approvalRequestFrom(this.raw.gateway, organizationId, input.businessNo),
     );
-    return this.gateway.registerStoredCertificate(organizationId, {
-      challengeId: challenge.challengeId,
-      challengePayload: challenge.payload,
-      bundle: mergePassword(proof.bundle, input.password),
-    });
+    return result as unknown as StoredCertificate;
+  }
+
+  async listStoredCertificates(organizationId: string): Promise<StoredCertificate[]> {
+    return this.raw.gateway.listStoredCertificates(organizationId);
+  }
+
+  async runStored(
+    organizationId: string,
+    input: RunStoredInput,
+  ): Promise<SyncRun> {
+    const issued = await this.raw.gateway.issueCrawlTaskToken(
+      organizationId,
+      input.certificateId,
+    );
+    return this.raw.gateway.startCrawl(organizationId, issued.crawlTaskToken);
+  }
+
+  async runEphemeralExecution(organizationId: string, input: SignAndRunInput): Promise<SyncRun> {
+    return this.runEphemeral(organizationId, input);
+  }
+
+  async registerStoredCertificate(organizationId: string, input: RegisterStoredInput): Promise<StoredCertificate> {
+    return this.registerStored(organizationId, input);
   }
 }
 
-function signRequestFrom(
-  challenge: string,
-  input: Pick<SignAndRunInput, "certificateId" | "password">,
+function approvalRequestFrom(
+  gateway: GatewayClient,
   organizationId: string,
-): AgentSignRequest {
+  businessNo: string,
+): AgentApprovalRequest {
+  const trimmedBusinessNo = trimRequired("businessNo", businessNo);
   return {
-    certificateId: input.certificateId,
-    challenge,
-    password: input.password,
-    businessNo: organizationId,
+    gatewayBaseUrl: resolveAgentGatewayBaseUrl(gateway.options.baseUrl),
+    organizationId,
+    businessNo: trimmedBusinessNo,
+    bearerToken: gateway.options.bearerToken,
+    activeOrganizationId: gateway.options.activeOrganizationId,
   };
 }
 
-function mergePassword(bundle: AgentProofBundle, password: string) {
-  return {
-    ...bundle,
-    password,
-  };
+function resolveAgentGatewayBaseUrl(baseUrl: string): string {
+  if (/^https?:\/\//i.test(baseUrl)) {
+    return baseUrl;
+  }
+  const origin = globalThis.location?.origin;
+  if (!origin) {
+    return baseUrl;
+  }
+  return new URL(baseUrl, origin).toString().replace(/\/+$/, "");
 }
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+function trimRequired(field: string, value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`${field} is required`);
+  }
+  return trimmed;
+}
+
 export type {
-  AgentProofBundle,
+  AgentCapabilities,
   Challenge,
   CreateChallengeInput,
   StoredCertificate,
-  SyncMode,
   SyncRun,
 };
+
+export { DesktopAgentClient, GatewayClient };
+export type { AgentApprovalRequest, AgentSession } from "./agent.ts";
+export type {
+  CrawlTaskToken,
+  ChallengeMode,
+  ExecuteEphemeralExecutionInput,
+  IssueCrawlTaskTokenInput,
+  ProofBundle,
+  RegisterStoredCertificateInput,
+  SyncMode,
+} from "./client.ts";

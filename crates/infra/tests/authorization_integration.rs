@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use domain::{
     Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
     RoleBindingState, RoleBindingSubjectType, SyncMode,
@@ -16,6 +17,10 @@ use domain::{
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{
     artifacts::ArtifactStore,
+    bridge::{
+        BridgeFacility, BridgeGenerationRecord, BridgeRateRecord, BridgeRecRecord, BridgeRun,
+        BridgeSnapshot,
+    },
     config::{
         AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, KmsConfig,
         LocalNodeRole, ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
@@ -172,9 +177,61 @@ async fn build_service() -> (AppService, Database, TempDir, TempDir) {
     let artifacts = ArtifactStore::new(&cfg.artifacts)
         .await
         .expect("artifact store");
-    let service = AppService::new(cfg, db.clone(), artifacts);
+    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, mock_collect_snapshot);
     service.initialize().await.expect("initialize service");
     (service, db, db_dir, artifacts_dir)
+}
+
+async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Result<BridgeRun> {
+    let facility_code = opts
+        .facility_code
+        .clone()
+        .unwrap_or_else(|| "FAC-MOCK".to_owned());
+    Ok(BridgeRun {
+        temp_dir: tempfile::tempdir().expect("collector tempdir"),
+        snapshot: BridgeSnapshot {
+            collected_at: Utc::now().fixed_offset(),
+            facility: BridgeFacility {
+                code: facility_code,
+                name: "Mock Facility".to_owned(),
+                business_no: opts.business_no,
+                contract_no: "CONTRACT-001".to_owned(),
+                address: "Seoul".to_owned(),
+                installed_kw: 123.4,
+                rec_start_date: "2026-01-01".to_owned(),
+                confirm_issued: "Y".to_owned(),
+            },
+            generation: vec![BridgeGenerationRecord {
+                month: "2026-03".to_owned(),
+                generation_kwh: 1000.0,
+                self_consumption_kwh: Some(100.0),
+                supply_kwh: 900.0,
+                application_deadline: Some("2026-04-15".to_owned()),
+            }],
+            rates: vec![BridgeRateRecord {
+                month: "2026-03".to_owned(),
+                self_rate: Some(110.0),
+                national_average: Some(120.0),
+                nearby_average: Some(118.0),
+                nearby_highest: Some(130.0),
+                published: true,
+                source_control_flag: Some("mock".to_owned()),
+            }],
+            rec: vec![BridgeRecRecord {
+                month: "2026-03".to_owned(),
+                application_no: "APP-001".to_owned(),
+                supply_kwh: 900,
+                rec_quantity: 1,
+                fee_krw: 1000,
+                issued_date: "2026-04-01".to_owned(),
+                expiry_date: "2027-04-01".to_owned(),
+                virtual_account: None,
+                bank_name: None,
+                status: Some("issued".to_owned()),
+            }],
+            documents: Vec::new(),
+        },
+    })
 }
 
 fn fake_bundle() -> CertificateBundle {
@@ -190,7 +247,7 @@ fn fake_bundle() -> CertificateBundle {
 }
 
 #[tokio::test]
-async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
+async fn requires_explicit_contract_backed_access_for_each_organization() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
@@ -208,19 +265,6 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
     db.upsert_organization_with_owner("dealer-org", "Dealer Org", "Dealer Org")
         .await
         .expect("upsert dealer org");
-
-    runtime
-        .execute(
-            "INSERT INTO organization_edges (parent_organization_id, child_organization_id, created_at)
-             VALUES ($1, $2, $3)",
-            vec![
-                "distributor-org".into(),
-                "dealer-org".into(),
-                "2026-04-03T00:00:00Z".into(),
-            ],
-        )
-        .await
-        .expect("insert organization edge");
 
     runtime
         .execute(
@@ -343,6 +387,38 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
     .await
     .expect("save org role binding");
 
+    let distributor_agreement = Agreement {
+        id: "agreement-2".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "generator-org".to_owned(),
+        grantee_organization_id: "distributor-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "Generator to Distributor".to_owned(),
+        reference_no: None,
+        starts_at: None,
+        ends_at: None,
+    };
+    db.upsert_agreement(&distributor_agreement)
+        .await
+        .expect("upsert distributor agreement");
+
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "distributor-org".to_owned(),
+        subject_organization_id: "distributor-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-1".to_owned(),
+        role_id: "role-plant-profile-reader".to_owned(),
+        agreement_id: Some("agreement-2".to_owned()),
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save distributor org role binding");
+
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::Group,
@@ -425,9 +501,9 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         ..agreement
     })
     .await
-    .expect("terminate agreement");
+    .expect("terminate dealer agreement");
 
-    let org_rows_after: Vec<OrganizationPlantActionRow> = runtime
+    let org_rows_after: HashSet<OrganizationPlantActionRow> = runtime
         .query_rows(
             ReadConsistency::Local,
             "SELECT organization_id, plant_id, action_id
@@ -436,13 +512,27 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
             vec!["plant-1".into()],
         )
         .await
-        .expect("organization action rows after termination");
+        .expect("organization action rows after dealer termination")
+        .into_iter()
+        .collect();
     assert!(
-        org_rows_after.is_empty(),
-        "agreement termination should remove inherited organization access"
+        !org_rows_after.contains(&OrganizationPlantActionRow {
+            organization_id: "dealer-org".to_owned(),
+            plant_id: "plant-1".to_owned(),
+            action_id: "plant.profile.read".to_owned(),
+        }),
+        "dealer access should disappear when its agreement terminates"
+    );
+    assert!(
+        org_rows_after.contains(&OrganizationPlantActionRow {
+            organization_id: "distributor-org".to_owned(),
+            plant_id: "plant-1".to_owned(),
+            action_id: "plant.profile.read".to_owned(),
+        }),
+        "distributor access should remain while its own agreement is still active"
     );
 
-    let user_rows_after: Vec<UserPlantActionRow> = runtime
+    let user_rows_after: HashSet<UserPlantActionRow> = runtime
         .query_rows(
             ReadConsistency::Local,
             "SELECT user_id, organization_id, plant_id, action_id
@@ -451,13 +541,20 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
             vec!["plant-1".into()],
         )
         .await
-        .expect("user action rows after termination");
+        .expect("user action rows after dealer termination")
+        .into_iter()
+        .collect();
     assert!(
-        user_rows_after.is_empty(),
-        "agreement termination should remove user actions"
+        user_rows_after.contains(&UserPlantActionRow {
+            user_id: "dist-user".to_owned(),
+            organization_id: "distributor-org".to_owned(),
+            plant_id: "plant-1".to_owned(),
+            action_id: "plant.profile.read".to_owned(),
+        }),
+        "distributor user action should remain while distributor agreement is active"
     );
 
-    let visibility_rows_after: Vec<UserPlantVisibilityRow> = runtime
+    let visibility_rows_after: HashSet<UserPlantVisibilityRow> = runtime
         .query_rows(
             ReadConsistency::Local,
             "SELECT user_id, organization_id, plant_id
@@ -466,16 +563,74 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
             vec!["plant-1".into()],
         )
         .await
-        .expect("visibility rows after termination");
+        .expect("visibility rows after dealer termination")
+        .into_iter()
+        .collect();
     assert!(
-        visibility_rows_after.is_empty(),
-        "agreement termination should remove plant visibility"
+        visibility_rows_after.contains(&UserPlantVisibilityRow {
+            user_id: "dist-user".to_owned(),
+            organization_id: "distributor-org".to_owned(),
+            plant_id: "plant-1".to_owned(),
+        }),
+        "visibility should remain while distributor agreement is active"
+    );
+
+    db.upsert_agreement(&Agreement {
+        status: AgreementStatus::Terminated,
+        ..distributor_agreement
+    })
+    .await
+    .expect("terminate distributor agreement");
+
+    let org_rows_final: Vec<OrganizationPlantActionRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT organization_id, plant_id, action_id
+             FROM effective_organization_plant_actions
+             WHERE plant_id = $1",
+            vec!["plant-1".into()],
+        )
+        .await
+        .expect("organization action rows after all terminations");
+    assert!(
+        org_rows_final.is_empty(),
+        "all explicit organization access should disappear after both agreements terminate"
+    );
+
+    let user_rows_final: Vec<UserPlantActionRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT user_id, organization_id, plant_id, action_id
+             FROM effective_user_plant_actions
+             WHERE plant_id = $1",
+            vec!["plant-1".into()],
+        )
+        .await
+        .expect("user action rows after all terminations");
+    assert!(
+        user_rows_final.is_empty(),
+        "group and user actions should disappear after the final explicit organization agreement terminates"
+    );
+
+    let visibility_rows_final: Vec<UserPlantVisibilityRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT user_id, organization_id, plant_id
+             FROM effective_user_plant_visibility
+             WHERE plant_id = $1",
+            vec!["plant-1".into()],
+        )
+        .await
+        .expect("visibility rows after all terminations");
+    assert!(
+        visibility_rows_final.is_empty(),
+        "visibility should disappear after the final explicit organization agreement terminates"
     );
 }
 
 #[tokio::test]
 async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_tokens() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
     let expired = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
@@ -554,8 +709,15 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         })
         .await
         .expect("execute ephemeral crawl");
-    assert_eq!(run.status, "accepted");
+    assert_eq!(run.status, "completed");
     assert_eq!(run.plant_id.as_deref(), Some("FAC-002"));
+    assert_eq!(
+        db.get_plant_by_facility_code("FAC-002")
+            .await
+            .expect("ephemeral plant")
+            .facility_code,
+        "FAC-002"
+    );
 
     let issued = service
         .issue_crawl_task_token(IssueCrawlTaskTokenInput {
@@ -576,7 +738,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         })
         .await
         .expect("consume crawl task token");
-    assert_eq!(started.status, "accepted");
+    assert_eq!(started.status, "completed");
     assert_eq!(started.mode, SyncMode::Full);
     assert_eq!(started.plant_id.as_deref(), Some("FAC-003"));
 

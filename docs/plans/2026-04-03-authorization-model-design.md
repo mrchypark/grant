@@ -1,5 +1,7 @@
 # Authorization Model Design
 
+> Superseded on 2026-04-10. The current implementation removed `organization_edges` and `organization_closure`; organization-to-organization plant access now exists only when an explicit agreement-backed role binding exists.
+
 목표는 `cert`의 사업자/발전소 권한 모델을 실제 운영 구조에 맞게 다시 정의하는 것이다.
 
 핵심 전제는 다음과 같다.
@@ -15,14 +17,13 @@
 권장 모델은 `account`를 별도 테넌트로 두지 않고 `organization` 중심으로 간다.
 
 - `organizations`
-- `organization_edges`
 - `users`
 - `organization_memberships`
 - `groups`
 - `group_memberships`
 - `plants`
 
-조직은 상하위 관계를 가질 수 있다. 예를 들어 총판과 대리점은 `organization_edges`로 표현한다. 상위 조직은 하위 조직이 보유한 발전소 접근권을 상속하지만, 발전소 소유권 자체를 상속하지는 않는다.
+조직 간 plant 접근은 상하위 관계로 상속하지 않는다. 총판, 대리점, 시공사, 유지보수사 모두 별도 `organization`이고, 접근은 각 조직이 가진 명시 계약과 role binding으로만 생긴다.
 
 발전소는 다음 두 축을 가진다.
 
@@ -174,13 +175,12 @@ wildcard는 정의용 문법으로만 사용한다. 런타임은 항상 `role_ac
 
 ## 조회 최적화와 전개 테이블
 
-권한 원본을 그대로 조인해서 `list plants`를 풀면 느려진다. 특히 조직 상속, 그룹 membership, user override, role-action 전개가 한 번에 들어가면 hot path가 복잡해진다.
+권한 원본을 그대로 조인해서 `list plants`를 풀면 느려진다. 특히 조직별 명시 binding, 그룹 membership, user override, role-action 전개가 한 번에 들어가면 hot path가 복잡해진다.
 
 따라서 권한 정의와 조회를 분리한다.
 
 원본 규칙:
 
-- `organization_edges`
 - `organization_memberships`
 - `group_memberships`
 - `role_actions`
@@ -188,18 +188,9 @@ wildcard는 정의용 문법으로만 사용한다. 런타임은 항상 `role_ac
 
 전개 결과:
 
-- `organization_closure`
 - `effective_organization_plant_actions`
 - `effective_user_plant_actions`
 - `effective_user_plant_visibility`
-
-### `organization_closure`
-
-상위 조직이 하위 조직 권한을 자동 상속하기 위한 전개 테이블이다.
-
-- `ancestor_organization_id`
-- `descendant_organization_id`
-- `depth`
 
 ### `effective_organization_plant_actions`
 
@@ -213,7 +204,6 @@ wildcard는 정의용 문법으로만 사용한다. 런타임은 항상 `role_ac
 입력:
 
 - `role_bindings(subject_type=organization)`
-- `organization_closure`
 - `role_actions`
 
 ### `effective_user_plant_actions`
@@ -294,11 +284,10 @@ ORDER BY p.name;
 
 1. `organization`, `group`, `plant`, `agreement`, `action`, `role` 스키마 정리
 2. `role_bindings` 도입
-3. `organization_closure` 전개 구현
-4. `effective_organization_plant_actions` 전개 구현
-5. `effective_user_plant_actions` 전개 구현
-6. `effective_user_plant_visibility` 전개 구현
-7. 목록 API와 단건 권한 체크를 전개 테이블 기반으로 전환
+3. `effective_organization_plant_actions` 전개 구현
+4. `effective_user_plant_actions` 전개 구현
+5. `effective_user_plant_visibility` 전개 구현
+6. 목록 API와 단건 권한 체크를 전개 테이블 기반으로 전환
 
 ## 결론
 
@@ -306,4 +295,4 @@ ORDER BY p.name;
 
 정의는 정규화하고, 조회는 전개한다.
 
-권한 원본은 `role_bindings`와 `role_actions`가 담당하고, 실제 목록 및 액션 판정은 `effective_*` 전개 테이블이 담당한다. 이렇게 해야 총판/대리점 같은 조직 상속 구조와 발전소별 세밀한 권한 모델을 동시에 유지하면서도 `user -> visible plants` 조회 성능을 확보할 수 있다.
+권한 원본은 `role_bindings`와 `role_actions`가 담당하고, 실제 목록 및 액션 판정은 `effective_*` 전개 테이블이 담당한다. 이렇게 해야 명시 계약 기반 조직 접근과 발전소별 세밀한 권한 모델을 동시에 유지하면서도 `user -> visible plants` 조회 성능을 확보할 수 있다.

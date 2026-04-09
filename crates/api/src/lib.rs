@@ -45,17 +45,28 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         )
         .route(
             "/api/v1/organizations/{organizationId}/certificates",
-            post(register_stored_certificate),
+            get(list_stored_certificates).post(register_stored_certificate),
         )
         .route(
             "/api/v1/organizations/{organizationId}/plants",
             post(create_plant),
         )
         .route(
+            "/api/v1/organizations/{organizationId}/deactivate",
+            post(deactivate_organization),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/reactivate",
+            post(reactivate_organization),
+        )
+        .route(
             "/api/v1/organizations/{organizationId}/certificates/{certificateId}/crawl-tokens",
             post(issue_crawl_task_token),
         )
-        .route("/api/v1/organizations/{organizationId}/crawls", post(start_crawl))
+        .route(
+            "/api/v1/organizations/{organizationId}/crawls",
+            post(start_crawl),
+        )
         .route(
             "/api/v1/admin/backups",
             get(list_backups_local).post(trigger_backup),
@@ -95,10 +106,21 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
             any(requires_voter_node),
         )
         .route(
+            "/api/v1/organizations/{organizationId}/deactivate",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/reactivate",
+            any(requires_voter_node),
+        )
+        .route(
             "/api/v1/organizations/{organizationId}/certificates/{certificateId}/crawl-tokens",
             any(requires_voter_node),
         )
-        .route("/api/v1/organizations/{organizationId}/crawls", any(requires_voter_node))
+        .route(
+            "/api/v1/organizations/{organizationId}/crawls",
+            any(requires_voter_node),
+        )
         .route("/api/v1/admin/backups", any(requires_voter_node))
         .route("/api/v1/admin/backups/s3", any(requires_voter_node))
         .route(
@@ -525,6 +547,30 @@ async fn register_stored_certificate(
     Ok((StatusCode::CREATED, Json(map_certificate(cert))))
 }
 
+async fn list_stored_certificates(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<CertificateResponse>>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let certificates = service
+        .list_stored_certificates(&organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(
+        certificates.into_iter().map(map_certificate).collect(),
+    ))
+}
+
 async fn issue_crawl_task_token(
     State(service): State<Arc<AppService>>,
     Path((organization_id, certificate_id)): Path<(String, String)>,
@@ -646,6 +692,47 @@ async fn create_plant(
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::CREATED, Json(plant)))
+}
+
+async fn deactivate_organization(
+    State(service): State<Arc<AppService>>,
+    Path(path_organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Organization>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    if path_organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                path_organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let organization = service
+        .deactivate_organization(&ctx.user_id, &ctx.organization_id, &path_organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(organization))
+}
+
+async fn reactivate_organization(
+    State(service): State<Arc<AppService>>,
+    Path(path_organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Organization>> {
+    let ctx = request_context_for_inactive_organization(
+        service.as_ref(),
+        &headers,
+        &path_organization_id,
+        Some(ReadConsistency::Strong),
+    )
+    .await?;
+    let organization = service
+        .reactivate_organization(&ctx.user_id, &ctx.organization_id, &path_organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(organization))
 }
 
 async fn list_plant_generation(
@@ -1006,6 +1093,41 @@ async fn request_context(
     Ok(RequestContext {
         user_id: principal.user_id,
         organization_id: principal.organization_id,
+    })
+}
+
+async fn request_context_for_inactive_organization(
+    service: &AppService,
+    headers: &HeaderMap,
+    target_organization_id: &str,
+    read_consistency: Option<ReadConsistency>,
+) -> ApiResult<RequestContext> {
+    let bearer_token = bearer_token(headers)?;
+    let current = service
+        .current_user(bearer_token.as_deref(), None, read_consistency.clone())
+        .await
+        .map_err(ApiError::from_auth)?;
+    let has_membership = service
+        .db()
+        .has_organization_membership_with_consistency(
+            &current.user.id,
+            target_organization_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    if !has_membership {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: user {} is not an active member of organization {}",
+                current.user.id, target_organization_id
+            ),
+        });
+    }
+    Ok(RequestContext {
+        user_id: current.user.id,
+        organization_id: target_organization_id.to_owned(),
     })
 }
 

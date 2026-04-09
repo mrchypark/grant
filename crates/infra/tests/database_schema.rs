@@ -104,7 +104,6 @@ async fn ensure_schema_creates_authorization_tables() {
         "crawl_task_tokens",
         "user_identities",
         "organizations",
-        "organization_edges",
         "organization_memberships",
         "groups",
         "group_memberships",
@@ -114,7 +113,6 @@ async fn ensure_schema_creates_authorization_tables() {
         "role_rules",
         "role_actions",
         "role_bindings",
-        "organization_closure",
         "effective_organization_plant_actions",
         "effective_user_plant_actions",
         "effective_user_plant_visibility",
@@ -124,6 +122,8 @@ async fn ensure_schema_creates_authorization_tables() {
 
     assert!(!names.contains("businesses"));
     assert!(!names.contains("business_memberships"));
+    assert!(!names.contains("organization_edges"));
+    assert!(!names.contains("organization_closure"));
 
     let binding_columns: Vec<ColumnRow> = runtime
         .query_rows(
@@ -215,6 +215,21 @@ async fn ensure_schema_creates_authorization_tables() {
         .collect();
     assert!(crawl_token_columns.contains(&"token_hash".to_owned()));
     assert!(crawl_token_columns.contains(&"used_at".to_owned()));
+
+    let organization_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('organizations') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("organizations columns");
+    let organization_columns: Vec<String> = organization_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(organization_columns.contains(&"inactivated_at".to_owned()));
+    assert!(!organization_columns.contains(&"active".to_owned()));
 
     let indexes: Vec<IndexRow> = runtime
         .query_rows(

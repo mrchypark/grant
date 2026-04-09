@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "tsx --test src/index.test.ts",
-    "example": "vite examples/browser --host 127.0.0.1 --port 4173",
-    "example:build": "vite build examples/browser --outDir dist/example"
+    "example": "vite --config examples/browser/vite.config.ts --host 127.0.0.1 --port 4173",
+    "example:build": "vite build --config examples/browser/vite.config.ts --outDir dist/example"
   },
   "devDependencies": {
     "tsx": "^4.20.6",

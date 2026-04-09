@@ -4,10 +4,15 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use http_body_util::BodyExt;
+use chrono::Utc;
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
+use http_body_util::BodyExt;
 use infra::{
     artifacts::ArtifactStore,
+    bridge::{
+        BridgeFacility, BridgeGenerationRecord, BridgeRateRecord, BridgeRecRecord, BridgeRun,
+        BridgeSnapshot,
+    },
     config::{
         AppConfig, ArtifactBackendConfig, ArtifactConfig, HiqliteConfig, LocalNodeRole,
         ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
@@ -95,12 +100,75 @@ async fn build_app() -> (axum::Router, TempDir, TempDir) {
     let artifacts = ArtifactStore::new(&cfg.artifacts)
         .await
         .expect("artifact store");
-    let service = Arc::new(AppService::new(cfg, db, artifacts));
+    let service = Arc::new(AppService::new_with_collector(
+        cfg,
+        db,
+        artifacts,
+        mock_collect_snapshot,
+    ));
     service.initialize().await.expect("initialize");
     (api::build_router(service), db_dir, artifacts_dir)
 }
 
-fn auth_request(method: &str, path: &str, token: &str, organization_id: &str, body: Value) -> Request<Body> {
+async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Result<BridgeRun> {
+    let facility_code = opts
+        .facility_code
+        .clone()
+        .unwrap_or_else(|| "FAC-MOCK".to_owned());
+    Ok(BridgeRun {
+        temp_dir: tempfile::tempdir().expect("collector tempdir"),
+        snapshot: BridgeSnapshot {
+            collected_at: Utc::now().fixed_offset(),
+            facility: BridgeFacility {
+                code: facility_code,
+                name: "Mock Facility".to_owned(),
+                business_no: opts.business_no,
+                contract_no: "CONTRACT-001".to_owned(),
+                address: "Seoul".to_owned(),
+                installed_kw: 123.4,
+                rec_start_date: "2026-01-01".to_owned(),
+                confirm_issued: "Y".to_owned(),
+            },
+            generation: vec![BridgeGenerationRecord {
+                month: "2026-03".to_owned(),
+                generation_kwh: 1000.0,
+                self_consumption_kwh: Some(100.0),
+                supply_kwh: 900.0,
+                application_deadline: Some("2026-04-15".to_owned()),
+            }],
+            rates: vec![BridgeRateRecord {
+                month: "2026-03".to_owned(),
+                self_rate: Some(110.0),
+                national_average: Some(120.0),
+                nearby_average: Some(118.0),
+                nearby_highest: Some(130.0),
+                published: true,
+                source_control_flag: Some("mock".to_owned()),
+            }],
+            rec: vec![BridgeRecRecord {
+                month: "2026-03".to_owned(),
+                application_no: "APP-001".to_owned(),
+                supply_kwh: 900,
+                rec_quantity: 1,
+                fee_krw: 1000,
+                issued_date: "2026-04-01".to_owned(),
+                expiry_date: "2027-04-01".to_owned(),
+                virtual_account: None,
+                bank_name: None,
+                status: Some("issued".to_owned()),
+            }],
+            documents: Vec::new(),
+        },
+    })
+}
+
+fn auth_request(
+    method: &str,
+    path: &str,
+    token: &str,
+    organization_id: &str,
+    body: Value,
+) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(path)
@@ -190,6 +258,23 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .expect("certificate id")
         .to_owned();
 
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/organizations/bootstrap-user/certificates")
+                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header("x-organization-id", "bootstrap-user")
+                .body(Body::empty())
+                .expect("list request"),
+        )
+        .await
+        .expect("list response");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_json = json_body(list_response).await;
+    assert_eq!(list_json.as_array().expect("list array").len(), 1);
+
     let issue_response = app
         .clone()
         .oneshot(auth_request(
@@ -225,7 +310,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .expect("start response");
     assert_eq!(start_response.status(), StatusCode::ACCEPTED);
     let start_json = json_body(start_response).await;
-    assert_eq!(start_json["status"], "accepted");
+    assert_eq!(start_json["status"], "completed");
     assert_eq!(start_json["plantId"], "FAC-003");
 
     let reuse_response = app
@@ -272,6 +357,6 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .expect("ephemeral response");
     assert_eq!(ephemeral_response.status(), StatusCode::ACCEPTED);
     let ephemeral_json = json_body(ephemeral_response).await;
-    assert_eq!(ephemeral_json["status"], "accepted");
+    assert_eq!(ephemeral_json["status"], "completed");
     assert_eq!(ephemeral_json["plantId"], "FAC-002");
 }

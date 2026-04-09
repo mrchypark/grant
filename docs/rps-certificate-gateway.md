@@ -9,7 +9,7 @@
 - `stored`
   - 공동인증서를 암호화 저장하고 이후 반복 수집에 재사용
 - 브라우저는 JS SDK만 사용
-- 실제 인증서 접근과 비밀번호 처리는 local desktop agent에서 수행
+- 실제 인증서 접근과 비밀번호 처리는 local desktop agent의 native approval modal에서 수행
 
 ## 구성 요소
 
@@ -19,9 +19,10 @@
   - certificate gateway HTTP routes 노출
 - `desktop-agent`
   - loopback HTTP server
-  - `/healthz`, `/certificates`, `/sign`
+  - `/healthz`, `/sessions/open`, `/certificates`, `/sign`
+  - `/approve-ephemeral-run`, `/approve-stored-registration`
 - `packages/certd-web-sdk`
-  - 브라우저 앱에서 사용하는 orchestration SDK
+  - 고수준 제품 API + 저수준 raw client
 
 ## KMS 환경변수
 
@@ -43,6 +44,22 @@ Desktop agent는 인증서 탐색 루트를 환경변수로 덮어쓸 수 있다
 ```bash
 export DESKTOP_AGENT_NPKI_DIRS="$HOME/NPKI:$HOME/Documents/NPKI"
 ```
+
+loopback agent는 허용 origin과 local session secret도 환경변수로 제어할 수 있다.
+
+```bash
+export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
+export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
+export DESKTOP_AGENT_DISABLE_TRAY=1
+```
+
+- `DESKTOP_AGENT_ALLOWED_ORIGINS`
+  - 브라우저에서 agent를 호출할 수 있는 allowlist origin
+- `DESKTOP_AGENT_SESSION_SECRET`
+  - local session token HMAC에 쓰는 32-byte 이상 secret
+  - 비워 두면 사용자 config 디렉터리에 device-local secret을 생성한다
+- `DESKTOP_AGENT_DISABLE_TRAY`
+  - macOS 기본 tray 실행을 끄고 기존 headless HTTP agent로 실행한다
 
 - macOS 기본 탐색 경로
   - `~/NPKI`
@@ -103,7 +120,6 @@ Content-Type: application/json
 
 {
   "mode": "stored" | "ephemeral",
-  "facilityCode": "FAC-001",
   "ttlSeconds": 120
 }
 ```
@@ -137,15 +153,11 @@ Content-Type: application/json
     "signPriKeyBase64": "BAUG",
     "kmCertDerBase64": "BwgJ",
     "kmPriKeyBase64": "CgsM"
-  },
-  "facilityCode": "FAC-001",
-  "startMonth": "2026-01",
-  "endMonth": "2026-03",
-  "mode": "delta"
+  }
 }
 ```
 
-성공 시 `202 Accepted`와 `SyncRun`을 반환한다.
+성공 시 `202 Accepted`와 `SyncRun`을 반환한다. 제품형 고수준 SDK는 `facilityCode`, `startMonth`, `endMonth`, `mode`를 프론트에서 받지 않고 서버가 기존 데이터와 수집 범위를 보고 결정하게 둔다. 이 필드들은 raw client에서만 유지한다.
 
 ### Stored 등록
 
@@ -177,10 +189,6 @@ POST /certificates/{certificateId}/crawl-tokens
 Content-Type: application/json
 
 {
-  "facilityCode": "FAC-003",
-  "startMonth": "2026-01",
-  "endMonth": "2026-04",
-  "mode": "full",
   "ttlSeconds": 60
 }
 ```
@@ -210,8 +218,11 @@ Authorization: Bearer <crawlTaskToken>
 
 ```text
 GET  /healthz
+POST /sessions/open
 GET  /certificates
 POST /sign
+POST /approve-ephemeral-run
+POST /approve-stored-registration
 ```
 
 ### `GET /healthz`
@@ -223,6 +234,8 @@ ok
 ```
 
 ### `GET /certificates`
+
+`X-Agent-Session` 헤더가 필요하다. session은 `POST /sessions/open`으로 먼저 연다.
 
 응답:
 
@@ -241,6 +254,8 @@ ok
 
 ### `POST /sign`
 
+`X-Agent-Session` 헤더가 필요하다.
+
 요청:
 
 ```json
@@ -251,10 +266,15 @@ ok
 }
 ```
 
-현재 스캐폴드 구현 상태:
+현재 구현 상태:
 
-- `challenge` 또는 `password`가 비어 있으면 `400`
-- 정상 요청은 아직 플랫폼별 인증서 접근 구현이 없어서 `501 Not Implemented`
+- 허용 origin만 CORS 허용
+- `/sessions/open`으로 짧은 local session token 발급
+- `/certificates`, `/sign`는 session 없으면 거절
+- 제품형 high-level SDK는 `/approve-ephemeral-run`, `/approve-stored-registration` 사용
+- 실제 NPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
+- macOS에서는 기본적으로 메뉴바(tray) 앱으로 실행되고 `Open Example Page`, `Quit certd Agent` 메뉴 제공
+- native approval modal은 현재 macOS AppKit(`NSAlert + certificate picker + secure password field`) 구현, Windows는 후속 구현 대상
 
 ## JS SDK 사용 예시
 
@@ -270,32 +290,33 @@ const sdk = new CertdWebSdk({
 ### Ephemeral
 
 ```ts
-const run = await sdk.runEphemeralExecution("org-1", {
-  certificateId: "cert-1",
-  password: "secret-password",
-  facilityCode: "FAC-001",
-  startMonth: "2026-01",
-  endMonth: "2026-03",
-  mode: "delta",
+await sdk.assertAvailable();
+
+const run = await sdk.runEphemeral("org-1", {
+  businessNo: "2768603291",
 });
 ```
 
 ### Stored
 
 ```ts
-const cert = await sdk.registerStoredCertificate("org-1", {
-  certificateId: "cert-2",
-  password: "secret-password",
-  facilityCode: "FAC-002",
+const cert = await sdk.registerStored("org-1", {
+  businessNo: "2768603291",
+});
+
+const stored = await sdk.listStoredCertificates("org-1");
+const run = await sdk.runStored("org-1", {
+  certificateId: stored[0].id,
 });
 ```
 
 SDK가 내부적으로 수행하는 순서는 다음과 같다.
 
 1. local agent `/healthz` 확인
-2. gateway challenge 생성
-3. local agent `/sign` 호출
-4. `ephemeral`이면 즉시 실행, `stored`면 등록 요청
+2. local agent `/sessions/open`으로 local session 확보
+3. local agent `approve-*` endpoint 호출
+4. agent가 native approval modal로 인증서 선택과 비밀번호 입력 처리
+5. agent가 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
 
 ## 로컬 검증
 
@@ -312,6 +333,7 @@ USB 인증서를 직접 읽도록 agent 실행:
 ```bash
 export DESKTOP_AGENT_ADDR=127.0.0.1:8765
 export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI"
+export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
 ./bin/desktop-agent
 ```
 
@@ -319,7 +341,11 @@ export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI"
 
 ```bash
 curl -i http://127.0.0.1:8765/healthz
-curl http://127.0.0.1:8765/certificates
+SESSION_TOKEN=$(curl -sS -X POST http://127.0.0.1:8765/sessions/open \
+  -H 'Origin: http://127.0.0.1:4173' | jq -r .sessionToken)
+curl http://127.0.0.1:8765/certificates \
+  -H 'Origin: http://127.0.0.1:4173' \
+  -H "X-Agent-Session: ${SESSION_TOKEN}"
 ```
 
 JS 예시 페이지 실행:

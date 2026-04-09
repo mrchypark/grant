@@ -9,13 +9,9 @@ type CertificateItem = {
 
 const gatewayBaseUrl = element<HTMLInputElement>("gatewayBaseUrl");
 const agentBaseUrl = element<HTMLInputElement>("agentBaseUrl");
+const bearerToken = element<HTMLInputElement>("bearerToken");
 const organizationId = element<HTMLInputElement>("organizationId");
-const facilityCode = element<HTMLInputElement>("facilityCode");
-const startMonth = element<HTMLInputElement>("startMonth");
-const endMonth = element<HTMLInputElement>("endMonth");
-const syncMode = element<HTMLSelectElement>("syncMode");
-const certificateId = element<HTMLInputElement>("certificateId");
-const password = element<HTMLInputElement>("password");
+const businessNo = element<HTMLInputElement>("businessNo");
 const output = element<HTMLTextAreaElement>("output");
 const status = element<HTMLDivElement>("status");
 const certList = element<HTMLDivElement>("certList");
@@ -38,39 +34,25 @@ async function checkHealth() {
 }
 
 async function loadCertificates() {
-  const response = await fetch(`${agentBaseUrl.value}/certificates`);
-  if (!response.ok) {
-    throw new Error(`certificate list failed with status ${response.status}`);
-  }
-  const body = (await response.json()) as { items: CertificateItem[] };
+  const body = (await createSdk().raw.agent.listCertificates()) as { items: CertificateItem[] };
   renderCertificates(body.items);
-  if (body.items[0]) {
-    certificateId.value = body.items[0].id;
-  }
   appendLog(`agent /certificates -> ${body.items.length}개`);
   setStatus(`인증서 ${body.items.length}개 로드`);
 }
 
 async function runEphemeral() {
   const sdk = createSdk();
-  const run = await sdk.runEphemeralExecution(organizationId.value, {
-    certificateId: certificateId.value,
-    password: password.value,
-    facilityCode: optional(facilityCode.value),
-    startMonth: optional(startMonth.value),
-    endMonth: optional(endMonth.value),
-    mode: syncMode.value as "full" | "delta",
+  const run = await sdk.runEphemeral(organizationId.value, {
+    businessNo: required(businessNo.value, "Business No"),
   });
-  appendLog(`ephemeral accepted -> ${JSON.stringify(run, null, 2)}`);
-  setStatus("Ephemeral 실행 수락");
+  appendLog(`ephemeral completed -> ${JSON.stringify(run, null, 2)}`);
+  setStatus(`Ephemeral ${run.status}`);
 }
 
 async function runStored() {
   const sdk = createSdk();
-  const cert = await sdk.registerStoredCertificate(organizationId.value, {
-    certificateId: certificateId.value,
-    password: password.value,
-    facilityCode: optional(facilityCode.value),
+  const cert = await sdk.registerStored(organizationId.value, {
+    businessNo: required(businessNo.value, "Business No"),
   });
   appendLog(`stored registered -> ${JSON.stringify(cert, null, 2)}`);
   setStatus("Stored 등록 완료");
@@ -80,6 +62,8 @@ function createSdk() {
   return new CertdWebSdk({
     gatewayBaseUrl: gatewayBaseUrl.value,
     agentBaseUrl: agentBaseUrl.value,
+    bearerToken: optional(bearerToken.value),
+    activeOrganizationId: organizationId.value,
   });
 }
 
@@ -111,10 +95,6 @@ function renderCertificates(items: CertificateItem[]) {
       <div>notAfter: ${escapeHtml(item.notAfter)}</div>
       <div style="margin-top:6px; word-break:break-all; color:#6b7280;">${escapeHtml(item.id)}</div>
     `;
-    card.addEventListener("click", () => {
-      certificateId.value = item.id;
-      appendLog(`certificate selected -> ${item.id}`);
-    });
     certList.appendChild(card);
   }
 }
@@ -132,6 +112,14 @@ function appendLog(message: string) {
 function optional(value: string) {
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
+}
+
+function required(value: string, field: string) {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    throw new Error(`${field} is required`);
+  }
+  return trimmed;
 }
 
 function element<T extends HTMLElement>(id: string): T {
