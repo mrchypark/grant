@@ -135,6 +135,12 @@ test("runEphemeralExecution() checks agent health, signs locally, then starts th
     assert.equal(mock.calls.length, 4);
     assert.equal(String(mock.calls[0].input), "http://127.0.0.1:8765/healthz");
     assert.equal(String(mock.calls[2].input), "http://127.0.0.1:8765/sign");
+    assert.deepEqual(JSON.parse(String(mock.calls[2].init?.body)), {
+      certificateId: "cert-1",
+      challenge: "payload-ephemeral",
+      password: "secret-password",
+      businessNo: "org-1",
+    });
     assert.equal(
       String(mock.calls[3].input),
       "http://gateway.local/api/v1/organizations/org-1/cert-gateway/ephemeral-executions",

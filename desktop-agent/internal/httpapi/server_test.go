@@ -21,7 +21,18 @@ func (s stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateMe
 }
 
 func (s stubNPKIService) Sign(context.Context, npki.SignRequest) (npki.SignResult, error) {
-	return npki.SignResult{}, nil
+	return npki.SignResult{
+		CertificateID: "cert-1",
+		Challenge:     "challenge-1",
+		Bundle: npki.ProofBundle{
+			BusinessNo:        "2768603291",
+			CommonName:        "Test Certificate",
+			SignCertDerBase64: "AQID",
+			SignPriKeyBase64:  "BAUG",
+			KMCertDerBase64:   "BwgJ",
+			KMPriKeyBase64:    "CgsM",
+		},
+	}, nil
 }
 
 func TestServerHealthz(t *testing.T) {
@@ -106,5 +117,38 @@ func TestServerRejectsInvalidSignRequests(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 			}
 		})
+	}
+}
+
+func TestServerReturnsBundleOnSign(t *testing.T) {
+	handler := NewServer(stubNPKIService{}).Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
+		"challenge":"challenge-1",
+		"certificateId":"cert-1",
+		"password":"secret-password"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var got struct {
+		CertificateID string `json:"certificateId"`
+		Bundle        struct {
+			BusinessNo string `json:"businessNo"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got.CertificateID != "cert-1" {
+		t.Fatalf("certificateId = %q, want cert-1", got.CertificateID)
+	}
+	if got.Bundle.BusinessNo != "2768603291" {
+		t.Fatalf("businessNo = %q, want 2768603291", got.Bundle.BusinessNo)
 	}
 }

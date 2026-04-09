@@ -57,7 +57,9 @@ export class CertdWebSdk {
       mode: "ephemeral",
       facilityCode: input.facilityCode,
     });
-    const proof = await this.agent.sign(signRequestFrom(challenge.payload, input));
+    const proof = await this.agent.sign(
+      signRequestFrom(challenge.payload, input, organizationId),
+    );
     return this.gateway.executeEphemeralExecution(organizationId, {
       challengeId: challenge.challengeId,
       challengePayload: challenge.payload,
@@ -78,7 +80,9 @@ export class CertdWebSdk {
       mode: "stored",
       facilityCode: input.facilityCode,
     });
-    const proof = await this.agent.sign(signRequestFrom(challenge.payload, input));
+    const proof = await this.agent.sign(
+      signRequestFrom(challenge.payload, input, organizationId),
+    );
     return this.gateway.registerStoredCertificate(organizationId, {
       challengeId: challenge.challengeId,
       challengePayload: challenge.payload,
@@ -90,11 +94,13 @@ export class CertdWebSdk {
 function signRequestFrom(
   challenge: string,
   input: Pick<SignAndRunInput, "certificateId" | "password">,
+  organizationId: string,
 ): AgentSignRequest {
   return {
     certificateId: input.certificateId,
     challenge,
     password: input.password,
+    businessNo: organizationId,
   };
 }
 

@@ -12,6 +12,7 @@ export type AgentSignRequest = {
   certificateId: string;
   challenge: string;
   password: string;
+  businessNo?: string;
 };
 
 export type AgentSignResponse = {

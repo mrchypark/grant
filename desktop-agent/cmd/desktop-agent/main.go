@@ -19,7 +19,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	server := httpapi.NewServer(npki.NewService(nil))
+	server := httpapi.NewServer(npki.NewService(npki.DefaultConfig()))
 	log.Printf("desktop agent listening on %s", addr)
 	if err := http.ListenAndServe(addr, server.Handler()); err != nil {
 		log.Fatal(err)

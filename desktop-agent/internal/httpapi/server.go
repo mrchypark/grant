@@ -87,8 +87,13 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	result, err := s.npki.Sign(r.Context(), req)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, npki.ErrNotImplemented) {
+		switch {
+		case errors.Is(err, npki.ErrNotImplemented):
 			status = http.StatusNotImplemented
+		case errors.Is(err, npki.ErrCertificateNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, npki.ErrInvalidPassword):
+			status = http.StatusUnauthorized
 		}
 		writeError(w, status, err.Error())
 		return

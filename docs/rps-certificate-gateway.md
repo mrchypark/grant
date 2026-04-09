@@ -38,6 +38,22 @@ export CERTD_KMS_MASTER_KEYS=local-dev-v1:BASE64_KEY_MATERIAL,local-dev-v2:BASE6
   - `key-id:base64-key` 목록
   - 읽기 시에는 row에 저장된 `kms_key_id`로 알맞은 key를 선택한다
 
+Desktop agent는 인증서 탐색 루트를 환경변수로 덮어쓸 수 있다.
+
+```bash
+export DESKTOP_AGENT_NPKI_DIRS="$HOME/NPKI:$HOME/Documents/NPKI"
+```
+
+- macOS 기본 탐색 경로
+  - `~/NPKI`
+  - `~/Documents/NPKI`
+  - `~/Library/Preferences/NPKI`
+- Windows 기본 탐색 경로
+  - `%USERPROFILE%\\NPKI`
+  - `%USERPROFILE%\\Documents\\NPKI`
+  - `%LOCALAPPDATA%\\NPKI`
+  - `%APPDATA%\\NPKI`
+
 ## 서버 API
 
 공통 조직 경로 prefix:
