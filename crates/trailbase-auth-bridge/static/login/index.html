@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="login-csrf-token" content="__LOGIN_CSRF_TOKEN__" />
+    <meta name="post-login-path" content="__POST_LOGIN_PATH__" />
+    <title>Sign in</title>
+    <link rel="stylesheet" href="/login-assets/login.v1.css" />
+    <script src="/login-assets/login.v1.js" defer></script>
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="login-shell__panel login-shell__panel--brand" aria-label="Welcome">
+        <div class="brand-mark" aria-hidden="true">
+          <div class="brand-mark__slot">Logo</div>
+        </div>
+        <p class="eyebrow">Account access</p>
+        <h1>Welcome back</h1>
+        <p class="lede">
+          Sign in to continue with your workspace, reviews, and organization settings.
+        </p>
+        <ul class="brand-notes" aria-label="Highlights">
+          <li>Thoughtful auth surface</li>
+          <li>Warm editorial presentation</li>
+          <li>Responsive from desktop to mobile</li>
+        </ul>
+      </section>
+
+      <section class="login-shell__panel login-shell__panel--form" aria-label="Sign in form">
+        <div class="form-card">
+          <div class="form-card__header">
+            <p class="eyebrow">Sign in</p>
+            <h2>Use your email and password</h2>
+            <p class="form-copy">Social options are available below. JavaScript is intentionally deferred.</p>
+          </div>
+
+          <div class="login-form" role="group" aria-label="Email and password sign in">
+            <div class="field">
+              <label for="email">Email address</label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                inputmode="email"
+                autocomplete="email"
+                placeholder="name@company.com"
+              />
+            </div>
+
+            <div class="field">
+              <label for="password">Password</label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                placeholder="Enter your password"
+              />
+            </div>
+
+            <button class="button button--primary" type="button">Sign in</button>
+            <p class="form-copy" data-login-status aria-live="polite"></p>
+          </div>
+
+          <div class="divider" role="presentation">
+            <span>or continue with</span>
+          </div>
+
+          <div class="social-stack" aria-label="Social sign in options">
+            <a
+              class="button button--social"
+              href="/api/auth/v1/oauth/google/login"
+              role="button"
+              data-provider="google"
+              data-provider-rollout-enabled="__GOOGLE_OAUTH_ROLLOUT_ENABLED__"
+              data-provider-ready="__GOOGLE_OAUTH_READY__"
+              __GOOGLE_OAUTH_HIDDEN__
+              >Continue with Google</a
+            >
+            <a
+              class="button button--social button--kakao"
+              href="/api/auth/v1/oauth/oidc0/login"
+              role="button"
+              data-provider="kakao"
+              data-provider-rollout-enabled="__KAKAO_OAUTH_ROLLOUT_ENABLED__"
+              data-provider-oidc-ready="__KAKAO_OIDC_READY__"
+              data-provider-linking-ready="__KAKAO_LINKING_READY__"
+              __KAKAO_OAUTH_HIDDEN__
+              >Continue with Kakao</a
+            >
+            <a
+              class="button button--social"
+              href="/api/auth/v1/oauth/apple/login"
+              role="button"
+              data-provider="apple"
+              data-provider-rollout-enabled="__APPLE_OAUTH_ROLLOUT_ENABLED__"
+              data-provider-ready="__APPLE_OAUTH_READY__"
+              __APPLE_OAUTH_HIDDEN__
+              >Continue with Apple</a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

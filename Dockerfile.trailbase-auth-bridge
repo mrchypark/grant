@@ -34,7 +34,7 @@ RUN --mount=type=cache,id=trailbase-bridge-cargo-registry,target=/usr/local/carg
     && cp /workspace/crates/trailbase-auth-bridge/target/release/trailbase-auth-bridge /workspace/trailbase-auth-bridge
 
 FROM debian:bookworm-slim AS runtime-prep
-RUN install -d -o 65532 -g 65532 /app /data/trailbase /tmp
+RUN install -d -o 65532 -g 65532 /app /app/public /app/public/login /app/public/login-assets /data/trailbase /tmp
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
@@ -43,11 +43,18 @@ COPY --link --from=runtime-prep --chown=65532:65532 /app /app
 COPY --link --from=runtime-prep --chown=65532:65532 /data /data
 COPY --link --from=runtime-prep --chown=65532:65532 /tmp /tmp
 COPY --link --from=builder --chown=65532:65532 /workspace/trailbase-auth-bridge /usr/local/bin/trailbase-auth-bridge
+COPY --link --from=builder --chown=65532:65532 /workspace/crates/trailbase-auth-bridge/static/login/index.html /app/public/login/index.html
+COPY --link --from=builder --chown=65532:65532 /workspace/crates/trailbase-auth-bridge/static/login/login.v1.css /app/public/login-assets/login.v1.css
+COPY --link --from=builder --chown=65532:65532 /workspace/crates/trailbase-auth-bridge/static/login/login.v1.js /app/public/login-assets/login.v1.js
 
 USER 65532:65532
 ENV TRAILBASE_ADDRESS=0.0.0.0:4000
 ENV TRAILBASE_DATA_DIR=/data/trailbase
 ENV TRAILBASE_DEV=false
+ENV TRAILBASE_PUBLIC_DIR=/app/public
+ENV TRAILBASE_CUSTOM_LOGIN_ENABLED=false
+ENV TRAILBASE_LOGIN_FALLBACK_ENABLED=true
+ENV TRAILBASE_DEFAULT_POST_LOGIN_PATH=/app
 ENV RUST_LOG=info
 ENV RUST_BACKTRACE=0
 

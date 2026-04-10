@@ -1,0 +1,252 @@
+:root {
+  color-scheme: light;
+  --bg: #f5efe6;
+  --bg-accent: #efe4d4;
+  --surface: rgba(255, 252, 247, 0.82);
+  --surface-strong: #fffaf3;
+  --text: #24170f;
+  --muted: #68584f;
+  --line: rgba(54, 33, 17, 0.12);
+  --primary: #20130e;
+  --primary-contrast: #fff8f0;
+  --shadow: 0 28px 80px rgba(63, 38, 18, 0.12);
+  --radius-xl: 32px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  font-family:
+    "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.85), transparent 34%),
+    linear-gradient(135deg, var(--bg) 0%, #f8f2ea 45%, var(--bg-accent) 100%);
+  color: var(--text);
+}
+
+body {
+  min-height: 100vh;
+}
+
+.login-shell {
+  width: min(1120px, calc(100% - 32px));
+  min-height: 100vh;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  align-items: center;
+  gap: 28px;
+  padding: 32px 0;
+}
+
+.login-shell__panel {
+  position: relative;
+}
+
+.login-shell__panel--brand {
+  padding: 48px;
+}
+
+.brand-mark {
+  margin-bottom: 40px;
+}
+
+.brand-mark__slot {
+  width: 116px;
+  height: 116px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed rgba(32, 19, 14, 0.28);
+  border-radius: 28px;
+  background: rgba(255, 250, 243, 0.6);
+  color: var(--muted);
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #7a5e46;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 0.95;
+}
+
+h1 {
+  max-width: 10ch;
+  font-size: clamp(3.3rem, 7vw, 5.6rem);
+}
+
+h2 {
+  font-size: clamp(2rem, 4vw, 2.7rem);
+}
+
+.lede,
+.form-copy,
+.brand-notes,
+.field label,
+.field input,
+.button,
+.divider span {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+.lede,
+.form-copy {
+  max-width: 38ch;
+  margin: 22px 0 0;
+  color: var(--muted);
+  font-size: 1.02rem;
+  line-height: 1.65;
+}
+
+.brand-notes {
+  list-style: none;
+  display: grid;
+  gap: 12px;
+  margin: 32px 0 0;
+  padding: 0;
+  color: #4d3c32;
+}
+
+.brand-notes li {
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(36, 23, 15, 0.1);
+}
+
+.form-card {
+  padding: 40px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-strong) 100%);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.form-card__header {
+  margin-bottom: 28px;
+}
+
+.login-form {
+  display: grid;
+  gap: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field label {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.field input {
+  width: 100%;
+  border: 1px solid rgba(36, 23, 15, 0.14);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.field input::placeholder {
+  color: #917a6c;
+}
+
+.field input:focus-visible,
+.button:focus-visible {
+  outline: 2px solid #8d6842;
+  outline-offset: 2px;
+}
+
+.button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 15px 18px;
+  font-size: 0.98rem;
+  font-weight: 700;
+  cursor: default;
+}
+
+.button--primary {
+  margin-top: 8px;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  box-shadow: 0 14px 30px rgba(32, 19, 14, 0.16);
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 22px 0 18px;
+  color: #856f61;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: rgba(36, 23, 15, 0.12);
+}
+
+.social-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.button--social {
+  border-color: rgba(36, 23, 15, 0.12);
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--text);
+}
+
+.button--kakao {
+  background: #fee500;
+}
+
+@media (max-width: 900px) {
+  .login-shell {
+    min-height: auto;
+    grid-template-columns: 1fr;
+    gap: 20px;
+    padding: 20px 0 28px;
+  }
+
+  .login-shell__panel--brand,
+  .form-card {
+    padding: 28px;
+  }
+
+  .brand-mark {
+    margin-bottom: 28px;
+  }
+
+  h1 {
+    max-width: none;
+    font-size: clamp(2.8rem, 12vw, 4.2rem);
+  }
+}

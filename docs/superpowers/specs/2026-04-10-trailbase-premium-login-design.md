@@ -138,6 +138,7 @@ Canonical unauthenticated entry behavior:
 - `/` must server-side redirect to `/login` when the custom login experience is enabled.
 - `/` must server-side redirect to `/_/auth/login` when fallback mode is enabled.
 - `/login` must also server-side redirect to `/_/auth/login` when fallback mode is enabled, so direct bookmarks and stale links do not bypass rollback.
+- The `/login` routing contract is not complete until the route terminates in the minimal custom shell itself; redirect plumbing without a reachable shell is considered incomplete, and temporary placeholder endpoints are not part of the intended contract.
 
 Backend endpoints used by the page:
 
@@ -218,6 +219,11 @@ Asset namespace rules:
 - custom frontend assets must live under a dedicated prefix such as `/login-assets/`
 - asset filenames must be versioned or content-hashed for cache-busting
 - reserved prefixes `/api/`, `/_/auth/`, and provider callback routes must never be served from static assets
+
+Runtime config rules:
+
+- rollout booleans such as custom-login enablement, fallback mode, and Kakao gating may use defaults only when the env var is absent
+- malformed rollout booleans are fatal configuration errors because silent fallback could expose the wrong login surface during rollout or rollback
 - `/login` HTML should use rollback-friendly caching rather than long-lived caching
 - no service worker should control `/login`
 
