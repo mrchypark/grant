@@ -11,12 +11,29 @@ package approval
 #include <stdlib.h>
 #include <string.h>
 
+static volatile int certd_should_cancel_modal = 0;
+static NSAlert *certd_current_alert = nil;
+
 static NSArray<NSString *> *certd_split_labels(const char *joined) {
 	if (joined == NULL || joined[0] == '\0') {
 		return @[];
 	}
 	NSString *source = [NSString stringWithUTF8String:joined];
 	return [source componentsSeparatedByString:@"\x1f"];
+}
+
+static void certd_reset_approval_modal_cancellation(void) {
+	certd_should_cancel_modal = 0;
+}
+
+static void certd_request_cancel_approval_modal(void) {
+	certd_should_cancel_modal = 1;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (certd_current_alert != nil) {
+			[NSApp abortModal];
+			[[certd_current_alert window] orderOut:nil];
+		}
+	});
 }
 
 static char *certd_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex) {
@@ -64,8 +81,14 @@ static char *certd_show_approval_modal(const char *origin, const char *organizat
 
 			[alert setAccessoryView:accessory];
 			[[alert window] setInitialFirstResponder:passwordField];
+			if (certd_should_cancel_modal) {
+				didCancel = 1;
+				return;
+			}
 
+			certd_current_alert = alert;
 			NSInteger response = [alert runModal];
+			certd_current_alert = nil;
 			if (response != NSAlertFirstButtonReturn) {
 				didCancel = 1;
 				return;
@@ -103,13 +126,60 @@ import (
 
 type Prompter struct{}
 
+type approvalModalInput struct {
+	Origin         string
+	OrganizationID string
+	BusinessNo     string
+	Action         string
+	Labels         []string
+	DefaultIndex   int
+}
+
+var resetApprovalModalCancellation = func() {
+	C.certd_reset_approval_modal_cancellation()
+}
+
+var requestApprovalModalCancellation = func() {
+	C.certd_request_cancel_approval_modal()
+}
+
+var showApprovalModal = func(input approvalModalInput) (string, bool) {
+	origin := C.CString(input.Origin)
+	organization := C.CString(input.OrganizationID)
+	businessNo := C.CString(input.BusinessNo)
+	action := C.CString(input.Action)
+	labels := C.CString(strings.Join(input.Labels, "\x1f"))
+	defer C.free(unsafe.Pointer(origin))
+	defer C.free(unsafe.Pointer(organization))
+	defer C.free(unsafe.Pointer(businessNo))
+	defer C.free(unsafe.Pointer(action))
+	defer C.free(unsafe.Pointer(labels))
+
+	raw := C.certd_show_approval_modal(
+		origin,
+		organization,
+		businessNo,
+		action,
+		labels,
+		C.int(input.DefaultIndex),
+	)
+	if raw == nil {
+		return "", false
+	}
+	defer C.free(unsafe.Pointer(raw))
+	return C.GoString(raw), true
+}
+
 func NewPrompter() *Prompter {
 	return &Prompter{}
 }
 
-func (p *Prompter) PromptApproval(_ context.Context, prompt httpapi.ApprovalPrompt) (httpapi.ApprovalDecision, error) {
+func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPrompt) (httpapi.ApprovalDecision, error) {
 	if len(prompt.Certificates) == 0 {
 		return httpapi.ApprovalDecision{}, fmt.Errorf("no certificates available for approval")
+	}
+	if err := ctx.Err(); err != nil {
+		return httpapi.ApprovalDecision{}, err
 	}
 
 	joinedLabels := make([]string, 0, len(prompt.Certificates))
@@ -125,24 +195,37 @@ func (p *Prompter) PromptApproval(_ context.Context, prompt httpapi.ApprovalProm
 		}
 	}
 
-	origin := C.CString(prompt.Origin)
-	organization := C.CString(prompt.OrganizationID)
-	businessNo := C.CString(prompt.BusinessNo)
-	action := C.CString(prompt.Action)
-	labels := C.CString(strings.Join(joinedLabels, "\x1f"))
-	defer C.free(unsafe.Pointer(origin))
-	defer C.free(unsafe.Pointer(organization))
-	defer C.free(unsafe.Pointer(businessNo))
-	defer C.free(unsafe.Pointer(action))
-	defer C.free(unsafe.Pointer(labels))
+	resetApprovalModalCancellation()
+	type modalResult struct {
+		packed   string
+		approved bool
+	}
+	resultCh := make(chan modalResult, 1)
+	go func() {
+		packed, approved := showApprovalModal(approvalModalInput{
+			Origin:         prompt.Origin,
+			OrganizationID: prompt.OrganizationID,
+			BusinessNo:     prompt.BusinessNo,
+			Action:         prompt.Action,
+			Labels:         joinedLabels,
+			DefaultIndex:   defaultIndex,
+		})
+		resultCh <- modalResult{packed: packed, approved: approved}
+	}()
 
-	raw := C.certd_show_approval_modal(origin, organization, businessNo, action, labels, C.int(defaultIndex))
-	if raw == nil {
+	var result modalResult
+	select {
+	case <-ctx.Done():
+		requestApprovalModalCancellation()
+		go func() { <-resultCh }()
+		return httpapi.ApprovalDecision{}, ctx.Err()
+	case result = <-resultCh:
+	}
+	if !result.approved {
 		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
 	}
-	defer C.free(unsafe.Pointer(raw))
 
-	packed := C.GoString(raw)
+	packed := result.packed
 	parts := strings.SplitN(packed, "\x1f", 2)
 	if len(parts) != 2 {
 		return httpapi.ApprovalDecision{}, fmt.Errorf("invalid approval modal response")

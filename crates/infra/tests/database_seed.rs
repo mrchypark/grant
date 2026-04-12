@@ -339,6 +339,18 @@ async fn certificate_gateway_rows_round_trip() {
         "recent repeated loads should not rewrite last_used_at immediately"
     );
 
+    db.deactivate_organization("conalog-account")
+        .await
+        .expect("deactivate organization");
+    let err = db
+        .load_active_certificate("conalog-account")
+        .await
+        .expect_err("inactive organization should not load active certificate");
+    assert!(
+        err.to_string().contains("certificate not found"),
+        "unexpected error: {err:#}"
+    );
+
     let challenge = db
         .create_cert_gateway_challenge(
             "conalog-account",

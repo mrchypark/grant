@@ -403,7 +403,7 @@ type plainPrivateKey struct {
 	Extra      asn1.RawValue `asn1:"optional"`
 }
 
-func validatePassword(signPriKey []byte, password string) error {
+func withDecryptedSignerKey(signPriKey []byte, password string, fn func(*rsa.PrivateKey) error) error {
 	encrypted, err := parseEncryptedPrivateKey(signPriKey)
 	if err != nil {
 		return err
@@ -430,53 +430,36 @@ func validatePassword(signPriKey []byte, password string) error {
 	var decoded plainPrivateKey
 	if _, err := asn1.Unmarshal(plainDER, &decoded); err != nil {
 		return ErrInvalidPassword
-	}
-	defer zeroBytes(decoded.PrivateKey)
-	if _, err := x509.ParsePKCS1PrivateKey(decoded.PrivateKey); err != nil {
-		return ErrInvalidPassword
-	}
-	return nil
-}
-
-func signChallenge(signPriKey []byte, password string, challenge string) (string, error) {
-	encrypted, err := parseEncryptedPrivateKey(signPriKey)
-	if err != nil {
-		return "", err
-	}
-	passwordBytes := []byte(password)
-	defer zeroBytes(passwordBytes)
-	key, iv, err := deriveDecryptionKey(
-		encrypted.Meta.Algorithm,
-		encrypted.Meta.Params.Salt,
-		encrypted.Meta.Params.Iteration,
-		passwordBytes,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer zeroBytes(key)
-	defer zeroBytes(iv)
-	plainDER, err := decryptSEEDCBC(key, iv, encrypted.CipherText)
-	if err != nil {
-		return "", ErrInvalidPassword
-	}
-	defer zeroBytes(plainDER[:cap(plainDER)])
-
-	var decoded plainPrivateKey
-	if _, err := asn1.Unmarshal(plainDER, &decoded); err != nil {
-		return "", ErrInvalidPassword
 	}
 	defer zeroBytes(decoded.PrivateKey)
 	privateKey, err := x509.ParsePKCS1PrivateKey(decoded.PrivateKey)
 	if err != nil {
-		return "", ErrInvalidPassword
+		return ErrInvalidPassword
 	}
-	digest := sha256.Sum256([]byte(challenge))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	return fn(privateKey)
+}
+
+func validatePassword(signPriKey []byte, password string) error {
+	return withDecryptedSignerKey(signPriKey, password, func(*rsa.PrivateKey) error {
+		return nil
+	})
+}
+
+func signChallenge(signPriKey []byte, password string, challenge string) (string, error) {
+	var encoded string
+	err := withDecryptedSignerKey(signPriKey, password, func(privateKey *rsa.PrivateKey) error {
+		digest := sha256.Sum256([]byte(challenge))
+		signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+		if err != nil {
+			return fmt.Errorf("sign challenge: %w", err)
+		}
+		encoded = base64.StdEncoding.EncodeToString(signature)
+		return nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("sign challenge: %w", err)
+		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(signature), nil
+	return encoded, nil
 }
 
 func parseEncryptedPrivateKey(input []byte) (encryptedPrivateKey, error) {
