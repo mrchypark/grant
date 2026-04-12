@@ -89,6 +89,10 @@ require_contains "scripts/k3d-chaos.sh" '--connect-timeout "${HTTP_CONNECT_TIMEO
 require_contains "scripts/k3d-chaos.sh" 'capture_file="$(mktemp "${TMPDIR:-/tmp}/retry-capture.XXXXXX")"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos.sh" 'if "$@" >"${capture_file}"; then'
+require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS="${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS:-180}"'
+require_contains "scripts/k3d-chaos.sh" 'dump_trailbase_debug()'
+require_contains "scripts/k3d-chaos.sh" 'retry_capture_into recovered_token'
+require_not_contains "scripts/k3d-chaos.sh" 'recovered_token="$(login_trailbase || true)"'
 require_not_contains "scripts/k3d-chaos.sh" 'retry_json_query()'
 require_contains "scripts/vind-bootstrap.sh" 'minio-statefulset-ephemeral.yaml'
 require_contains "scripts/vind-bootstrap.sh" 'dump_minio_debug'

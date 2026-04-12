@@ -35,6 +35,9 @@ LEARNER_REMOTE_API_PORT="${LEARNER_REMOTE_API_PORT:-8200}"
 LEARNER_SERVICE_CURL_TIMEOUT_SECONDS="${LEARNER_SERVICE_CURL_TIMEOUT_SECONDS:-5}"
 HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"
 HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"
+TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS="${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS:-180}"
+TRAILBASE_RECOVERY_LOGIN_RETRIES="${TRAILBASE_RECOVERY_LOGIN_RETRIES:-20}"
+TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS="${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS:-2}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -162,6 +165,13 @@ ensure_trailbase_online() {
     kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=1 >/dev/null
   fi
   kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m >/dev/null
+}
+
+dump_trailbase_debug() {
+  echo "[trailbase-debug] deployment state" >&2
+  kubectl -n "${NAMESPACE}" describe deployment/trailbase >&2 || true
+  kubectl -n "${NAMESPACE}" describe pod -l app=trailbase >&2 || true
+  kubectl -n "${NAMESPACE}" logs -l app=trailbase --all-containers --tail=200 >&2 || true
 }
 
 ensure_no_restore_mode() {
@@ -869,14 +879,25 @@ scenario_trailbase_cache_ttl() {
   set_chaos_phase "trailbase-recovery"
   echo "[trailbase] restoring deployment" >&2
   kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=1 >/dev/null
-  kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m >/dev/null
-  local recovered_token
-  recovered_token="$(login_trailbase || true)"
+  if ! kubectl -n "${NAMESPACE}" rollout status deployment/trailbase \
+    --timeout="${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS}s" >/dev/null; then
+    echo "[trailbase] rollout did not complete within ${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS}s; continuing with direct recovery probes" >&2
+    dump_trailbase_debug
+  fi
+  local recovered_token=""
+  retry_capture_into recovered_token \
+    "${TRAILBASE_RECOVERY_LOGIN_RETRIES}" \
+    "${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS}" \
+    login_trailbase || true
   if [[ -z "${recovered_token}" || "${recovered_token}" == "null" ]]; then
     echo "[trailbase] restored user login failed; attempting reseed fallback" >&2
     seed_trailbase_user >&2
-    recovered_token="$(login_trailbase)"
+    retry_capture_into recovered_token \
+      "${TRAILBASE_RECOVERY_LOGIN_RETRIES}" \
+      "${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS}" \
+      login_trailbase || true
     if [[ -z "${recovered_token}" || "${recovered_token}" == "null" ]]; then
+      dump_trailbase_debug
       echo "failed to login after trailbase recovery" >&2
       exit 1
     fi
