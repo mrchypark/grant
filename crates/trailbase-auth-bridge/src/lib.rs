@@ -281,9 +281,7 @@ async fn root_entry_handler(
     }
 
     if is_authenticated(&state, &headers).await {
-        return with_login_entry_cache_headers(
-            Redirect::to(&target.path).into_response(),
-        );
+        return with_login_entry_cache_headers(Redirect::to(&target.path).into_response());
     }
 
     with_login_entry_cache_headers(Redirect::to(&login_entry_location("/login", &target)).into_response())

@@ -51,13 +51,11 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
 
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "epc-org".into(),
-                Option::<String>::Some("2768603291".to_owned()).into(),
                 "EPC Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-03T00:00:00Z".into(),
                 "2026-04-03T00:00:00Z".into(),
@@ -67,13 +65,11 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
         .expect("insert organization");
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "foreign-org".into(),
-                Option::<String>::Some("9999999999".to_owned()).into(),
                 "Foreign Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-03T00:00:00Z".into(),
                 "2026-04-03T00:00:00Z".into(),

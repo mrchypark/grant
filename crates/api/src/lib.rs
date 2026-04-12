@@ -8,14 +8,16 @@ use axum::{
     routing::{any, get, post, put},
 };
 use domain::{
-    DocumentArtifact, GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord,
-    SyncMode, SyncRun, User,
+    Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
+    GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord, SyncMode, SyncRun,
+    User,
 };
 use infra::{
     config::ReadConsistency,
     database::StoredCertificate,
     service::{
-        AppService, BackupInfo, CreatePlantInput, PlantView, PutCertificateInput, SyncInput,
+        AppService, BackupInfo, CreateClientInput, CreatePlantInput, PlantView,
+        PutCertificateInput, SyncInput, UpdateClientInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,18 @@ use std::sync::Arc;
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route(
+            "/api/v1/organizations/{organizationId}/clients",
+            post(create_client),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            put(update_client),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
+            put(replace_client_actions),
+        )
         .route(
             "/api/v1/organizations/{organizationId}/certificate",
             put(put_organization_certificate),
@@ -49,6 +63,18 @@ pub fn build_router(service: Arc<AppService>) -> Router {
 
 pub fn build_learner_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route(
+            "/api/v1/organizations/{organizationId}/clients",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
+            any(requires_voter_node),
+        )
         .route(
             "/api/v1/organizations/{organizationId}/certificate",
             any(requires_voter_node),
@@ -81,6 +107,18 @@ fn build_shared_router() -> Router<Arc<AppService>> {
             any(proxy_trailbase_passthrough),
         )
         .route("/api/v1/me", get(get_current_user))
+        .route(
+            "/api/v1/organizations/{organizationId}/clients",
+            get(list_clients),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            get(get_client),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
+            get(list_client_actions),
+        )
         .route("/api/v1/plants", get(list_plants))
         .route("/api/v1/plants/{facilityCode}", get(get_plant))
         .route(
@@ -122,7 +160,7 @@ struct CertificateUploadRequest {
 #[serde(rename_all = "camelCase")]
 struct CertificateResponse {
     id: String,
-    organization_id: String,
+    party_id: String,
     business_no: Option<String>,
     common_name: String,
 }
@@ -147,6 +185,39 @@ struct CreatePlantRequest {
     rec_start_date: String,
     confirm_issued: String,
     owner_organization_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateClientRequest {
+    id: String,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    client_type: ClientType,
+    app_type: ClientAppType,
+    first_party: bool,
+    consent_policy: ClientConsentPolicy,
+    active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateClientRequest {
+    slug: String,
+    name: String,
+    description: Option<String>,
+    client_type: ClientType,
+    app_type: ClientAppType,
+    first_party: bool,
+    consent_policy: ClientConsentPolicy,
+    active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceClientActionsRequest {
+    action_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -320,6 +391,190 @@ async fn sync_organization(
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::CREATED, Json(map_sync(run))))
+}
+
+async fn list_clients(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Client>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let clients = service
+        .list_clients_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(clients))
+}
+
+async fn create_client(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateClientRequest>,
+) -> ApiResult<(StatusCode, Json<Client>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let client = service
+        .create_client(
+            &ctx.user_id,
+            &ctx.organization_id,
+            CreateClientInput {
+                id: body.id,
+                slug: body.slug,
+                name: body.name,
+                description: body.description,
+                client_type: body.client_type,
+                app_type: body.app_type,
+                first_party: body.first_party,
+                consent_policy: body.consent_policy,
+                active: body.active,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(client)))
+}
+
+async fn get_client(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Client>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let client = service
+        .get_client_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(client))
+}
+
+async fn update_client(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateClientRequest>,
+) -> ApiResult<Json<Client>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let client = service
+        .update_client(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            UpdateClientInput {
+                slug: body.slug,
+                name: body.name,
+                description: body.description,
+                client_type: body.client_type,
+                app_type: body.app_type,
+                first_party: body.first_party,
+                consent_policy: body.consent_policy,
+                active: body.active,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(client))
+}
+
+async fn list_client_actions(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Action>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let actions = service
+        .list_client_actions_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
+}
+
+async fn replace_client_actions(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ReplaceClientActionsRequest>,
+) -> ApiResult<Json<Vec<Action>>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    if organization_id != ctx.organization_id {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: organization path {} does not match active organization {}",
+                organization_id, ctx.organization_id
+            ),
+        });
+    }
+    let actions = service
+        .replace_client_actions_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            &body.action_ids,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
 }
 
 async fn list_plants(
@@ -662,7 +917,7 @@ fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
 fn map_certificate(cert: StoredCertificate) -> CertificateResponse {
     CertificateResponse {
         id: cert.id,
-        organization_id: cert.organization_id,
+        party_id: cert.party_id,
         business_no: cert.business_no,
         common_name: cert.common_name,
     }
@@ -859,10 +1114,19 @@ impl ApiError {
         let message = err.to_string();
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
+        } else if message.contains("already exists")
+            || message.contains("UNIQUE constraint failed")
+            || message.contains("unique constraint failed")
+        {
+            StatusCode::CONFLICT
         } else if message.contains("unavailable:") {
             StatusCode::SERVICE_UNAVAILABLE
         } else if message.contains("not found") {
             StatusCode::NOT_FOUND
+        } else if message.contains("must not be empty")
+            || message.contains("is not grantable to clients")
+        {
+            StatusCode::BAD_REQUEST
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
@@ -897,9 +1161,10 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::ApiError;
+    use super::{ApiError, map_certificate};
     use anyhow::anyhow;
     use axum::http::StatusCode;
+    use infra::database::StoredCertificate;
 
     #[test]
     fn auth_unavailable_errors_map_to_service_unavailable() {
@@ -912,5 +1177,22 @@ mod tests {
         let err =
             ApiError::from_domain(anyhow!("unavailable: quorum validation path is not ready"));
         assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn certificate_response_exposes_party_identity() {
+        let response = map_certificate(StoredCertificate {
+            id: "cert-1".to_owned(),
+            party_id: "party-2768603291".to_owned(),
+            business_no: Some("2768603291".to_owned()),
+            common_name: "주식회사 커널로그에너지".to_owned(),
+            encrypted_blob: "blob".to_owned(),
+            active: 1,
+            last_used_at: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+        });
+
+        assert_eq!(response.party_id, "party-2768603291");
+        assert_eq!(response.business_no.as_deref(), Some("2768603291"));
     }
 }

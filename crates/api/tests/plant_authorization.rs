@@ -106,10 +106,21 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
 }
 
 async fn seed_user_visible_plant(service: &Arc<AppService>, db: &Database) {
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.bind_identity_to_user(
+        "bootstrap-user",
+        "trailbase",
+        "bootstrap-user",
+        Some("bootstrap@example.com"),
+        "Bootstrap User",
+        true,
+        true,
+    )
+    .await
+    .expect("bind bootstrap identity");
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("owner org");
-    db.upsert_organization_with_owner("viewer-org", "Viewer Org", "Viewer Org")
+    db.upsert_organization_with_owner("viewer-org", "Viewer Org", None, "Viewer Org")
         .await
         .expect("viewer org");
 

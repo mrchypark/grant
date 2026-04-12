@@ -2,6 +2,7 @@ const token =
   document.querySelector('meta[name="login-csrf-token"]')?.getAttribute('content') ?? '';
 const postLoginPath =
   document.querySelector('meta[name="post-login-path"]')?.getAttribute('content') ?? '/app';
+const loginForm = document.querySelector('.login-form');
 const emailInput = document.getElementById('email');
 const passwordInput = document.getElementById('password');
 const submitButton = document.querySelector('.button--primary');
@@ -14,7 +15,11 @@ function setStatus(message) {
 }
 
 async function submitLogin() {
-  if (!emailInput || !passwordInput || !submitButton) {
+  if (!loginForm || !emailInput || !passwordInput || !submitButton) {
+    return;
+  }
+
+  if (typeof loginForm.reportValidity === 'function' && !loginForm.reportValidity()) {
     return;
   }
 
@@ -48,8 +53,9 @@ async function submitLogin() {
   }
 }
 
-if (submitButton) {
-  submitButton.addEventListener('click', () => {
+if (loginForm) {
+  loginForm.addEventListener('submit', (event) => {
+    event.preventDefault();
     void submitLogin();
   });
 }

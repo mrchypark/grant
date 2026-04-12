@@ -168,10 +168,10 @@ async fn query_identity_meta(
 #[tokio::test]
 async fn trailbase_bearer_token_resolves_user_and_allows_list() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
     db.upsert_agreement(&domain::Agreement {
@@ -375,10 +375,10 @@ async fn bootstrap_trailbase_owner_binds_first_user_to_bootstrap_org() {
 #[tokio::test]
 async fn current_user_returns_local_user_and_active_organizations() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("alpha-org", "Alpha Org", "Alpha Org")
+    db.upsert_organization_with_owner("alpha-org", "Alpha Org", None, "Alpha Org")
         .await
         .expect("upsert alpha org");
-    db.upsert_organization_with_owner("beta-org", "Beta Org", "Beta Org")
+    db.upsert_organization_with_owner("beta-org", "Beta Org", None, "Beta Org")
         .await
         .expect("upsert beta org");
     let user = db
@@ -444,7 +444,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
 #[tokio::test]
 async fn trailbase_identity_relinks_same_email_after_restore() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("restore-org", "Restore Org", "Restore Org")
+    db.upsert_organization_with_owner("restore-org", "Restore Org", None, "Restore Org")
         .await
         .expect("upsert restore org");
 
@@ -622,13 +622,11 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
     let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "local-org".into(),
-                Option::<String>::None.into(),
                 "Local Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -710,13 +708,11 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
     let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "linked-org".into(),
-                Option::<String>::None.into(),
                 "Linked Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -810,13 +806,11 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
     let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "strong-org".into(),
-                Option::<String>::None.into(),
                 "Strong Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -899,13 +893,11 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
         build_service_with_default_consistency(ReadConsistency::Strong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "strong-org".into(),
-                Option::<String>::None.into(),
                 "Strong Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -988,13 +980,11 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
         build_service_with_default_consistency(ReadConsistency::PreferStrong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "prefer-strong-org".into(),
-                Option::<String>::None.into(),
                 "Prefer Strong Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -1080,13 +1070,11 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
         build_service_with_default_consistency(ReadConsistency::Strong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "strong-org".into(),
-                Option::<String>::None.into(),
                 "Strong Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -1159,13 +1147,11 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
         build_service_with_default_consistency(ReadConsistency::PreferStrong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "prefer-strong-org".into(),
-                Option::<String>::None.into(),
                 "Prefer Strong Org".into(),
-                Option::<String>::None.into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),

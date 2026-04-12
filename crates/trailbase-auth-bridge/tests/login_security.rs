@@ -141,6 +141,36 @@ async fn shell_and_js_contract_use_same_origin_json_login_fetch() {
 }
 
 #[tokio::test]
+async fn login_shell_uses_single_contract_and_ignores_legacy_view_query() {
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login())
+        .await
+        .expect("test app");
+
+    let (status, _, body) = app
+        .request_response(Method::GET, "/login?return_to=%2Fteams%3Ftab%3Dqa&view=auth0")
+        .await
+        .expect("login shell");
+    let (js_status, _, js_body) = app
+        .request_response(Method::GET, "/login-assets/login.v1.js")
+        .await
+        .expect("login script");
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(js_status, StatusCode::OK);
+
+    let html = String::from_utf8(body).expect("utf8");
+    let js = String::from_utf8(js_body).expect("utf8");
+
+    assert!(html.contains("Sign in to continue"));
+    assert!(html.contains("/login-assets/login.v1.css"));
+    assert_eq!(extract_meta_content(&html, "post-login-path"), "/teams?tab=qa");
+    assert!(!html.contains("Editorial"));
+    assert!(!html.contains("Auth0"));
+    assert!(js.contains("fetch('/api/auth/v1/login', {"));
+    assert!(js.contains("'x-login-csrf': token"));
+}
+
+#[tokio::test]
 async fn login_shell_assets_do_not_use_browser_storage() {
     let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login())
         .await
@@ -375,6 +405,47 @@ async fn login_shell_rejects_dot_segment_return_to_targets() {
 
     let html = String::from_utf8(body).expect("utf8");
     assert_eq!(extract_meta_content(&html, "post-login-path"), "/post-login");
+}
+
+#[tokio::test]
+async fn provider_gating_applies_to_the_single_login_shell() {
+    let app = build_test_app_with_login_routes(
+        None,
+        "bridge-secret",
+        LoginRouteConfig {
+            custom_login_enabled: true,
+            login_fallback_enabled: false,
+            kakao_enabled: true,
+            kakao_oidc_ready: true,
+            kakao_linking_ready: false,
+            google_oauth_enabled: true,
+            google_oauth_ready: false,
+            apple_oauth_enabled: true,
+            apple_oauth_ready: false,
+            default_post_login_path: "/post-login".to_owned(),
+        },
+    )
+    .await
+    .expect("test app");
+
+    let (_, _, body) = app
+        .request_response(Method::GET, "/login?view=auth0")
+        .await
+        .expect("login shell");
+    let html = String::from_utf8(body).expect("utf8");
+
+    assert!(
+        provider_anchor(&html, "google").contains(" hidden"),
+        "expected google hidden in the single login shell when readiness is false, got: {html}",
+    );
+    assert!(
+        provider_anchor(&html, "kakao").contains(" hidden"),
+        "expected kakao hidden in the single login shell when linking gate is false, got: {html}",
+    );
+    assert!(
+        provider_anchor(&html, "apple").contains(" hidden"),
+        "expected apple hidden in the single login shell when readiness is false, got: {html}",
+    );
 }
 
 #[tokio::test]

@@ -102,10 +102,10 @@ async fn build_service() -> (AppService, Database, HiqliteRuntime, TempDir, Temp
 }
 
 async fn seed_authorization_fixture(db: &Database, runtime: &HiqliteRuntime) {
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
 

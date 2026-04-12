@@ -101,18 +101,22 @@ async fn ensure_schema_creates_authorization_tables() {
 
     for table in [
         "user_identities",
+        "parties",
         "organizations",
-        "organization_edges",
+        "organization_party_links",
         "organization_memberships",
         "groups",
         "group_memberships",
         "agreements",
+        "agreement_documents",
         "actions",
         "roles",
-        "role_rules",
         "role_actions",
         "role_bindings",
-        "organization_closure",
+        "clients",
+        "client_actions",
+        "client_grants",
+        "client_grant_actions",
         "effective_organization_plant_actions",
         "effective_user_plant_actions",
         "effective_user_plant_visibility",
@@ -153,6 +157,125 @@ async fn ensure_schema_creates_authorization_tables() {
         ]
     );
 
+    let action_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('actions') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("actions columns");
+    let action_columns: Vec<String> = action_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        action_columns,
+        vec![
+            "id",
+            "code",
+            "name",
+            "description",
+            "risk_level",
+            "visibility_granting",
+            "grantable_to_clients",
+            "consent_label",
+            "consent_description",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let client_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('clients') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("clients columns");
+    let client_columns: Vec<String> = client_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        client_columns,
+        vec![
+            "id",
+            "organization_id",
+            "slug",
+            "name",
+            "description",
+            "client_type",
+            "app_type",
+            "first_party",
+            "consent_policy",
+            "active",
+            "created_by_user_id",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let client_action_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('client_actions') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("client_actions columns");
+    let client_action_columns: Vec<String> = client_action_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(client_action_columns, vec!["client_id", "action_id"]);
+
+    let client_grant_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('client_grants') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("client_grants columns");
+    let client_grant_columns: Vec<String> = client_grant_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        client_grant_columns,
+        vec![
+            "id",
+            "user_id",
+            "client_id",
+            "organization_id",
+            "status",
+            "consented_at",
+            "revoked_at",
+            "revoked_by_user_id",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let client_grant_action_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('client_grant_actions') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("client_grant_actions columns");
+    let client_grant_action_columns: Vec<String> = client_grant_action_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        client_grant_action_columns,
+        vec!["client_grant_id", "action_id"]
+    );
+
     let plant_columns: Vec<ColumnRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -169,6 +292,119 @@ async fn ensure_schema_creates_authorization_tables() {
     assert!(plant_columns.contains(&"created_by_organization_id".to_owned()));
     assert!(plant_columns.contains(&"facility_code".to_owned()));
 
+    let organization_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('organizations') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("organizations columns");
+    let organization_columns: Vec<String> = organization_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(!organization_columns.contains(&"party_id".to_owned()));
+    assert!(!organization_columns.contains(&"business_no".to_owned()));
+    assert!(!organization_columns.contains(&"legal_entity_id".to_owned()));
+
+    let organization_party_link_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('organization_party_links') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("organization_party_links columns");
+    let organization_party_link_columns: Vec<String> = organization_party_link_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        organization_party_link_columns,
+        vec![
+            "organization_id",
+            "party_id",
+            "relation_type",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let party_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('parties') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("parties columns");
+    let party_columns: Vec<String> = party_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        party_columns,
+        vec![
+            "id",
+            "business_no",
+            "legal_name",
+            "active",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let agreement_document_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('agreement_documents') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("agreement_documents columns");
+    let agreement_document_columns: Vec<String> = agreement_document_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        agreement_document_columns,
+        vec![
+            "id",
+            "agreement_id",
+            "document_type",
+            "file_name",
+            "object_key",
+            "content_type",
+            "document_no",
+            "uploaded_at",
+        ]
+    );
+    let certificate_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('certificates') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("certificates columns");
+    let certificate_columns: Vec<String> = certificate_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        certificate_columns,
+        vec![
+            "id",
+            "party_id",
+            "common_name",
+            "encrypted_blob",
+            "active",
+            "last_used_at",
+            "created_at",
+        ]
+    );
+
     let indexes: Vec<IndexRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -180,8 +416,14 @@ async fn ensure_schema_creates_authorization_tables() {
     let index_names: std::collections::BTreeSet<String> =
         indexes.into_iter().map(|index| index.name).collect();
     for index in [
-        "idx_certificates_organization_active",
+        "idx_certificates_party_active",
+        "idx_agreement_documents_agreement",
+        "idx_client_grants_active_unique",
+        "idx_client_grants_user_client",
+        "idx_organization_party_links_org_relation",
+        "idx_parties_business_no",
         "idx_plants_owner_facility",
+        "idx_roles_global_code",
         "idx_sync_runs_plant_started",
         "idx_user_identities_provider_external",
     ] {

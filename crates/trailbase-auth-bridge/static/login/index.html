@@ -11,31 +11,18 @@
   </head>
   <body>
     <main class="login-shell">
-      <section class="login-shell__panel login-shell__panel--brand" aria-label="Welcome">
-        <div class="brand-mark" aria-hidden="true">
-          <div class="brand-mark__slot">Logo</div>
-        </div>
-        <p class="eyebrow">Account access</p>
-        <h1>Welcome back</h1>
-        <p class="lede">
-          Sign in to continue with your workspace, reviews, and organization settings.
-        </p>
-        <ul class="brand-notes" aria-label="Highlights">
-          <li>Thoughtful auth surface</li>
-          <li>Warm editorial presentation</li>
-          <li>Responsive from desktop to mobile</li>
-        </ul>
-      </section>
-
-      <section class="login-shell__panel login-shell__panel--form" aria-label="Sign in form">
-        <div class="form-card">
-          <div class="form-card__header">
-            <p class="eyebrow">Sign in</p>
-            <h2>Use your email and password</h2>
-            <p class="form-copy">Social options are available below. JavaScript is intentionally deferred.</p>
+      <section class="login-shell__form" aria-label="Sign in form">
+        <div class="login-card">
+          <div class="login-card__header">
+            <div class="logo-slot" aria-hidden="true">Logo</div>
+            <p class="eyebrow">Workspace access</p>
+            <h1>Sign in to continue</h1>
+            <p class="intro">
+              One place for email and social sign-in across your workspace, reviews, and account settings.
+            </p>
           </div>
 
-          <div class="login-form" role="group" aria-label="Email and password sign in">
+          <form class="login-form" aria-label="Email and password sign in" novalidate>
             <div class="field">
               <label for="email">Email address</label>
               <input
@@ -44,6 +31,7 @@
                 type="email"
                 inputmode="email"
                 autocomplete="email"
+                required
                 placeholder="name@company.com"
               />
             </div>
@@ -55,23 +43,23 @@
                 name="password"
                 type="password"
                 autocomplete="current-password"
+                required
                 placeholder="Enter your password"
               />
             </div>
 
-            <button class="button button--primary" type="button">Sign in</button>
-            <p class="form-copy" data-login-status aria-live="polite"></p>
-          </div>
+            <button class="button button--primary" type="submit">Sign in</button>
+            <p class="login-status" data-login-status aria-live="polite"></p>
+          </form>
 
           <div class="divider" role="presentation">
-            <span>or continue with</span>
+            <span>Or continue with</span>
           </div>
 
           <div class="social-stack" aria-label="Social sign in options">
             <a
               class="button button--social"
               href="/api/auth/v1/oauth/google/login"
-              role="button"
               data-provider="google"
               data-provider-rollout-enabled="__GOOGLE_OAUTH_ROLLOUT_ENABLED__"
               data-provider-ready="__GOOGLE_OAUTH_READY__"
@@ -81,7 +69,6 @@
             <a
               class="button button--social button--kakao"
               href="/api/auth/v1/oauth/oidc0/login"
-              role="button"
               data-provider="kakao"
               data-provider-rollout-enabled="__KAKAO_OAUTH_ROLLOUT_ENABLED__"
               data-provider-oidc-ready="__KAKAO_OIDC_READY__"
@@ -92,7 +79,6 @@
             <a
               class="button button--social"
               href="/api/auth/v1/oauth/apple/login"
-              role="button"
               data-provider="apple"
               data-provider-rollout-enabled="__APPLE_OAUTH_ROLLOUT_ENABLED__"
               data-provider-ready="__APPLE_OAUTH_READY__"
@@ -100,6 +86,21 @@
               >Continue with Apple</a
             >
           </div>
+        </div>
+      </section>
+
+      <section class="login-shell__hero" aria-label="Product introduction">
+        <div class="hero-panel">
+          <p class="eyebrow eyebrow--hero">Secure login</p>
+          <h2>Fast enough for daily work, clear enough for the first visit.</h2>
+          <p class="hero-copy">
+            Keep the authentication surface familiar without turning it into a generic hosted-login clone.
+          </p>
+          <ul class="hero-points" aria-label="Highlights">
+            <li>Email and social entry in one flow</li>
+            <li>Same-origin session handoff</li>
+            <li>Responsive across mobile, tablet, and desktop</li>
+          </ul>
         </div>
       </section>
     </main>

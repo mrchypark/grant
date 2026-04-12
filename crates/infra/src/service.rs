@@ -14,13 +14,14 @@ use crate::{
         StoredRateRecord,
     },
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
-    DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization, Plant,
-    RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
-    RoleBindingSubjectType, SyncMode, SyncRun, User,
+    Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
+    DocumentCategory, GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord,
+    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
+    SyncRun, User,
 };
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
@@ -65,6 +66,31 @@ pub struct CreatePlantInput {
     pub rec_start_date: String,
     pub confirm_issued: String,
     pub owner_organization_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateClientInput {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub client_type: ClientType,
+    pub app_type: ClientAppType,
+    pub first_party: bool,
+    pub consent_policy: ClientConsentPolicy,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateClientInput {
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub client_type: ClientType,
+    pub app_type: ClientAppType,
+    pub first_party: bool,
+    pub consent_policy: ClientConsentPolicy,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -619,6 +645,184 @@ impl AppService {
         Ok(plant)
     }
 
+    pub async fn list_clients_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Client>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.client.manage",
+            "manage organization clients",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_clients_with_consistency(organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn get_client_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Client> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.client.manage",
+            "manage organization clients",
+            read_consistency.clone(),
+        )
+        .await?;
+        let client = self
+            .db
+            .get_client_with_consistency(client_id, read_consistency)
+            .await?;
+        if client.organization_id != organization_id {
+            anyhow::bail!(
+                "client not found: {} in organization {}",
+                client_id,
+                organization_id
+            );
+        }
+        Ok(client)
+    }
+
+    pub async fn create_client(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: CreateClientInput,
+    ) -> Result<Client> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.client.manage",
+            "manage organization clients",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let client_id = require_non_empty("id", &input.id)?;
+        let slug = require_non_empty("slug", &input.slug)?;
+        if self
+            .db
+            .find_client_by_id_with_consistency(&client_id, Some(ReadConsistency::Strong))
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("client id already exists: {}", client_id);
+        }
+        if self
+            .db
+            .find_client_by_slug_with_consistency(&slug, Some(ReadConsistency::Strong))
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("client slug already exists: {}", slug);
+        }
+        let client = Client {
+            id: client_id,
+            organization_id: organization_id.to_owned(),
+            slug,
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+            client_type: input.client_type,
+            app_type: input.app_type,
+            first_party: input.first_party,
+            consent_policy: input.consent_policy,
+            active: input.active,
+            created_by_user_id: user_id.to_owned(),
+        };
+        self.db.upsert_client(&client).await?;
+        Ok(client)
+    }
+
+    pub async fn update_client(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        input: UpdateClientInput,
+    ) -> Result<Client> {
+        let existing = self
+            .get_client_authorized(
+                user_id,
+                organization_id,
+                client_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        let slug = require_non_empty("slug", &input.slug)?;
+        if let Some(other) = self
+            .db
+            .find_client_by_slug_with_consistency(&slug, Some(ReadConsistency::Strong))
+            .await?
+        {
+            if other.id != existing.id {
+                anyhow::bail!("client slug already exists: {}", slug);
+            }
+        }
+        let client = Client {
+            id: existing.id,
+            organization_id: existing.organization_id,
+            slug,
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+            client_type: input.client_type,
+            app_type: input.app_type,
+            first_party: input.first_party,
+            consent_policy: input.consent_policy,
+            active: input.active,
+            created_by_user_id: existing.created_by_user_id,
+        };
+        self.db.upsert_client(&client).await?;
+        Ok(client)
+    }
+
+    pub async fn list_client_actions_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Action>> {
+        self.get_client_authorized(
+            user_id,
+            organization_id,
+            client_id,
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_client_actions_with_consistency(client_id, read_consistency)
+            .await
+    }
+
+    pub async fn replace_client_actions_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        self.get_client_authorized(
+            user_id,
+            organization_id,
+            client_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        self.db.replace_client_actions(client_id, action_ids).await
+    }
+
     pub async fn list_generation_authorized(
         &self,
         user_id: &str,
@@ -794,6 +998,36 @@ impl AppService {
                 user_id,
                 organization_id,
                 target_label
+            );
+        }
+        Ok(())
+    }
+
+    async fn authorize_organization_action(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+        action_id: &str,
+        action_label: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<()> {
+        let allowed = self
+            .db
+            .has_user_organization_action_with_consistency(
+                user_id,
+                organization_id,
+                target_organization_id,
+                action_id,
+                read_consistency,
+            )
+            .await?;
+        if !allowed {
+            anyhow::bail!(
+                "forbidden: user {} in organization {} cannot {}",
+                user_id,
+                organization_id,
+                action_label
             );
         }
         Ok(())
@@ -1005,17 +1239,15 @@ impl AppService {
         organization_id: &str,
         requested_business_no: Option<&str>,
     ) -> Result<String> {
-        if let Some(business_no) = requested_business_no {
-            return normalize_business_no(business_no);
-        }
-
-        if let Ok(organization) = self.db.get_organization(organization_id).await {
-            if let Some(business_no) = organization.business_no.as_deref() {
-                return normalize_business_no(business_no);
-            }
-        }
-
-        normalize_business_no(organization_id)
+        let linked_business_no = self
+            .db
+            .get_organization_business_no(organization_id)
+            .await?;
+        normalize_business_no(select_organization_business_no(
+            organization_id,
+            requested_business_no,
+            linked_business_no.as_deref(),
+        )?)
     }
 
     async fn persist_documents(
@@ -1254,4 +1486,70 @@ fn current_month_seoul() -> String {
 
 fn now_string() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn select_organization_business_no<'a>(
+    organization_id: &str,
+    requested_business_no: Option<&'a str>,
+    linked_business_no: Option<&'a str>,
+) -> Result<&'a str> {
+    if let Some(business_no) = requested_business_no {
+        return Ok(business_no);
+    }
+    if let Some(business_no) = linked_business_no {
+        return Ok(business_no);
+    }
+    Err(anyhow!(
+        "organization missing linked legal party business number: {organization_id}"
+    ))
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_optional_text, select_organization_business_no};
+
+    #[test]
+    fn requested_business_number_wins() {
+        let selected =
+            select_organization_business_no("ops-seoul", Some("2768603291"), Some("9999999999"))
+                .expect("selected business number");
+        assert_eq!(selected, "2768603291");
+    }
+
+    #[test]
+    fn linked_business_number_is_used_when_request_omits_it() {
+        let selected = select_organization_business_no("ops-seoul", None, Some("2768603291"))
+            .expect("selected business number");
+        assert_eq!(selected, "2768603291");
+    }
+
+    #[test]
+    fn missing_business_number_returns_explicit_error() {
+        let err = select_organization_business_no("ops-seoul", None, None)
+            .expect_err("missing business number must fail");
+        assert!(
+            err.to_string()
+                .contains("organization missing linked legal party business number: ops-seoul")
+        );
+    }
+
+    #[test]
+    fn blank_optional_text_normalizes_to_none() {
+        assert_eq!(normalize_optional_text(Some("   ".to_owned())), None);
+        assert_eq!(
+            normalize_optional_text(Some("  hello  ".to_owned())).as_deref(),
+            Some("hello")
+        );
+    }
 }

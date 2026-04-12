@@ -107,7 +107,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 #[tokio::test]
-async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
+async fn drops_grantee_access_when_agreement_terminates() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
@@ -116,37 +116,21 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
     );
     db.ensure_schema().await.expect("ensure schema");
 
-    db.upsert_organization_with_owner("generator-org", "Generator Org", "Generator Org")
+    db.upsert_organization_with_owner("generator-org", "Generator Org", None, "Generator Org")
         .await
         .expect("upsert generator org");
-    db.upsert_organization_with_owner("distributor-org", "Distributor Org", "Distributor Org")
-        .await
-        .expect("upsert distributor org");
-    db.upsert_organization_with_owner("dealer-org", "Dealer Org", "Dealer Org")
+    db.upsert_organization_with_owner("dealer-org", "Dealer Org", None, "Dealer Org")
         .await
         .expect("upsert dealer org");
-
-    runtime
-        .execute(
-            "INSERT INTO organization_edges (parent_organization_id, child_organization_id, created_at)
-             VALUES ($1, $2, $3)",
-            vec![
-                "distributor-org".into(),
-                "dealer-org".into(),
-                "2026-04-03T00:00:00Z".into(),
-            ],
-        )
-        .await
-        .expect("insert organization edge");
 
     runtime
         .execute(
             "INSERT INTO users (id, email, display_name, active, created_at)
              VALUES ($1, $2, $3, $4, $5)",
             vec![
-                "dist-user".into(),
+                "dealer-user".into(),
                 "dist@example.com".into(),
-                "Distributor User".into(),
+                "Dealer User".into(),
                 1_i64.into(),
                 "2026-04-03T00:00:00Z".into(),
             ],
@@ -158,9 +142,9 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
             "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
             vec![
-                "membership-dist-user".into(),
-                "distributor-org".into(),
-                "dist-user".into(),
+                "membership-dealer-user".into(),
+                "dealer-org".into(),
+                "dealer-user".into(),
                 "member".into(),
                 "active".into(),
                 "2026-04-03T00:00:00Z".into(),
@@ -174,9 +158,9 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
             "INSERT INTO groups (id, organization_id, name, description, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
-                "dist-ops".into(),
-                "distributor-org".into(),
-                "Distributor Ops".into(),
+                "dealer-ops".into(),
+                "dealer-org".into(),
+                "Dealer Ops".into(),
                 Option::<String>::None.into(),
                 "2026-04-03T00:00:00Z".into(),
                 "2026-04-03T00:00:00Z".into(),
@@ -188,7 +172,7 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         .execute(
             "INSERT INTO group_memberships (group_id, organization_membership_id)
              VALUES ($1, $2)",
-            vec!["dist-ops".into(), "membership-dist-user".into()],
+            vec!["dealer-ops".into(), "membership-dealer-user".into()],
         )
         .await
         .expect("insert group membership");
@@ -263,8 +247,8 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::Group,
-        subject_id: "dist-ops".to_owned(),
-        subject_organization_id: "distributor-org".to_owned(),
+        subject_id: "dealer-ops".to_owned(),
+        subject_organization_id: "dealer-org".to_owned(),
         resource_type: RoleBindingResourceType::Plant,
         resource_id: "plant-1".to_owned(),
         role_id: "role-plant-profile-reader".to_owned(),
@@ -294,12 +278,6 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         plant_id: "plant-1".to_owned(),
         action_id: "plant.profile.read".to_owned(),
     }));
-    assert!(org_rows.contains(&OrganizationPlantActionRow {
-        organization_id: "distributor-org".to_owned(),
-        plant_id: "plant-1".to_owned(),
-        action_id: "plant.profile.read".to_owned(),
-    }));
-
     let user_rows: HashSet<UserPlantActionRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -313,8 +291,8 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         .into_iter()
         .collect();
     assert!(user_rows.contains(&UserPlantActionRow {
-        user_id: "dist-user".to_owned(),
-        organization_id: "distributor-org".to_owned(),
+        user_id: "dealer-user".to_owned(),
+        organization_id: "dealer-org".to_owned(),
         plant_id: "plant-1".to_owned(),
         action_id: "plant.profile.read".to_owned(),
     }));
@@ -332,8 +310,8 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         .into_iter()
         .collect();
     assert!(visibility_rows.contains(&UserPlantVisibilityRow {
-        user_id: "dist-user".to_owned(),
-        organization_id: "distributor-org".to_owned(),
+        user_id: "dealer-user".to_owned(),
+        organization_id: "dealer-org".to_owned(),
         plant_id: "plant-1".to_owned(),
     }));
 
@@ -356,7 +334,7 @@ async fn expands_hierarchy_and_drops_access_when_agreement_terminates() {
         .expect("organization action rows after termination");
     assert!(
         org_rows_after.is_empty(),
-        "agreement termination should remove inherited organization access"
+        "agreement termination should remove grantee organization access"
     );
 
     let user_rows_after: Vec<UserPlantActionRow> = runtime
@@ -400,10 +378,10 @@ async fn rebuild_keeps_existing_visibility_readable_during_save_role_binding() {
     );
     db.ensure_schema().await.expect("ensure schema");
 
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
 

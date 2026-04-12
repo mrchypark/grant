@@ -102,6 +102,21 @@ fn provider_anchor<'a>(body: &'a str, provider: &str) -> &'a str {
     &body[prefix_start..suffix_end]
 }
 
+fn active_custom_login_routes() -> LoginRouteConfig {
+    LoginRouteConfig {
+        custom_login_enabled: true,
+        login_fallback_enabled: false,
+        kakao_enabled: false,
+        kakao_oidc_ready: false,
+        kakao_linking_ready: false,
+        google_oauth_enabled: false,
+        google_oauth_ready: false,
+        apple_oauth_enabled: false,
+        apple_oauth_ready: false,
+        default_post_login_path: "/post-login".to_owned(),
+    }
+}
+
 #[test]
 fn from_env_defaults_bridge_login_config_fields() {
     let config = with_env(
@@ -295,48 +310,18 @@ async fn serves_login_assets_from_public_dir() {
 
 #[tokio::test]
 async fn unauthenticated_root_redirects_to_login_when_custom_login_enabled_and_fallback_disabled() {
-    let app = build_test_app_with_login_routes(
-        None,
-        "bridge-secret",
-        LoginRouteConfig {
-            custom_login_enabled: true,
-            login_fallback_enabled: false,
-            kakao_enabled: false,
-            kakao_oidc_ready: false,
-            kakao_linking_ready: false,
-            google_oauth_enabled: false,
-            google_oauth_ready: false,
-            apple_oauth_enabled: false,
-            apple_oauth_ready: false,
-            default_post_login_path: "/post-login".to_owned(),
-        },
-    )
-    .await
-    .expect("test app");
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login_routes())
+        .await
+        .expect("test app");
 
     assert_redirect_location(&app, Method::GET, "/", "/login").await;
 }
 
 #[tokio::test]
 async fn root_redirect_preserves_only_valid_return_to_targets() {
-    let app = build_test_app_with_login_routes(
-        None,
-        "bridge-secret",
-        LoginRouteConfig {
-            custom_login_enabled: true,
-            login_fallback_enabled: false,
-            kakao_enabled: false,
-            kakao_oidc_ready: false,
-            kakao_linking_ready: false,
-            google_oauth_enabled: false,
-            google_oauth_ready: false,
-            apple_oauth_enabled: false,
-            apple_oauth_ready: false,
-            default_post_login_path: "/post-login".to_owned(),
-        },
-    )
-    .await
-    .expect("test app");
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login_routes())
+        .await
+        .expect("test app");
 
     assert_redirect_location(
         &app,
@@ -369,25 +354,25 @@ async fn root_redirect_preserves_only_valid_return_to_targets() {
 }
 
 #[tokio::test]
+async fn root_redirect_ignores_legacy_view_query_parameter() {
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login_routes())
+        .await
+        .expect("test app");
+
+    for (uri, expected) in [
+        ("/?return_to=%2Fteams&view=auth0", "/login?return_to=%2Fteams"),
+        ("/?return_to=%2Fteams&view=AUTH0", "/login?return_to=%2Fteams"),
+        ("/?return_to=%2Fteams&view=editorial&view=auth0", "/login?return_to=%2Fteams"),
+    ] {
+        assert_redirect_location(&app, Method::GET, uri, expected).await;
+    }
+}
+
+#[tokio::test]
 async fn custom_login_entrypoint_is_reachable_when_fallback_disabled() {
-    let app = build_test_app_with_login_routes(
-        None,
-        "bridge-secret",
-        LoginRouteConfig {
-            custom_login_enabled: true,
-            login_fallback_enabled: false,
-            kakao_enabled: false,
-            kakao_oidc_ready: false,
-            kakao_linking_ready: false,
-            google_oauth_enabled: false,
-            google_oauth_ready: false,
-            apple_oauth_enabled: false,
-            apple_oauth_ready: false,
-            default_post_login_path: "/post-login".to_owned(),
-        },
-    )
-    .await
-    .expect("test app");
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login_routes())
+        .await
+        .expect("test app");
 
     let (status, headers, body) = app
         .request_response(Method::GET, "/login")
@@ -418,7 +403,8 @@ async fn custom_login_entrypoint_is_reachable_when_fallback_disabled() {
     let body = String::from_utf8(body).expect("utf8");
     for expected in [
         "Sign in",
-        "Welcome back",
+        "Sign in to continue",
+        "Fast enough for daily work",
         "label for=\"email\"",
         "type=\"email\"",
         "label for=\"password\"",
@@ -460,6 +446,32 @@ async fn custom_login_entrypoint_is_reachable_when_fallback_disabled() {
         },
         "apple oauth should stay hidden unless rollout and readiness are both enabled, got body: {body}",
     );
+}
+
+#[tokio::test]
+async fn legacy_view_query_still_serves_the_single_login_shell() {
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login_routes())
+        .await
+        .expect("test app");
+
+    let (status, _, body) = app
+        .request_response(Method::GET, "/login?return_to=%2Fteams&view=auth0")
+        .await
+        .expect("request");
+
+    assert_eq!(status, StatusCode::OK);
+
+    let body = String::from_utf8(body).expect("utf8");
+    for expected in [
+        "Sign in to continue",
+        "meta name=\"post-login-path\" content=\"/teams\"",
+        "/login-assets/login.v1.css",
+    ] {
+        assert!(
+            body.contains(expected),
+            "expected single login shell to contain {expected:?}, got body: {body}",
+        );
+    }
 }
 
 #[tokio::test]
@@ -566,24 +578,9 @@ async fn provider_visibility_keeps_ui_only_enablement_hidden_when_ready_is_false
 
 #[tokio::test]
 async fn login_stylesheet_route_serves_versioned_css() {
-    let app = build_test_app_with_login_routes(
-        None,
-        "bridge-secret",
-        LoginRouteConfig {
-            custom_login_enabled: true,
-            login_fallback_enabled: false,
-            kakao_enabled: false,
-            kakao_oidc_ready: false,
-            kakao_linking_ready: false,
-            google_oauth_enabled: false,
-            google_oauth_ready: false,
-            apple_oauth_enabled: false,
-            apple_oauth_ready: false,
-            default_post_login_path: "/post-login".to_owned(),
-        },
-    )
-    .await
-    .expect("test app");
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login_routes())
+        .await
+        .expect("test app");
 
     let (status, headers, body) = app
         .request_response(Method::GET, "/login-assets/login.v1.css")
@@ -648,6 +645,13 @@ async fn login_entry_routes_to_trailbase_login_when_fallback_enabled() {
         "/_/auth/login?return_to=%2Freports",
     )
     .await;
+    assert_redirect_location(
+        &app,
+        Method::GET,
+        "/?return_to=%2Fdashboard&view=auth0",
+        "/_/auth/login?return_to=%2Fdashboard",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -706,6 +710,27 @@ async fn authenticated_login_bypasses_to_default_post_login_path() {
             .get(axum::http::header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/teams?tab=ops"),
+    );
+
+    let (status, headers, _) = app
+        .request_response_with_auth(
+            Method::GET,
+            "/login?return_to=%2Fteams&view=auth0",
+            "alice@example.com",
+            "password123",
+        )
+        .await
+        .expect("authenticated request with ignored view");
+
+    assert!(
+        status.is_redirection(),
+        "expected redirect status, got {status}"
+    );
+    assert_eq!(
+        headers
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/teams"),
     );
 }
 
