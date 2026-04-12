@@ -651,6 +651,19 @@ func TestHTTPGatewayExecutorRejectsOversizedResponseBody(t *testing.T) {
 	}
 }
 
+func TestNewHTTPGatewayExecutorUsesLongRunningRequestTimeout(t *testing.T) {
+	executor, ok := NewHTTPGatewayExecutor().(httpGatewayExecutor)
+	if !ok {
+		t.Fatal("expected httpGatewayExecutor implementation")
+	}
+	if executor.client == nil {
+		t.Fatal("expected configured http client")
+	}
+	if executor.client.Timeout != gatewayRequestTimeout {
+		t.Fatalf("timeout = %v, want %v", executor.client.Timeout, gatewayRequestTimeout)
+	}
+}
+
 func newTestHandler(npkiSvc npkiService, approver stubApprover, gateways ...*stubGateway) http.Handler {
 	gateway := &stubGateway{}
 	if len(gateways) > 0 && gateways[0] != nil {

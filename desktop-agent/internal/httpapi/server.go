@@ -44,6 +44,7 @@ var ErrApprovalRejected = errors.New("approval rejected")
 var errMethodNotAllowed = errors.New("method not allowed")
 
 const maxJSONBodyBytes int64 = 1024 * 1024
+const gatewayRequestTimeout = 5 * time.Minute
 
 type httpStatusError struct {
 	status  int
@@ -614,7 +615,7 @@ type httpGatewayExecutor struct {
 
 func NewHTTPGatewayExecutor() gatewayExecutor {
 	return httpGatewayExecutor{
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{Timeout: gatewayRequestTimeout},
 	}
 }
 

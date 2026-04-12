@@ -905,6 +905,14 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
     assert_eq!(started.status, "completed");
     assert_eq!(started.mode, SyncMode::Full);
     assert_eq!(started.plant_id.as_deref(), Some("FAC-003"));
+    let used_certificate = db
+        .get_certificate_by_id(&cert.id)
+        .await
+        .expect("reload used certificate");
+    assert!(
+        used_certificate.last_used_at.is_some(),
+        "crawl task token flow should stamp certificate usage"
+    );
 
     let token_reuse = service
         .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {

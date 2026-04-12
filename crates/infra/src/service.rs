@@ -641,6 +641,9 @@ impl AppService {
             let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
             let dek = kms.unwrap(&certificate.kms_key_id, &certificate.wrapped_dek)?;
             let bundle = decrypt_bundle_with_key(&dek, &certificate.encrypted_blob)?;
+            self.db
+                .touch_certificate_last_used_at_if_stale(&certificate)
+                .await?;
 
             return self
                 .run_sync_with_bundle(
