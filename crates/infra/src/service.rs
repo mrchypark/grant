@@ -10,8 +10,8 @@ use crate::{
         extract_common_name, generate_data_encryption_key, normalize_business_no,
     },
     database::{
-        Database, PersistedDocument, PlantSummary, StoredCertificate, StoredDocument,
-        StoredRateRecord,
+        Database, DatabaseLookupError, PersistedDocument, PlantSummary, StoredCertificate,
+        StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
     npki::verify_challenge_signature,
@@ -560,7 +560,12 @@ impl AppService {
                         .await?;
                     Ok(Some(facility_code.to_owned()))
                 }
-                Err(err) if err.to_string().contains("plant not found") => {
+                Err(err)
+                    if matches!(
+                        err.downcast_ref::<DatabaseLookupError>(),
+                        Some(DatabaseLookupError::PlantNotFound)
+                    ) =>
+                {
                     self.authorize_organization_action(
                         user_id,
                         organization_id,

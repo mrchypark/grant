@@ -13,6 +13,7 @@ use domain::{
 use hiqlite::Row;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::{error::Error as StdError, fmt};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -23,6 +24,21 @@ macro_rules! params {
 }
 
 const CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS: i64 = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseLookupError {
+    PlantNotFound,
+}
+
+impl fmt::Display for DatabaseLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlantNotFound => f.write_str("plant not found"),
+        }
+    }
+}
+
+impl StdError for DatabaseLookupError {}
 
 #[derive(Clone)]
 pub struct Database {
@@ -2602,7 +2618,9 @@ impl Database {
             )
             .await
             .context("query plant")?;
-        let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
+        let plant_row = plants
+            .pop()
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))?;
         Ok(plant_row.into())
     }
 
@@ -2644,7 +2662,9 @@ impl Database {
             )
             .await
             .context("query plant")?;
-        let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
+        let plant_row = plants
+            .pop()
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))?;
         let resolved_plant_id = plant_row.id.clone();
 
         let mut runs: Vec<SyncRunRow> = self

@@ -186,6 +186,33 @@ func TestServiceListCertificatesFollowsSymlinkedBundleDirectories(t *testing.T) 
 	}
 }
 
+func TestServiceListCertificatesDeduplicatesSymlinksToSameBundle(t *testing.T) {
+	root := t.TempDir()
+	realRoot := t.TempDir()
+	fixture := writeFixtureBundle(t, realRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Symlink Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{25, 26, 27, 28},
+	})
+	for _, linkName := range []string{"linked-cert-a", "linked-cert-b"} {
+		if err := os.Symlink(fixture.path, filepath.Join(root, linkName)); err != nil {
+			t.Fatalf("symlink bundle %s: %v", linkName, err)
+		}
+	}
+
+	service := NewService(ServiceConfig{Roots: []string{root}})
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("ListCertificates() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+}
+
 type fixtureOptions struct {
 	dirName         string
 	password        string

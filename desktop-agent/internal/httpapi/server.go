@@ -217,6 +217,9 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	req.Challenge = strings.TrimSpace(req.Challenge)
 
 	switch {
+	case req.CertificateID == "":
+		writeError(w, http.StatusBadRequest, "certificateId must not be empty")
+		return
 	case req.Challenge == "":
 		writeError(w, http.StatusBadRequest, "challenge must not be empty")
 		return

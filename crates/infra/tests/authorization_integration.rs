@@ -28,7 +28,7 @@ use infra::{
         TrailbaseAuthConfig,
     },
     crypto::CertificateBundle,
-    database::Database,
+    database::{Database, DatabaseLookupError},
     runtime::HiqliteRuntime,
     service::{
         AppService, CreateCertGatewayChallengeInput, ExecuteEphemeralCrawlInput,
@@ -1007,6 +1007,21 @@ async fn gateway_sync_scope_requires_permission_for_existing_plant() {
         .await
         .expect_err("existing plant should require plant sync execute permission");
     assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn get_plant_by_facility_code_returns_structured_not_found() {
+    let (_service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let err = db
+        .get_plant_by_facility_code("FAC-MISSING")
+        .await
+        .expect_err("missing facility should fail");
+    let lookup_err = err
+        .downcast_ref::<DatabaseLookupError>()
+        .expect("plant lookup should expose structured database lookup error");
+    assert_eq!(*lookup_err, DatabaseLookupError::PlantNotFound);
+    assert_eq!(lookup_err.to_string(), "plant not found");
 }
 
 #[tokio::test]

@@ -287,8 +287,8 @@ func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, see
 				return nil
 			}
 			if isBundleDirectory(resolved) {
-				if _, ok := seenBundles[path]; !ok {
-					seenBundles[path] = struct{}{}
+				if _, ok := seenBundles[resolved]; !ok {
+					seenBundles[resolved] = struct{}{}
 					*dirs = append(*dirs, path)
 				}
 				return filepath.SkipDir
@@ -302,8 +302,12 @@ func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, see
 			return nil
 		}
 		if isBundleDirectory(path) {
-			if _, ok := seenBundles[path]; !ok {
-				seenBundles[path] = struct{}{}
+			bundleKey := path
+			if resolved, err := filepath.EvalSymlinks(path); err == nil {
+				bundleKey = resolved
+			}
+			if _, ok := seenBundles[bundleKey]; !ok {
+				seenBundles[bundleKey] = struct{}{}
 				*dirs = append(*dirs, path)
 			}
 			return filepath.SkipDir

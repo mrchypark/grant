@@ -177,6 +177,7 @@ func TestServerRejectsInvalidSignRequests(t *testing.T) {
 		name string
 		body string
 	}{
+		{name: "missing certificate id", body: `{"challenge":"nonce-1","password":"secret"}`},
 		{name: "missing password", body: `{"challenge":"nonce-1","certificateId":"cert-1"}`},
 		{name: "missing challenge", body: `{"password":"secret","certificateId":"cert-1"}`},
 		{name: "whitespace only password", body: `{"challenge":"nonce-1","certificateId":"cert-1","password":"   "}`},
