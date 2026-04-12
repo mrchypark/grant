@@ -678,6 +678,9 @@ impl AppService {
             .resolve_organization_business_no(&organization_id, None)
             .await?;
         let cert = self.db.load_active_certificate(&organization_id).await?;
+        self.db
+            .touch_certificate_last_used_at_if_stale(&cert)
+            .await?;
         let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
         let dek = kms.unwrap(&cert.kms_key_id, &cert.wrapped_dek)?;
         let bundle = decrypt_bundle_with_key(&dek, &cert.encrypted_blob)?;

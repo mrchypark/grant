@@ -316,6 +316,9 @@ async fn certificate_gateway_rows_round_trip() {
         .load_active_certificate("conalog-account")
         .await
         .expect("first active certificate load");
+    db.touch_certificate_last_used_at_if_stale(&first_load)
+        .await
+        .expect("touch certificate last_used_at");
     let first_loaded = db
         .get_certificate_by_id(&first_load.id)
         .await
@@ -329,6 +332,9 @@ async fn certificate_gateway_rows_round_trip() {
         .load_active_certificate("conalog-account")
         .await
         .expect("second active certificate load");
+    db.touch_certificate_last_used_at_if_stale(&second_load)
+        .await
+        .expect("skip redundant touch");
     let second_loaded = db
         .get_certificate_by_id(&second_load.id)
         .await

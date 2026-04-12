@@ -1816,6 +1816,13 @@ impl Database {
             .next()
             .ok_or_else(|| anyhow!("certificate not found"))?
             .try_into()?;
+        Ok(cert)
+    }
+
+    pub async fn touch_certificate_last_used_at_if_stale(
+        &self,
+        cert: &StoredCertificate,
+    ) -> Result<()> {
         if should_refresh_certificate_last_used_at(cert.last_used_at.as_deref())? {
             self.runtime
                 .execute(
@@ -1825,7 +1832,7 @@ impl Database {
                 .await
                 .context("update certificate last_used_at")?;
         }
-        Ok(cert)
+        Ok(())
     }
 
     pub async fn get_certificate_by_id(&self, certificate_id: &str) -> Result<StoredCertificate> {
