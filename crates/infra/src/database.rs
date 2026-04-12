@@ -1893,20 +1893,22 @@ impl Database {
         &self,
         challenge_id: &str,
     ) -> Result<CertGatewayChallenge> {
-        let existing = self.get_cert_gateway_challenge(challenge_id).await?;
-        if existing.consumed_at.is_some() {
-            anyhow::bail!("cert gateway challenge already consumed");
-        }
+        let consumed_at = now_string();
         self.runtime
             .execute(
                 "UPDATE cert_gateway_challenges
                  SET consumed_at = $1
-                 WHERE id = $2",
-                params!(now_string(), challenge_id.to_owned()),
+                 WHERE id = $2
+                   AND consumed_at IS NULL",
+                params!(consumed_at.clone(), challenge_id.to_owned()),
             )
             .await
             .context("consume cert gateway challenge")?;
-        self.get_cert_gateway_challenge(challenge_id).await
+        let challenge = self.get_cert_gateway_challenge(challenge_id).await?;
+        if challenge.consumed_at.as_deref() != Some(consumed_at.as_str()) {
+            anyhow::bail!("cert gateway challenge already consumed");
+        }
+        Ok(challenge)
     }
 
     pub async fn issue_crawl_task_token(
@@ -1942,20 +1944,22 @@ impl Database {
     }
 
     pub async fn consume_crawl_task_token(&self, token_hash: &str) -> Result<CrawlTaskToken> {
-        let existing = self.get_crawl_task_token_by_hash(token_hash).await?;
-        if existing.used_at.is_some() {
-            anyhow::bail!("crawl task token already used");
-        }
+        let used_at = now_string();
         self.runtime
             .execute(
                 "UPDATE crawl_task_tokens
                  SET used_at = $1
-                 WHERE token_hash = $2",
-                params!(now_string(), token_hash.to_owned()),
+                 WHERE token_hash = $2
+                   AND used_at IS NULL",
+                params!(used_at.clone(), token_hash.to_owned()),
             )
             .await
             .context("consume crawl task token")?;
-        self.get_crawl_task_token_by_hash(token_hash).await
+        let token = self.get_crawl_task_token_by_hash(token_hash).await?;
+        if token.used_at.as_deref() != Some(used_at.as_str()) {
+            anyhow::bail!("crawl task token already used");
+        }
+        Ok(token)
     }
 
     pub async fn get_cert_gateway_challenge(

@@ -59,10 +59,8 @@ export class DesktopAgentClient {
   }
 
   async sign(input: AgentSignRequest): Promise<AgentSignResponse> {
-    await this.ensureSession();
-    const response = await fetch(`${this.baseUrl}/sign`, {
+    const response = await this.fetchWithSessionRetry("/sign", {
       method: "POST",
-      headers: this.headers(),
       body: JSON.stringify(input),
     });
     if (!response.ok) {
@@ -72,10 +70,7 @@ export class DesktopAgentClient {
   }
 
   async listCertificates(): Promise<{ items: Array<Record<string, unknown>> }> {
-    await this.ensureSession();
-    const response = await fetch(`${this.baseUrl}/certificates`, {
-      headers: this.headers(),
-    });
+    const response = await this.fetchWithSessionRetry("/certificates");
     if (!response.ok) {
       throw new Error(`agent certificate list failed with status ${response.status}`);
     }
@@ -108,15 +103,31 @@ export class DesktopAgentClient {
   }
 
   private async postApproval(path: string, input: AgentApprovalRequest): Promise<Record<string, unknown>> {
-    await this.ensureSession();
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await this.fetchWithSessionRetry(path, {
       method: "POST",
-      headers: this.headers(),
       body: JSON.stringify(input),
     });
     if (!response.ok) {
       throw new Error(`agent approval failed with status ${response.status}`);
     }
     return (await response.json()) as Record<string, unknown>;
+  }
+
+  private async fetchWithSessionRetry(path: string, init?: RequestInit): Promise<Response> {
+    await this.ensureSession();
+    let response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: this.headers(),
+    });
+    if (response.status !== 401) {
+      return response;
+    }
+    this.sessionToken = undefined;
+    await this.ensureSession();
+    response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: this.headers(),
+    });
+    return response;
   }
 }

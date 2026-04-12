@@ -1,6 +1,7 @@
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
+use tokio::task::JoinSet;
 
 #[derive(Debug)]
 struct OrganizationRow {
@@ -327,4 +328,101 @@ async fn certificate_gateway_rows_round_trip() {
         consumed_token.certificate_id.as_deref(),
         Some(cert.id.as_str())
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cert_gateway_challenge_consumption_allows_only_one_concurrent_winner() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let challenge = db
+        .create_cert_gateway_challenge(
+            "conalog-account",
+            "ephemeral",
+            "nonce-1",
+            "payload-hash-1",
+            Some("FAC-001"),
+            "2099-01-01T00:00:00Z",
+            "conalog-account",
+        )
+        .await
+        .expect("create challenge");
+
+    let mut tasks = JoinSet::new();
+    for _ in 0..16 {
+        let db = db.clone();
+        let challenge_id = challenge.id.clone();
+        tasks.spawn(async move { db.consume_cert_gateway_challenge(&challenge_id).await });
+    }
+
+    let mut success_count = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result.expect("task join") {
+            Ok(_) => success_count += 1,
+            Err(err) => assert!(
+                err.to_string().contains("already consumed"),
+                "unexpected error: {err:#}"
+            ),
+        }
+    }
+
+    assert_eq!(success_count, 1, "challenge should be consumable exactly once");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crawl_task_token_consumption_allows_only_one_concurrent_winner() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let cert = db
+        .save_certificate(
+            "conalog-account",
+            Some("2768603291"),
+            "Test Certificate",
+            "encrypted-blob",
+            b"wrapped-dek",
+            "kms-key-v1",
+        )
+        .await
+        .expect("save certificate");
+
+    db.issue_crawl_task_token(
+        "conalog-account",
+        Some(&cert.id),
+        "token-hash-1",
+        "{\"facilityCode\":\"FAC-001\"}",
+        "2099-01-01T00:01:00Z",
+        "conalog-account",
+    )
+    .await
+    .expect("issue crawl task token");
+
+    let mut tasks = JoinSet::new();
+    for _ in 0..16 {
+        let db = db.clone();
+        tasks.spawn(async move { db.consume_crawl_task_token("token-hash-1").await });
+    }
+
+    let mut success_count = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result.expect("task join") {
+            Ok(_) => success_count += 1,
+            Err(err) => assert!(
+                err.to_string().contains("already used"),
+                "unexpected error: {err:#}"
+            ),
+        }
+    }
+
+    assert_eq!(success_count, 1, "crawl task token should be consumable exactly once");
 }

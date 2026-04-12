@@ -231,6 +231,52 @@ test("registerStored() delegates approval and registration to the local agent", 
   }
 });
 
+test("runEphemeral() reopens the local agent session after a 401 response", async () => {
+  const mock = installFetchMock([
+    () => textResponse("ok"),
+    () =>
+      jsonResponse({
+        sessionToken: "expired-session",
+        expiresAt: "2026-04-09T00:05:00Z",
+      }, 201),
+    () => textResponse("expired", 401),
+    () =>
+      jsonResponse({
+        sessionToken: "fresh-session",
+        expiresAt: "2026-04-09T00:10:00Z",
+      }, 201),
+    () =>
+      jsonResponse({
+        id: "sync-401-recovered",
+        organizationId: "org-1",
+        plantId: "FAC-001",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 0,
+      }, 202),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    const run = await sdk.runEphemeral("org-1", { businessNo: "2768603291" });
+
+    assert.equal(run.id, "sync-401-recovered");
+    assert.equal(mock.calls.length, 5);
+    assert.equal(String(mock.calls[3].input), "http://127.0.0.1:8765/sessions/open");
+    assert.equal(String(mock.calls[4].input), "http://127.0.0.1:8765/approve-ephemeral-run");
+    assert.equal((mock.calls[2].init?.headers as Record<string, string>)["x-agent-session"], "expired-session");
+    assert.equal((mock.calls[4].init?.headers as Record<string, string>)["x-agent-session"], "fresh-session");
+  } finally {
+    mock.restore();
+  }
+});
+
 test("runStored() issues a crawl task token and starts the stored crawl", async () => {
   const mock = installFetchMock([
     () =>
