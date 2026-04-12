@@ -1035,7 +1035,6 @@ impl Database {
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    inactivated_at = excluded.inactivated_at,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
@@ -1065,12 +1064,7 @@ impl Database {
             )
             .await
             .context("upsert organization membership")?;
-        Ok(Organization {
-            id: organization_id.to_owned(),
-            business_no: Some(organization_id.to_owned()),
-            name: display_name.to_owned(),
-            inactivated_at: None,
-        })
+        self.get_organization(organization_id).await
     }
 
     pub async fn upsert_organization_identity(
@@ -1087,7 +1081,6 @@ impl Database {
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    inactivated_at = excluded.inactivated_at,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
@@ -1100,12 +1093,7 @@ impl Database {
             )
             .await
             .context("upsert organization identity")?;
-        Ok(Organization {
-            id: organization_id.to_owned(),
-            business_no: business_no.map(ToOwned::to_owned),
-            name: display_name.to_owned(),
-            inactivated_at: None,
-        })
+        self.get_organization(organization_id).await
     }
 
     pub async fn resolve_or_create_user_identity(

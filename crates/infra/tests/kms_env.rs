@@ -23,6 +23,7 @@ fn clear_certd_env() {
         "CERTD_TRAILBASE_INTROSPECT_PATH",
         "CERTD_TRAILBASE_INTERNAL_SECRET",
         "CERTD_TRAILBASE_CACHE_TTL_SECONDS",
+        "CERTD_MASTER_KEY",
         "CERTD_KMS_ACTIVE_KEY_ID",
         "CERTD_KMS_MASTER_KEYS",
     ] {
@@ -111,5 +112,23 @@ fn env_kms_provider_wraps_and_unwraps_keys() {
         .unwrap(provider.active_key_id(), &wrapped)
         .expect("unwrap");
 
+    assert_eq!(unwrapped, b"dek-bytes");
+}
+
+#[test]
+fn env_kms_provider_falls_back_to_master_key_when_kms_envs_are_absent() {
+    let _guard = env_lock().lock().expect("env lock");
+    clear_certd_env();
+    unsafe {
+        std::env::set_var("CERTD_MASTER_KEY", "legacy-master-key-material");
+    }
+
+    let provider = EnvKmsProvider::from_env().expect("kms provider");
+    let wrapped = provider.wrap(b"dek-bytes").expect("wrap");
+    let unwrapped = provider
+        .unwrap(provider.active_key_id(), &wrapped)
+        .expect("unwrap");
+
+    assert_eq!(provider.active_key_id(), "legacy-master-key");
     assert_eq!(unwrapped, b"dek-bytes");
 }

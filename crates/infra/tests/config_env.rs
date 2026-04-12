@@ -22,6 +22,7 @@ fn clear_certd_env() {
         "CERTD_TRAILBASE_INTROSPECT_PATH",
         "CERTD_TRAILBASE_INTERNAL_SECRET",
         "CERTD_TRAILBASE_CACHE_TTL_SECONDS",
+        "CERTD_MASTER_KEY",
         "CERTD_KMS_ACTIVE_KEY_ID",
         "CERTD_KMS_MASTER_KEYS",
     ] {
@@ -160,5 +161,26 @@ fn normalizes_remote_nodes_without_scheme_changes() {
             "b:8200".to_owned(),
             "c:8300".to_owned()
         ]
+    );
+}
+
+#[test]
+fn falls_back_to_legacy_master_key_when_kms_envs_are_absent() {
+    let _guard = env_lock().lock().expect("env lock");
+    clear_certd_env();
+    unsafe {
+        std::env::set_var("CERTD_TRAILBASE_INTERNAL_SECRET", "fallback-secret");
+        std::env::set_var("CERTD_MASTER_KEY", "legacy-master-key-material");
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+
+    assert_eq!(cfg.kms.active_key_id, "legacy-master-key");
+    assert_eq!(
+        cfg.kms.master_keys,
+        vec![(
+            "legacy-master-key".to_owned(),
+            b"legacy-master-key-material".to_vec()
+        )]
     );
 }

@@ -288,6 +288,39 @@ async fn ensure_schema_preserves_bootstrap_organization_deactivation() {
 }
 
 #[tokio::test]
+async fn organization_upserts_preserve_existing_deactivation_state() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.deactivate_organization("conalog-account")
+        .await
+        .expect("deactivate bootstrap organization");
+
+    let owner_upserted = db
+        .upsert_organization_with_owner("conalog-account", "Renamed Org", "ignored")
+        .await
+        .expect("upsert organization with owner");
+    assert!(
+        owner_upserted.inactivated_at.is_some(),
+        "owner upsert should not reactivate an inactive organization"
+    );
+
+    let identity_upserted = db
+        .upsert_organization_identity("conalog-account", Some("conalog-account"), "Renamed Again")
+        .await
+        .expect("upsert organization identity");
+    assert!(
+        identity_upserted.inactivated_at.is_some(),
+        "identity upsert should not reactivate an inactive organization"
+    );
+}
+
+#[tokio::test]
 async fn certificate_gateway_rows_round_trip() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(

@@ -1043,7 +1043,7 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
 
 fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
-        .decode(value)
+        .decode(value.trim())
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
 }
 
@@ -1360,7 +1360,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::ApiError;
+    use super::{ApiError, decode_base64_field};
     use anyhow::anyhow;
     use axum::http::StatusCode;
     use infra::service::{ServiceError, ServiceErrorKind};
@@ -1392,5 +1392,12 @@ mod tests {
     fn generic_invalid_domain_errors_stay_internal() {
         let err = ApiError::from_domain(anyhow!("invalid internal state"));
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn decode_base64_field_trims_surrounding_whitespace() {
+        let decoded = decode_base64_field("signCertDerBase64", "  Zm9vYmFy\n")
+            .expect("trimmed base64 should decode");
+        assert_eq!(decoded, b"foobar");
     }
 }

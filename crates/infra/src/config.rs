@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{env, path::PathBuf};
 
+const LEGACY_MASTER_KEY_ID: &str = "legacy-master-key";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub bind_addr: String,
@@ -120,18 +122,42 @@ impl AppConfig {
 
 impl KmsConfig {
     pub fn from_env() -> Result<Self> {
-        let active_key_id = required_env("CERTD_KMS_ACTIVE_KEY_ID")?;
-        let master_keys = required_env("CERTD_KMS_MASTER_KEYS")?;
-        let parsed = parse_kms_master_keys(&master_keys)?;
-        if !parsed.iter().any(|(key_id, _)| key_id == &active_key_id) {
-            anyhow::bail!(
-                "CERTD_KMS_ACTIVE_KEY_ID {active_key_id} is not present in CERTD_KMS_MASTER_KEYS"
-            );
+        let active_key_id = env::var("CERTD_KMS_ACTIVE_KEY_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let master_keys = env::var("CERTD_KMS_MASTER_KEYS")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
+        match (active_key_id, master_keys) {
+            (Some(active_key_id), Some(master_keys)) => {
+                let parsed = parse_kms_master_keys(&master_keys)?;
+                if !parsed.iter().any(|(key_id, _)| key_id == &active_key_id) {
+                    anyhow::bail!(
+                        "CERTD_KMS_ACTIVE_KEY_ID {active_key_id} is not present in CERTD_KMS_MASTER_KEYS"
+                    );
+                }
+                Ok(Self {
+                    active_key_id,
+                    master_keys: parsed,
+                })
+            }
+            (None, None) => Ok(Self {
+                active_key_id: LEGACY_MASTER_KEY_ID.to_owned(),
+                master_keys: vec![(
+                    LEGACY_MASTER_KEY_ID.to_owned(),
+                    env_or("CERTD_MASTER_KEY", "dev-only-master-key").into_bytes(),
+                )],
+            }),
+            (None, Some(_)) => {
+                anyhow::bail!("missing required environment variable CERTD_KMS_ACTIVE_KEY_ID")
+            }
+            (Some(_), None) => {
+                anyhow::bail!("missing required environment variable CERTD_KMS_MASTER_KEYS")
+            }
         }
-        Ok(Self {
-            active_key_id,
-            master_keys: parsed,
-        })
     }
 }
 
