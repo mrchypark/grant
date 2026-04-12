@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -273,6 +274,7 @@ func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, see
 
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			log.Printf("npki walk error path=%s err=%v", path, walkErr)
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {
@@ -522,6 +524,7 @@ func decryptSEEDCBC(key []byte, iv []byte, cipherText []byte) ([]byte, error) {
 	}
 
 	plain := make([]byte, len(cipherText))
+	defer zeroBytes(plain)
 	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, cipherText)
 	return unpadPKCS7(plain, block.BlockSize())
 }
@@ -554,11 +557,18 @@ func digitsOnly(value string) string {
 }
 
 func pbkdf1SHA1(password []byte, salt []byte, iterations int, length int) []byte {
-	sum := sha1.Sum(append(append([]byte{}, password...), salt...))
-	digest := sum[:]
+	h := sha1.New()
+	_, _ = h.Write(password)
+	_, _ = h.Write(salt)
+	digest := h.Sum(nil)
 	for i := 1; i < iterations; i++ {
-		next := sha1.Sum(digest)
-		digest = next[:]
+		h.Reset()
+		_, _ = h.Write(digest)
+		next := h.Sum(nil)
+		zeroBytes(digest)
+		digest = next
 	}
-	return append([]byte{}, digest[:length]...)
+	out := append([]byte{}, digest[:length]...)
+	zeroBytes(digest)
+	return out
 }

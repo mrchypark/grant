@@ -1304,7 +1304,6 @@ impl ApiError {
             || message.contains("mismatch")
             || message.contains("already used")
             || message.contains("must not be empty")
-            || message.contains("invalid")
         {
             StatusCode::BAD_REQUEST
         } else {
@@ -1387,5 +1386,11 @@ mod tests {
         )));
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.message, "challengeSignatureBase64 must not be empty");
+    }
+
+    #[test]
+    fn generic_invalid_domain_errors_stay_internal() {
+        let err = ApiError::from_domain(anyhow!("invalid internal state"));
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

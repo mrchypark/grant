@@ -468,6 +468,54 @@ func TestServerRejectsOversizedApprovalBody(t *testing.T) {
 	}
 }
 
+func TestServerApproveEphemeralRunRejectsInvalidJSON(t *testing.T) {
+	handler := newTestHandler(
+		&stubNPKIService{},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      "secret-password",
+		}},
+		&stubGateway{},
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestServerApproveEphemeralRunRequiresSession(t *testing.T) {
+	handler := newTestHandler(
+		&stubNPKIService{},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      "secret-password",
+		}},
+		&stubGateway{},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"http://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestServerApproveEphemeralRunHandlesUserRejection(t *testing.T) {
 	handler := newTestHandler(&stubNPKIService{}, stubApprover{err: ErrApprovalRejected})
 	sessionToken := openSession(t, handler)

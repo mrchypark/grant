@@ -45,6 +45,19 @@ var errMethodNotAllowed = errors.New("method not allowed")
 
 const maxJSONBodyBytes int64 = 1024 * 1024
 
+type httpStatusError struct {
+	status  int
+	message string
+}
+
+func (e *httpStatusError) Error() string {
+	return e.message
+}
+
+func newHTTPStatusError(status int, message string) error {
+	return &httpStatusError{status: status, message: message}
+}
+
 type ApprovalPrompt struct {
 	Origin         string
 	Action         string
@@ -261,7 +274,7 @@ func (s *Server) handleApproveStoredRegistration(w http.ResponseWriter, r *http.
 
 func (s *Server) handleApprovedAction(r *http.Request, action string) (map[string]any, int, error) {
 	if r.Method != http.MethodPost {
-		return nil, 0, errMethodNotAllowed
+		return nil, 0, newHTTPStatusError(http.StatusMethodNotAllowed, errMethodNotAllowed.Error())
 	}
 	if err := s.validateSession(r); err != nil {
 		return nil, 0, err
@@ -270,7 +283,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 
 	var req ApprovalActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return nil, 0, errors.New("invalid json body")
+		return nil, 0, newHTTPStatusError(http.StatusBadRequest, "invalid json body")
 	}
 	req.GatewayBaseURL = strings.TrimSpace(req.GatewayBaseURL)
 	req.OrganizationID = strings.TrimSpace(req.OrganizationID)
@@ -279,10 +292,10 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	req.ActiveOrganizationID = strings.TrimSpace(req.ActiveOrganizationID)
 
 	if req.OrganizationID == "" {
-		return nil, 0, errors.New("organizationId must not be empty")
+		return nil, 0, newHTTPStatusError(http.StatusBadRequest, "organizationId must not be empty")
 	}
 	if req.BusinessNo == "" {
-		return nil, 0, errors.New("businessNo must not be empty")
+		return nil, 0, newHTTPStatusError(http.StatusBadRequest, "businessNo must not be empty")
 	}
 	gatewayBaseURL, err := s.trustedGatewayBaseURL(req.GatewayBaseURL)
 	if err != nil {
@@ -374,28 +387,19 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func writeApprovalError(w http.ResponseWriter, err error) {
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) {
+		writeError(w, statusErr.status, statusErr.message)
+		return
+	}
 	status := http.StatusInternalServerError
 	switch {
-	case errors.Is(err, errMethodNotAllowed):
-		status = http.StatusMethodNotAllowed
 	case errors.Is(err, ErrApprovalRejected):
 		status = http.StatusForbidden
 	case errors.Is(err, npki.ErrCertificateNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, npki.ErrInvalidPassword):
 		status = http.StatusUnauthorized
-	case strings.Contains(err.Error(), "origin not allowed"):
-		status = http.StatusForbidden
-	default:
-		message := err.Error()
-		if strings.Contains(message, "must not be empty") ||
-			strings.Contains(message, "invalid json body") ||
-			strings.Contains(message, "gatewayBaseUrl") ||
-			strings.Contains(message, "gateway backend") {
-			status = http.StatusBadRequest
-		} else if strings.Contains(message, "agent session") {
-			status = http.StatusUnauthorized
-		}
 	}
 	writeError(w, status, err.Error())
 }
@@ -450,7 +454,7 @@ func (s *Server) validateSession(r *http.Request) error {
 	}
 	sessionToken := strings.TrimSpace(r.Header.Get("X-Agent-Session"))
 	if sessionToken == "" {
-		return errors.New("missing agent session")
+		return newHTTPStatusError(http.StatusUnauthorized, "missing agent session")
 	}
 	return s.sessions.validate(origin, sessionToken, time.Now().UTC())
 }
@@ -458,7 +462,7 @@ func (s *Server) validateSession(r *http.Request) error {
 func (s *Server) originFromRequest(r *http.Request) (string, error) {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" || !s.isOriginAllowed(origin) {
-		return "", errors.New("origin not allowed")
+		return "", newHTTPStatusError(http.StatusForbidden, "origin not allowed")
 	}
 	return origin, nil
 }
@@ -470,11 +474,14 @@ func (s *Server) isOriginAllowed(origin string) bool {
 
 func (s *Server) trustedGatewayBaseURL(requestValue string) (string, error) {
 	if s.gatewayBaseURL == "" {
-		return "", errors.New("gateway backend is not configured")
+		return "", newHTTPStatusError(http.StatusBadRequest, "gateway backend is not configured")
 	}
 	requested := strings.TrimRight(strings.TrimSpace(requestValue), "/")
 	if requested != "" && requested != s.gatewayBaseURL {
-		return "", errors.New("gatewayBaseUrl does not match configured gateway backend")
+		return "", newHTTPStatusError(
+			http.StatusBadRequest,
+			"gatewayBaseUrl does not match configured gateway backend",
+		)
 	}
 	return s.gatewayBaseURL, nil
 }
@@ -525,26 +532,26 @@ func (m sessionManager) issue(origin string, now time.Time) (string, time.Time, 
 func (m sessionManager) validate(origin string, token string, now time.Time) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 {
-		return errors.New("invalid agent session")
+		return newHTTPStatusError(http.StatusUnauthorized, "invalid agent session")
 	}
 	expected := signPayload(m.secret, parts[0])
 	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || !hmac.Equal(expected, actual) {
-		return errors.New("invalid agent session")
+		return newHTTPStatusError(http.StatusUnauthorized, "invalid agent session")
 	}
 	payload, err := decodePayload(parts[0])
 	if err != nil {
-		return errors.New("invalid agent session")
+		return newHTTPStatusError(http.StatusUnauthorized, "invalid agent session")
 	}
 	if payload.Origin != origin {
-		return errors.New("agent session origin mismatch")
+		return newHTTPStatusError(http.StatusUnauthorized, "agent session origin mismatch")
 	}
 	expiry, err := time.Parse(time.RFC3339, payload.Expiry)
 	if err != nil {
-		return errors.New("invalid agent session")
+		return newHTTPStatusError(http.StatusUnauthorized, "invalid agent session")
 	}
 	if now.After(expiry) {
-		return errors.New("agent session expired")
+		return newHTTPStatusError(http.StatusUnauthorized, "agent session expired")
 	}
 	return nil
 }

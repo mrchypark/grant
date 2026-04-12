@@ -13,6 +13,7 @@ use domain::{
 use hiqlite::Row;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use tracing::warn;
 use uuid::Uuid;
 
 macro_rules! params {
@@ -3467,7 +3468,7 @@ fn validation_read_consistency_for_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::validation_read_consistency_for_mode;
+    use super::{should_refresh_certificate_last_used_at, validation_read_consistency_for_mode};
     use crate::config::{ReadConsistency, RuntimeMode};
 
     #[test]
@@ -3484,6 +3485,13 @@ mod tests {
             validation_read_consistency_for_mode(&RuntimeMode::Embedded),
             ReadConsistency::Local
         );
+    }
+
+    #[test]
+    fn invalid_last_used_at_refreshes_instead_of_failing() {
+        let should_refresh = should_refresh_certificate_last_used_at(Some("not-a-timestamp"))
+            .expect("invalid timestamp should not fail");
+        assert!(should_refresh);
     }
 }
 
@@ -3524,9 +3532,17 @@ fn should_refresh_certificate_last_used_at(last_used_at: Option<&str>) -> Result
     let Some(last_used_at) = last_used_at else {
         return Ok(true);
     };
-    let parsed = DateTime::parse_from_rfc3339(last_used_at)
-        .with_context(|| format!("parse lastUsedAt {last_used_at}"))?
-        .with_timezone(&Utc);
+    let parsed = match DateTime::parse_from_rfc3339(last_used_at) {
+        Ok(parsed) => parsed.with_timezone(&Utc),
+        Err(err) => {
+            warn!(
+                last_used_at,
+                error = %err,
+                "failed to parse certificate last_used_at; refreshing timestamp"
+            );
+            return Ok(true);
+        }
+    };
     Ok(Utc::now().signed_duration_since(parsed)
         >= ChronoDuration::seconds(CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS))
 }
