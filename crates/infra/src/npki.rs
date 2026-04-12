@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use openssl::{
+    asn1::Asn1Time,
     hash::MessageDigest,
     nid::Nid,
     pkcs7::{Pkcs7, Pkcs7Flags},
@@ -132,6 +133,15 @@ pub fn verify_challenge_signature(
     ensure_openssl_legacy_provider()?;
     let certificate =
         X509::from_der(sign_cert_der).context("parse signCert.der as X509 for challenge verify")?;
+    let now = Asn1Time::days_from_now(0).context("build current ASN.1 time")?;
+    if certificate
+        .not_after()
+        .compare(now.as_ref())
+        .context("compare certificate expiry")?
+        .is_lt()
+    {
+        bail!("certificate has expired");
+    }
     let public_key = certificate
         .public_key()
         .context("extract certificate public key")?;

@@ -262,8 +262,25 @@ fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, Str
 }
 
 fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
+    create_sign_cert_der_for_common_name(key, "Test Certificate")
+}
+
+fn create_sign_cert_der_for_common_name(key: &PKey<Private>, common_name: &str) -> Vec<u8> {
+    create_sign_cert_der_with_validity(key, common_name, 0, 365)
+}
+
+fn create_expired_sign_cert_der(key: &PKey<Private>, common_name: &str) -> Vec<u8> {
+    create_sign_cert_der_with_validity(key, common_name, -365, -1)
+}
+
+fn create_sign_cert_der_with_validity(
+    key: &PKey<Private>,
+    common_name: &str,
+    not_before_days_from_now: i32,
+    not_after_days_from_now: i32,
+) -> Vec<u8> {
     let mut name = X509NameBuilder::new().expect("x509 name");
-    name.append_entry_by_text("CN", "Test Certificate")
+    name.append_entry_by_text("CN", common_name)
         .expect("append cn");
     let name = name.build();
 
@@ -272,8 +289,30 @@ fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
     builder.set_subject_name(&name).expect("set subject");
     builder.set_issuer_name(&name).expect("set issuer");
     builder.set_pubkey(key).expect("set pubkey");
-    let not_before = Asn1Time::days_from_now(0).expect("not before");
-    let not_after = Asn1Time::days_from_now(365).expect("not after");
+    let not_before = if not_before_days_from_now >= 0 {
+        Asn1Time::days_from_now(not_before_days_from_now as u32).expect("not before")
+    } else {
+        Asn1Time::from_unix(
+            (std::time::SystemTime::now()
+                - std::time::Duration::from_secs((-not_before_days_from_now) as u64 * 24 * 60 * 60))
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("not before duration")
+            .as_secs() as i64,
+        )
+        .expect("not before")
+    };
+    let not_after = if not_after_days_from_now >= 0 {
+        Asn1Time::days_from_now(not_after_days_from_now as u32).expect("not after")
+    } else {
+        Asn1Time::from_unix(
+            (std::time::SystemTime::now()
+                - std::time::Duration::from_secs((-not_after_days_from_now) as u64 * 24 * 60 * 60))
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("not after duration")
+            .as_secs() as i64,
+        )
+        .expect("not after")
+    };
     builder
         .set_not_before(not_before.as_ref())
         .expect("set not before");
@@ -320,6 +359,18 @@ async fn seed_gateway_scope_fixture(db: &Database) {
     db.upsert_role_action("role-plant-sync-execute", "plant.sync.execute")
         .await
         .expect("upsert sync action");
+    db.upsert_role(&Role {
+        id: "role-plant-profile-reader".to_owned(),
+        organization_id: None,
+        code: "plant.profile.read".to_owned(),
+        name: "Plant Profile Read".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert profile role");
+    db.upsert_role_action("role-plant-profile-reader", "plant.profile.read")
+        .await
+        .expect("upsert profile role action");
 
     db.upsert_agreement(&Agreement {
         id: "agreement-sync".to_owned(),
@@ -866,6 +917,79 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
 }
 
 #[tokio::test]
+async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_common_name() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let expired = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let expired_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate expired rsa key")).expect("wrap key");
+    let expired_cert_der = create_expired_sign_cert_der(&expired_key, "Expired Certificate");
+    let expired_signature = sign_challenge(&expired_key, &expired.payload);
+    let expired_err = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: expired.id.clone(),
+            challenge_payload: expired.payload.clone(),
+            challenge_signature_base64: expired_signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: expired_cert_der,
+                sign_pri_key: vec![4, 5, 6],
+                km_cert_der: vec![7, 8, 9],
+                km_pri_key: vec![10, 11, 12],
+            },
+        })
+        .await
+        .expect_err("expired certificate should be rejected");
+    assert!(expired_err.to_string().contains("expired"));
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let valid_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate valid rsa key")).expect("wrap key");
+    let valid_cert_der = create_sign_cert_der_for_common_name(&valid_key, "CN From Certificate");
+    let valid_signature = sign_challenge(&valid_key, &stored.payload);
+    let stored_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id.clone(),
+            challenge_payload: stored.payload.clone(),
+            challenge_signature_base64: valid_signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: valid_cert_der,
+                sign_pri_key: vec![4, 5, 6],
+                km_cert_der: vec![7, 8, 9],
+                km_pri_key: vec![10, 11, 12],
+            },
+        })
+        .await
+        .expect("register certificate");
+    assert_eq!(stored_cert.common_name, "CN From Certificate");
+}
+
+#[tokio::test]
 async fn gateway_sync_scope_requires_permission_for_existing_plant() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
     seed_gateway_scope_fixture(&db).await;
@@ -875,6 +999,119 @@ async fn gateway_sync_scope_requires_permission_for_existing_plant() {
         .await
         .expect_err("existing plant should require plant sync execute permission");
     assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn gateway_sync_scope_lists_executable_facilities_in_one_query_shape() {
+    let (_service, db, _db_dir, _artifacts_dir) = build_service().await;
+    seed_gateway_scope_fixture(&db).await;
+
+    db.upsert_plant(&domain::Plant {
+        id: "FAC-SYNC-002".to_owned(),
+        facility_code: "FAC-SYNC-002".to_owned(),
+        name: "Sync Plant 2".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        contract_no: "CN-SYNC-002".to_owned(),
+        address: "Busan".to_owned(),
+        installed_kw: 50.0,
+        rec_start_date: "2026-02-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert second plant");
+    for (binding_id, resource_id, role_id) in [
+        (
+            "binding-org-sync-execute-1",
+            "FAC-SYNC-001",
+            "role-plant-sync-execute",
+        ),
+        (
+            "binding-org-sync-execute-2",
+            "FAC-SYNC-002",
+            "role-plant-sync-execute",
+        ),
+        (
+            "binding-org-profile-read-1",
+            "FAC-SYNC-001",
+            "role-plant-profile-reader",
+        ),
+        (
+            "binding-org-profile-read-2",
+            "FAC-SYNC-002",
+            "role-plant-profile-reader",
+        ),
+    ] {
+        db.save_role_binding(&RoleBinding {
+            id: binding_id.to_owned(),
+            subject_type: RoleBindingSubjectType::Organization,
+            subject_id: "operator-org".to_owned(),
+            subject_organization_id: "operator-org".to_owned(),
+            resource_type: RoleBindingResourceType::Plant,
+            resource_id: resource_id.to_owned(),
+            role_id: role_id.to_owned(),
+            agreement_id: Some("agreement-sync".to_owned()),
+            state: RoleBindingState::Active,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            created_at: "2026-04-03T00:00:00Z".to_owned(),
+            updated_at: "2026-04-03T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("grant plant binding");
+    }
+    for (binding_id, resource_id, role_id) in [
+        (
+            "binding-user-sync-execute-1",
+            "FAC-SYNC-001",
+            "role-plant-sync-execute",
+        ),
+        (
+            "binding-user-sync-execute-2",
+            "FAC-SYNC-002",
+            "role-plant-sync-execute",
+        ),
+        (
+            "binding-user-profile-read-1",
+            "FAC-SYNC-001",
+            "role-plant-profile-reader",
+        ),
+        (
+            "binding-user-profile-read-2",
+            "FAC-SYNC-002",
+            "role-plant-profile-reader",
+        ),
+    ] {
+        db.save_role_binding(&RoleBinding {
+            id: binding_id.to_owned(),
+            subject_type: RoleBindingSubjectType::User,
+            subject_id: "bootstrap-user".to_owned(),
+            subject_organization_id: "operator-org".to_owned(),
+            resource_type: RoleBindingResourceType::Plant,
+            resource_id: resource_id.to_owned(),
+            role_id: role_id.to_owned(),
+            agreement_id: None,
+            state: RoleBindingState::Active,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            created_at: "2026-04-03T00:00:00Z".to_owned(),
+            updated_at: "2026-04-03T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("grant user plant binding");
+    }
+
+    let facilities = db
+        .list_user_plant_action_facility_codes_with_consistency(
+            "bootstrap-user",
+            "operator-org",
+            "plant.sync.execute",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("list executable facility codes");
+    assert_eq!(
+        facilities,
+        vec!["FAC-SYNC-001".to_owned(), "FAC-SYNC-002".to_owned()]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

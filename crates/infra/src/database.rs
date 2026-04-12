@@ -2396,6 +2396,52 @@ impl Database {
             > 0)
     }
 
+    pub async fn list_user_plant_action_facility_codes_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        action_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<String>> {
+        #[derive(Debug)]
+        struct FacilityCodeRow {
+            facility_code: String,
+        }
+
+        impl From<&mut Row<'_>> for FacilityCodeRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    facility_code: row.get("facility_code"),
+                }
+            }
+        }
+
+        let rows: Vec<FacilityCodeRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT DISTINCT p.facility_code
+                 FROM effective_user_plant_visibility v
+                 JOIN effective_user_plant_actions a
+                   ON a.user_id = v.user_id
+                  AND a.organization_id = v.organization_id
+                  AND a.plant_id = v.plant_id
+                 JOIN plants p ON p.id = v.plant_id
+                 WHERE v.user_id = $1
+                   AND v.organization_id = $2
+                   AND a.action_id = $3
+                 ORDER BY p.facility_code ASC",
+                params!(
+                    user_id.to_owned(),
+                    organization_id.to_owned(),
+                    action_id.to_owned()
+                ),
+                "effective user plant action facility codes",
+            )
+            .await
+            .context("list user plant action facility codes")?;
+        Ok(rows.into_iter().map(|row| row.facility_code).collect())
+    }
+
     pub async fn has_user_organization_action(
         &self,
         user_id: &str,

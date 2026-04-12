@@ -574,30 +574,15 @@ impl AppService {
                 Err(err) => Err(err),
             },
             None => {
-                let plants = self
+                let executable = self
                     .db
-                    .list_visible_plants_with_consistency(
+                    .list_user_plant_action_facility_codes_with_consistency(
                         user_id,
                         organization_id,
+                        "plant.sync.execute",
                         Some(ReadConsistency::Strong),
                     )
                     .await?;
-                let mut executable = Vec::new();
-                for plant in plants {
-                    if self
-                        .db
-                        .has_user_plant_action_with_consistency(
-                            user_id,
-                            organization_id,
-                            &plant.id,
-                            "plant.sync.execute",
-                            Some(ReadConsistency::Strong),
-                        )
-                        .await?
-                    {
-                        executable.push(plant.facility_code);
-                    }
-                }
 
                 match executable.len() {
                     0 => {
@@ -1536,7 +1521,7 @@ impl AppService {
         let business_no = self
             .resolve_organization_business_no(organization_id, Some(&bundle.business_no))
             .await?;
-        let common_name = require_non_empty("commonName", &bundle.common_name)?;
+        let common_name = extract_common_name(&bundle.sign_cert_der)?;
         bundle.business_no = business_no.clone();
         bundle.common_name = common_name.clone();
 
