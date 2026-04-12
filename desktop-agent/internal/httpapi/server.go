@@ -41,6 +41,8 @@ type Config struct {
 var ErrApprovalRejected = errors.New("approval rejected")
 var errMethodNotAllowed = errors.New("method not allowed")
 
+const maxJSONBodyBytes int64 = 1024 * 1024
+
 type ApprovalPrompt struct {
 	Origin         string
 	Action         string
@@ -163,6 +165,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 
 	var req npki.SignRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -219,6 +222,7 @@ func (s *Server) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApproveEphemeralRun(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	result, status, err := s.handleApprovedAction(r, "ephemeral")
 	if err != nil {
 		writeApprovalError(w, err)
@@ -228,6 +232,7 @@ func (s *Server) handleApproveEphemeralRun(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleApproveStoredRegistration(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	result, status, err := s.handleApprovedAction(r, "stored")
 	if err != nil {
 		writeApprovalError(w, err)

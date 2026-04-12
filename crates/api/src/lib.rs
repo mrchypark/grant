@@ -503,13 +503,21 @@ async fn execute_ephemeral_crawl(
             ),
         });
     }
+    let facility_code = service
+        .authorize_gateway_sync_scope(
+            &ctx.user_id,
+            &organization_id,
+            body.facility_code.as_deref(),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
     let run = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id,
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             bundle: map_proof_bundle(body.bundle)?,
-            facility_code: body.facility_code,
+            facility_code,
             start_month: body.start_month,
             end_month: body.end_month,
             mode: parse_sync_mode(body.mode.as_deref())?,
@@ -587,11 +595,19 @@ async fn issue_crawl_task_token(
             ),
         });
     }
+    let facility_code = service
+        .authorize_gateway_sync_scope(
+            &ctx.user_id,
+            &organization_id,
+            body.facility_code.as_deref(),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
     let issued = service
         .issue_crawl_task_token(IssueCrawlTaskTokenInput {
             organization_id,
             certificate_id,
-            facility_code: body.facility_code,
+            facility_code,
             start_month: body.start_month,
             end_month: body.end_month,
             mode: parse_sync_mode(body.mode.as_deref())?,

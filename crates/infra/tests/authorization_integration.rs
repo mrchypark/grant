@@ -246,6 +246,63 @@ fn fake_bundle() -> CertificateBundle {
     }
 }
 
+async fn seed_gateway_scope_fixture(db: &Database) {
+    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+        .await
+        .expect("owner org");
+    db.upsert_organization_with_owner("operator-org", "Operator Org", "Operator Org")
+        .await
+        .expect("operator org");
+    db.upsert_organization_identity("owner-org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("owner business no");
+    db.upsert_organization_identity("operator-org", Some("2768603291"), "Operator Org")
+        .await
+        .expect("operator business no");
+
+    db.upsert_role(&Role {
+        id: "role-plant-sync-execute".to_owned(),
+        organization_id: None,
+        code: "plant.sync.execute".to_owned(),
+        name: "Plant Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert sync role");
+    db.upsert_role_action("role-plant-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert sync action");
+
+    db.upsert_agreement(&Agreement {
+        id: "agreement-sync".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "owner-org".to_owned(),
+        grantee_organization_id: "operator-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "Sync Delegation".to_owned(),
+        reference_no: None,
+        starts_at: None,
+        ends_at: None,
+    })
+    .await
+    .expect("upsert agreement");
+
+    db.upsert_plant(&domain::Plant {
+        id: "FAC-SYNC-001".to_owned(),
+        facility_code: "FAC-SYNC-001".to_owned(),
+        name: "Sync Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        contract_no: "CN-SYNC-001".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert plant");
+}
+
 #[tokio::test]
 async fn requires_explicit_contract_backed_access_for_each_organization() {
     let (runtime, _dir) = test_runtime().await;
@@ -751,6 +808,18 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .await
         .expect_err("reused crawl task token should fail");
     assert!(token_reuse.to_string().contains("already used"));
+}
+
+#[tokio::test]
+async fn gateway_sync_scope_requires_permission_for_existing_plant() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+    seed_gateway_scope_fixture(&db).await;
+
+    let err = service
+        .authorize_gateway_sync_scope("bootstrap-user", "operator-org", Some("FAC-SYNC-001"))
+        .await
+        .expect_err("existing plant should require plant sync execute permission");
+    assert!(err.to_string().contains("cannot execute sync"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

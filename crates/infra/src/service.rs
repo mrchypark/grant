@@ -481,6 +481,82 @@ impl AppService {
         })
     }
 
+    pub async fn authorize_gateway_sync_scope(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: Option<&str>,
+    ) -> Result<Option<String>> {
+        match facility_code
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(facility_code) => match self.db.get_plant_by_facility_code(facility_code).await {
+                Ok(_) => {
+                    self.authorize_sync(user_id, organization_id, Some(facility_code))
+                        .await?;
+                    Ok(Some(facility_code.to_owned()))
+                }
+                Err(err) if err.to_string().contains("plant not found") => {
+                    self.authorize_organization_action(
+                        user_id,
+                        organization_id,
+                        organization_id,
+                        "organization.plant.create",
+                        &format!("create plant {}", facility_code),
+                    )
+                    .await?;
+                    Ok(Some(facility_code.to_owned()))
+                }
+                Err(err) => Err(err),
+            },
+            None => {
+                let plants = self
+                    .db
+                    .list_visible_plants_with_consistency(
+                        user_id,
+                        organization_id,
+                        Some(ReadConsistency::Strong),
+                    )
+                    .await?;
+                let mut executable = Vec::new();
+                for plant in plants {
+                    if self
+                        .db
+                        .has_user_plant_action_with_consistency(
+                            user_id,
+                            organization_id,
+                            &plant.id,
+                            "plant.sync.execute",
+                            Some(ReadConsistency::Strong),
+                        )
+                        .await?
+                    {
+                        executable.push(plant.facility_code);
+                    }
+                }
+
+                match executable.len() {
+                    0 => {
+                        self.authorize_organization_action(
+                            user_id,
+                            organization_id,
+                            organization_id,
+                            "organization.plant.create",
+                            "create plants",
+                        )
+                        .await?;
+                        Ok(None)
+                    }
+                    1 => Ok(executable.into_iter().next()),
+                    _ => anyhow::bail!(
+                        "facilityCode is required when multiple executable plants are visible"
+                    ),
+                }
+            }
+        }
+    }
+
     pub async fn consume_crawl_task_token_and_start_crawl(
         &self,
         input: StartCrawlWithTaskTokenInput,

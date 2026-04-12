@@ -241,6 +241,27 @@ func TestServerPreservesPasswordWhitespaceOnSign(t *testing.T) {
 	}
 }
 
+func TestServerRejectsOversizedSignBody(t *testing.T) {
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
+	sessionToken := openSession(t, handler)
+	oversizedPassword := strings.Repeat("x", int(maxJSONBodyBytes)+1)
+
+	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
+		"challenge":"challenge-1",
+		"certificateId":"cert-1",
+		"password":"`+oversizedPassword+`"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{}
 	handler := newTestHandler(
@@ -332,6 +353,34 @@ func TestServerApproveStoredRegistration(t *testing.T) {
 	}
 	if gateway.lastStoredRegister.Password != "secret-password" {
 		t.Fatalf("password = %q, want secret-password", gateway.lastStoredRegister.Password)
+	}
+}
+
+func TestServerRejectsOversizedApprovalBody(t *testing.T) {
+	handler := newTestHandler(
+		&stubNPKIService{},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      "secret-password",
+		}},
+		&stubGateway{},
+	)
+	sessionToken := openSession(t, handler)
+	oversizedBusinessNo := strings.Repeat("1", int(maxJSONBodyBytes)+1)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"http://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"`+oversizedBusinessNo+`"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
