@@ -2,8 +2,12 @@ package npki
 
 import (
 	"context"
+	"crypto"
 	"crypto/cipher"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
@@ -61,9 +65,10 @@ type SignRequest struct {
 }
 
 type SignResult struct {
-	CertificateID string      `json:"certificateId"`
-	Challenge     string      `json:"challenge"`
-	Bundle        ProofBundle `json:"bundle"`
+	CertificateID            string      `json:"certificateId"`
+	Challenge                string      `json:"challenge"`
+	ChallengeSignatureBase64 string      `json:"challengeSignatureBase64"`
+	Bundle                   ProofBundle `json:"bundle"`
 }
 
 type Service struct {
@@ -110,6 +115,10 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 	if err := validatePassword(bundle.signPriKey, req.Password); err != nil {
 		return SignResult{}, err
 	}
+	challengeSignatureBase64, err := signChallenge(bundle.signPriKey, req.Password, req.Challenge)
+	if err != nil {
+		return SignResult{}, err
+	}
 
 	businessNo := metadata.BusinessNo
 	if businessNo == "" {
@@ -117,8 +126,9 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 	}
 
 	return SignResult{
-		CertificateID: bundleDir,
-		Challenge:     req.Challenge,
+		CertificateID:            bundleDir,
+		Challenge:                req.Challenge,
+		ChallengeSignatureBase64: challengeSignatureBase64,
 		Bundle: ProofBundle{
 			BusinessNo:        businessNo,
 			CommonName:        metadata.CommonName,
@@ -396,23 +406,75 @@ func validatePassword(signPriKey []byte, password string) error {
 	if err != nil {
 		return err
 	}
-	key, iv, err := deriveDecryptionKey(encrypted.Meta.Algorithm, encrypted.Meta.Params.Salt, encrypted.Meta.Params.Iteration, []byte(password))
+	passwordBytes := []byte(password)
+	defer zeroBytes(passwordBytes)
+	key, iv, err := deriveDecryptionKey(
+		encrypted.Meta.Algorithm,
+		encrypted.Meta.Params.Salt,
+		encrypted.Meta.Params.Iteration,
+		passwordBytes,
+	)
 	if err != nil {
 		return err
 	}
+	defer zeroBytes(key)
+	defer zeroBytes(iv)
 	plainDER, err := decryptSEEDCBC(key, iv, encrypted.CipherText)
 	if err != nil {
 		return ErrInvalidPassword
 	}
+	defer zeroBytes(plainDER[:cap(plainDER)])
 
 	var decoded plainPrivateKey
 	if _, err := asn1.Unmarshal(plainDER, &decoded); err != nil {
 		return ErrInvalidPassword
 	}
+	defer zeroBytes(decoded.PrivateKey)
 	if _, err := x509.ParsePKCS1PrivateKey(decoded.PrivateKey); err != nil {
 		return ErrInvalidPassword
 	}
 	return nil
+}
+
+func signChallenge(signPriKey []byte, password string, challenge string) (string, error) {
+	encrypted, err := parseEncryptedPrivateKey(signPriKey)
+	if err != nil {
+		return "", err
+	}
+	passwordBytes := []byte(password)
+	defer zeroBytes(passwordBytes)
+	key, iv, err := deriveDecryptionKey(
+		encrypted.Meta.Algorithm,
+		encrypted.Meta.Params.Salt,
+		encrypted.Meta.Params.Iteration,
+		passwordBytes,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer zeroBytes(key)
+	defer zeroBytes(iv)
+	plainDER, err := decryptSEEDCBC(key, iv, encrypted.CipherText)
+	if err != nil {
+		return "", ErrInvalidPassword
+	}
+	defer zeroBytes(plainDER[:cap(plainDER)])
+
+	var decoded plainPrivateKey
+	if _, err := asn1.Unmarshal(plainDER, &decoded); err != nil {
+		return "", ErrInvalidPassword
+	}
+	defer zeroBytes(decoded.PrivateKey)
+	privateKey, err := x509.ParsePKCS1PrivateKey(decoded.PrivateKey)
+	if err != nil {
+		return "", ErrInvalidPassword
+	}
+	digest := sha256.Sum256([]byte(challenge))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", fmt.Errorf("sign challenge: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(signature), nil
 }
 
 func parseEncryptedPrivateKey(input []byte) (encryptedPrivateKey, error) {
@@ -432,6 +494,7 @@ func deriveDecryptionKey(algorithm asn1.ObjectIdentifier, salt []byte, iteration
 	}
 
 	digest := pbkdf1SHA1(password, salt, iteration, 20)
+	defer zeroBytes(digest)
 	key := append([]byte{}, digest[:16]...)
 
 	switch {
@@ -443,6 +506,10 @@ func deriveDecryptionKey(algorithm asn1.ObjectIdentifier, salt []byte, iteration
 	default:
 		return nil, nil, fmt.Errorf("unsupported NPKI private key algorithm")
 	}
+}
+
+func zeroBytes(buf []byte) {
+	clear(buf)
 }
 
 func decryptSEEDCBC(key []byte, iv []byte, cipherText []byte) ([]byte, error) {

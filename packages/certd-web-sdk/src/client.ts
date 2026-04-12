@@ -53,6 +53,7 @@ export type CrawlTaskToken = {
 export type ExecuteEphemeralExecutionInput = {
   challengeId: string;
   challengePayload: string;
+  challengeSignatureBase64: string;
   bundle: ProofBundle;
   facilityCode?: string;
   startMonth?: string;
@@ -63,6 +64,7 @@ export type ExecuteEphemeralExecutionInput = {
 export type RegisterStoredCertificateInput = {
   challengeId: string;
   challengePayload: string;
+  challengeSignatureBase64: string;
   bundle: ProofBundle;
 };
 

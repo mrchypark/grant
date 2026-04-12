@@ -28,6 +28,7 @@ type approvalPrompter interface {
 }
 
 type gatewayExecutor interface {
+	CreateChallenge(context.Context, GatewayChallengeRequest) (challengeResponse, error)
 	RunEphemeral(context.Context, GatewayEphemeralRequest) (map[string]any, error)
 	RegisterStored(context.Context, GatewayStoredRegistrationRequest) (map[string]any, error)
 }
@@ -65,23 +66,37 @@ type ApprovalActionRequest struct {
 }
 
 type GatewayEphemeralRequest struct {
-	BaseURL              string
-	OrganizationID       string
-	BusinessNo           string
-	Password             string
-	BearerToken          string
-	ActiveOrganizationID string
-	Bundle               npki.ProofBundle
+	BaseURL                  string
+	OrganizationID           string
+	BusinessNo               string
+	Password                 string
+	BearerToken              string
+	ActiveOrganizationID     string
+	ChallengeID              string
+	ChallengePayload         string
+	ChallengeSignatureBase64 string
+	Bundle                   npki.ProofBundle
 }
 
 type GatewayStoredRegistrationRequest struct {
+	BaseURL                  string
+	OrganizationID           string
+	BusinessNo               string
+	Password                 string
+	BearerToken              string
+	ActiveOrganizationID     string
+	ChallengeID              string
+	ChallengePayload         string
+	ChallengeSignatureBase64 string
+	Bundle                   npki.ProofBundle
+}
+
+type GatewayChallengeRequest struct {
 	BaseURL              string
 	OrganizationID       string
-	BusinessNo           string
-	Password             string
 	BearerToken          string
 	ActiveOrganizationID string
-	Bundle               npki.ProofBundle
+	Mode                 string
 }
 
 type Server struct {
@@ -269,6 +284,16 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if req.BusinessNo == "" {
 		return nil, 0, errors.New("businessNo must not be empty")
 	}
+	challenge, err := s.gateway.CreateChallenge(r.Context(), GatewayChallengeRequest{
+		BaseURL:              req.GatewayBaseURL,
+		OrganizationID:       req.OrganizationID,
+		BearerToken:          req.BearerToken,
+		ActiveOrganizationID: req.ActiveOrganizationID,
+		Mode:                 action,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
 
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	certificates, err := s.npki.ListCertificates(r.Context())
@@ -287,7 +312,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	}
 	signResult, err := s.npki.Sign(r.Context(), npki.SignRequest{
 		CertificateID: decision.CertificateID,
-		Challenge:     "pending",
+		Challenge:     challenge.Payload,
 		Password:      decision.Password,
 		BusinessNo:    req.BusinessNo,
 	})
@@ -298,24 +323,30 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	switch action {
 	case "ephemeral":
 		body, err := s.gateway.RunEphemeral(r.Context(), GatewayEphemeralRequest{
-			BaseURL:              req.GatewayBaseURL,
-			OrganizationID:       req.OrganizationID,
-			BusinessNo:           req.BusinessNo,
-			Password:             decision.Password,
-			BearerToken:          req.BearerToken,
-			ActiveOrganizationID: req.ActiveOrganizationID,
-			Bundle:               signResult.Bundle,
+			BaseURL:                  req.GatewayBaseURL,
+			OrganizationID:           req.OrganizationID,
+			BusinessNo:               req.BusinessNo,
+			Password:                 decision.Password,
+			BearerToken:              req.BearerToken,
+			ActiveOrganizationID:     req.ActiveOrganizationID,
+			ChallengeID:              challenge.ChallengeID,
+			ChallengePayload:         challenge.Payload,
+			ChallengeSignatureBase64: signResult.ChallengeSignatureBase64,
+			Bundle:                   signResult.Bundle,
 		})
 		return body, http.StatusAccepted, err
 	case "stored":
 		body, err := s.gateway.RegisterStored(r.Context(), GatewayStoredRegistrationRequest{
-			BaseURL:              req.GatewayBaseURL,
-			OrganizationID:       req.OrganizationID,
-			BusinessNo:           req.BusinessNo,
-			Password:             decision.Password,
-			BearerToken:          req.BearerToken,
-			ActiveOrganizationID: req.ActiveOrganizationID,
-			Bundle:               signResult.Bundle,
+			BaseURL:                  req.GatewayBaseURL,
+			OrganizationID:           req.OrganizationID,
+			BusinessNo:               req.BusinessNo,
+			Password:                 decision.Password,
+			BearerToken:              req.BearerToken,
+			ActiveOrganizationID:     req.ActiveOrganizationID,
+			ChallengeID:              challenge.ChallengeID,
+			ChallengePayload:         challenge.Payload,
+			ChallengeSignatureBase64: signResult.ChallengeSignatureBase64,
+			Bundle:                   signResult.Bundle,
 		})
 		return body, http.StatusCreated, err
 	default:
@@ -544,19 +575,20 @@ func NewHTTPGatewayExecutor() gatewayExecutor {
 	}
 }
 
+func (h httpGatewayExecutor) CreateChallenge(ctx context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
+	return h.createChallenge(ctx, req.BaseURL, req.OrganizationID, req.BearerToken, req.ActiveOrganizationID, req.Mode)
+}
+
 func (h httpGatewayExecutor) RunEphemeral(ctx context.Context, req GatewayEphemeralRequest) (map[string]any, error) {
-	challenge, err := h.createChallenge(ctx, req.BaseURL, req.OrganizationID, req.BearerToken, req.ActiveOrganizationID, "ephemeral")
-	if err != nil {
-		return nil, err
-	}
 	return h.postJSON(ctx, gatewayRequest{
 		BaseURL:              req.BaseURL,
 		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/ephemeral-executions", req.OrganizationID),
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
 		Body: map[string]any{
-			"challengeId":      challenge.ChallengeID,
-			"challengePayload": challenge.Payload,
+			"challengeId":              req.ChallengeID,
+			"challengePayload":         req.ChallengePayload,
+			"challengeSignatureBase64": req.ChallengeSignatureBase64,
 			"bundle": map[string]any{
 				"businessNo":        firstNonEmpty(req.Bundle.BusinessNo, req.BusinessNo),
 				"password":          req.Password,
@@ -571,18 +603,15 @@ func (h httpGatewayExecutor) RunEphemeral(ctx context.Context, req GatewayEpheme
 }
 
 func (h httpGatewayExecutor) RegisterStored(ctx context.Context, req GatewayStoredRegistrationRequest) (map[string]any, error) {
-	challenge, err := h.createChallenge(ctx, req.BaseURL, req.OrganizationID, req.BearerToken, req.ActiveOrganizationID, "stored")
-	if err != nil {
-		return nil, err
-	}
 	return h.postJSON(ctx, gatewayRequest{
 		BaseURL:              req.BaseURL,
 		Path:                 fmt.Sprintf("/api/v1/organizations/%s/certificates", req.OrganizationID),
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
 		Body: map[string]any{
-			"challengeId":      challenge.ChallengeID,
-			"challengePayload": challenge.Payload,
+			"challengeId":              req.ChallengeID,
+			"challengePayload":         req.ChallengePayload,
+			"challengeSignatureBase64": req.ChallengeSignatureBase64,
 			"bundle": map[string]any{
 				"businessNo":        firstNonEmpty(req.Bundle.BusinessNo, req.BusinessNo),
 				"password":          req.Password,

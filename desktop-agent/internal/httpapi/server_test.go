@@ -31,8 +31,9 @@ func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateM
 func (s *stubNPKIService) Sign(_ context.Context, req npki.SignRequest) (npki.SignResult, error) {
 	s.lastSignReq = req
 	return npki.SignResult{
-		CertificateID: "cert-1",
-		Challenge:     req.Challenge,
+		CertificateID:            "cert-1",
+		Challenge:                req.Challenge,
+		ChallengeSignatureBase64: "c2lnbmF0dXJl",
 		Bundle: npki.ProofBundle{
 			BusinessNo:        "2768603291",
 			CommonName:        "Test Certificate",
@@ -58,8 +59,21 @@ func (s stubApprover) PromptApproval(context.Context, ApprovalPrompt) (ApprovalD
 
 type stubGateway struct {
 	mu                 sync.Mutex
+	challenge          challengeResponse
 	lastEphemeral      GatewayEphemeralRequest
 	lastStoredRegister GatewayStoredRegistrationRequest
+}
+
+func (s *stubGateway) CreateChallenge(_ context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.challenge.ChallengeID != "" {
+		return s.challenge, nil
+	}
+	return challengeResponse{
+		ChallengeID: "challenge-1",
+		Payload:     "cert-gateway:org-1:ephemeral::nonce:2026-04-12T00:00:00Z",
+	}, nil
 }
 
 func (s *stubGateway) RunEphemeral(_ context.Context, req GatewayEphemeralRequest) (map[string]any, error) {
@@ -263,16 +277,22 @@ func TestServerRejectsOversizedSignBody(t *testing.T) {
 }
 
 func TestServerApproveEphemeralRun(t *testing.T) {
-	gateway := &stubGateway{}
-	handler := newTestHandler(
-		&stubNPKIService{
-			certificates: []npki.CertificateMetadata{{
-				ID:         "cert-1",
-				CommonName: "Test Certificate",
-				BusinessNo: "2768603291",
-				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
-			}},
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-1",
+			Payload:     "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z",
 		},
+	}
+	npkiSvc := &stubNPKIService{
+		certificates: []npki.CertificateMetadata{{
+			ID:         "cert-1",
+			CommonName: "Test Certificate",
+			BusinessNo: "2768603291",
+			NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	handler := newTestHandler(
+		npkiSvc,
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
 			Password:      "secret-password",
@@ -304,22 +324,40 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	if got["status"] != "completed" {
 		t.Fatalf("status = %v, want completed", got["status"])
 	}
+	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
+		t.Fatalf("challenge = %q", npkiSvc.lastSignReq.Challenge)
+	}
 	if gateway.lastEphemeral.Password != "secret-password" {
 		t.Fatalf("password = %q, want secret-password", gateway.lastEphemeral.Password)
+	}
+	if gateway.lastEphemeral.ChallengeID != "challenge-ephemeral-1" {
+		t.Fatalf("challengeId = %q, want challenge-ephemeral-1", gateway.lastEphemeral.ChallengeID)
+	}
+	if gateway.lastEphemeral.ChallengePayload != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
+		t.Fatalf("challengePayload = %q", gateway.lastEphemeral.ChallengePayload)
+	}
+	if gateway.lastEphemeral.ChallengeSignatureBase64 == "" {
+		t.Fatal("challengeSignatureBase64 is empty")
 	}
 }
 
 func TestServerApproveStoredRegistration(t *testing.T) {
-	gateway := &stubGateway{}
-	handler := newTestHandler(
-		&stubNPKIService{
-			certificates: []npki.CertificateMetadata{{
-				ID:         "cert-1",
-				CommonName: "Test Certificate",
-				BusinessNo: "2768603291",
-				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
-			}},
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-stored-1",
+			Payload:     "cert-gateway:org-1:stored::nonce-2:2026-04-12T00:00:00Z",
 		},
+	}
+	npkiSvc := &stubNPKIService{
+		certificates: []npki.CertificateMetadata{{
+			ID:         "cert-1",
+			CommonName: "Test Certificate",
+			BusinessNo: "2768603291",
+			NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	handler := newTestHandler(
+		npkiSvc,
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
 			Password:      "secret-password",
@@ -351,8 +389,14 @@ func TestServerApproveStoredRegistration(t *testing.T) {
 	if got["id"] != "stored-cert-1" {
 		t.Fatalf("id = %v, want stored-cert-1", got["id"])
 	}
+	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:stored::nonce-2:2026-04-12T00:00:00Z" {
+		t.Fatalf("challenge = %q", npkiSvc.lastSignReq.Challenge)
+	}
 	if gateway.lastStoredRegister.Password != "secret-password" {
 		t.Fatalf("password = %q, want secret-password", gateway.lastStoredRegister.Password)
+	}
+	if gateway.lastStoredRegister.ChallengeSignatureBase64 == "" {
+		t.Fatal("challengeSignatureBase64 is empty")
 	}
 }
 

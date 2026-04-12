@@ -177,14 +177,14 @@ Rust `certd` 안에 별도 서비스가 아니라 새로운 기능 경계로 넣
 입력:
 
 - `challengeId`
-- `signedPayload`
-- `certificateChain`
-- `crawlRequest`
+- `challengePayload`
+- `challengeSignatureBase64`
+- `bundle`
 
 동작:
 
 - challenge 일치 여부 확인
-- 서명 검증
+- `signCertDerBase64`의 공개키로 `challengePayload` 서명 검증
 - 인증서 상태 검증
 - business number 등 식별자 추출
 - 즉시 수집 실행
@@ -201,14 +201,14 @@ Rust `certd` 안에 별도 서비스가 아니라 새로운 기능 경계로 넣
 입력:
 
 - `challengeId`
-- `signedPayload`
-- `certificateChain`
-- `certificateBundle`
+- `challengePayload`
+- `challengeSignatureBase64`
+- `bundle`
 
 동작:
 
 - challenge 검증
-- 서명 검증
+- `signCertDerBase64`의 공개키로 `challengePayload` 서명 검증
 - 인증서 식별자 추출
 - bundle 암호화 저장
 

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use domain::{
     Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
@@ -33,6 +34,14 @@ use infra::{
         AppService, CreateCertGatewayChallengeInput, ExecuteEphemeralCrawlInput,
         IssueCrawlTaskTokenInput, RegisterCertificateFromProofInput, StartCrawlWithTaskTokenInput,
     },
+};
+use openssl::{
+    asn1::Asn1Time,
+    hash::MessageDigest,
+    pkey::{PKey, Private},
+    rsa::Rsa,
+    sign::Signer,
+    x509::{X509, X509NameBuilder},
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -234,16 +243,55 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
     })
 }
 
-fn fake_bundle() -> CertificateBundle {
-    CertificateBundle {
-        business_no: "2768603291".to_owned(),
-        password: "secret-password".to_owned(),
-        common_name: "Test Certificate".to_owned(),
-        sign_cert_der: vec![1, 2, 3],
-        sign_pri_key: vec![4, 5, 6],
-        km_cert_der: vec![7, 8, 9],
-        km_pri_key: vec![10, 11, 12],
-    }
+fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, String) {
+    let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der(&key);
+    let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
+    (
+        CertificateBundle {
+            business_no: "2768603291".to_owned(),
+            password: "secret-password".to_owned(),
+            common_name: "Test Certificate".to_owned(),
+            sign_cert_der: cert_der,
+            sign_pri_key: vec![4, 5, 6],
+            km_cert_der: vec![7, 8, 9],
+            km_pri_key: vec![10, 11, 12],
+        },
+        challenge_signature_base64,
+    )
+}
+
+fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
+    let mut name = X509NameBuilder::new().expect("x509 name");
+    name.append_entry_by_text("CN", "Test Certificate")
+        .expect("append cn");
+    let name = name.build();
+
+    let mut builder = X509::builder().expect("x509 builder");
+    builder.set_version(2).expect("set version");
+    builder.set_subject_name(&name).expect("set subject");
+    builder.set_issuer_name(&name).expect("set issuer");
+    builder.set_pubkey(key).expect("set pubkey");
+    let not_before = Asn1Time::days_from_now(0).expect("not before");
+    let not_after = Asn1Time::days_from_now(365).expect("not after");
+    builder
+        .set_not_before(not_before.as_ref())
+        .expect("set not before");
+    builder
+        .set_not_after(not_after.as_ref())
+        .expect("set not after");
+    builder
+        .sign(key, MessageDigest::sha256())
+        .expect("sign cert");
+    builder.build().to_der().expect("cert der")
+}
+
+fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
+    let mut signer = Signer::new(MessageDigest::sha256(), key).expect("create signer");
+    signer
+        .update(challenge_payload.as_bytes())
+        .expect("sign challenge payload");
+    STANDARD.encode(signer.sign_to_vec().expect("signature"))
 }
 
 async fn seed_gateway_scope_fixture(db: &Database) {
@@ -699,12 +747,14 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         })
         .await
         .expect("create expired challenge");
+    let (expired_bundle, expired_signature) = fake_bundle_and_signature(&expired.payload);
     let err = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
             challenge_id: expired.id.clone(),
             challenge_payload: expired.payload.clone(),
-            bundle: fake_bundle(),
+            challenge_signature_base64: expired_signature,
+            bundle: expired_bundle,
         })
         .await
         .expect_err("expired challenge should be rejected");
@@ -720,12 +770,14 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         })
         .await
         .expect("create stored challenge");
+    let (stored_bundle, stored_signature) = fake_bundle_and_signature(&stored.payload);
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
             challenge_id: stored.id.clone(),
             challenge_payload: stored.payload.clone(),
-            bundle: fake_bundle(),
+            challenge_signature_base64: stored_signature.clone(),
+            bundle: stored_bundle.clone(),
         })
         .await
         .expect("register certificate");
@@ -737,7 +789,8 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
             organization_id: "bootstrap-user".to_owned(),
             challenge_id: stored.id.clone(),
             challenge_payload: stored.payload.clone(),
-            bundle: fake_bundle(),
+            challenge_signature_base64: stored_signature,
+            bundle: stored_bundle,
         })
         .await
         .expect_err("reused challenge should fail");
@@ -753,12 +806,14 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         })
         .await
         .expect("create ephemeral challenge");
+    let (ephemeral_bundle, ephemeral_signature) = fake_bundle_and_signature(&ephemeral.payload);
     let run = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
             challenge_id: ephemeral.id.clone(),
             challenge_payload: ephemeral.payload.clone(),
-            bundle: fake_bundle(),
+            challenge_signature_base64: ephemeral_signature,
+            bundle: ephemeral_bundle,
             facility_code: Some("FAC-002".to_owned()),
             start_month: Some("2026-01".to_owned()),
             end_month: Some("2026-03".to_owned()),

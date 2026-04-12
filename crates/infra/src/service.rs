@@ -14,6 +14,7 @@ use crate::{
         StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
+    npki::verify_challenge_signature,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
@@ -25,12 +26,51 @@ use domain::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap, error::Error as StdError, fmt, future::Future, path::Path, pin::Pin,
+    sync::Arc,
+};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceErrorKind {
+    BadRequest,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub struct ServiceError {
+    kind: ServiceErrorKind,
+    message: String,
+}
+
+impl ServiceError {
+    pub fn new(kind: ServiceErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> ServiceErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl StdError for ServiceError {}
 
 #[derive(Clone)]
 pub struct AppService {
@@ -126,6 +166,7 @@ pub struct RegisterCertificateFromProofInput {
     pub organization_id: String,
     pub challenge_id: String,
     pub challenge_payload: String,
+    pub challenge_signature_base64: String,
     pub bundle: CertificateBundle,
 }
 
@@ -134,6 +175,7 @@ pub struct ExecuteEphemeralCrawlInput {
     pub organization_id: String,
     pub challenge_id: String,
     pub challenge_payload: String,
+    pub challenge_signature_base64: String,
     pub bundle: CertificateBundle,
     pub facility_code: Option<String>,
     pub start_month: Option<String>,
@@ -397,6 +439,8 @@ impl AppService {
         self.consume_valid_challenge(
             &input.challenge_id,
             &input.challenge_payload,
+            &input.challenge_signature_base64,
+            &input.bundle.sign_cert_der,
             "stored",
             &organization_id,
         )
@@ -421,6 +465,8 @@ impl AppService {
         self.consume_valid_challenge(
             &input.challenge_id,
             &input.challenge_payload,
+            &input.challenge_signature_base64,
+            &input.bundle.sign_cert_der,
             "ephemeral",
             &organization_id,
         )
@@ -450,7 +496,9 @@ impl AppService {
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
         let certificate = self.db.get_certificate_by_id(&certificate_id).await?;
         if certificate.organization_id != organization_id {
-            anyhow::bail!("certificate does not belong to organization");
+            return Err(bad_request_error(
+                "certificate does not belong to organization",
+            ));
         }
 
         let scope = CrawlTaskScope {
@@ -549,9 +597,9 @@ impl AppService {
                         Ok(None)
                     }
                     1 => Ok(executable.into_iter().next()),
-                    _ => anyhow::bail!(
-                        "facilityCode is required when multiple executable plants are visible"
-                    ),
+                    _ => Err(bad_request_error(
+                        "facilityCode is required when multiple executable plants are visible",
+                    )),
                 }
             }
         }
@@ -566,14 +614,13 @@ impl AppService {
         let token_hash = hash_hex(&token);
         let issued = self.db.get_crawl_task_token_by_hash(&token_hash).await?;
         if is_expired(&issued.expires_at)? {
-            anyhow::bail!("crawl task token has expired");
+            return Err(bad_request_error("crawl task token has expired"));
         }
         if issued.organization_id != organization_id {
-            anyhow::bail!(
+            return Err(forbidden_error(format!(
                 "forbidden: crawl task token organization {} does not match request organization {}",
-                issued.organization_id,
-                organization_id
-            );
+                issued.organization_id, organization_id
+            )));
         }
         let consumed = self.db.consume_crawl_task_token(&token_hash).await?;
 
@@ -1495,29 +1542,40 @@ impl AppService {
         &self,
         challenge_id: &str,
         challenge_payload: &str,
+        challenge_signature_base64: &str,
+        sign_cert_der: &[u8],
         expected_mode: &str,
         organization_id: &str,
     ) -> Result<()> {
         let challenge = self.db.get_cert_gateway_challenge(challenge_id).await?;
         if challenge.organization_id != organization_id {
-            anyhow::bail!("cert gateway challenge organization mismatch");
+            return Err(bad_request_error(
+                "cert gateway challenge organization mismatch",
+            ));
         }
         if challenge.mode != expected_mode {
-            anyhow::bail!(
+            return Err(bad_request_error(format!(
                 "cert gateway challenge mode mismatch: expected {}, got {}",
-                expected_mode,
-                challenge.mode
-            );
+                expected_mode, challenge.mode
+            )));
         }
         if challenge.consumed_at.is_some() {
-            anyhow::bail!("cert gateway challenge already consumed");
+            return Err(bad_request_error("cert gateway challenge already consumed"));
         }
         if is_expired(&challenge.expires_at)? {
-            anyhow::bail!("cert gateway challenge has expired");
+            return Err(bad_request_error("cert gateway challenge has expired"));
         }
         if hash_hex(challenge_payload) != challenge.payload_hash {
-            anyhow::bail!("cert gateway challenge payload mismatch");
+            return Err(bad_request_error("cert gateway challenge payload mismatch"));
         }
+        let challenge_signature_base64 =
+            require_non_empty("challengeSignatureBase64", challenge_signature_base64)?;
+        verify_challenge_signature(
+            sign_cert_der,
+            challenge_payload,
+            &challenge_signature_base64,
+        )
+        .map_err(|err| bad_request_error(err.to_string()))?;
         self.db.consume_cert_gateway_challenge(challenge_id).await?;
         Ok(())
     }
@@ -1579,17 +1637,16 @@ fn normalize_active_organization(
     if organizations.iter().any(|org| org.id == requested) {
         return Ok(Some(requested.to_owned()));
     }
-    anyhow::bail!(
+    Err(forbidden_error(format!(
         "forbidden: trailbase user {} is not an active member of organization {}",
-        identity.external_user_id,
-        requested
-    );
+        identity.external_user_id, requested
+    )))
 }
 
 fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        anyhow::bail!("{field_name} must not be empty");
+        return Err(bad_request_error(format!("{field_name} must not be empty")));
     }
     Ok(trimmed.to_owned())
 }
@@ -1779,7 +1836,7 @@ fn parse_sync_mode(value: &str) -> Result<SyncMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "full" => Ok(SyncMode::Full),
         "delta" => Ok(SyncMode::Delta),
-        other => anyhow::bail!("unsupported sync mode: {other}"),
+        other => Err(bad_request_error(format!("unsupported sync mode: {other}"))),
     }
 }
 
@@ -1799,4 +1856,16 @@ fn is_expired(expires_at: &str) -> Result<bool> {
 
 fn now_string() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ServiceError::new(kind, message))
+}
+
+fn bad_request_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::BadRequest, message)
+}
+
+fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::Forbidden, message)
 }

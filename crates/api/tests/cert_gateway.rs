@@ -4,6 +4,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -20,6 +21,14 @@ use infra::{
     database::Database,
     runtime::HiqliteRuntime,
     service::AppService,
+};
+use openssl::{
+    asn1::Asn1Time,
+    hash::MessageDigest,
+    pkey::{PKey, Private},
+    rsa::Rsa,
+    sign::Signer,
+    x509::{X509, X509NameBuilder},
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -188,16 +197,63 @@ fn task_token_request(path: &str, token: &str) -> Request<Body> {
         .expect("request")
 }
 
-fn proof_bundle() -> Value {
+fn proof_bundle_request(challenge_payload: &str) -> Value {
+    let (bundle, challenge_signature_base64) = signed_proof_bundle(challenge_payload);
     json!({
-        "businessNo": "2768603291",
-        "password": "secret-password",
-        "commonName": "Test Certificate",
-        "signCertDerBase64": "AQID",
-        "signPriKeyBase64": "BAUG",
-        "kmCertDerBase64": "BwgJ",
-        "kmPriKeyBase64": "CgsM"
+        "challengeSignatureBase64": challenge_signature_base64,
+        "bundle": bundle,
     })
+}
+
+fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
+    let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der(&key);
+    let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
+    (
+        json!({
+            "businessNo": "2768603291",
+            "password": "secret-password",
+            "commonName": "Test Certificate",
+            "signCertDerBase64": STANDARD.encode(cert_der),
+            "signPriKeyBase64": "BAUG",
+            "kmCertDerBase64": "BwgJ",
+            "kmPriKeyBase64": "CgsM"
+        }),
+        challenge_signature_base64,
+    )
+}
+
+fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
+    let mut name = X509NameBuilder::new().expect("x509 name");
+    name.append_entry_by_text("CN", "Test Certificate")
+        .expect("append cn");
+    let name = name.build();
+
+    let mut builder = X509::builder().expect("x509 builder");
+    builder.set_version(2).expect("set version");
+    builder.set_subject_name(&name).expect("set subject");
+    builder.set_issuer_name(&name).expect("set issuer");
+    builder.set_pubkey(key).expect("set pubkey");
+    let not_before = Asn1Time::days_from_now(0).expect("not before");
+    let not_after = Asn1Time::days_from_now(365).expect("not after");
+    builder
+        .set_not_before(not_before.as_ref())
+        .expect("set not before");
+    builder
+        .set_not_after(not_after.as_ref())
+        .expect("set not after");
+    builder
+        .sign(key, MessageDigest::sha256())
+        .expect("sign cert");
+    builder.build().to_der().expect("cert der")
+}
+
+fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
+    let mut signer = Signer::new(MessageDigest::sha256(), key).expect("create signer");
+    signer
+        .update(challenge_payload.as_bytes())
+        .expect("sign challenge payload");
+    STANDARD.encode(signer.sign_to_vec().expect("signature"))
 }
 
 async fn json_body(response: axum::response::Response) -> Value {
@@ -243,11 +299,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/certificates",
             "bootstrap-user",
             "bootstrap-user",
-            json!({
-                "challengeId": challenge_id,
-                "challengePayload": challenge_payload,
-                "bundle": proof_bundle()
-            }),
+            {
+                let mut request = proof_bundle_request(&challenge_payload);
+                request["challengeId"] = Value::String(challenge_id.clone());
+                request["challengePayload"] = Value::String(challenge_payload.clone());
+                request
+            },
         ))
         .await
         .expect("register response");
@@ -343,15 +400,19 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/ephemeral-executions",
             "bootstrap-user",
             "bootstrap-user",
-            json!({
-                "challengeId": ephemeral_challenge_json["challengeId"],
-                "challengePayload": ephemeral_challenge_json["payload"],
-                "bundle": proof_bundle(),
-                "facilityCode": "FAC-002",
-                "startMonth": "2026-01",
-                "endMonth": "2026-03",
-                "mode": "delta"
-            }),
+            {
+                let payload = ephemeral_challenge_json["payload"]
+                    .as_str()
+                    .expect("ephemeral payload");
+                let mut request = proof_bundle_request(payload);
+                request["challengeId"] = ephemeral_challenge_json["challengeId"].clone();
+                request["challengePayload"] = ephemeral_challenge_json["payload"].clone();
+                request["facilityCode"] = Value::String("FAC-002".to_owned());
+                request["startMonth"] = Value::String("2026-01".to_owned());
+                request["endMonth"] = Value::String("2026-03".to_owned());
+                request["mode"] = Value::String("delta".to_owned());
+                request
+            },
         ))
         .await
         .expect("ephemeral response");
@@ -386,11 +447,15 @@ async fn crawl_start_rejects_organization_path_mismatch() {
             "/api/v1/organizations/bootstrap-user/certificates",
             "bootstrap-user",
             "bootstrap-user",
-            json!({
-                "challengeId": challenge_json["challengeId"],
-                "challengePayload": challenge_json["payload"],
-                "bundle": proof_bundle()
-            }),
+            {
+                let payload = challenge_json["payload"]
+                    .as_str()
+                    .expect("challenge payload");
+                let mut request = proof_bundle_request(payload);
+                request["challengeId"] = challenge_json["challengeId"].clone();
+                request["challengePayload"] = challenge_json["payload"].clone();
+                request
+            },
         ))
         .await
         .expect("register response");
@@ -442,4 +507,52 @@ async fn crawl_start_rejects_organization_path_mismatch() {
         .await
         .expect("retry response");
     assert_eq!(retry_response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn stored_registration_requires_challenge_signature() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    let challenge_response = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+        ))
+        .await
+        .expect("challenge response");
+    assert_eq!(challenge_response.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge_response).await;
+
+    let register_response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/certificates",
+            "bootstrap-user",
+            "bootstrap-user",
+            {
+                let (bundle, _) = signed_proof_bundle(
+                    challenge_json["payload"]
+                        .as_str()
+                        .expect("challenge payload"),
+                );
+                json!({
+                    "challengeId": challenge_json["challengeId"],
+                    "challengePayload": challenge_json["payload"],
+                    "challengeSignatureBase64": "",
+                    "bundle": bundle
+                })
+            },
+        ))
+        .await
+        .expect("register response");
+    assert_eq!(register_response.status(), StatusCode::BAD_REQUEST);
+    let register_json = json_body(register_response).await;
+    assert_eq!(
+        register_json["error"],
+        "challengeSignatureBase64 must not be empty"
+    );
 }

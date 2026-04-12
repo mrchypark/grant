@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use openssl::{
+    hash::MessageDigest,
     nid::Nid,
     pkcs7::{Pkcs7, Pkcs7Flags},
     pkey::{PKey, Private},
     provider::Provider,
     rsa::Rsa,
+    sign::Verifier,
     stack::Stack,
     symm::{Cipher, Crypter, Mode},
     x509::X509,
@@ -120,6 +122,34 @@ impl NpkiSigner {
             .context("encode PKCS7 envelopedData to PEM")?;
         String::from_utf8(pem).context("decode PKCS7 PEM as UTF-8")
     }
+}
+
+pub fn verify_challenge_signature(
+    sign_cert_der: &[u8],
+    challenge_payload: &str,
+    challenge_signature_base64: &str,
+) -> Result<()> {
+    ensure_openssl_legacy_provider()?;
+    let certificate =
+        X509::from_der(sign_cert_der).context("parse signCert.der as X509 for challenge verify")?;
+    let public_key = certificate
+        .public_key()
+        .context("extract certificate public key")?;
+    let signature = STANDARD
+        .decode(challenge_signature_base64)
+        .context("decode challengeSignatureBase64")?;
+    let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key)
+        .context("create challenge signature verifier")?;
+    verifier
+        .update(challenge_payload.as_bytes())
+        .context("update challenge signature verifier")?;
+    let verified = verifier
+        .verify(&signature)
+        .context("verify challenge signature")?;
+    if !verified {
+        bail!("invalid cert gateway challenge signature");
+    }
+    Ok(())
 }
 
 fn parse_certificate(input: &[u8]) -> Result<X509> {

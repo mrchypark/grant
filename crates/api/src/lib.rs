@@ -19,7 +19,8 @@ use infra::{
     service::{
         AppService, BackupInfo, CreateCertGatewayChallengeInput, CreatePlantInput,
         ExecuteEphemeralCrawlInput, IssueCrawlTaskTokenInput, PlantView, PutCertificateInput,
-        RegisterCertificateFromProofInput, StartCrawlWithTaskTokenInput, SyncInput,
+        RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
+        StartCrawlWithTaskTokenInput, SyncInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -231,6 +232,7 @@ struct ProofBundleRequest {
 struct RegisterStoredCertificateRequest {
     challenge_id: String,
     challenge_payload: String,
+    challenge_signature_base64: String,
     bundle: ProofBundleRequest,
 }
 
@@ -239,6 +241,7 @@ struct RegisterStoredCertificateRequest {
 struct ExecuteEphemeralCrawlRequest {
     challenge_id: String,
     challenge_payload: String,
+    challenge_signature_base64: String,
     bundle: ProofBundleRequest,
     facility_code: Option<String>,
     start_month: Option<String>,
@@ -516,6 +519,7 @@ async fn execute_ephemeral_crawl(
             organization_id,
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
+            challenge_signature_base64: body.challenge_signature_base64,
             bundle: map_proof_bundle(body.bundle)?,
             facility_code,
             start_month: body.start_month,
@@ -548,6 +552,7 @@ async fn register_stored_certificate(
             organization_id,
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
+            challenge_signature_base64: body.challenge_signature_base64,
             bundle: map_proof_bundle(body.bundle)?,
         })
         .await
@@ -1246,6 +1251,12 @@ impl ApiError {
     }
 
     fn bad_request_if_known(err: anyhow::Error) -> Self {
+        if let Some(status) = structured_status(&err) {
+            return Self {
+                status,
+                message: err.to_string(),
+            };
+        }
         let message = err.to_string();
         let status = if message.contains("businessNo")
             || message.contains("organizationId")
@@ -1270,6 +1281,12 @@ impl ApiError {
     }
 
     fn from_domain(err: anyhow::Error) -> Self {
+        if let Some(status) = structured_status(&err) {
+            return Self {
+                status,
+                message: err.to_string(),
+            };
+        }
         let message = err.to_string();
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
@@ -1293,6 +1310,12 @@ impl ApiError {
     }
 
     fn from_auth(err: anyhow::Error) -> Self {
+        if let Some(status) = structured_status(&err) {
+            return Self {
+                status,
+                message: err.to_string(),
+            };
+        }
         let message = err.to_string();
         let status = if message.contains("unauthorized:") {
             StatusCode::UNAUTHORIZED
@@ -1309,6 +1332,20 @@ impl ApiError {
     }
 }
 
+fn structured_status(err: &anyhow::Error) -> Option<StatusCode> {
+    err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<ServiceError>()
+            .map(|err| match err.kind() {
+                ServiceErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+                ServiceErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+                ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
+                ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
+                ServiceErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            })
+    })
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = Json(serde_json::json!({
@@ -1323,6 +1360,7 @@ mod tests {
     use super::ApiError;
     use anyhow::anyhow;
     use axum::http::StatusCode;
+    use infra::service::{ServiceError, ServiceErrorKind};
 
     #[test]
     fn auth_unavailable_errors_map_to_service_unavailable() {
@@ -1335,5 +1373,15 @@ mod tests {
         let err =
             ApiError::from_domain(anyhow!("unavailable: quorum validation path is not ready"));
         assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn structured_service_errors_override_string_matching() {
+        let err = ApiError::from_domain(anyhow::Error::new(ServiceError::new(
+            ServiceErrorKind::BadRequest,
+            "challengeSignatureBase64 must not be empty",
+        )));
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "challengeSignatureBase64 must not be empty");
     }
 }

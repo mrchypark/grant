@@ -18,6 +18,7 @@ export type AgentSignRequest = {
 export type AgentSignResponse = {
   certificateId: string;
   challenge: string;
+  challengeSignatureBase64: string;
   bundle: AgentProofBundle;
 };
 
