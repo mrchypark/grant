@@ -734,6 +734,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .expect("issue crawl task token");
     let started = service
         .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
             token: issued.token.clone(),
         })
         .await
@@ -744,6 +745,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
 
     let token_reuse = service
         .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
             token: issued.token,
         })
         .await

@@ -21,16 +21,18 @@ var testServerConfig = Config{
 
 type stubNPKIService struct {
 	certificates []npki.CertificateMetadata
+	lastSignReq  npki.SignRequest
 }
 
-func (s stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateMetadata, error) {
+func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateMetadata, error) {
 	return s.certificates, nil
 }
 
-func (s stubNPKIService) Sign(context.Context, npki.SignRequest) (npki.SignResult, error) {
+func (s *stubNPKIService) Sign(_ context.Context, req npki.SignRequest) (npki.SignResult, error) {
+	s.lastSignReq = req
 	return npki.SignResult{
 		CertificateID: "cert-1",
-		Challenge:     "challenge-1",
+		Challenge:     req.Challenge,
 		Bundle: npki.ProofBundle{
 			BusinessNo:        "2768603291",
 			CommonName:        "Test Certificate",
@@ -89,7 +91,7 @@ func (s *stubGateway) RegisterStored(_ context.Context, req GatewayStoredRegistr
 }
 
 func TestServerHealthz(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:4173")
@@ -109,7 +111,7 @@ func TestServerHealthz(t *testing.T) {
 
 func TestServerListsCertificates(t *testing.T) {
 	handler := newTestHandler(
-		stubNPKIService{
+		&stubNPKIService{
 			certificates: []npki.CertificateMetadata{{
 				ID:         "cert-1",
 				CommonName: "Test Certificate",
@@ -151,7 +153,7 @@ func TestServerListsCertificates(t *testing.T) {
 }
 
 func TestServerRejectsInvalidSignRequests(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 	sessionToken := openSession(t, handler)
 
 	testCases := []struct {
@@ -160,6 +162,7 @@ func TestServerRejectsInvalidSignRequests(t *testing.T) {
 	}{
 		{name: "missing password", body: `{"challenge":"nonce-1","certificateId":"cert-1"}`},
 		{name: "missing challenge", body: `{"password":"secret","certificateId":"cert-1"}`},
+		{name: "whitespace only password", body: `{"challenge":"nonce-1","certificateId":"cert-1","password":"   "}`},
 	}
 
 	for _, tc := range testCases {
@@ -179,7 +182,7 @@ func TestServerRejectsInvalidSignRequests(t *testing.T) {
 }
 
 func TestServerReturnsBundleOnSign(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
@@ -214,10 +217,34 @@ func TestServerReturnsBundleOnSign(t *testing.T) {
 	}
 }
 
+func TestServerPreservesPasswordWhitespaceOnSign(t *testing.T) {
+	npkiSvc := &stubNPKIService{}
+	handler := newTestHandler(npkiSvc, stubApprover{})
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
+		"challenge":"challenge-1",
+		"certificateId":"cert-1",
+		"password":"  secret-password  "
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if npkiSvc.lastSignReq.Password != "  secret-password  " {
+		t.Fatalf("password = %q, want surrounding whitespace preserved", npkiSvc.lastSignReq.Password)
+	}
+}
+
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{}
 	handler := newTestHandler(
-		stubNPKIService{
+		&stubNPKIService{
 			certificates: []npki.CertificateMetadata{{
 				ID:         "cert-1",
 				CommonName: "Test Certificate",
@@ -264,7 +291,7 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 func TestServerApproveStoredRegistration(t *testing.T) {
 	gateway := &stubGateway{}
 	handler := newTestHandler(
-		stubNPKIService{
+		&stubNPKIService{
 			certificates: []npki.CertificateMetadata{{
 				ID:         "cert-1",
 				CommonName: "Test Certificate",
@@ -309,7 +336,7 @@ func TestServerApproveStoredRegistration(t *testing.T) {
 }
 
 func TestServerApproveEphemeralRunHandlesUserRejection(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{err: ErrApprovalRejected})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{err: ErrApprovalRejected})
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
@@ -329,7 +356,7 @@ func TestServerApproveEphemeralRunHandlesUserRejection(t *testing.T) {
 }
 
 func TestServerRequiresSessionForSensitiveRoutes(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 
 	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:4173")
@@ -342,7 +369,7 @@ func TestServerRequiresSessionForSensitiveRoutes(t *testing.T) {
 }
 
 func TestServerRejectsDisallowedOrigin(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions/open", nil)
 	req.Header.Set("Origin", "http://evil.example")
@@ -355,7 +382,7 @@ func TestServerRejectsDisallowedOrigin(t *testing.T) {
 }
 
 func TestServerHandlesCORSPreflight(t *testing.T) {
-	handler := newTestHandler(stubNPKIService{}, stubApprover{})
+	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 
 	req := httptest.NewRequest(http.MethodOptions, "/sessions/open", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:4173")
@@ -375,7 +402,7 @@ func TestServerHandlesCORSPreflight(t *testing.T) {
 	}
 }
 
-func newTestHandler(npkiSvc stubNPKIService, approver stubApprover, gateways ...*stubGateway) http.Handler {
+func newTestHandler(npkiSvc npkiService, approver stubApprover, gateways ...*stubGateway) http.Handler {
 	gateway := &stubGateway{}
 	if len(gateways) > 0 && gateways[0] != nil {
 		gateway = gateways[0]

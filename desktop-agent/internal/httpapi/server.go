@@ -109,7 +109,7 @@ func NewServer(service npkiService, approver approvalPrompter, gateway gatewayEx
 		gateway:        gateway,
 		mux:            http.NewServeMux(),
 		allowedOrigins: allowlistFromConfig(cfg.AllowedOrigins),
-		sessions: newSessionManager(cfg.SessionSecret, cfg.SessionTTL),
+		sessions:       newSessionManager(cfg.SessionSecret, cfg.SessionTTL),
 	}
 	server.routes()
 	return server
@@ -171,13 +171,12 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	}
 	req.CertificateID = strings.TrimSpace(req.CertificateID)
 	req.Challenge = strings.TrimSpace(req.Challenge)
-	req.Password = strings.TrimSpace(req.Password)
 
 	switch {
 	case req.Challenge == "":
 		writeError(w, http.StatusBadRequest, "challenge must not be empty")
 		return
-	case req.Password == "":
+	case strings.TrimSpace(req.Password) == "":
 		writeError(w, http.StatusBadRequest, "password must not be empty")
 		return
 	}

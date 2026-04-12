@@ -487,17 +487,19 @@ impl AppService {
     ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let token = require_non_empty("token", &input.token)?;
-        let consumed = self.db.consume_crawl_task_token(&hash_hex(&token)).await?;
-        if is_expired(&consumed.expires_at)? {
+        let token_hash = hash_hex(&token);
+        let issued = self.db.get_crawl_task_token_by_hash(&token_hash).await?;
+        if is_expired(&issued.expires_at)? {
             anyhow::bail!("crawl task token has expired");
         }
-        if consumed.organization_id != organization_id {
+        if issued.organization_id != organization_id {
             anyhow::bail!(
                 "forbidden: crawl task token organization {} does not match request organization {}",
-                consumed.organization_id,
+                issued.organization_id,
                 organization_id
             );
         }
+        let consumed = self.db.consume_crawl_task_token(&token_hash).await?;
 
         let scope: CrawlTaskScope =
             serde_json::from_str(&consumed.scope_json).context("parse crawl task scope")?;

@@ -425,6 +425,7 @@ async fn crawl_start_rejects_organization_path_mismatch() {
         .to_owned();
 
     let mismatch_response = app
+        .clone()
         .oneshot(task_token_request(
             "/api/v1/organizations/other-org/crawls",
             &crawl_task_token,
@@ -432,4 +433,13 @@ async fn crawl_start_rejects_organization_path_mismatch() {
         .await
         .expect("mismatch response");
     assert_eq!(mismatch_response.status(), StatusCode::FORBIDDEN);
+
+    let retry_response = app
+        .oneshot(task_token_request(
+            "/api/v1/organizations/bootstrap-user/crawls",
+            &crawl_task_token,
+        ))
+        .await
+        .expect("retry response");
+    assert_eq!(retry_response.status(), StatusCode::ACCEPTED);
 }

@@ -204,23 +204,6 @@ func extractBusinessNo(cert *x509.Certificate) string {
 			}
 		}
 	}
-
-	candidates := []string{cert.Subject.CommonName, cert.Subject.String(), cert.Issuer.String()}
-	for _, name := range cert.Subject.Names {
-		candidates = append(candidates, fmt.Sprint(name.Value))
-	}
-	for _, name := range cert.Subject.ExtraNames {
-		candidates = append(candidates, fmt.Sprint(name.Value))
-	}
-	for _, value := range candidates {
-		digits := digitsOnly(value)
-		if len(digits) == 10 {
-			return digits
-		}
-		for start := 0; start+10 <= len(digits); start++ {
-			return digits[start : start+10]
-		}
-	}
 	return ""
 }
 

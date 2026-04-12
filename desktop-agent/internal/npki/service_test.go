@@ -131,13 +131,40 @@ func TestServiceBusinessNumberPrefersSubjectSerialNumberOverHeuristicDigits(t *t
 	}
 }
 
+func TestServiceBusinessNumberDoesNotFallbackToHeuristicDigits(t *testing.T) {
+	root := t.TempDir()
+	fixture := writeFixtureBundle(t, root, fixtureOptions{
+		dirName:         "cert-1",
+		password:        "secret-password",
+		commonName:      "Invoice 1234567890 Test Certificate",
+		businessNo:      "",
+		validUntil:      time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:       []byte{17, 18, 19, 20},
+		includeSerialNo: false,
+	})
+	service := NewService(ServiceConfig{Roots: []string{root}})
+
+	result, err := service.Sign(context.Background(), SignRequest{
+		CertificateID: fixture.path,
+		Challenge:     "challenge-1",
+		Password:      "secret-password",
+	})
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if result.Bundle.BusinessNo != "" {
+		t.Fatalf("businessNo = %q, want empty string when serial-number OID is absent", result.Bundle.BusinessNo)
+	}
+}
+
 type fixtureOptions struct {
-	dirName    string
-	password   string
-	commonName string
-	businessNo string
-	validUntil time.Time
-	vidRandom  []byte
+	dirName         string
+	password        string
+	commonName      string
+	businessNo      string
+	validUntil      time.Time
+	vidRandom       []byte
+	includeSerialNo bool
 }
 
 type fixtureBundle struct {
@@ -187,9 +214,17 @@ func createCertificateDER(
 ) []byte {
 	t.Helper()
 
+	extraNames := []pkix.AttributeTypeAndValue{}
+	if businessNo != "" {
+		extraNames = append(extraNames, pkix.AttributeTypeAndValue{
+			Type:  asn1.ObjectIdentifier{2, 5, 4, 5},
+			Value: businessNo,
+		})
+	}
+
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: commonName, ExtraNames: []pkix.AttributeTypeAndValue{{Type: asn1.ObjectIdentifier{2, 5, 4, 5}, Value: businessNo}}},
+		Subject:               pkix.Name{CommonName: commonName, ExtraNames: extraNames},
 		NotBefore:             validUntil.Add(-24 * time.Hour),
 		NotAfter:              validUntil,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

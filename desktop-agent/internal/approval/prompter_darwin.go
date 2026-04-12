@@ -151,8 +151,8 @@ func (p *Prompter) PromptApproval(_ context.Context, prompt httpapi.ApprovalProm
 	if err != nil {
 		return httpapi.ApprovalDecision{}, err
 	}
-	password := strings.TrimSpace(parts[1])
-	if password == "" {
+	password := parts[1]
+	if strings.TrimSpace(password) == "" {
 		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
 	}
 
