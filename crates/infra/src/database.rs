@@ -1894,7 +1894,8 @@ impl Database {
         challenge_id: &str,
     ) -> Result<CertGatewayChallenge> {
         let consumed_at = now_string();
-        self.runtime
+        let updated = self
+            .runtime
             .execute(
                 "UPDATE cert_gateway_challenges
                  SET consumed_at = $1
@@ -1904,10 +1905,14 @@ impl Database {
             )
             .await
             .context("consume cert gateway challenge")?;
-        let challenge = self.get_cert_gateway_challenge(challenge_id).await?;
-        if challenge.consumed_at.as_deref() != Some(consumed_at.as_str()) {
-            anyhow::bail!("cert gateway challenge already consumed");
+        if updated == 0 {
+            let challenge = self.get_cert_gateway_challenge(challenge_id).await?;
+            if challenge.consumed_at.is_some() {
+                anyhow::bail!("cert gateway challenge already consumed");
+            }
+            anyhow::bail!("cert gateway challenge not found");
         }
+        let challenge = self.get_cert_gateway_challenge(challenge_id).await?;
         Ok(challenge)
     }
 
@@ -1945,7 +1950,8 @@ impl Database {
 
     pub async fn consume_crawl_task_token(&self, token_hash: &str) -> Result<CrawlTaskToken> {
         let used_at = now_string();
-        self.runtime
+        let updated = self
+            .runtime
             .execute(
                 "UPDATE crawl_task_tokens
                  SET used_at = $1
@@ -1955,10 +1961,14 @@ impl Database {
             )
             .await
             .context("consume crawl task token")?;
-        let token = self.get_crawl_task_token_by_hash(token_hash).await?;
-        if token.used_at.as_deref() != Some(used_at.as_str()) {
-            anyhow::bail!("crawl task token already used");
+        if updated == 0 {
+            let token = self.get_crawl_task_token_by_hash(token_hash).await?;
+            if token.used_at.is_some() {
+                anyhow::bail!("crawl task token already used");
+            }
+            anyhow::bail!("crawl task token not found");
         }
+        let token = self.get_crawl_task_token_by_hash(token_hash).await?;
         Ok(token)
     }
 

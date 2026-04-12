@@ -360,3 +360,76 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(ephemeral_json["status"], "completed");
     assert_eq!(ephemeral_json["plantId"], "FAC-002");
 }
+
+#[tokio::test]
+async fn crawl_start_rejects_organization_path_mismatch() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    let challenge_response = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+        ))
+        .await
+        .expect("challenge response");
+    assert_eq!(challenge_response.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge_response).await;
+
+    let register_response = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/certificates",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "bundle": proof_bundle()
+            }),
+        ))
+        .await
+        .expect("register response");
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+    let register_json = json_body(register_response).await;
+    let certificate_id = register_json["id"]
+        .as_str()
+        .expect("certificate id")
+        .to_owned();
+
+    let issue_response = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            &format!(
+                "/api/v1/organizations/bootstrap-user/certificates/{certificate_id}/crawl-tokens"
+            ),
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "facilityCode": "FAC-003",
+                "mode": "full"
+            }),
+        ))
+        .await
+        .expect("issue response");
+    assert_eq!(issue_response.status(), StatusCode::CREATED);
+    let issue_json = json_body(issue_response).await;
+    let crawl_task_token = issue_json["crawlTaskToken"]
+        .as_str()
+        .expect("crawl task token")
+        .to_owned();
+
+    let mismatch_response = app
+        .oneshot(task_token_request(
+            "/api/v1/organizations/other-org/crawls",
+            &crawl_task_token,
+        ))
+        .await
+        .expect("mismatch response");
+    assert_eq!(mismatch_response.status(), StatusCode::FORBIDDEN);
+}

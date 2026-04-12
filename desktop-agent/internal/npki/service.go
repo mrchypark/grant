@@ -30,6 +30,7 @@ var (
 var (
 	oidNPKISeedCBC         = asn1.ObjectIdentifier{1, 2, 410, 200004, 1, 4}
 	oidNPKISeedCBCWithSHA1 = asn1.ObjectIdentifier{1, 2, 410, 200004, 1, 15}
+	oidX509SerialNumber    = asn1.ObjectIdentifier{2, 5, 4, 5}
 )
 
 type ServiceConfig struct {
@@ -189,6 +190,21 @@ func metadataFromCertificate(dir string, signCertDER []byte) (CertificateMetadat
 }
 
 func extractBusinessNo(cert *x509.Certificate) string {
+	for _, name := range cert.Subject.Names {
+		if name.Type.Equal(oidX509SerialNumber) {
+			if businessNo := normalizeBusinessNoValue(name.Value); businessNo != "" {
+				return businessNo
+			}
+		}
+	}
+	for _, name := range cert.Subject.ExtraNames {
+		if name.Type.Equal(oidX509SerialNumber) {
+			if businessNo := normalizeBusinessNoValue(name.Value); businessNo != "" {
+				return businessNo
+			}
+		}
+	}
+
 	candidates := []string{cert.Subject.CommonName, cert.Subject.String(), cert.Issuer.String()}
 	for _, name := range cert.Subject.Names {
 		candidates = append(candidates, fmt.Sprint(name.Value))
@@ -204,6 +220,14 @@ func extractBusinessNo(cert *x509.Certificate) string {
 		for start := 0; start+10 <= len(digits); start++ {
 			return digits[start : start+10]
 		}
+	}
+	return ""
+}
+
+func normalizeBusinessNoValue(value any) string {
+	digits := digitsOnly(fmt.Sprint(value))
+	if len(digits) == 10 {
+		return digits
 	}
 	return ""
 }

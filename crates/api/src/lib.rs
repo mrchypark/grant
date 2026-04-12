@@ -611,13 +611,16 @@ async fn issue_crawl_task_token(
 
 async fn start_crawl(
     State(service): State<Arc<AppService>>,
-    Path(_organization_id): Path<String>,
+    Path(organization_id): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
     let token = bearer_token(&headers)?
         .ok_or_else(|| ApiError::bad_request(anyhow!("missing authorization header")))?;
     let run = service
-        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput { token })
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id,
+            token,
+        })
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::ACCEPTED, Json(map_sync(run))))

@@ -106,6 +106,31 @@ func TestServiceSignRejectsWrongPassword(t *testing.T) {
 	}
 }
 
+func TestServiceBusinessNumberPrefersSubjectSerialNumberOverHeuristicDigits(t *testing.T) {
+	root := t.TempDir()
+	fixture := writeFixtureBundle(t, root, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Invoice 1234567890 Test Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{13, 14, 15, 16},
+	})
+	service := NewService(ServiceConfig{Roots: []string{root}})
+
+	result, err := service.Sign(context.Background(), SignRequest{
+		CertificateID: fixture.path,
+		Challenge:     "challenge-1",
+		Password:      "secret-password",
+	})
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if result.Bundle.BusinessNo != "2768603291" {
+		t.Fatalf("businessNo = %q, want 2768603291", result.Bundle.BusinessNo)
+	}
+}
+
 type fixtureOptions struct {
 	dirName    string
 	password   string

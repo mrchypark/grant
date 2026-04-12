@@ -371,7 +371,10 @@ async fn cert_gateway_challenge_consumption_allows_only_one_concurrent_winner() 
         }
     }
 
-    assert_eq!(success_count, 1, "challenge should be consumable exactly once");
+    assert_eq!(
+        success_count, 1,
+        "challenge should be consumable exactly once"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -424,5 +427,8 @@ async fn crawl_task_token_consumption_allows_only_one_concurrent_winner() {
         }
     }
 
-    assert_eq!(success_count, 1, "crawl task token should be consumable exactly once");
+    assert_eq!(
+        success_count, 1,
+        "crawl task token should be consumable exactly once"
+    );
 }
