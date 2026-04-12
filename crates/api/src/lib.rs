@@ -425,15 +425,7 @@ async fn sync_organization(
     Json(body): Json<SyncRequest>,
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     let mode = parse_sync_mode(body.mode.as_deref())?;
     let run = service
         .sync_authorized(
@@ -459,15 +451,7 @@ async fn create_cert_gateway_challenge(
     Json(body): Json<CreateCertGatewayChallengeRequest>,
 ) -> ApiResult<(StatusCode, Json<CertGatewayChallengeResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id,
@@ -497,15 +481,7 @@ async fn execute_ephemeral_crawl(
     Json(body): Json<ExecuteEphemeralCrawlRequest>,
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     let facility_code = service
         .authorize_gateway_sync_scope(
             &ctx.user_id,
@@ -538,15 +514,7 @@ async fn register_stored_certificate(
     Json(body): Json<RegisterStoredCertificateRequest>,
 ) -> ApiResult<(StatusCode, Json<CertificateResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     service
         .authorize_certificate_registration(&ctx.user_id, &organization_id)
         .await
@@ -570,15 +538,7 @@ async fn list_stored_certificates(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<CertificateResponse>>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     let certificates = service
         .list_stored_certificates(&organization_id)
         .await
@@ -595,15 +555,7 @@ async fn issue_crawl_task_token(
     Json(body): Json<IssueCrawlTaskTokenRequest>,
 ) -> ApiResult<(StatusCode, Json<CrawlTaskTokenResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     let facility_code = service
         .authorize_gateway_sync_scope(
             &ctx.user_id,
@@ -692,15 +644,7 @@ async fn create_plant(
     Json(body): Json<CreatePlantRequest>,
 ) -> ApiResult<(StatusCode, Json<Plant>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if path_organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                path_organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&path_organization_id, &ctx.organization_id)?;
 
     let plant = service
         .create_plant(
@@ -728,15 +672,7 @@ async fn deactivate_organization(
     headers: HeaderMap,
 ) -> ApiResult<Json<Organization>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if path_organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                path_organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&path_organization_id, &ctx.organization_id)?;
     let organization = service
         .deactivate_organization(&ctx.user_id, &ctx.organization_id, &path_organization_id)
         .await
@@ -1171,6 +1107,22 @@ fn read_consistency_override(query: &ReadConsistencyQuery) -> ApiResult<Option<R
     }
 }
 
+fn ensure_active_organization_path_matches(
+    path_organization_id: &str,
+    active_organization_id: &str,
+) -> ApiResult<()> {
+    if path_organization_id == active_organization_id {
+        return Ok(());
+    }
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        message: format!(
+            "forbidden: organization path {} does not match active organization {}",
+            path_organization_id, active_organization_id
+        ),
+    })
+}
+
 fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
     let provided = header_value(headers, "x-certd-master-key")?;
     if provided != service.master_key() {
@@ -1360,7 +1312,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiError, decode_base64_field};
+    use super::{ApiError, decode_base64_field, ensure_active_organization_path_matches};
     use anyhow::anyhow;
     use axum::http::StatusCode;
     use infra::service::{ServiceError, ServiceErrorKind};
@@ -1399,5 +1351,16 @@ mod tests {
         let decoded = decode_base64_field("signCertDerBase64", "  Zm9vYmFy\n")
             .expect("trimmed base64 should decode");
         assert_eq!(decoded, b"foobar");
+    }
+
+    #[test]
+    fn organization_path_match_helper_returns_forbidden_on_mismatch() {
+        let err = ensure_active_organization_path_matches("org-b", "org-a")
+            .expect_err("mismatched organization path should be rejected");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.message,
+            "forbidden: organization path org-b does not match active organization org-a"
+        );
     }
 }

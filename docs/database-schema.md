@@ -1,6 +1,6 @@
 # Database Schema
 
-이 문서는 현재 `/Users/cypark/.codex/worktrees/ff1d/account/crates/infra/src/database.rs` 기준의 실제 스키마를 설명한다.
+이 문서는 현재 [`crates/infra/src/database.rs`](../crates/infra/src/database.rs) 기준의 실제 스키마를 설명한다.
 
 핵심 원칙은 다음과 같다.
 
