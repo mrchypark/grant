@@ -7,6 +7,7 @@ import {
   type Challenge,
   type CreateChallengeInput,
   type StoredCertificate,
+  type SyncMode,
   type SyncRun,
 } from "./client.ts";
 
@@ -19,6 +20,10 @@ export type CertdWebSdkOptions = {
 
 export type SignAndRunInput = {
   businessNo: string;
+  facilityCode?: string;
+  startMonth?: string;
+  endMonth?: string;
+  mode?: SyncMode;
 };
 
 export type RegisterStoredInput = {
@@ -85,7 +90,7 @@ export class CertdWebSdk {
   ): Promise<SyncRun> {
     await this.assertAvailable();
     const result = await this.raw.agent.approveEphemeralRun(
-      approvalRequestFrom(this.raw.gateway, organizationId, input.businessNo),
+      approvalRequestFrom(this.raw.gateway, organizationId, input),
     );
     return result as unknown as SyncRun;
   }
@@ -96,7 +101,7 @@ export class CertdWebSdk {
   ): Promise<StoredCertificate> {
     await this.assertAvailable();
     const result = await this.raw.agent.approveStoredRegistration(
-      approvalRequestFrom(this.raw.gateway, organizationId, input.businessNo),
+      approvalRequestFrom(this.raw.gateway, organizationId, input),
     );
     return result as unknown as StoredCertificate;
   }
@@ -128,16 +133,34 @@ export class CertdWebSdk {
 function approvalRequestFrom(
   gateway: GatewayClient,
   organizationId: string,
-  businessNo: string,
+  input: SignAndRunInput | RegisterStoredInput,
 ): AgentApprovalRequest {
-  const trimmedBusinessNo = trimRequired("businessNo", businessNo);
-  return {
+  const request: AgentApprovalRequest = {
     gatewayBaseUrl: resolveAgentGatewayBaseUrl(gateway.options.baseUrl),
     organizationId,
-    businessNo: trimmedBusinessNo,
+    businessNo: trimRequired("businessNo", input.businessNo),
     bearerToken: gateway.options.bearerToken,
     activeOrganizationId: gateway.options.activeOrganizationId,
   };
+  if ("facilityCode" in input) {
+    const facilityCode = trimOptional(input.facilityCode);
+    const startMonth = trimOptional(input.startMonth);
+    const endMonth = trimOptional(input.endMonth);
+    const mode = trimOptional(input.mode);
+    if (facilityCode) {
+      request.facilityCode = facilityCode;
+    }
+    if (startMonth) {
+      request.startMonth = startMonth;
+    }
+    if (endMonth) {
+      request.endMonth = endMonth;
+    }
+    if (mode) {
+      request.mode = mode;
+    }
+  }
+  return request;
 }
 
 function resolveAgentGatewayBaseUrl(baseUrl: string): string {
@@ -161,6 +184,11 @@ function trimRequired(field: string, value: string): string {
     throw new Error(`${field} is required`);
   }
   return trimmed;
+}
+
+function trimOptional(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 export type {

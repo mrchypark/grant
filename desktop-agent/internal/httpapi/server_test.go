@@ -61,6 +61,7 @@ func (s stubApprover) PromptApproval(context.Context, ApprovalPrompt) (ApprovalD
 type stubGateway struct {
 	mu                 sync.Mutex
 	challenge          challengeResponse
+	lastChallenge      GatewayChallengeRequest
 	lastEphemeral      GatewayEphemeralRequest
 	lastStoredRegister GatewayStoredRegistrationRequest
 }
@@ -68,6 +69,7 @@ type stubGateway struct {
 func (s *stubGateway) CreateChallenge(_ context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastChallenge = req
 	if s.challenge.ChallengeID != "" {
 		return s.challenge, nil
 	}
@@ -307,7 +309,11 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 		"organizationId":"org-1",
 		"businessNo":"2768603291",
 		"bearerToken":"token-1",
-		"activeOrganizationId":"org-1"
+		"activeOrganizationId":"org-1",
+		"facilityCode":"FAC-001",
+		"startMonth":"2026-01",
+		"endMonth":"2026-03",
+		"mode":"delta"
 	}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://127.0.0.1:4173")
@@ -339,6 +345,21 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	}
 	if gateway.lastEphemeral.ChallengeSignatureBase64 == "" {
 		t.Fatal("challengeSignatureBase64 is empty")
+	}
+	if gateway.lastChallenge.FacilityCode != "FAC-001" {
+		t.Fatalf("challenge facilityCode = %q, want FAC-001", gateway.lastChallenge.FacilityCode)
+	}
+	if gateway.lastEphemeral.FacilityCode != "FAC-001" {
+		t.Fatalf("facilityCode = %q, want FAC-001", gateway.lastEphemeral.FacilityCode)
+	}
+	if gateway.lastEphemeral.StartMonth != "2026-01" {
+		t.Fatalf("startMonth = %q, want 2026-01", gateway.lastEphemeral.StartMonth)
+	}
+	if gateway.lastEphemeral.EndMonth != "2026-03" {
+		t.Fatalf("endMonth = %q, want 2026-03", gateway.lastEphemeral.EndMonth)
+	}
+	if gateway.lastEphemeral.Mode != "delta" {
+		t.Fatalf("mode = %q, want delta", gateway.lastEphemeral.Mode)
 	}
 }
 

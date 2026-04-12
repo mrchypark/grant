@@ -77,6 +77,10 @@ type ApprovalActionRequest struct {
 	BusinessNo           string `json:"businessNo"`
 	BearerToken          string `json:"bearerToken,omitempty"`
 	ActiveOrganizationID string `json:"activeOrganizationId,omitempty"`
+	FacilityCode         string `json:"facilityCode,omitempty"`
+	StartMonth           string `json:"startMonth,omitempty"`
+	EndMonth             string `json:"endMonth,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
 }
 
 type GatewayEphemeralRequest struct {
@@ -89,6 +93,10 @@ type GatewayEphemeralRequest struct {
 	ChallengeID              string
 	ChallengePayload         string
 	ChallengeSignatureBase64 string
+	FacilityCode             string
+	StartMonth               string
+	EndMonth                 string
+	Mode                     string
 	Bundle                   npki.ProofBundle
 }
 
@@ -111,6 +119,7 @@ type GatewayChallengeRequest struct {
 	BearerToken          string
 	ActiveOrganizationID string
 	Mode                 string
+	FacilityCode         string
 }
 
 type Server struct {
@@ -290,6 +299,10 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	req.BusinessNo = strings.TrimSpace(req.BusinessNo)
 	req.BearerToken = strings.TrimSpace(req.BearerToken)
 	req.ActiveOrganizationID = strings.TrimSpace(req.ActiveOrganizationID)
+	req.FacilityCode = strings.TrimSpace(req.FacilityCode)
+	req.StartMonth = strings.TrimSpace(req.StartMonth)
+	req.EndMonth = strings.TrimSpace(req.EndMonth)
+	req.Mode = strings.TrimSpace(req.Mode)
 
 	if req.OrganizationID == "" {
 		return nil, 0, newHTTPStatusError(http.StatusBadRequest, "organizationId must not be empty")
@@ -307,6 +320,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
 		Mode:                 action,
+		FacilityCode:         req.FacilityCode,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -349,6 +363,10 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 			ChallengeID:              challenge.ChallengeID,
 			ChallengePayload:         challenge.Payload,
 			ChallengeSignatureBase64: signResult.ChallengeSignatureBase64,
+			FacilityCode:             req.FacilityCode,
+			StartMonth:               req.StartMonth,
+			EndMonth:                 req.EndMonth,
+			Mode:                     req.Mode,
 			Bundle:                   signResult.Bundle,
 		})
 		return body, http.StatusAccepted, err
@@ -601,29 +619,42 @@ func NewHTTPGatewayExecutor() gatewayExecutor {
 }
 
 func (h httpGatewayExecutor) CreateChallenge(ctx context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
-	return h.createChallenge(ctx, req.BaseURL, req.OrganizationID, req.BearerToken, req.ActiveOrganizationID, req.Mode)
+	return h.createChallenge(ctx, req)
 }
 
 func (h httpGatewayExecutor) RunEphemeral(ctx context.Context, req GatewayEphemeralRequest) (map[string]any, error) {
+	body := map[string]any{
+		"challengeId":              req.ChallengeID,
+		"challengePayload":         req.ChallengePayload,
+		"challengeSignatureBase64": req.ChallengeSignatureBase64,
+		"bundle": map[string]any{
+			"businessNo":        firstNonEmpty(req.Bundle.BusinessNo, req.BusinessNo),
+			"password":          req.Password,
+			"commonName":        req.Bundle.CommonName,
+			"signCertDerBase64": req.Bundle.SignCertDerBase64,
+			"signPriKeyBase64":  req.Bundle.SignPriKeyBase64,
+			"kmCertDerBase64":   req.Bundle.KMCertDerBase64,
+			"kmPriKeyBase64":    req.Bundle.KMPriKeyBase64,
+		},
+	}
+	if req.FacilityCode != "" {
+		body["facilityCode"] = req.FacilityCode
+	}
+	if req.StartMonth != "" {
+		body["startMonth"] = req.StartMonth
+	}
+	if req.EndMonth != "" {
+		body["endMonth"] = req.EndMonth
+	}
+	if req.Mode != "" {
+		body["mode"] = req.Mode
+	}
 	return h.postJSON(ctx, gatewayRequest{
 		BaseURL:              req.BaseURL,
 		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/ephemeral-executions", req.OrganizationID),
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
-		Body: map[string]any{
-			"challengeId":              req.ChallengeID,
-			"challengePayload":         req.ChallengePayload,
-			"challengeSignatureBase64": req.ChallengeSignatureBase64,
-			"bundle": map[string]any{
-				"businessNo":        firstNonEmpty(req.Bundle.BusinessNo, req.BusinessNo),
-				"password":          req.Password,
-				"commonName":        req.Bundle.CommonName,
-				"signCertDerBase64": req.Bundle.SignCertDerBase64,
-				"signPriKeyBase64":  req.Bundle.SignPriKeyBase64,
-				"kmCertDerBase64":   req.Bundle.KMCertDerBase64,
-				"kmPriKeyBase64":    req.Bundle.KMPriKeyBase64,
-			},
-		},
+		Body:                 body,
 	})
 }
 
@@ -663,21 +694,25 @@ type challengeResponse struct {
 	Payload     string `json:"payload"`
 }
 
-func (h httpGatewayExecutor) createChallenge(ctx context.Context, baseURL string, organizationID string, bearerToken string, activeOrganizationID string, mode string) (challengeResponse, error) {
+func (h httpGatewayExecutor) createChallenge(ctx context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
 	var result challengeResponse
-	body, err := h.postJSON(ctx, gatewayRequest{
-		BaseURL:              baseURL,
-		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/challenges", organizationID),
-		BearerToken:          bearerToken,
-		ActiveOrganizationID: activeOrganizationID,
-		Body: map[string]any{
-			"mode": mode,
-		},
+	body := map[string]any{
+		"mode": req.Mode,
+	}
+	if req.FacilityCode != "" {
+		body["facilityCode"] = req.FacilityCode
+	}
+	responseBody, err := h.postJSON(ctx, gatewayRequest{
+		BaseURL:              req.BaseURL,
+		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/challenges", req.OrganizationID),
+		BearerToken:          req.BearerToken,
+		ActiveOrganizationID: req.ActiveOrganizationID,
+		Body:                 body,
 	})
 	if err != nil {
 		return result, err
 	}
-	raw, err := json.Marshal(body)
+	raw, err := json.Marshal(responseBody)
 	if err != nil {
 		return result, err
 	}

@@ -156,6 +156,55 @@ test("runEphemeral() checks agent health then delegates approval and execution t
   }
 });
 
+test("runEphemeral() forwards optional sync scope to the local agent", async () => {
+  const mock = installFetchMock([
+    () => textResponse("ok"),
+    () =>
+      jsonResponse({
+        sessionToken: "agent-session-scope",
+        expiresAt: "2026-04-09T00:05:00Z",
+      }, 201),
+    () =>
+      jsonResponse({
+        id: "sync-scope-1",
+        organizationId: "org-1",
+        plantId: "FAC-009",
+        mode: "delta",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 0,
+      }, 202),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    await sdk.runEphemeral("org-1", {
+      businessNo: "2768603291",
+      facilityCode: " FAC-009 ",
+      startMonth: " 2026-01 ",
+      endMonth: " 2026-03 ",
+      mode: "delta",
+    });
+
+    assert.deepEqual(JSON.parse(String(mock.calls[2].init?.body)), {
+      gatewayBaseUrl: "http://gateway.local",
+      organizationId: "org-1",
+      businessNo: "2768603291",
+      facilityCode: "FAC-009",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      mode: "delta",
+    });
+  } finally {
+    mock.restore();
+  }
+});
+
 test("runEphemeral() resolves a relative gateway base URL before sending it to the local agent", async () => {
   const locationMock = installLocationMock("http://127.0.0.1:4173/");
   const mock = installFetchMock([

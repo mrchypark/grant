@@ -33,6 +33,10 @@ export type AgentApprovalRequest = {
   businessNo: string;
   bearerToken?: string;
   activeOrganizationId?: string;
+  facilityCode?: string;
+  startMonth?: string;
+  endMonth?: string;
+  mode?: "full" | "delta";
 };
 
 export class DesktopAgentClient {

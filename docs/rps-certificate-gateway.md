@@ -162,7 +162,7 @@ Content-Type: application/json
 }
 ```
 
-성공 시 `202 Accepted`와 `SyncRun`을 반환한다. 제품형 고수준 SDK는 `facilityCode`, `startMonth`, `endMonth`, `mode`를 프론트에서 받지 않고 서버가 기존 데이터와 수집 범위를 보고 결정하게 둔다. 이 필드들은 raw client에서만 유지한다.
+성공 시 `202 Accepted`와 `SyncRun`을 반환한다. 기본 제품형 high-level SDK 호출은 여전히 이 스코프를 생략해도 되지만, multi-plant 조직처럼 서버가 단일 대상을 자동 결정할 수 없는 경우를 위해 `facilityCode`, `startMonth`, `endMonth`, `mode`를 선택적으로 agent/raw client 경로로 전달할 수 있다.
 
 ### Stored 등록
 
