@@ -547,6 +547,10 @@ async fn register_stored_certificate(
             ),
         });
     }
+    service
+        .authorize_certificate_registration(&ctx.user_id, &organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id,

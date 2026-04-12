@@ -449,6 +449,21 @@ impl AppService {
             .await
     }
 
+    pub async fn authorize_certificate_registration(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+    ) -> Result<()> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "register stored certificates",
+        )
+        .await
+    }
+
     pub async fn list_stored_certificates(
         &self,
         organization_id: &str,

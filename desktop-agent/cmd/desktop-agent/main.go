@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/approval"
 	"github.com/cypark/account/desktop-agent/internal/app"
+	"github.com/cypark/account/desktop-agent/internal/approval"
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
 	"github.com/cypark/account/desktop-agent/internal/npki"
 )
@@ -32,6 +32,7 @@ func main() {
 	}
 	server := httpapi.NewServer(npki.NewService(npki.DefaultConfig()), approval.NewPrompter(), httpapi.NewHTTPGatewayExecutor(), httpapi.Config{
 		AllowedOrigins: allowedOrigins(),
+		GatewayBaseURL: gatewayBaseURL(),
 		SessionTTL:     5 * time.Minute,
 		SessionSecret:  sessionSecret,
 	})
@@ -69,6 +70,10 @@ func allowedOrigins() []string {
 		}
 	}
 	return origins
+}
+
+func gatewayBaseURL() string {
+	return strings.TrimSpace(os.Getenv("DESKTOP_AGENT_GATEWAY_BASE_URL"))
 }
 
 func loadOrCreateSessionSecret() ([]byte, error) {

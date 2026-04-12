@@ -35,6 +35,7 @@ type gatewayExecutor interface {
 
 type Config struct {
 	AllowedOrigins []string
+	GatewayBaseURL string
 	SessionTTL     time.Duration
 	SessionSecret  []byte
 }
@@ -103,6 +104,7 @@ type Server struct {
 	npki           npkiService
 	approver       approvalPrompter
 	gateway        gatewayExecutor
+	gatewayBaseURL string
 	mux            *http.ServeMux
 	allowedOrigins map[string]struct{}
 	sessions       sessionManager
@@ -124,6 +126,7 @@ func NewServer(service npkiService, approver approvalPrompter, gateway gatewayEx
 		npki:           service,
 		approver:       approver,
 		gateway:        gateway,
+		gatewayBaseURL: strings.TrimRight(strings.TrimSpace(cfg.GatewayBaseURL), "/"),
 		mux:            http.NewServeMux(),
 		allowedOrigins: allowlistFromConfig(cfg.AllowedOrigins),
 		sessions:       newSessionManager(cfg.SessionSecret, cfg.SessionTTL),
@@ -275,17 +278,18 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	req.BearerToken = strings.TrimSpace(req.BearerToken)
 	req.ActiveOrganizationID = strings.TrimSpace(req.ActiveOrganizationID)
 
-	if req.GatewayBaseURL == "" {
-		return nil, 0, errors.New("gatewayBaseUrl must not be empty")
-	}
 	if req.OrganizationID == "" {
 		return nil, 0, errors.New("organizationId must not be empty")
 	}
 	if req.BusinessNo == "" {
 		return nil, 0, errors.New("businessNo must not be empty")
 	}
+	gatewayBaseURL, err := s.trustedGatewayBaseURL(req.GatewayBaseURL)
+	if err != nil {
+		return nil, 0, err
+	}
 	challenge, err := s.gateway.CreateChallenge(r.Context(), GatewayChallengeRequest{
-		BaseURL:              req.GatewayBaseURL,
+		BaseURL:              gatewayBaseURL,
 		OrganizationID:       req.OrganizationID,
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
@@ -323,7 +327,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	switch action {
 	case "ephemeral":
 		body, err := s.gateway.RunEphemeral(r.Context(), GatewayEphemeralRequest{
-			BaseURL:                  req.GatewayBaseURL,
+			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
 			BusinessNo:               req.BusinessNo,
 			Password:                 decision.Password,
@@ -337,7 +341,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		return body, http.StatusAccepted, err
 	case "stored":
 		body, err := s.gateway.RegisterStored(r.Context(), GatewayStoredRegistrationRequest{
-			BaseURL:                  req.GatewayBaseURL,
+			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
 			BusinessNo:               req.BusinessNo,
 			Password:                 decision.Password,
@@ -384,7 +388,10 @@ func writeApprovalError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	default:
 		message := err.Error()
-		if strings.Contains(message, "must not be empty") || strings.Contains(message, "invalid json body") {
+		if strings.Contains(message, "must not be empty") ||
+			strings.Contains(message, "invalid json body") ||
+			strings.Contains(message, "gatewayBaseUrl") ||
+			strings.Contains(message, "gateway backend") {
 			status = http.StatusBadRequest
 		} else if strings.Contains(message, "agent session") {
 			status = http.StatusUnauthorized
@@ -459,6 +466,17 @@ func (s *Server) originFromRequest(r *http.Request) (string, error) {
 func (s *Server) isOriginAllowed(origin string) bool {
 	_, ok := s.allowedOrigins[origin]
 	return ok
+}
+
+func (s *Server) trustedGatewayBaseURL(requestValue string) (string, error) {
+	if s.gatewayBaseURL == "" {
+		return "", errors.New("gateway backend is not configured")
+	}
+	requested := strings.TrimRight(strings.TrimSpace(requestValue), "/")
+	if requested != "" && requested != s.gatewayBaseURL {
+		return "", errors.New("gatewayBaseUrl does not match configured gateway backend")
+	}
+	return s.gatewayBaseURL, nil
 }
 
 func allowlistFromConfig(origins []string) map[string]struct{} {

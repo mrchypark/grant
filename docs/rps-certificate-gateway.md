@@ -49,12 +49,16 @@ loopback agent는 허용 origin과 local session secret도 환경변수로 제�
 
 ```bash
 export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
+export DESKTOP_AGENT_GATEWAY_BASE_URL="https://certd.example.com"
 export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
 export DESKTOP_AGENT_DISABLE_TRAY=1
 ```
 
 - `DESKTOP_AGENT_ALLOWED_ORIGINS`
   - 브라우저에서 agent를 호출할 수 있는 allowlist origin
+- `DESKTOP_AGENT_GATEWAY_BASE_URL`
+  - local agent가 certificate bundle과 password를 전달할 단일 trusted certd backend base URL
+  - 브라우저가 보낸 `gatewayBaseUrl`는 이 값과 일치할 때만 허용된다
 - `DESKTOP_AGENT_SESSION_SECRET`
   - local session token HMAC에 쓰는 32-byte 이상 secret
   - 비워 두면 사용자 config 디렉터리에 device-local secret을 생성한다

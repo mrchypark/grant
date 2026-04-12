@@ -15,6 +15,7 @@ import (
 
 var testServerConfig = Config{
 	AllowedOrigins: []string{"http://127.0.0.1:4173"},
+	GatewayBaseURL: "http://gateway.local",
 	SessionTTL:     5 * time.Minute,
 	SessionSecret:  []byte("0123456789abcdef0123456789abcdef"),
 }
@@ -397,6 +398,45 @@ func TestServerApproveStoredRegistration(t *testing.T) {
 	}
 	if gateway.lastStoredRegister.ChallengeSignatureBase64 == "" {
 		t.Fatal("challengeSignatureBase64 is empty")
+	}
+}
+
+func TestServerRejectsGatewayBaseURLMismatch(t *testing.T) {
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "2768603291",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      "secret-password",
+		}},
+		&stubGateway{},
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"http://attacker.example",
+		"organizationId":"org-1",
+		"businessNo":"2768603291",
+		"bearerToken":"token-1",
+		"activeOrganizationId":"org-1"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "configured gateway backend") {
+		t.Fatalf("body = %q, want configured gateway backend mismatch", rec.Body.String())
 	}
 }
 
