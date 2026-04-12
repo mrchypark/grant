@@ -1857,8 +1857,9 @@ impl Database {
             .query_consistent_rows(
                 "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
                  FROM certificates c
-                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 JOIN organizations o ON o.id = c.organization_id
                  WHERE c.organization_id = $1
+                   AND o.inactivated_at IS NULL
                  ORDER BY c.active DESC, c.created_at DESC",
                 params!(organization_id.to_owned()),
                 "organization certificates",

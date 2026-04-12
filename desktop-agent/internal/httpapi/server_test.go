@@ -629,6 +629,28 @@ func TestHTTPGatewayExecutorIncludesErrorBody(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayExecutorRejectsOversizedResponseBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(strings.Repeat("x", int(maxJSONBodyBytes)+1)))
+	}))
+	defer backend.Close()
+
+	executor := httpGatewayExecutor{client: backend.Client()}
+	_, err := executor.postJSON(context.Background(), gatewayRequest{
+		BaseURL: backend.URL,
+		Path:    "/api/v1/ok",
+		Body:    map[string]any{"mode": "stored"},
+	})
+	if err == nil {
+		t.Fatal("expected postJSON error")
+	}
+	if !strings.Contains(err.Error(), "gateway response body exceeds") {
+		t.Fatalf("error = %q, want oversized body failure", err)
+	}
+}
+
 func newTestHandler(npkiSvc npkiService, approver stubApprover, gateways ...*stubGateway) http.Handler {
 	gateway := &stubGateway{}
 	if len(gateways) > 0 && gateways[0] != nil {

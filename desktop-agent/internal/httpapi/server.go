@@ -743,7 +743,7 @@ func (h httpGatewayExecutor) postJSON(ctx context.Context, req gatewayRequest) (
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimitedBody(resp.Body, maxJSONBodyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -758,6 +758,17 @@ func (h httpGatewayExecutor) postJSON(ctx context.Context, req gatewayRequest) (
 		return nil, err
 	}
 	return body, nil
+}
+
+func readLimitedBody(reader io.Reader, maxBytes int64) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("gateway response body exceeds %d bytes", maxBytes)
+	}
+	return raw, nil
 }
 
 func firstNonEmpty(values ...string) string {

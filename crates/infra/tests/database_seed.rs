@@ -311,6 +311,11 @@ async fn certificate_gateway_rows_round_trip() {
         .expect("save certificate");
     assert_eq!(cert.kms_key_id, "kms-key-v1");
     assert_eq!(cert.wrapped_dek, b"wrapped-dek");
+    let listed = db
+        .list_certificates("conalog-account")
+        .await
+        .expect("list certificates for active organization");
+    assert_eq!(listed.len(), 1);
 
     let first_load = db
         .load_active_certificate("conalog-account")
@@ -348,6 +353,14 @@ async fn certificate_gateway_rows_round_trip() {
     db.deactivate_organization("conalog-account")
         .await
         .expect("deactivate organization");
+    let listed = db
+        .list_certificates("conalog-account")
+        .await
+        .expect("list certificates for inactive organization");
+    assert!(
+        listed.is_empty(),
+        "inactive organization should not list stored certificates"
+    );
     let err = db
         .load_active_certificate("conalog-account")
         .await
