@@ -261,6 +261,33 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
 }
 
 #[tokio::test]
+async fn ensure_schema_preserves_bootstrap_organization_deactivation() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    let deactivated = db
+        .deactivate_organization("conalog-account")
+        .await
+        .expect("deactivate bootstrap organization");
+    assert!(deactivated.inactivated_at.is_some());
+
+    db.ensure_schema().await.expect("ensure schema again");
+    let bootstrap = db
+        .get_organization("conalog-account")
+        .await
+        .expect("bootstrap organization");
+    assert!(
+        bootstrap.inactivated_at.is_some(),
+        "bootstrap organization should stay deactivated across ensure_schema"
+    );
+}
+
+#[tokio::test]
 async fn certificate_gateway_rows_round_trip() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
@@ -284,6 +311,33 @@ async fn certificate_gateway_rows_round_trip() {
         .expect("save certificate");
     assert_eq!(cert.kms_key_id, "kms-key-v1");
     assert_eq!(cert.wrapped_dek, b"wrapped-dek");
+
+    let first_load = db
+        .load_active_certificate("conalog-account")
+        .await
+        .expect("first active certificate load");
+    let first_loaded = db
+        .get_certificate_by_id(&first_load.id)
+        .await
+        .expect("first reloaded certificate");
+    let first_last_used_at = first_loaded
+        .last_used_at
+        .clone()
+        .expect("first load should stamp last_used_at");
+
+    let second_load = db
+        .load_active_certificate("conalog-account")
+        .await
+        .expect("second active certificate load");
+    let second_loaded = db
+        .get_certificate_by_id(&second_load.id)
+        .await
+        .expect("second reloaded certificate");
+    assert_eq!(
+        second_loaded.last_used_at.as_deref(),
+        Some(first_last_used_at.as_str()),
+        "recent repeated loads should not rewrite last_used_at immediately"
+    );
 
     let challenge = db
         .create_cert_gateway_challenge(

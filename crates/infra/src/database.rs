@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use domain::{
     Agreement, DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization,
     Plant, RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
@@ -20,6 +20,8 @@ macro_rules! params {
         vec![$(::hiqlite::Param::from($value)),*]
     };
 }
+
+const CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS: i64 = 60;
 
 #[derive(Clone)]
 pub struct Database {
@@ -833,7 +835,6 @@ impl Database {
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    inactivated_at = excluded.inactivated_at,
                     updated_at = excluded.updated_at",
                 params!(
                     self.bootstrap_user_id.clone(),
@@ -1812,13 +1813,15 @@ impl Database {
             .next()
             .ok_or_else(|| anyhow!("certificate not found"))?
             .try_into()?;
-        self.runtime
-            .execute(
-                "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
-                params!(now_string(), cert.id.clone()),
-            )
-            .await
-            .context("update certificate last_used_at")?;
+        if should_refresh_certificate_last_used_at(cert.last_used_at.as_deref())? {
+            self.runtime
+                .execute(
+                    "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
+                    params!(now_string(), cert.id.clone()),
+                )
+                .await
+                .context("update certificate last_used_at")?;
+        }
         Ok(cert)
     }
 
@@ -3515,6 +3518,17 @@ fn sync_mode_str(mode: &SyncMode) -> &'static str {
 
 fn now_string() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
+}
+
+fn should_refresh_certificate_last_used_at(last_used_at: Option<&str>) -> Result<bool> {
+    let Some(last_used_at) = last_used_at else {
+        return Ok(true);
+    };
+    let parsed = DateTime::parse_from_rfc3339(last_used_at)
+        .with_context(|| format!("parse lastUsedAt {last_used_at}"))?
+        .with_timezone(&Utc);
+    Ok(Utc::now().signed_duration_since(parsed)
+        >= ChronoDuration::seconds(CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS))
 }
 
 impl From<&mut Row<'_>> for StoredCertificateRow {

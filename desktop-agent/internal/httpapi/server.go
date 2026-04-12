@@ -654,6 +654,9 @@ func (h httpGatewayExecutor) postJSON(ctx context.Context, req gatewayRequest) (
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if detail := summarizeGatewayErrorBody(raw); detail != "" {
+			return nil, fmt.Errorf("gateway request failed with status %d: %s", resp.StatusCode, detail)
+		}
 		return nil, fmt.Errorf("gateway request failed with status %d", resp.StatusCode)
 	}
 	var body map[string]any
@@ -670,4 +673,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func summarizeGatewayErrorBody(raw []byte) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return ""
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err == nil {
+		for _, key := range []string{"message", "error", "detail"} {
+			if value, ok := body[key]; ok {
+				if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+					return text
+				}
+			}
+		}
+	}
+	if len(trimmed) > 200 {
+		return trimmed[:200]
+	}
+	return trimmed
 }

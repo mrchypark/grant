@@ -234,36 +234,70 @@ func (s *Service) resolveBundleDir(id string) (string, error) {
 
 func (s *Service) discoverBundles() ([]string, error) {
 	dirs := make([]string, 0)
-	seen := make(map[string]struct{})
+	walked := make(map[string]struct{})
+	seenBundles := make(map[string]struct{})
 
 	for _, root := range s.roots {
-		info, err := os.Stat(root)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return nil
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			if isBundleDirectory(path) {
-				if _, ok := seen[path]; !ok {
-					seen[path] = struct{}{}
-					dirs = append(dirs, path)
-				}
-				return filepath.SkipDir
-			}
-			return nil
-		})
-		if err != nil {
+		if err := walkBundleRoot(root, &dirs, walked, seenBundles); err != nil {
 			return nil, err
 		}
 	}
 
 	slices.Sort(dirs)
 	return dirs, nil
+}
+
+func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, seenBundles map[string]struct{}) error {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+	walkKey := root
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		walkKey = resolvedRoot
+	}
+	if _, ok := walked[walkKey]; ok {
+		return nil
+	}
+	walked[walkKey] = struct{}{}
+
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return nil
+			}
+			info, err := os.Stat(resolved)
+			if err != nil || !info.IsDir() {
+				return nil
+			}
+			if isBundleDirectory(resolved) {
+				if _, ok := seenBundles[path]; !ok {
+					seenBundles[path] = struct{}{}
+					*dirs = append(*dirs, path)
+				}
+				return filepath.SkipDir
+			}
+			if err := walkBundleRoot(path, dirs, walked, seenBundles); err != nil {
+				return err
+			}
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if isBundleDirectory(path) {
+			if _, ok := seenBundles[path]; !ok {
+				seenBundles[path] = struct{}{}
+				*dirs = append(*dirs, path)
+			}
+			return filepath.SkipDir
+		}
+		return nil
+	})
 }
 
 func isBundleDirectory(path string) bool {

@@ -157,6 +157,35 @@ func TestServiceBusinessNumberDoesNotFallbackToHeuristicDigits(t *testing.T) {
 	}
 }
 
+func TestServiceListCertificatesFollowsSymlinkedBundleDirectories(t *testing.T) {
+	root := t.TempDir()
+	realRoot := t.TempDir()
+	fixture := writeFixtureBundle(t, realRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Symlink Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{21, 22, 23, 24},
+	})
+	linkPath := filepath.Join(root, "linked-cert")
+	if err := os.Symlink(fixture.path, linkPath); err != nil {
+		t.Fatalf("symlink bundle: %v", err)
+	}
+
+	service := NewService(ServiceConfig{Roots: []string{root}})
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("ListCertificates() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].CommonName != "Symlink Certificate" {
+		t.Fatalf("commonName = %q, want Symlink Certificate", got[0].CommonName)
+	}
+}
+
 type fixtureOptions struct {
 	dirName         string
 	password        string

@@ -402,6 +402,31 @@ func TestServerHandlesCORSPreflight(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayExecutorIncludesErrorBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"invalid challenge payload"}`))
+	}))
+	defer backend.Close()
+
+	executor := httpGatewayExecutor{client: backend.Client()}
+	_, err := executor.postJSON(context.Background(), gatewayRequest{
+		BaseURL: backend.URL,
+		Path:    "/api/v1/fail",
+		Body:    map[string]any{"mode": "stored"},
+	})
+	if err == nil {
+		t.Fatal("expected postJSON error")
+	}
+	if !strings.Contains(err.Error(), "status 403") {
+		t.Fatalf("error = %q, want status code included", err)
+	}
+	if !strings.Contains(err.Error(), "invalid challenge payload") {
+		t.Fatalf("error = %q, want response body context included", err)
+	}
+}
+
 func newTestHandler(npkiSvc npkiService, approver stubApprover, gateways ...*stubGateway) http.Handler {
 	gateway := &stubGateway{}
 	if len(gateways) > 0 && gateways[0] != nil {

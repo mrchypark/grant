@@ -112,6 +112,7 @@ spec:
             - |
               mkdir -p "${TRAILBASE_DATA_DIR}"
               mkdir -p "$(dirname "${LITESTREAM_DB_PATH}")"
+              chmod -R 0770 "${TRAILBASE_DATA_DIR}"
               cat >/tmp/litestream.yml <<EOF
               dbs:
                 - path: ${LITESTREAM_DB_PATH}
