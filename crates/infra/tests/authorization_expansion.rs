@@ -78,7 +78,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 #[tokio::test]
-async fn expands_direct_organization_access_without_user_actions() {
+async fn keeps_organization_access_explicit_without_hierarchy_tables() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
@@ -210,7 +210,7 @@ async fn expands_direct_organization_access_without_user_actions() {
             plant_id: "plant-1".to_owned(),
             action_id: "plant.profile.read".to_owned(),
         }),
-        "without organization hierarchy, distributor should not inherit dealer access"
+        "organization hierarchy should not synthesize distributor access"
     );
 
     let user_actions: Vec<UserPlantActionRow> = runtime

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path as FsPath, PathBuf},
+    sync::Arc,
 };
 use tower::util::ServiceExt;
 use trailbase::constants::COOKIE_AUTH_TOKEN;
@@ -149,6 +150,7 @@ impl BridgeConfig {
 #[derive(Clone)]
 struct BridgeState {
     app_state: AppState,
+    jwt: Arc<trailbase::api::JwtHelper>,
     internal_secret: String,
     login_routes: LoginRouteConfig,
 }
@@ -200,7 +202,7 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
 
     let router = (
         main_router.0,
-        build_router(state, main_router.1, config.internal_secret, login_routes),
+        build_router(state, main_router.1, config.internal_secret, login_routes).await?,
     );
 
     trailbase::api::serve(router, admin_router, tls)
@@ -231,14 +233,20 @@ pub async fn seed_user(data_dir: PathBuf, email: &str, password: &str) -> Result
     Ok(())
 }
 
-pub fn build_router(
+pub async fn build_router(
     app_state: AppState,
     main_router: Router,
     internal_secret: String,
     login_routes: LoginRouteConfig,
-) -> Router {
+) -> Result<Router> {
+    let jwt = Arc::new(
+        trailbase::api::JwtHelper::init_from_path(app_state.data_dir())
+            .await
+            .context("initialize auth bridge JWT helper")?,
+    );
     let state = BridgeState {
         app_state,
+        jwt,
         internal_secret,
         login_routes,
     };
@@ -246,7 +254,7 @@ pub fn build_router(
         state.clone(),
         require_login_security,
     ));
-    Router::new()
+    Ok(Router::new()
         .route("/healthz", get(health_handler))
         .route("/", get(root_entry_handler))
         .route("/login", get(login_entry_handler))
@@ -260,7 +268,7 @@ pub fn build_router(
             )),
         )
         .with_state(state)
-        .merge(main_router)
+        .merge(main_router))
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -280,7 +288,7 @@ async fn root_entry_handler(
         );
     }
 
-    if is_authenticated(&state, &headers).await {
+    if is_authenticated(&state, &headers) {
         return with_login_entry_cache_headers(Redirect::to(&target.path).into_response());
     }
 
@@ -294,7 +302,7 @@ async fn login_entry_handler(
 ) -> Response {
     let target = resolve_post_login_target(uri.query(), &state.login_routes.default_post_login_path);
 
-    if is_authenticated(&state, &headers).await {
+    if is_authenticated(&state, &headers) {
         return with_login_entry_cache_headers(Redirect::to(&target.path).into_response());
     }
 
@@ -492,17 +500,12 @@ async fn require_login_security(
     }
 }
 
-async fn is_authenticated(state: &BridgeState, headers: &HeaderMap) -> bool {
+fn is_authenticated(state: &BridgeState, headers: &HeaderMap) -> bool {
     let Some(auth_token) = request_auth_token(headers) else {
         return false;
     };
 
-    let Ok(jwt) = trailbase::api::JwtHelper::init_from_path(state.app_state.data_dir()).await
-    else {
-        return false;
-    };
-
-    trailbase::api::AuthTokenClaims::from_auth_token(&jwt, &auth_token).is_ok()
+    trailbase::api::AuthTokenClaims::from_auth_token(state.jwt.as_ref(), &auth_token).is_ok()
 }
 
 fn request_auth_token(headers: &HeaderMap) -> Option<String> {
@@ -902,7 +905,8 @@ pub async fn build_test_app_with_login_routes(
         build_test_main_router(public_dir),
         internal_secret.to_owned(),
         login_routes,
-    );
+    )
+    .await?;
 
     Ok(TestApp {
         router,
@@ -951,6 +955,90 @@ const AUTH_UI_COMPONENT: &[u8] =
 const LOGIN_SHELL_HTML: &str = include_str!("../static/login/index.html");
 const LOGIN_SHELL_CSS: &str = include_str!("../static/login/login.v1.css");
 const LOGIN_SHELL_JS: &str = include_str!("../static/login/login.v1.js");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_jwt_helper_survives_key_file_rotation() {
+        let root_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = root_dir.path().join("traildepot");
+        let public_dir = root_dir.path().join("public");
+        ensure_auth_ui_component(&data_dir).expect("auth ui component");
+        fs::create_dir_all(&public_dir).expect("create public dir");
+
+        let server = Server::init(ServerOptions {
+            data_dir: DataDir(data_dir.clone()),
+            address: "127.0.0.1:0".to_owned(),
+            admin_address: None,
+            public_dir: Some(public_dir),
+            log_responses: false,
+            dev: true,
+            cors_allowed_origins: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("init trailbase test server");
+        ensure_core_auth_schema(&server.state)
+            .await
+            .expect("core auth schema");
+        ensure_session_auth_schema(&server.state)
+            .await
+            .expect("session auth schema");
+        trailbase::api::cli::add_user(server.state.user_conn(), "alice@example.com", "password123")
+            .await
+            .expect("create trailbase test user");
+
+        let router = build_router(
+            server.state.clone(),
+            build_test_main_router(None),
+            "bridge-secret".to_owned(),
+            LoginRouteConfig {
+                custom_login_enabled: true,
+                login_fallback_enabled: false,
+                kakao_enabled: false,
+                kakao_oidc_ready: false,
+                kakao_linking_ready: false,
+                google_oauth_enabled: false,
+                google_oauth_ready: false,
+                apple_oauth_enabled: false,
+                apple_oauth_ready: false,
+                default_post_login_path: "/post-login".to_owned(),
+            },
+        )
+        .await
+        .expect("build router");
+        let token = mint_auth_token_for_email(&server.state, "alice@example.com", "password123")
+            .await
+            .expect("mint auth token");
+
+        let key_dir = server.state.data_dir().key_path();
+        std::fs::remove_file(key_dir.join("private_key.pem")).expect("remove private key");
+        std::fs::remove_file(key_dir.join("public_key.pem")).expect("remove public key");
+
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/login")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/post-login"),
+        );
+    }
+}
 
 async fn mint_auth_token_for_email(
     app_state: &AppState,

@@ -22,6 +22,27 @@
 - `crates/trailbase-auth-bridge`
   - 별도 TrailBase auth bridge 바이너리
   - `certd`용 `/api/certd/introspect` 제공
+- `desktop-agent`
+  - 윈도우/macOS loopback HTTP agent
+  - 로컬 인증서 탐색과 challenge 서명 담당
+- `packages/certd-web-sdk`
+  - 브라우저용 JS SDK
+  - `stored`와 `ephemeral` certificate gateway 흐름 오케스트레이션 담당
+
+## Certificate Gateway
+
+`certd`는 사용자 로그인 대체가 아니라 공동인증서 기반 작업 실행 경계를 별도로 가진다.
+
+- `ephemeral`
+  - 브라우저 SDK가 challenge를 발급받고, local desktop agent로 서명한 뒤 즉시 1회성 crawl을 시작한다
+  - 인증서는 서버에 저장하지 않는다
+- `stored`
+  - agent가 로컬 인증서를 열고, 서버는 인증서 bundle을 per-certificate DEK로 암호화해서 저장한다
+  - 이후에는 짧은 TTL의 1회용 crawl task token으로 작업만 실행한다
+
+환경변수 기반 KMS 어댑터가 첫 구현이며, 저장 경로는 `CERTD_KMS_ACTIVE_KEY_ID`, `CERTD_KMS_MASTER_KEYS`를 사용한다.
+
+상세 API, desktop agent 로컬 계약, JS SDK 사용 예시는 [docs/rps-certificate-gateway.md](./docs/rps-certificate-gateway.md)에 정리했다.
 
 저장 계층:
 

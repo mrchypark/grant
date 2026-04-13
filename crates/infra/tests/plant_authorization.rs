@@ -3,8 +3,9 @@ use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use infra::{
     artifacts::ArtifactStore,
     config::{
-        AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, LocalNodeRole,
-        ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig, TrailbaseAuthConfig,
+        AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, KmsConfig,
+        LocalNodeRole, ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
+        TrailbaseAuthConfig,
     },
     database::Database,
     runtime::HiqliteRuntime,
@@ -65,6 +66,10 @@ fn test_config(artifacts_root: &std::path::Path) -> AppConfig {
                 internal_secret: "test-trailbase-secret".to_owned(),
                 cache_ttl_seconds: 30,
             },
+        },
+        kms: KmsConfig {
+            active_key_id: "local-dev-v1".to_owned(),
+            master_keys: vec![("local-dev-v1".to_owned(), b"dev-only-master-key".to_vec())],
         },
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {

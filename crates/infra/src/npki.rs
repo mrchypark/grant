@@ -1,11 +1,14 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use openssl::{
+    asn1::Asn1Time,
+    hash::MessageDigest,
     nid::Nid,
     pkcs7::{Pkcs7, Pkcs7Flags},
     pkey::{PKey, Private},
     provider::Provider,
     rsa::Rsa,
+    sign::Verifier,
     stack::Stack,
     symm::{Cipher, Crypter, Mode},
     x509::X509,
@@ -120,6 +123,51 @@ impl NpkiSigner {
             .context("encode PKCS7 envelopedData to PEM")?;
         String::from_utf8(pem).context("decode PKCS7 PEM as UTF-8")
     }
+}
+
+pub fn verify_challenge_signature(
+    sign_cert_der: &[u8],
+    challenge_payload: &str,
+    challenge_signature_base64: &str,
+) -> Result<()> {
+    ensure_openssl_legacy_provider()?;
+    let certificate =
+        X509::from_der(sign_cert_der).context("parse signCert.der as X509 for challenge verify")?;
+    let now = Asn1Time::days_from_now(0).context("build current ASN.1 time")?;
+    if certificate
+        .not_after()
+        .compare(now.as_ref())
+        .context("compare certificate expiry")?
+        .is_lt()
+    {
+        bail!("certificate has expired");
+    }
+    if certificate
+        .not_before()
+        .compare(now.as_ref())
+        .context("compare certificate not_before")?
+        .is_gt()
+    {
+        bail!("certificate is not yet valid");
+    }
+    let public_key = certificate
+        .public_key()
+        .context("extract certificate public key")?;
+    let signature = STANDARD
+        .decode(challenge_signature_base64)
+        .context("decode challengeSignatureBase64")?;
+    let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key)
+        .context("create challenge signature verifier")?;
+    verifier
+        .update(challenge_payload.as_bytes())
+        .context("update challenge signature verifier")?;
+    let verified = verifier
+        .verify(&signature)
+        .context("verify challenge signature")?;
+    if !verified {
+        bail!("invalid cert gateway challenge signature");
+    }
+    Ok(())
 }
 
 fn parse_certificate(input: &[u8]) -> Result<X509> {
@@ -352,4 +400,68 @@ fn biguint_to_u64(value: &BigUint) -> Result<u64> {
     value
         .try_into()
         .map_err(|_| anyhow!("ASN.1 tag does not fit into u64"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_challenge_signature;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use openssl::{
+        asn1::Asn1Time,
+        hash::MessageDigest,
+        pkey::{PKey, Private},
+        rsa::Rsa,
+        sign::Signer,
+        x509::{X509Builder, X509NameBuilder},
+    };
+
+    #[test]
+    fn verify_challenge_signature_rejects_certificate_before_not_before() {
+        let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
+        let cert_der = create_sign_cert_der_with_validity(&key, 1, 365);
+        let payload = "cert-gateway:test:stored::nonce:2026-04-13T00:00:00Z";
+        let signature = sign_challenge(&key, payload);
+
+        let err = verify_challenge_signature(&cert_der, payload, &signature)
+            .expect_err("future certificate should be rejected");
+        assert!(err.to_string().contains("not yet valid"));
+    }
+
+    fn create_sign_cert_der_with_validity(
+        key: &PKey<Private>,
+        not_before_days_from_now: u32,
+        not_after_days_from_now: u32,
+    ) -> Vec<u8> {
+        let mut name = X509NameBuilder::new().expect("name builder");
+        name.append_entry_by_text("CN", "Future Certificate")
+            .expect("append cn");
+        let name = name.build();
+
+        let mut builder = X509Builder::new().expect("x509 builder");
+        builder.set_version(2).expect("set version");
+        builder.set_subject_name(&name).expect("set subject");
+        builder.set_issuer_name(&name).expect("set issuer");
+        builder.set_pubkey(key).expect("set pubkey");
+
+        let not_before = Asn1Time::days_from_now(not_before_days_from_now).expect("not before");
+        let not_after = Asn1Time::days_from_now(not_after_days_from_now).expect("not after");
+        builder
+            .set_not_before(not_before.as_ref())
+            .expect("set not before");
+        builder
+            .set_not_after(not_after.as_ref())
+            .expect("set not after");
+        builder
+            .sign(key, MessageDigest::sha256())
+            .expect("sign cert");
+        builder.build().to_der().expect("cert der")
+    }
+
+    fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
+        let mut signer = Signer::new(MessageDigest::sha256(), key).expect("create signer");
+        signer
+            .update(challenge_payload.as_bytes())
+            .expect("sign payload");
+        STANDARD.encode(signer.sign_to_vec().expect("signature bytes"))
+    }
 }

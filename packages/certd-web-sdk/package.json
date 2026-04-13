@@ -1,0 +1,16 @@
+{
+  "name": "@certd/web-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test src/index.test.ts",
+    "example": "vite --config examples/browser/vite.config.ts --host 127.0.0.1 --port 4173",
+    "example:build": "vite build --config examples/browser/vite.config.ts --outDir dist/example"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  }
+}

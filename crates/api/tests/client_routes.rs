@@ -74,6 +74,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
+        kms: support::test_kms_config(),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root,

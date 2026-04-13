@@ -19,8 +19,9 @@ fn serializes_core_models() {
     let organization = Organization {
         id: "2768603291".into(),
         party_id: Some("party_1".into()),
-        name: "서울사업팀".into(),
-        active: true,
+        business_no: Some("2768603291".into()),
+        name: "커널로그에너지".into(),
+        inactivated_at: None,
     };
     let party = Party {
         id: "party_1".into(),
@@ -217,6 +218,7 @@ fn serializes_core_models() {
     });
 
     assert_eq!(value["organization"]["partyId"], "party_1");
+    assert_eq!(value["organization"]["businessNo"], "2768603291");
     assert_eq!(value["party"]["businessNo"], "2768603291");
     assert_eq!(value["party"]["legalName"], "주식회사 커널로그에너지");
     assert_eq!(value["partyLink"]["relationType"], "legal");

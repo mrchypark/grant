@@ -100,6 +100,8 @@ async fn ensure_schema_creates_authorization_tables() {
     let names: std::collections::BTreeSet<String> = rows.into_iter().map(|row| row.name).collect();
 
     for table in [
+        "cert_gateway_challenges",
+        "crawl_task_tokens",
         "user_identities",
         "parties",
         "organizations",
@@ -126,6 +128,8 @@ async fn ensure_schema_creates_authorization_tables() {
 
     assert!(!names.contains("businesses"));
     assert!(!names.contains("business_memberships"));
+    assert!(!names.contains("organization_edges"));
+    assert!(!names.contains("organization_closure"));
 
     let binding_columns: Vec<ColumnRow> = runtime
         .query_rows(
@@ -305,8 +309,10 @@ async fn ensure_schema_creates_authorization_tables() {
         .map(|column| column.name)
         .collect();
     assert!(!organization_columns.contains(&"party_id".to_owned()));
-    assert!(!organization_columns.contains(&"business_no".to_owned()));
     assert!(!organization_columns.contains(&"legal_entity_id".to_owned()));
+    assert!(organization_columns.contains(&"business_no".to_owned()));
+    assert!(organization_columns.contains(&"inactivated_at".to_owned()));
+    assert!(!organization_columns.contains(&"active".to_owned()));
 
     let organization_party_link_columns: Vec<ColumnRow> = runtime
         .query_rows(
@@ -399,11 +405,58 @@ async fn ensure_schema_creates_authorization_tables() {
             "party_id",
             "common_name",
             "encrypted_blob",
+            "wrapped_dek",
+            "kms_key_id",
             "active",
             "last_used_at",
             "created_at",
         ]
     );
+
+    let challenge_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('cert_gateway_challenges') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("cert_gateway_challenges columns");
+    let challenge_columns: Vec<String> = challenge_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(challenge_columns.contains(&"expires_at".to_owned()));
+    assert!(challenge_columns.contains(&"consumed_at".to_owned()));
+
+    let crawl_token_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('crawl_task_tokens') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("crawl_task_tokens columns");
+    let crawl_token_columns: Vec<String> = crawl_token_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(crawl_token_columns.contains(&"token_hash".to_owned()));
+    assert!(crawl_token_columns.contains(&"used_at".to_owned()));
+
+    let organization_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('organizations') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("organizations columns");
+    let organization_columns: Vec<String> = organization_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(organization_columns.contains(&"inactivated_at".to_owned()));
+    assert!(!organization_columns.contains(&"active".to_owned()));
 
     let indexes: Vec<IndexRow> = runtime
         .query_rows(
@@ -416,7 +469,9 @@ async fn ensure_schema_creates_authorization_tables() {
     let index_names: std::collections::BTreeSet<String> =
         indexes.into_iter().map(|index| index.name).collect();
     for index in [
+        "idx_cert_gateway_challenges_org_expires",
         "idx_certificates_party_active",
+        "idx_crawl_task_tokens_org_expires",
         "idx_agreement_documents_agreement",
         "idx_client_grants_active_unique",
         "idx_client_grants_user_client",

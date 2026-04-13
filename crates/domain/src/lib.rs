@@ -47,8 +47,11 @@ pub struct Organization {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub party_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub business_no: Option<String>,
     pub name: String,
-    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactivated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -339,7 +342,6 @@ pub struct Party {
     pub legal_name: String,
     pub active: bool,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Plant {

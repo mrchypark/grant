@@ -22,8 +22,18 @@ fn clear_certd_env() {
         "CERTD_TRAILBASE_INTROSPECT_PATH",
         "CERTD_TRAILBASE_INTERNAL_SECRET",
         "CERTD_TRAILBASE_CACHE_TTL_SECONDS",
+        "CERTD_MASTER_KEY",
+        "CERTD_KMS_ACTIVE_KEY_ID",
+        "CERTD_KMS_MASTER_KEYS",
     ] {
         unsafe { std::env::remove_var(key) };
+    }
+}
+
+fn set_test_kms_env() {
+    unsafe {
+        std::env::set_var("CERTD_KMS_ACTIVE_KEY_ID", "test-kms-key");
+        std::env::set_var("CERTD_KMS_MASTER_KEYS", "test-kms-key:dGVzdC1rbXMta2V5");
     }
 }
 
@@ -31,6 +41,7 @@ fn clear_certd_env() {
 fn loads_default_config() {
     let _guard = env_lock().lock().expect("env lock");
     clear_certd_env();
+    set_test_kms_env();
     unsafe {
         std::env::set_var("CERTD_TRAILBASE_INTERNAL_SECRET", "default-secret");
     }
@@ -43,6 +54,7 @@ fn loads_default_config() {
         cfg.auth.trailbase.internal_secret,
         "default-secret".to_owned()
     );
+    assert_eq!(cfg.kms.active_key_id, "test-kms-key");
     assert_eq!(cfg.hiqlite.runtime_mode, RuntimeMode::Embedded);
     assert_eq!(cfg.hiqlite.local_node_role, LocalNodeRole::Voter);
     assert_eq!(cfg.hiqlite.default_read_consistency, ReadConsistency::Local);
@@ -56,6 +68,7 @@ fn loads_default_config() {
 fn loads_trailbase_auth_config_from_env() {
     let _guard = env_lock().lock().expect("env lock");
     clear_certd_env();
+    set_test_kms_env();
     unsafe {
         std::env::set_var("CERTD_TRAILBASE_BASE_URL", "http://trailbase.internal:4000");
         std::env::set_var("CERTD_TRAILBASE_INTROSPECT_PATH", "/api/certd/introspect");
@@ -81,6 +94,7 @@ fn loads_trailbase_auth_config_from_env() {
 fn missing_trailbase_internal_secret_is_rejected() {
     let _guard = env_lock().lock().expect("env lock");
     clear_certd_env();
+    set_test_kms_env();
 
     let err = AppConfig::from_env().expect_err("missing internal secret should fail");
     assert!(err.to_string().contains("CERTD_TRAILBASE_INTERNAL_SECRET"));
@@ -90,6 +104,7 @@ fn missing_trailbase_internal_secret_is_rejected() {
 fn loads_split_runtime_config_from_env() {
     let _guard = env_lock().lock().expect("env lock");
     clear_certd_env();
+    set_test_kms_env();
     unsafe {
         std::env::set_var("CERTD_TRAILBASE_INTERNAL_SECRET", "split-secret");
         std::env::set_var("CERTD_RUNTIME_MODE", "split");
@@ -127,6 +142,7 @@ fn loads_split_runtime_config_from_env() {
 fn normalizes_remote_nodes_without_scheme_changes() {
     let _guard = env_lock().lock().expect("env lock");
     clear_certd_env();
+    set_test_kms_env();
     unsafe {
         std::env::set_var("CERTD_TRAILBASE_INTERNAL_SECRET", "remote-secret");
         std::env::set_var("CERTD_RUNTIME_MODE", "remote");
@@ -145,5 +161,26 @@ fn normalizes_remote_nodes_without_scheme_changes() {
             "b:8200".to_owned(),
             "c:8300".to_owned()
         ]
+    );
+}
+
+#[test]
+fn falls_back_to_legacy_master_key_when_kms_envs_are_absent() {
+    let _guard = env_lock().lock().expect("env lock");
+    clear_certd_env();
+    unsafe {
+        std::env::set_var("CERTD_TRAILBASE_INTERNAL_SECRET", "fallback-secret");
+        std::env::set_var("CERTD_MASTER_KEY", "legacy-master-key-material");
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+
+    assert_eq!(cfg.kms.active_key_id, "legacy-master-key");
+    assert_eq!(
+        cfg.kms.master_keys,
+        vec![(
+            "legacy-master-key".to_owned(),
+            b"legacy-master-key-material".to_vec()
+        )]
     );
 }

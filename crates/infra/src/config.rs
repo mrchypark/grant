@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{env, path::PathBuf};
+
+const LEGACY_MASTER_KEY_ID: &str = "legacy-master-key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -24,6 +27,12 @@ pub struct TrailbaseAuthConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
     pub trailbase: TrailbaseAuthConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KmsConfig {
+    pub active_key_id: String,
+    pub master_keys: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +92,7 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub security: SecurityConfig,
     pub auth: AuthConfig,
+    pub kms: KmsConfig,
     pub artifacts: ArtifactConfig,
     pub hiqlite: HiqliteConfig,
 }
@@ -90,21 +100,64 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let current_dir = env::current_dir().context("resolve current working directory")?;
+        let security = SecurityConfig {
+            master_key: env_or("CERTD_MASTER_KEY", "dev-only-master-key"),
+            bootstrap_user_id: env_or("CERTD_BOOTSTRAP_USER_ID", "conalog-account"),
+            bootstrap_user_name: env_or("CERTD_BOOTSTRAP_USER_NAME", "Conalog Account"),
+        };
         Ok(Self {
             server: ServerConfig {
                 bind_addr: env_or("CERTD_BIND_ADDR", "0.0.0.0:8080"),
             },
-            security: SecurityConfig {
-                master_key: env_or("CERTD_MASTER_KEY", "dev-only-master-key"),
-                bootstrap_user_id: env_or("CERTD_BOOTSTRAP_USER_ID", "conalog-account"),
-                bootstrap_user_name: env_or("CERTD_BOOTSTRAP_USER_NAME", "Conalog Account"),
-            },
+            security: security.clone(),
             auth: auth_config()?,
+            kms: KmsConfig::from_env()?,
             artifacts: ArtifactConfig {
                 backend: artifact_backend(&current_dir)?,
             },
             hiqlite: hiqlite_config(),
         })
+    }
+}
+
+impl KmsConfig {
+    pub fn from_env() -> Result<Self> {
+        let active_key_id = env::var("CERTD_KMS_ACTIVE_KEY_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let master_keys = env::var("CERTD_KMS_MASTER_KEYS")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
+        match (active_key_id, master_keys) {
+            (Some(active_key_id), Some(master_keys)) => {
+                let parsed = parse_kms_master_keys(&master_keys)?;
+                if !parsed.iter().any(|(key_id, _)| key_id == &active_key_id) {
+                    anyhow::bail!(
+                        "CERTD_KMS_ACTIVE_KEY_ID {active_key_id} is not present in CERTD_KMS_MASTER_KEYS"
+                    );
+                }
+                Ok(Self {
+                    active_key_id,
+                    master_keys: parsed,
+                })
+            }
+            (None, None) => Ok(Self {
+                active_key_id: LEGACY_MASTER_KEY_ID.to_owned(),
+                master_keys: vec![(
+                    LEGACY_MASTER_KEY_ID.to_owned(),
+                    env_or("CERTD_MASTER_KEY", "dev-only-master-key").into_bytes(),
+                )],
+            }),
+            (None, Some(_)) => {
+                anyhow::bail!("missing required environment variable CERTD_KMS_ACTIVE_KEY_ID")
+            }
+            (Some(_), None) => {
+                anyhow::bail!("missing required environment variable CERTD_KMS_MASTER_KEYS")
+            }
+        }
     }
 }
 
@@ -160,6 +213,36 @@ fn artifact_backend(current_dir: &PathBuf) -> Result<ArtifactBackendConfig> {
         }),
         other => Err(anyhow::anyhow!("unsupported ARTIFACTS_BACKEND: {other}")),
     }
+}
+
+fn parse_kms_master_keys(value: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut parsed = Vec::new();
+
+    for entry in value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (key_id, encoded) = entry.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("CERTD_KMS_MASTER_KEYS entry must be key-id:base64-key")
+        })?;
+        let key_id = key_id.trim();
+        let encoded = encoded.trim();
+        if key_id.is_empty() || encoded.is_empty() {
+            anyhow::bail!("CERTD_KMS_MASTER_KEYS entry must include both key id and key material");
+        }
+
+        let key_material = STANDARD
+            .decode(encoded)
+            .with_context(|| "decode CERTD_KMS_MASTER_KEYS base64 key material")?;
+        parsed.push((key_id.to_owned(), key_material));
+    }
+
+    if parsed.is_empty() {
+        anyhow::bail!("CERTD_KMS_MASTER_KEYS must include at least one entry");
+    }
+
+    Ok(parsed)
 }
 
 fn env_or(key: &str, default: &str) -> String {

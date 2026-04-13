@@ -56,7 +56,11 @@ pub fn extract_common_name(sign_cert_der: &[u8]) -> Result<String> {
 }
 
 pub fn encrypt_bundle(master_key: &str, bundle: &CertificateBundle) -> Result<String> {
-    let key = derive_key(master_key);
+    encrypt_bundle_with_key(master_key.as_bytes(), bundle)
+}
+
+pub fn encrypt_bundle_with_key(key_material: &[u8], bundle: &CertificateBundle) -> Result<String> {
+    let key = derive_key(key_material);
     let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte AES key");
 
     let plaintext = serde_json::to_vec(bundle).context("serialize certificate bundle")?;
@@ -75,9 +79,13 @@ pub fn encrypt_bundle(master_key: &str, bundle: &CertificateBundle) -> Result<St
 }
 
 pub fn decrypt_bundle(master_key: &str, value: &str) -> Result<CertificateBundle> {
+    decrypt_bundle_with_key(master_key.as_bytes(), value)
+}
+
+pub fn decrypt_bundle_with_key(key_material: &[u8], value: &str) -> Result<CertificateBundle> {
     let envelope: EncryptedBundle =
         serde_json::from_str(value).context("parse encrypted certificate bundle")?;
-    let key = derive_key(master_key);
+    let key = derive_key(key_material);
     let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte AES key");
 
     let nonce = STANDARD
@@ -93,9 +101,15 @@ pub fn decrypt_bundle(master_key: &str, value: &str) -> Result<CertificateBundle
     serde_json::from_slice(&plaintext).context("decode certificate bundle")
 }
 
-fn derive_key(master_key: &str) -> [u8; 32] {
+pub fn generate_data_encryption_key() -> Vec<u8> {
+    let mut dek = vec![0u8; 32];
+    OsRng.fill_bytes(&mut dek);
+    dek
+}
+
+fn derive_key(key_material: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(master_key.as_bytes());
+    hasher.update(key_material);
     let digest = hasher.finalize();
     let mut key = [0u8; 32];
     key.copy_from_slice(&digest);

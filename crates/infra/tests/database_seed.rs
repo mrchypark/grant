@@ -1206,6 +1206,8 @@ async fn certificates_are_shared_across_organizations_linked_to_same_party() {
             Some("2768603291"),
             "주식회사 커널로그에너지",
             "encrypted-bundle",
+            b"wrapped-dek",
+            "local-dev-v1",
         )
         .await
         .expect("save certificate");
@@ -1246,6 +1248,8 @@ async fn save_certificate_reuses_existing_party_without_overwriting_legal_name()
         Some("2768603291"),
         "커널로그에너지 운영 인증서",
         "encrypted-bundle",
+        b"wrapped-dek",
+        "local-dev-v1",
     )
     .await
     .expect("save certificate");
@@ -1280,5 +1284,5 @@ async fn organization_identity_bootstraps_placeholder_organization_when_missing(
     assert_eq!(organization.id, "missing-org");
     assert_eq!(organization.name, "missing-org");
     assert_eq!(organization.party_id, None);
-    assert!(organization.active);
+    assert!(organization.inactivated_at.is_none());
 }
