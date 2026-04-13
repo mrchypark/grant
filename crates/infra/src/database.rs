@@ -1808,7 +1808,7 @@ impl Database {
                  WHERE c.organization_id = $1
                    AND c.active = 1
                    AND o.inactivated_at IS NULL
-                 ORDER BY c.created_at DESC
+                 ORDER BY c.last_used_at DESC NULLS LAST, c.created_at DESC
                  LIMIT 1",
                 params!(organization_id.to_owned()),
                 "active certificate",

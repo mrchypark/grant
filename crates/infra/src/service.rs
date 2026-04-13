@@ -617,7 +617,11 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let token = require_non_empty("token", &input.token)?;
         let token_hash = hash_hex(&token);
-        let issued = self.db.get_crawl_task_token_by_hash(&token_hash).await?;
+        let issued = self
+            .db
+            .get_crawl_task_token_by_hash(&token_hash)
+            .await
+            .map_err(map_missing_crawl_task_token)?;
         if is_expired(&issued.expires_at)? {
             return Err(bad_request_error("crawl task token has expired"));
         }
@@ -1902,6 +1906,17 @@ fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -
             .contains("no row returned: cert gateway challenge")
     }) {
         return not_found_error("cert gateway challenge not found");
+    }
+    err
+}
+
+fn map_missing_crawl_task_token(err: anyhow::Error) -> anyhow::Error {
+    if err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("no row returned: crawl task token")
+    }) {
+        return not_found_error("crawl task token not found");
     }
     err
 }

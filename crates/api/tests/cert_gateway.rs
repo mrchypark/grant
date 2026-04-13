@@ -510,6 +510,23 @@ async fn crawl_start_rejects_organization_path_mismatch() {
 }
 
 #[tokio::test]
+async fn crawl_start_returns_not_found_for_unknown_token() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    let response = app
+        .oneshot(task_token_request(
+            "/api/v1/organizations/bootstrap-user/crawls",
+            "missing-crawl-task-token",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = json_body(response).await;
+    assert_eq!(body["error"], "crawl task token not found");
+}
+
+#[tokio::test]
 async fn stored_registration_requires_challenge_signature() {
     let (app, _db_dir, _artifacts_dir) = build_app().await;
 

@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
@@ -401,6 +402,55 @@ async fn certificate_gateway_rows_round_trip() {
     assert!(
         err.to_string().contains("certificate not found"),
         "unexpected error: {err:#}"
+    );
+
+    runtime
+        .execute(
+            "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            vec![
+                "cert-recent-created".into(),
+                "conalog-account".into(),
+                "Recent Created".into(),
+                "blob-created".into(),
+                STANDARD.encode("wrapped-created").into(),
+                "kms-key-v1".into(),
+                1_i64.into(),
+                Option::<String>::None.into(),
+                "2026-04-14T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert recent-created certificate");
+    runtime
+        .execute(
+            "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            vec![
+                "cert-recently-used".into(),
+                "conalog-account".into(),
+                "Recently Used".into(),
+                "blob-used".into(),
+                STANDARD.encode("wrapped-used").into(),
+                "kms-key-v1".into(),
+                1_i64.into(),
+                "2026-04-15T00:00:00Z".into(),
+                "2026-04-13T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert recently-used certificate");
+
+    db.reactivate_organization("conalog-account")
+        .await
+        .expect("reactivate organization for ordering check");
+    let preferred = db
+        .load_active_certificate("conalog-account")
+        .await
+        .expect("load preferred active certificate");
+    assert_eq!(
+        preferred.id, "cert-recently-used",
+        "last_used_at should take precedence over created_at for active certificate selection"
     );
 
     let challenge = db
