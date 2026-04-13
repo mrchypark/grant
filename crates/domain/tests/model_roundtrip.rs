@@ -1,9 +1,11 @@
 use domain::{
-    Action, ActionRiskLevel, Agreement, AgreementStatus, AgreementType, DocumentArtifact,
-    DocumentCategory, GenerationRecord, Group, MembershipRole, MembershipStatus, Organization,
-    OrganizationMembership, Plant, RateRecord, RecRecord, Role, RoleBinding,
-    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, RoleRule, RoleRuleEffect,
-    SyncMode, SyncRun, User,
+    Action, ActionRiskLevel, Agreement, AgreementDocument, AgreementDocumentType, AgreementStatus,
+    AgreementType, Client, ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant,
+    ClientGrantAction, ClientGrantStatus, ClientType, DocumentArtifact, DocumentCategory,
+    GenerationRecord, Group, MembershipRole, MembershipStatus, Organization,
+    OrganizationMembership, OrganizationPartyLink, OrganizationPartyRelationType, Party, Plant,
+    RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
+    RoleBindingSubjectType, SyncMode, SyncRun, User,
 };
 
 #[test]
@@ -16,9 +18,21 @@ fn serializes_core_models() {
     };
     let organization = Organization {
         id: "2768603291".into(),
+        party_id: Some("party_1".into()),
         business_no: Some("2768603291".into()),
         name: "커널로그에너지".into(),
         inactivated_at: None,
+    };
+    let party = Party {
+        id: "party_1".into(),
+        business_no: "2768603291".into(),
+        legal_name: "주식회사 커널로그에너지".into(),
+        active: true,
+    };
+    let party_link = OrganizationPartyLink {
+        organization_id: organization.id.clone(),
+        party_id: party.id.clone(),
+        relation_type: OrganizationPartyRelationType::Legal,
     };
     let membership = OrganizationMembership {
         id: "org_mem_1".into(),
@@ -44,6 +58,16 @@ fn serializes_core_models() {
         starts_at: Some("2026-01-01T00:00:00Z".into()),
         ends_at: Some("2027-01-01T00:00:00Z".into()),
     };
+    let agreement_document = AgreementDocument {
+        id: "agreement_doc_1".into(),
+        agreement_id: agreement.id.clone(),
+        document_type: AgreementDocumentType::MasterContract,
+        file_name: "om-2026-001.pdf".into(),
+        object_key: "agreements/agr_1/master.pdf".into(),
+        content_type: "application/pdf".into(),
+        document_no: Some("DOC-001".into()),
+        uploaded_at: "2026-03-31T00:00:00Z".into(),
+    };
     let action = Action {
         id: "action_1".into(),
         code: "plant.profile.read".into(),
@@ -51,6 +75,42 @@ fn serializes_core_models() {
         description: Some("Read plant profile".into()),
         risk_level: ActionRiskLevel::Low,
         visibility_granting: true,
+        grantable_to_clients: true,
+        consent_label: Some("발전소 기본정보 조회".into()),
+        consent_description: Some("발전소 기본정보를 조회합니다.".into()),
+    };
+    let client = Client {
+        id: "client_1".into(),
+        organization_id: organization.id.clone(),
+        slug: "awesome-dashboard".into(),
+        name: "Awesome Dashboard".into(),
+        description: Some("외부 발전소 대시보드".into()),
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: user.id.clone(),
+    };
+    let client_action = ClientAction {
+        client_id: client.id.clone(),
+        action_id: action.id.clone(),
+    };
+    let client_grant = ClientGrant {
+        id: "client_grant_1".into(),
+        user_id: user.id.clone(),
+        client_id: client.id.clone(),
+        organization_id: organization.id.clone(),
+        status: ClientGrantStatus::Active,
+        consented_at: "2026-03-31T00:00:00Z".into(),
+        revoked_at: None,
+        revoked_by_user_id: None,
+        created_at: "2026-03-31T00:00:00Z".into(),
+        updated_at: "2026-03-31T00:00:00Z".into(),
+    };
+    let client_grant_action = ClientGrantAction {
+        client_grant_id: client_grant.id.clone(),
+        action_id: action.id.clone(),
     };
     let role = Role {
         id: "role_1".into(),
@@ -58,12 +118,6 @@ fn serializes_core_models() {
         code: "viewer".into(),
         name: "Viewer".into(),
         description: Some("Read-only access".into()),
-    };
-    let role_rule = RoleRule {
-        id: "rule_1".into(),
-        role_id: role.id.clone(),
-        effect: RoleRuleEffect::Allow,
-        action_pattern: "plant.*.read".into(),
     };
     let binding = RoleBinding {
         id: "binding_1".into(),
@@ -144,11 +198,17 @@ fn serializes_core_models() {
         "organization": organization,
         "membership": membership,
         "group": group,
+        "party": party,
+        "partyLink": party_link,
         "agreement": agreement,
+        "agreementDocument": agreement_document,
         "action": action,
         "role": role,
-        "roleRule": role_rule,
         "binding": binding,
+        "client": client,
+        "clientAction": client_action,
+        "clientGrant": client_grant,
+        "clientGrantAction": client_grant_action,
         "plant": plant,
         "sync": sync,
         "generation": generation,
@@ -157,15 +217,38 @@ fn serializes_core_models() {
         "document": document,
     });
 
+    assert_eq!(value["organization"]["partyId"], "party_1");
     assert_eq!(value["organization"]["businessNo"], "2768603291");
+    assert_eq!(value["party"]["businessNo"], "2768603291");
+    assert_eq!(value["party"]["legalName"], "주식회사 커널로그에너지");
+    assert_eq!(value["partyLink"]["relationType"], "legal");
     assert_eq!(value["membership"]["membershipRole"], "owner");
     assert_eq!(value["group"]["name"], "현장팀");
     assert_eq!(value["agreement"]["agreementType"], "om");
+    assert_eq!(value["agreement"]["referenceNo"], "AG-2026-001");
+    assert_eq!(
+        value["agreementDocument"]["documentType"],
+        "master_contract"
+    );
+    assert_eq!(value["agreementDocument"]["documentNo"], "DOC-001");
+    assert_eq!(
+        value["agreementDocument"]["uploadedAt"],
+        "2026-03-31T00:00:00Z"
+    );
     assert_eq!(value["action"]["code"], "plant.profile.read");
+    assert_eq!(value["action"]["grantableToClients"], true);
+    assert_eq!(value["action"]["consentLabel"], "발전소 기본정보 조회");
     assert_eq!(value["role"]["code"], "viewer");
-    assert_eq!(value["roleRule"]["actionPattern"], "plant.*.read");
     assert_eq!(value["binding"]["resourceType"], "plant");
     assert_eq!(value["binding"]["resourceId"], "plant_1");
+    assert_eq!(value["client"]["slug"], "awesome-dashboard");
+    assert_eq!(value["client"]["clientType"], "confidential");
+    assert_eq!(value["clientAction"]["actionId"], "action_1");
+    assert_eq!(value["clientGrant"]["status"], "active");
+    assert_eq!(
+        value["clientGrantAction"]["clientGrantId"],
+        "client_grant_1"
+    );
     assert_eq!(value["sync"]["mode"], "delta");
     assert_eq!(value["sync"]["organizationId"], "2768603291");
     assert_eq!(value["document"]["category"], "drawings");

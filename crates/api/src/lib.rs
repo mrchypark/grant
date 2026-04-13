@@ -9,18 +9,19 @@ use axum::{
 };
 use base64::Engine;
 use domain::{
-    DocumentArtifact, GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord,
-    SyncMode, SyncRun, User,
+    Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
+    GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord, SyncMode, SyncRun,
+    User,
 };
 use infra::{
     config::ReadConsistency,
     crypto::CertificateBundle,
     database::StoredCertificate,
     service::{
-        AppService, BackupInfo, CreateCertGatewayChallengeInput, CreatePlantInput,
-        ExecuteEphemeralCrawlInput, IssueCrawlTaskTokenInput, PlantView, PutCertificateInput,
-        RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
-        StartCrawlWithTaskTokenInput, SyncInput,
+        AppService, BackupInfo, CreateCertGatewayChallengeInput, CreateClientInput,
+        CreatePlantInput, ExecuteEphemeralCrawlInput, IssueCrawlTaskTokenInput, PlantView,
+        PutCertificateInput, RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
+        StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,18 @@ use std::sync::Arc;
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route(
+            "/api/v1/organizations/{organizationId}/clients",
+            post(create_client),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            put(update_client),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
+            put(replace_client_actions),
+        )
         .route(
             "/api/v1/organizations/{organizationId}/certificate",
             put(put_organization_certificate),
@@ -82,6 +95,18 @@ pub fn build_router(service: Arc<AppService>) -> Router {
 
 pub fn build_learner_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route(
+            "/api/v1/organizations/{organizationId}/clients",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
+            any(requires_voter_node),
+        )
         .route(
             "/api/v1/organizations/{organizationId}/certificate",
             any(requires_voter_node),
@@ -142,6 +167,18 @@ fn build_shared_router() -> Router<Arc<AppService>> {
             any(proxy_trailbase_passthrough),
         )
         .route("/api/v1/me", get(get_current_user))
+        .route(
+            "/api/v1/organizations/{organizationId}/clients",
+            get(list_clients),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            get(get_client),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
+            get(list_client_actions),
+        )
         .route("/api/v1/plants", get(list_plants))
         .route("/api/v1/plants/{facilityCode}", get(get_plant))
         .route(
@@ -184,6 +221,7 @@ struct CertificateUploadRequest {
 struct CertificateResponse {
     id: String,
     organization_id: String,
+    party_id: String,
     business_no: Option<String>,
     common_name: String,
 }
@@ -277,6 +315,39 @@ struct CreatePlantRequest {
     rec_start_date: String,
     confirm_issued: String,
     owner_organization_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateClientRequest {
+    id: String,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    client_type: ClientType,
+    app_type: ClientAppType,
+    first_party: bool,
+    consent_policy: ClientConsentPolicy,
+    active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateClientRequest {
+    slug: String,
+    name: String,
+    description: Option<String>,
+    client_type: ClientType,
+    app_type: ClientAppType,
+    first_party: bool,
+    consent_policy: ClientConsentPolicy,
+    active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceClientActionsRequest {
+    action_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,7 +451,7 @@ async fn put_organization_certificate(
 ) -> ApiResult<Json<CertificateResponse>> {
     let cert = service
         .put_certificate(PutCertificateInput {
-            organization_id,
+            organization_id: organization_id.clone(),
             business_no: body.business_no,
             password: body.password,
             sign_cert_der_b64: body.sign_cert_der_base64,
@@ -390,7 +461,7 @@ async fn put_organization_certificate(
         })
         .await
         .map_err(ApiError::bad_request_if_known)?;
-    Ok(Json(map_certificate(cert)))
+    Ok(Json(map_certificate(cert, &organization_id)))
 }
 
 async fn get_current_user(
@@ -442,6 +513,142 @@ async fn sync_organization(
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::CREATED, Json(map_sync(run))))
+}
+
+async fn list_clients(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Client>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let clients = service
+        .list_clients_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(clients))
+}
+
+async fn create_client(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateClientRequest>,
+) -> ApiResult<(StatusCode, Json<Client>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let client = service
+        .create_client(
+            &ctx.user_id,
+            &ctx.organization_id,
+            CreateClientInput {
+                id: body.id,
+                slug: body.slug,
+                name: body.name,
+                description: body.description,
+                client_type: body.client_type,
+                app_type: body.app_type,
+                first_party: body.first_party,
+                consent_policy: body.consent_policy,
+                active: body.active,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(client)))
+}
+
+async fn get_client(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Client>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let client = service
+        .get_client_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(client))
+}
+
+async fn update_client(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateClientRequest>,
+) -> ApiResult<Json<Client>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let client = service
+        .update_client(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            UpdateClientInput {
+                slug: body.slug,
+                name: body.name,
+                description: body.description,
+                client_type: body.client_type,
+                app_type: body.app_type,
+                first_party: body.first_party,
+                consent_policy: body.consent_policy,
+                active: body.active,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(client))
+}
+
+async fn list_client_actions(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Action>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let actions = service
+        .list_client_actions_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
+}
+
+async fn replace_client_actions(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, client_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ReplaceClientActionsRequest>,
+) -> ApiResult<Json<Vec<Action>>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let actions = service
+        .replace_client_actions_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &client_id,
+            &body.action_ids,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
 }
 
 async fn create_cert_gateway_challenge(
@@ -521,7 +728,7 @@ async fn register_stored_certificate(
         .map_err(ApiError::from_domain)?;
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
-            organization_id,
+            organization_id: organization_id.clone(),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
@@ -529,7 +736,10 @@ async fn register_stored_certificate(
         })
         .await
         .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(map_certificate(cert))))
+    Ok((
+        StatusCode::CREATED,
+        Json(map_certificate(cert, &organization_id)),
+    ))
 }
 
 async fn list_stored_certificates(
@@ -544,7 +754,10 @@ async fn list_stored_certificates(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(
-        certificates.into_iter().map(map_certificate).collect(),
+        certificates
+            .into_iter()
+            .map(|cert| map_certificate(cert, &organization_id))
+            .collect(),
     ))
 }
 
@@ -983,10 +1196,11 @@ fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
 }
 
-fn map_certificate(cert: StoredCertificate) -> CertificateResponse {
+fn map_certificate(cert: StoredCertificate, organization_id: &str) -> CertificateResponse {
     CertificateResponse {
         id: cert.id,
-        organization_id: cert.organization_id,
+        organization_id: organization_id.to_owned(),
+        party_id: cert.party_id,
         business_no: cert.business_no,
         common_name: cert.common_name,
     }
@@ -1123,6 +1337,13 @@ fn ensure_active_organization_path_matches(
     })
 }
 
+fn ensure_request_context_organization(
+    path_organization_id: &str,
+    ctx: &RequestContext,
+) -> ApiResult<()> {
+    ensure_active_organization_path_matches(path_organization_id, &ctx.organization_id)
+}
+
 fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
     let provided = header_value(headers, "x-certd-master-key")?;
     if provided != service.master_key() {
@@ -1244,18 +1465,26 @@ impl ApiError {
             };
         }
         let message = err.to_string();
+        let contains_chain =
+            |needle: &str| err.chain().any(|cause| cause.to_string().contains(needle));
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
+        } else if contains_chain("already exists")
+            || contains_chain("UNIQUE constraint failed")
+            || contains_chain("unique constraint failed")
+        {
+            StatusCode::CONFLICT
         } else if message.contains("unavailable:") {
             StatusCode::SERVICE_UNAVAILABLE
-        } else if message.contains("not found") {
+        } else if contains_chain("not found") {
             StatusCode::NOT_FOUND
-        } else if message.contains("expired")
-            || message.contains("consumed")
-            || message.contains("payload mismatch")
-            || message.contains("mismatch")
-            || message.contains("already used")
-            || message.contains("must not be empty")
+        } else if contains_chain("must not be empty")
+            || contains_chain("is not grantable to clients")
+            || contains_chain("expired")
+            || contains_chain("consumed")
+            || contains_chain("payload mismatch")
+            || contains_chain("mismatch")
+            || contains_chain("already used")
         {
             StatusCode::BAD_REQUEST
         } else {
@@ -1296,6 +1525,7 @@ fn structured_status(err: &anyhow::Error) -> Option<StatusCode> {
                 ServiceErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
                 ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
                 ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
+                ServiceErrorKind::Conflict => StatusCode::CONFLICT,
                 ServiceErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             })
     })
@@ -1312,9 +1542,12 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiError, decode_base64_field, ensure_active_organization_path_matches};
+    use super::{
+        ApiError, decode_base64_field, ensure_active_organization_path_matches, map_certificate,
+    };
     use anyhow::anyhow;
     use axum::http::StatusCode;
+    use infra::database::StoredCertificate;
     use infra::service::{ServiceError, ServiceErrorKind};
 
     #[test]
@@ -1328,6 +1561,29 @@ mod tests {
         let err =
             ApiError::from_domain(anyhow!("unavailable: quorum validation path is not ready"));
         assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn certificate_response_exposes_party_identity() {
+        let response = map_certificate(
+            StoredCertificate {
+                id: "cert-1".to_owned(),
+                party_id: "party-2768603291".to_owned(),
+                business_no: Some("2768603291".to_owned()),
+                common_name: "주식회사 커널로그에너지".to_owned(),
+                encrypted_blob: "blob".to_owned(),
+                wrapped_dek: Vec::new(),
+                kms_key_id: "kms-key-v1".to_owned(),
+                active: 1,
+                last_used_at: None,
+                created_at: "2026-04-12T00:00:00Z".to_owned(),
+            },
+            "org-2768603291",
+        );
+
+        assert_eq!(response.organization_id, "org-2768603291");
+        assert_eq!(response.party_id, "party-2768603291");
+        assert_eq!(response.business_no.as_deref(), Some("2768603291"));
     }
 
     #[test]

@@ -14,7 +14,6 @@ resources:
   - app-learner-1-deployment.yaml
   - app-learner-2-deployment.yaml
   - app-learner-3-deployment.yaml
-  - trailbase-configmap.yaml
   - trailbase-service.yaml
   - trailbase-deployment.yaml
   - minio-headless-service.yaml
@@ -22,3 +21,4 @@ resources:
   - minio-pdb.yaml
   - minio-statefulset.yaml
   - ingress.yaml
+  - trailbase-configmap.yaml

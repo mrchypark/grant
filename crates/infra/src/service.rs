@@ -16,13 +16,14 @@ use crate::{
     kms::{EnvKmsProvider, KmsProvider},
     npki::verify_challenge_signature,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
-    DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization, Plant,
-    RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
-    RoleBindingSubjectType, SyncMode, SyncRun, User,
+    Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
+    DocumentCategory, GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord,
+    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
+    SyncRun, User,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +36,7 @@ use uuid::Uuid;
 
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
+const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -42,6 +44,7 @@ pub enum ServiceErrorKind {
     Unauthorized,
     Forbidden,
     NotFound,
+    Conflict,
     Unavailable,
 }
 
@@ -111,6 +114,31 @@ pub struct CreatePlantInput {
     pub rec_start_date: String,
     pub confirm_issued: String,
     pub owner_organization_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateClientInput {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub client_type: ClientType,
+    pub app_type: ClientAppType,
+    pub first_party: bool,
+    pub consent_policy: ClientConsentPolicy,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateClientInput {
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub client_type: ClientType,
+    pub app_type: ClientAppType,
+    pub first_party: bool,
+    pub consent_policy: ClientConsentPolicy,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -460,6 +488,7 @@ impl AppService {
             organization_id,
             "organization.permission.manage",
             "register stored certificates",
+            Some(ReadConsistency::Strong),
         )
         .await
     }
@@ -514,7 +543,13 @@ impl AppService {
             .get_certificate_by_id(&certificate_id)
             .await
             .map_err(map_missing_certificate)?;
-        if certificate.organization_id != organization_id {
+        let organization = self.db.get_organization(&organization_id).await?;
+        if organization.inactivated_at.is_some() {
+            return Err(forbidden_error(format!(
+                "forbidden: organization {organization_id} is inactive"
+            )));
+        }
+        if organization.party_id.as_deref() != Some(certificate.party_id.as_str()) {
             return Err(bad_request_error(
                 "certificate does not belong to organization",
             ));
@@ -579,6 +614,7 @@ impl AppService {
                         organization_id,
                         "organization.plant.create",
                         &format!("create plant {}", facility_code),
+                        Some(ReadConsistency::Strong),
                     )
                     .await?;
                     Ok(Some(facility_code.to_owned()))
@@ -604,6 +640,7 @@ impl AppService {
                             organization_id,
                             "organization.plant.create",
                             "create plants",
+                            Some(ReadConsistency::Strong),
                         )
                         .await?;
                         Ok(None)
@@ -653,8 +690,8 @@ impl AppService {
                 .get_certificate_by_id(certificate_id)
                 .await
                 .map_err(map_missing_certificate)?;
-            if certificate.organization_id != issued.organization_id {
-                anyhow::bail!("crawl task token certificate organization mismatch");
+            if organization.party_id.as_deref() != Some(certificate.party_id.as_str()) {
+                anyhow::bail!("crawl task token certificate party mismatch");
             }
             if certificate.active != 1 {
                 return Err(bad_request_error("certificate is inactive"));
@@ -1085,6 +1122,163 @@ impl AppService {
         Ok(plant)
     }
 
+    pub async fn list_clients_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Client>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.client.manage",
+            "manage organization clients",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_clients_with_consistency(organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn get_client_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Client> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.client.manage",
+            "manage organization clients",
+            read_consistency.clone(),
+        )
+        .await?;
+        let client = self
+            .db
+            .get_client_with_consistency(client_id, read_consistency)
+            .await?;
+        if client.organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "client not found: {} in organization {}",
+                client_id, organization_id
+            )));
+        }
+        Ok(client)
+    }
+
+    pub async fn create_client(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: CreateClientInput,
+    ) -> Result<Client> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.client.manage",
+            "manage organization clients",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let client_id = require_non_empty("id", &input.id)?;
+        let slug = require_non_empty("slug", &input.slug)?;
+        let client = Client {
+            id: client_id,
+            organization_id: organization_id.to_owned(),
+            slug,
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+            client_type: input.client_type,
+            app_type: input.app_type,
+            first_party: input.first_party,
+            consent_policy: input.consent_policy,
+            active: input.active,
+            created_by_user_id: user_id.to_owned(),
+        };
+        self.db.insert_client(&client).await?;
+        Ok(client)
+    }
+
+    pub async fn update_client(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        input: UpdateClientInput,
+    ) -> Result<Client> {
+        let existing = self
+            .get_client_authorized(
+                user_id,
+                organization_id,
+                client_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        let slug = require_non_empty("slug", &input.slug)?;
+        let client = Client {
+            id: existing.id,
+            organization_id: existing.organization_id,
+            slug,
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+            client_type: input.client_type,
+            app_type: input.app_type,
+            first_party: input.first_party,
+            consent_policy: input.consent_policy,
+            active: input.active,
+            created_by_user_id: existing.created_by_user_id,
+        };
+        self.db.update_client(&client).await?;
+        Ok(client)
+    }
+
+    pub async fn list_client_actions_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Action>> {
+        self.get_client_authorized(
+            user_id,
+            organization_id,
+            client_id,
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_client_actions_with_consistency(client_id, read_consistency)
+            .await
+    }
+
+    pub async fn replace_client_actions_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        client_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        self.get_client_authorized(
+            user_id,
+            organization_id,
+            client_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        if action_ids.len() > MAX_CLIENT_ACTION_IDS_PER_REQUEST {
+            return Err(bad_request_error(format!(
+                "actionIds must contain at most {MAX_CLIENT_ACTION_IDS_PER_REQUEST} items"
+            )));
+        }
+        self.db.replace_client_actions(client_id, action_ids).await
+    }
+
     pub async fn deactivate_organization(
         &self,
         user_id: &str,
@@ -1097,6 +1291,7 @@ impl AppService {
             target_organization_id,
             "organization.permission.manage",
             &format!("deactivate organization {}", target_organization_id),
+            Some(ReadConsistency::Strong),
         )
         .await?;
         self.db
@@ -1116,13 +1311,13 @@ impl AppService {
             target_organization_id,
             "organization.permission.manage",
             &format!("reactivate organization {}", target_organization_id),
+            Some(ReadConsistency::Strong),
         )
         .await?;
         self.db
             .reactivate_organization(target_organization_id)
             .await
     }
-
     pub async fn list_generation_authorized(
         &self,
         user_id: &str,
@@ -1309,15 +1504,17 @@ impl AppService {
         organization_id: &str,
         target_organization_id: &str,
         action_id: &str,
-        target_label: &str,
+        action_label: &str,
+        read_consistency: Option<ReadConsistency>,
     ) -> Result<()> {
         let allowed = self
             .db
-            .has_user_organization_action(
+            .has_user_organization_action_with_consistency(
                 user_id,
                 organization_id,
                 target_organization_id,
                 action_id,
+                read_consistency,
             )
             .await?;
         if !allowed {
@@ -1325,7 +1522,7 @@ impl AppService {
                 "forbidden: user {} in organization {} cannot {}",
                 user_id,
                 organization_id,
-                target_label
+                action_label
             );
         }
         Ok(())
@@ -1537,17 +1734,15 @@ impl AppService {
         organization_id: &str,
         requested_business_no: Option<&str>,
     ) -> Result<String> {
-        if let Some(business_no) = requested_business_no {
-            return normalize_business_no(business_no);
-        }
-
-        if let Ok(organization) = self.db.get_organization(organization_id).await {
-            if let Some(business_no) = organization.business_no.as_deref() {
-                return normalize_business_no(business_no);
-            }
-        }
-
-        normalize_business_no(organization_id)
+        let linked_business_no = self
+            .db
+            .get_organization_business_no(organization_id)
+            .await?;
+        normalize_business_no(select_organization_business_no(
+            organization_id,
+            requested_business_no,
+            linked_business_no.as_deref(),
+        )?)
     }
 
     async fn store_certificate_bundle(
@@ -1978,4 +2173,70 @@ fn map_missing_certificate(err: anyhow::Error) -> anyhow::Error {
         return not_found_error("certificate not found");
     }
     err
+}
+
+fn select_organization_business_no<'a>(
+    organization_id: &str,
+    requested_business_no: Option<&'a str>,
+    linked_business_no: Option<&'a str>,
+) -> Result<&'a str> {
+    if let Some(business_no) = requested_business_no {
+        return Ok(business_no);
+    }
+    if let Some(business_no) = linked_business_no {
+        return Ok(business_no);
+    }
+    Err(anyhow!(
+        "organization missing linked legal party business number: {organization_id}"
+    ))
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_optional_text, select_organization_business_no};
+
+    #[test]
+    fn requested_business_number_wins() {
+        let selected =
+            select_organization_business_no("ops-seoul", Some("2768603291"), Some("9999999999"))
+                .expect("selected business number");
+        assert_eq!(selected, "2768603291");
+    }
+
+    #[test]
+    fn linked_business_number_is_used_when_request_omits_it() {
+        let selected = select_organization_business_no("ops-seoul", None, Some("2768603291"))
+            .expect("selected business number");
+        assert_eq!(selected, "2768603291");
+    }
+
+    #[test]
+    fn missing_business_number_returns_explicit_error() {
+        let err = select_organization_business_no("ops-seoul", None, None)
+            .expect_err("missing business number must fail");
+        assert!(
+            err.to_string()
+                .contains("organization missing linked legal party business number: ops-seoul")
+        );
+    }
+
+    #[test]
+    fn blank_optional_text_normalizes_to_none() {
+        assert_eq!(normalize_optional_text(Some("   ".to_owned())), None);
+        assert_eq!(
+            normalize_optional_text(Some("  hello  ".to_owned())).as_deref(),
+            Some("hello")
+        );
+    }
 }

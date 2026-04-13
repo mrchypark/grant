@@ -6,9 +6,11 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use domain::{
-    Agreement, DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization,
-    Plant, RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
-    RoleBindingSubjectType, SyncMode, SyncRun, User,
+    Action, ActionRiskLevel, Agreement, AgreementDocument, AgreementDocumentType, Client,
+    ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant, ClientGrantAction,
+    ClientGrantStatus, ClientType, DocumentArtifact, DocumentCategory, GenerationRecord,
+    HealthStatus, Organization, Party, Plant, RateRecord, RecRecord, Role, RoleBinding,
+    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode, SyncRun, User,
 };
 use hiqlite::Row;
 use std::borrow::Cow;
@@ -56,7 +58,7 @@ pub struct Database {
 #[derive(Debug, Clone)]
 pub struct StoredCertificate {
     pub id: String,
-    pub organization_id: String,
+    pub party_id: String,
     pub business_no: Option<String>,
     pub common_name: String,
     pub encrypted_blob: String,
@@ -142,7 +144,7 @@ struct CountSumIntRow {
 #[derive(Debug, Clone)]
 struct StoredCertificateRow {
     id: String,
-    organization_id: String,
+    party_id: String,
     business_no: Option<String>,
     common_name: String,
     encrypted_blob: String,
@@ -250,9 +252,68 @@ struct RoleOrgRow {
 #[derive(Debug, Clone)]
 struct OrganizationRow {
     id: String,
+    party_id: Option<String>,
     business_no: Option<String>,
     name: String,
     inactivated_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PartyRow {
+    id: String,
+    business_no: String,
+    legal_name: String,
+    active: i64,
+}
+
+#[derive(Debug, Clone)]
+struct AgreementDocumentRow {
+    id: String,
+    agreement_id: String,
+    document_type: String,
+    file_name: String,
+    object_key: String,
+    content_type: String,
+    document_no: Option<String>,
+    uploaded_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActionRow {
+    id: String,
+    code: String,
+    name: String,
+    description: Option<String>,
+    risk_level: String,
+    visibility_granting: i64,
+    grantable_to_clients: i64,
+    consent_label: Option<String>,
+    consent_description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ClientRow {
+    id: String,
+    organization_id: String,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    client_type: String,
+    app_type: String,
+    first_party: i64,
+    consent_policy: String,
+    active: i64,
+    created_by_user_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClientGrantLookupRow {
+    id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActionLookupRow {
+    id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -541,13 +602,29 @@ impl Database {
                     expires_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS parties (
+                    id TEXT PRIMARY KEY,
+                    business_no TEXT NOT NULL UNIQUE,
+                    legal_name TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS organizations (
                     id TEXT PRIMARY KEY,
-                    business_no TEXT UNIQUE,
+                    business_no TEXT,
                     name TEXT NOT NULL,
                     inactivated_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS organization_party_links (
+                    organization_id TEXT NOT NULL,
+                    party_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (organization_id, party_id, relation_type)
                 );
                 CREATE TABLE IF NOT EXISTS organization_memberships (
                     id TEXT PRIMARY KEY,
@@ -586,6 +663,16 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS agreement_documents (
+                    id TEXT PRIMARY KEY,
+                    agreement_id TEXT NOT NULL,
+                    document_type TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    object_key TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    document_no TEXT,
+                    uploaded_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS actions (
                     id TEXT PRIMARY KEY,
                     code TEXT NOT NULL UNIQUE,
@@ -593,6 +680,9 @@ impl Database {
                     description TEXT,
                     risk_level TEXT NOT NULL,
                     visibility_granting INTEGER NOT NULL DEFAULT 0,
+                    grantable_to_clients INTEGER NOT NULL DEFAULT 0,
+                    consent_label TEXT,
+                    consent_description TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -605,14 +695,6 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (organization_id, code)
-                );
-                CREATE TABLE IF NOT EXISTS role_rules (
-                    id TEXT PRIMARY KEY,
-                    role_id TEXT NOT NULL,
-                    effect TEXT NOT NULL,
-                    action_pattern TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS role_actions (
                     role_id TEXT NOT NULL,
@@ -632,6 +714,43 @@ impl Database {
                     created_by_user_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS clients (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    client_type TEXT NOT NULL,
+                    app_type TEXT NOT NULL,
+                    first_party INTEGER NOT NULL DEFAULT 0,
+                    consent_policy TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_by_user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS client_actions (
+                    client_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    PRIMARY KEY (client_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS client_grants (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    consented_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    revoked_by_user_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS client_grant_actions (
+                    client_grant_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    PRIMARY KEY (client_grant_id, action_id)
                 );
                 CREATE TABLE IF NOT EXISTS effective_organization_plant_actions (
                     organization_id TEXT NOT NULL,
@@ -657,6 +776,12 @@ impl Database {
                 );
                 CREATE INDEX IF NOT EXISTS idx_organization_memberships_org_user
                     ON organization_memberships (organization_id, user_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_party_links_org_relation
+                    ON organization_party_links (organization_id, relation_type);
+                CREATE INDEX IF NOT EXISTS idx_organization_party_links_party
+                    ON organization_party_links (party_id, relation_type);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_parties_business_no
+                    ON parties (business_no);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_identities_provider_external
                     ON user_identities (provider, external_user_id);
                 CREATE INDEX IF NOT EXISTS idx_auth_identity_cache_expires_at
@@ -665,12 +790,13 @@ impl Database {
                     ON group_memberships (group_id, organization_membership_id);
                 CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
                     ON agreements (grantor_organization_id, grantee_organization_id, status);
+                CREATE INDEX IF NOT EXISTS idx_agreement_documents_agreement
+                    ON agreement_documents (agreement_id, document_type, uploaded_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_actions_code
                     ON actions (code);
-                CREATE INDEX IF NOT EXISTS idx_roles_org_code
-                    ON roles (organization_id, code);
-                CREATE INDEX IF NOT EXISTS idx_role_rules_role
-                    ON role_rules (role_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_global_code
+                    ON roles (code)
+                    WHERE organization_id IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_role_bindings_subject_resource_state
                     ON role_bindings (subject_type, subject_id, resource_type, resource_id, state);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_role_bindings_logical_unique
@@ -682,6 +808,11 @@ impl Database {
                         resource_id,
                         role_id
                     );
+                CREATE INDEX IF NOT EXISTS idx_client_grants_user_client
+                    ON client_grants (user_id, client_id, organization_id, status);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_client_grants_active_unique
+                    ON client_grants (user_id, client_id, organization_id)
+                    WHERE status = 'active';
                 CREATE INDEX IF NOT EXISTS idx_effective_organization_plant_actions_org_plant
                     ON effective_organization_plant_actions (organization_id, plant_id, action_id);
                 CREATE INDEX IF NOT EXISTS idx_effective_user_plant_actions_user_org
@@ -690,7 +821,7 @@ impl Database {
                     ON effective_user_plant_visibility (user_id, organization_id, plant_id);
                 CREATE TABLE IF NOT EXISTS certificates (
                     id TEXT PRIMARY KEY,
-                    organization_id TEXT NOT NULL,
+                    party_id TEXT NOT NULL,
                     common_name TEXT NOT NULL,
                     encrypted_blob TEXT NOT NULL,
                     wrapped_dek TEXT NOT NULL,
@@ -699,8 +830,8 @@ impl Database {
                     last_used_at TEXT,
                     created_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_certificates_organization_active
-                    ON certificates (organization_id, active, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_certificates_party_active
+                    ON certificates (party_id, active, created_at DESC);
                 CREATE TABLE IF NOT EXISTS cert_gateway_challenges (
                     id TEXT PRIMARY KEY,
                     organization_id TEXT NOT NULL,
@@ -856,12 +987,11 @@ impl Database {
                 "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
-                    business_no = excluded.business_no,
                     name = excluded.name,
                     updated_at = excluded.updated_at",
                 params!(
                     self.bootstrap_user_id.clone(),
-                    Some(self.bootstrap_user_id.clone()),
+                    Option::<String>::None,
                     self.bootstrap_user_name.clone(),
                     Option::<String>::None,
                     now.clone(),
@@ -911,6 +1041,7 @@ impl Database {
         for action in [
             "organization.plant.create",
             "organization.plant.create_for_owner",
+            "organization.client.manage",
             "organization.member.manage",
             "organization.group.manage",
             "organization.role.manage",
@@ -937,12 +1068,26 @@ impl Database {
 
     async fn ensure_action_catalog(&self) -> Result<()> {
         let now = now_string();
-        for (code, name, risk_level, visibility_granting) in [
-            ("organization.plant.create", "Create Plant", "medium", 0_i64),
+        for (code, name, risk_level, visibility_granting, grantable_to_clients) in [
+            (
+                "organization.plant.create",
+                "Create Plant",
+                "medium",
+                0_i64,
+                0_i64,
+            ),
             (
                 "organization.plant.create_for_owner",
                 "Create Plant For Owner",
                 "high",
+                0_i64,
+                0_i64,
+            ),
+            (
+                "organization.client.manage",
+                "Manage Organization Clients",
+                "high",
+                0_i64,
                 0_i64,
             ),
             (
@@ -950,11 +1095,13 @@ impl Database {
                 "Manage Organization Members",
                 "high",
                 0_i64,
+                0_i64,
             ),
             (
                 "organization.group.manage",
                 "Manage Organization Groups",
                 "high",
+                0_i64,
                 0_i64,
             ),
             (
@@ -962,39 +1109,86 @@ impl Database {
                 "Manage Organization Roles",
                 "high",
                 0_i64,
+                0_i64,
             ),
             (
                 "organization.permission.manage",
                 "Manage Organization Permissions",
                 "critical",
                 0_i64,
+                0_i64,
             ),
-            ("plant.profile.read", "Read Plant Profile", "low", 1_i64),
+            (
+                "plant.profile.read",
+                "Read Plant Profile",
+                "low",
+                1_i64,
+                1_i64,
+            ),
             (
                 "plant.profile.write",
                 "Write Plant Profile",
                 "medium",
                 0_i64,
+                0_i64,
             ),
-            ("plant.telemetry.read", "Read Plant Telemetry", "low", 0_i64),
-            ("plant.alert.read", "Read Plant Alerts", "low", 0_i64),
-            ("plant.document.read", "Read Plant Documents", "low", 0_i64),
+            (
+                "plant.telemetry.read",
+                "Read Plant Telemetry",
+                "low",
+                0_i64,
+                1_i64,
+            ),
+            ("plant.alert.read", "Read Plant Alerts", "low", 0_i64, 1_i64),
+            (
+                "plant.document.read",
+                "Read Plant Documents",
+                "low",
+                0_i64,
+                1_i64,
+            ),
             (
                 "plant.document.write",
                 "Write Plant Documents",
                 "medium",
                 0_i64,
+                0_i64,
             ),
-            ("plant.report.read", "Read Plant Reports", "low", 0_i64),
-            ("plant.report.write", "Write Plant Reports", "medium", 0_i64),
-            ("plant.rec.read", "Read Plant REC", "low", 0_i64),
-            ("plant.rate.read", "Read Plant Rates", "low", 0_i64),
-            ("plant.sync.execute", "Execute Plant Sync", "high", 0_i64),
-            ("plant.device.read", "Read Plant Device", "low", 0_i64),
+            (
+                "plant.report.read",
+                "Read Plant Reports",
+                "low",
+                0_i64,
+                1_i64,
+            ),
+            (
+                "plant.report.write",
+                "Write Plant Reports",
+                "medium",
+                0_i64,
+                0_i64,
+            ),
+            ("plant.rec.read", "Read Plant REC", "low", 0_i64, 1_i64),
+            ("plant.rate.read", "Read Plant Rates", "low", 0_i64, 1_i64),
+            (
+                "plant.sync.execute",
+                "Execute Plant Sync",
+                "high",
+                0_i64,
+                0_i64,
+            ),
+            (
+                "plant.device.read",
+                "Read Plant Device",
+                "low",
+                0_i64,
+                1_i64,
+            ),
             (
                 "plant.device.control",
                 "Control Plant Device",
                 "critical",
+                0_i64,
                 0_i64,
             ),
             (
@@ -1002,11 +1196,13 @@ impl Database {
                 "Use Plant Certificate",
                 "critical",
                 0_i64,
+                0_i64,
             ),
             (
                 "plant.permission.manage",
                 "Manage Plant Permissions",
                 "critical",
+                0_i64,
                 0_i64,
             ),
             (
@@ -1014,16 +1210,23 @@ impl Database {
                 "Transfer Plant Ownership",
                 "critical",
                 0_i64,
+                0_i64,
             ),
         ] {
             self.runtime
                 .execute(
-                    "INSERT INTO actions (id, code, name, description, risk_level, visibility_granting, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    "INSERT INTO actions (
+                        id, code, name, description, risk_level, visibility_granting,
+                        grantable_to_clients, consent_label, consent_description, created_at, updated_at
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                      ON CONFLICT(code) DO UPDATE SET
                         name = excluded.name,
                         risk_level = excluded.risk_level,
                         visibility_granting = excluded.visibility_granting,
+                        grantable_to_clients = excluded.grantable_to_clients,
+                        consent_label = excluded.consent_label,
+                        consent_description = excluded.consent_description,
                         updated_at = excluded.updated_at",
                     params!(
                         code.to_owned(),
@@ -1032,6 +1235,9 @@ impl Database {
                         Option::<String>::None,
                         risk_level.to_owned(),
                         visibility_granting,
+                        grantable_to_clients,
+                        Some(name.to_owned()),
+                        Option::<String>::None,
                         now.clone(),
                         now.clone()
                     ),
@@ -1047,7 +1253,8 @@ impl Database {
         &self,
         organization_id: &str,
         display_name: &str,
-        _common_name: &str,
+        business_no: Option<&str>,
+        legal_name: &str,
     ) -> Result<Organization> {
         let now = now_string();
         self.runtime
@@ -1055,12 +1262,12 @@ impl Database {
                 "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
-                    business_no = excluded.business_no,
+                    business_no = COALESCE(excluded.business_no, organizations.business_no),
                     name = excluded.name,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
-                    Some(organization_id.to_owned()),
+                    business_no.map(ToOwned::to_owned),
                     display_name.to_owned(),
                     Option::<String>::None,
                     now.clone(),
@@ -1086,6 +1293,18 @@ impl Database {
             )
             .await
             .context("upsert organization membership")?;
+        if let Some(business_no) = business_no {
+            let party_id = self
+                .upsert_party_by_business_no(business_no, legal_name, &now)
+                .await?;
+            self.upsert_organization_party_link(
+                organization_id,
+                &party_id,
+                organization_party_relation_type_str_legal(),
+                &now,
+            )
+            .await?;
+        }
         self.get_organization(organization_id).await
     }
 
@@ -1093,7 +1312,7 @@ impl Database {
         &self,
         organization_id: &str,
         business_no: Option<&str>,
-        display_name: &str,
+        legal_name: &str,
     ) -> Result<Organization> {
         let now = now_string();
         self.runtime
@@ -1101,13 +1320,12 @@ impl Database {
                 "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
-                    business_no = excluded.business_no,
-                    name = excluded.name,
+                    business_no = COALESCE(excluded.business_no, organizations.business_no),
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
                     business_no.map(ToOwned::to_owned),
-                    display_name.to_owned(),
+                    organization_id.to_owned(),
                     Option::<String>::None,
                     now.clone(),
                     now.clone()
@@ -1115,7 +1333,120 @@ impl Database {
             )
             .await
             .context("upsert organization identity")?;
+        if let Some(business_no) = business_no {
+            let party_id = self
+                .upsert_party_by_business_no(business_no, legal_name, &now)
+                .await?;
+            self.upsert_organization_party_link(
+                organization_id,
+                &party_id,
+                organization_party_relation_type_str_legal(),
+                &now,
+            )
+            .await?;
+        }
         self.get_organization(organization_id).await
+    }
+
+    async fn upsert_party_by_business_no(
+        &self,
+        business_no: &str,
+        legal_name: &str,
+        now: &str,
+    ) -> Result<String> {
+        let normalized = business_no.to_owned();
+        let party_id = format!("party-{normalized}");
+        self.runtime
+            .execute(
+                "INSERT INTO parties (id, business_no, legal_name, active, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT(business_no) DO UPDATE SET
+                    legal_name = excluded.legal_name,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at",
+                params!(
+                    party_id.clone(),
+                    normalized,
+                    legal_name.to_owned(),
+                    1_i64,
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            )
+            .await
+            .context("upsert party by business number")?;
+        let rows: Vec<PartyRow> = self
+            .query_default_rows(
+                "SELECT id, business_no, legal_name, active
+                 FROM parties
+                 WHERE business_no = $1
+                 LIMIT 1",
+                params!(business_no.to_owned()),
+                "party by business number",
+            )
+            .await?;
+        rows.into_iter()
+            .next()
+            .map(|row| row.id)
+            .ok_or_else(|| anyhow!("party not found after upsert: {business_no}"))
+    }
+
+    async fn find_party_id_by_business_no(&self, business_no: &str) -> Result<Option<String>> {
+        let rows: Vec<PartyRow> = self
+            .query_default_rows(
+                "SELECT id, business_no, legal_name, active
+                 FROM parties
+                 WHERE business_no = $1
+                 LIMIT 1",
+                params!(business_no.to_owned()),
+                "party by business number",
+            )
+            .await?;
+        Ok(rows.into_iter().next().map(|row| row.id))
+    }
+
+    async fn upsert_organization_party_link(
+        &self,
+        organization_id: &str,
+        party_id: &str,
+        relation_type: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.runtime
+            .execute(
+                "INSERT INTO organization_party_links (organization_id, party_id, relation_type, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT(organization_id, relation_type) DO UPDATE SET
+                    party_id = excluded.party_id,
+                    updated_at = excluded.updated_at",
+                params!(
+                    organization_id.to_owned(),
+                    party_id.to_owned(),
+                    relation_type.to_owned(),
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            )
+            .await
+            .context("upsert organization party link")?;
+        Ok(())
+    }
+
+    async fn find_organization_party_id(&self, organization_id: &str) -> Result<Option<String>> {
+        let rows: Vec<OrganizationRow> = self
+            .query_default_rows(
+                "SELECT o.id, opl.party_id, o.name, o.active
+                 FROM organizations o
+                 LEFT JOIN organization_party_links opl
+                   ON opl.organization_id = o.id
+                  AND opl.relation_type = 'legal'
+                 WHERE o.id = $1
+                 LIMIT 1",
+                params!(organization_id.to_owned()),
+                "organization party id",
+            )
+            .await?;
+        Ok(rows.into_iter().next().and_then(|row| row.party_id))
     }
 
     pub async fn resolve_or_create_user_identity(
@@ -1617,8 +1948,11 @@ impl Database {
             .runtime
             .query_rows(
                 self.validation_read_consistency_with_override(consistency),
-                "SELECT o.id, o.business_no, o.name, o.inactivated_at
+                "SELECT o.id, opl.party_id, o.business_no, o.name, o.inactivated_at
                  FROM organizations o
+                 LEFT JOIN organization_party_links opl
+                   ON opl.organization_id = o.id
+                  AND opl.relation_type = 'legal'
                  JOIN organization_memberships om ON om.organization_id = o.id
                  WHERE om.user_id = $1
                    AND om.status = 'active'
@@ -1671,6 +2005,569 @@ impl Database {
         Ok(())
     }
 
+    fn validate_client_references<'a>(
+        &'a self,
+        client: &'a Client,
+    ) -> impl std::future::Future<Output = Result<()>> + 'a {
+        async move {
+            if !self
+                .exists_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                    params!(client.organization_id.clone()),
+                    "client organization existence",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "client organization {} does not exist",
+                    client.organization_id
+                ));
+            }
+            if !self
+                .exists_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) as count FROM users WHERE id = $1",
+                    params!(client.created_by_user_id.clone()),
+                    "client creator existence",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "client creator user {} does not exist",
+                    client.created_by_user_id
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    pub async fn insert_client(&self, client: &Client) -> Result<()> {
+        self.validate_client_references(client).await?;
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO clients (
+                    id, organization_id, slug, name, description, client_type, app_type,
+                    first_party, consent_policy, active, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                params!(
+                    client.id.clone(),
+                    client.organization_id.clone(),
+                    client.slug.clone(),
+                    client.name.clone(),
+                    client.description.clone(),
+                    client_type_str(&client.client_type),
+                    client_app_type_str(&client.app_type),
+                    if client.first_party { 1_i64 } else { 0_i64 },
+                    client_consent_policy_str(&client.consent_policy),
+                    if client.active { 1_i64 } else { 0_i64 },
+                    client.created_by_user_id.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("insert client")?;
+        Ok(())
+    }
+
+    pub async fn update_client(&self, client: &Client) -> Result<()> {
+        self.validate_client_references(client).await?;
+        let now = now_string();
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE clients
+                 SET organization_id = $2,
+                     slug = $3,
+                     name = $4,
+                     description = $5,
+                     client_type = $6,
+                     app_type = $7,
+                     first_party = $8,
+                     consent_policy = $9,
+                     active = $10,
+                     created_by_user_id = $11,
+                     updated_at = $12
+                 WHERE id = $1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM clients AS conflicting
+                       WHERE conflicting.slug = $3
+                         AND conflicting.id <> $1
+                   )",
+                params!(
+                    client.id.clone(),
+                    client.organization_id.clone(),
+                    client.slug.clone(),
+                    client.name.clone(),
+                    client.description.clone(),
+                    client_type_str(&client.client_type),
+                    client_app_type_str(&client.app_type),
+                    if client.first_party { 1_i64 } else { 0_i64 },
+                    client_consent_policy_str(&client.consent_policy),
+                    if client.active { 1_i64 } else { 0_i64 },
+                    client.created_by_user_id.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("update client")?;
+        if updated == 0 {
+            if self
+                .find_client_by_id_with_consistency(&client.id, Some(ReadConsistency::Strong))
+                .await?
+                .is_none()
+            {
+                return Err(anyhow!("client not found: {}", client.id));
+            }
+            return Err(anyhow!("client slug already exists: {}", client.slug));
+        }
+        Ok(())
+    }
+
+    pub async fn upsert_client(&self, client: &Client) -> Result<()> {
+        self.validate_client_references(client).await?;
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO clients (
+                    id, organization_id, slug, name, description, client_type, app_type,
+                    first_party, consent_policy, active, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 ON CONFLICT(id) DO UPDATE SET
+                    organization_id = excluded.organization_id,
+                    slug = excluded.slug,
+                    name = excluded.name,
+                    description = excluded.description,
+                    client_type = excluded.client_type,
+                    app_type = excluded.app_type,
+                    first_party = excluded.first_party,
+                    consent_policy = excluded.consent_policy,
+                    active = excluded.active,
+                    created_by_user_id = excluded.created_by_user_id,
+                    updated_at = excluded.updated_at",
+                params!(
+                    client.id.clone(),
+                    client.organization_id.clone(),
+                    client.slug.clone(),
+                    client.name.clone(),
+                    client.description.clone(),
+                    client_type_str(&client.client_type),
+                    client_app_type_str(&client.app_type),
+                    if client.first_party { 1_i64 } else { 0_i64 },
+                    client_consent_policy_str(&client.consent_policy),
+                    if client.active { 1_i64 } else { 0_i64 },
+                    client.created_by_user_id.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("upsert client")?;
+        Ok(())
+    }
+
+    pub async fn list_clients_with_consistency(
+        &self,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Client>> {
+        let rows: Vec<ClientRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, organization_id, slug, name, description, client_type, app_type,
+                        first_party, consent_policy, active, created_by_user_id
+                 FROM clients
+                 WHERE organization_id = $1
+                 ORDER BY name ASC, slug ASC, id ASC",
+                params!(organization_id.to_owned()),
+                "clients by organization",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn find_client_by_id_with_consistency(
+        &self,
+        client_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<Client>> {
+        let rows: Vec<ClientRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, organization_id, slug, name, description, client_type, app_type,
+                        first_party, consent_policy, active, created_by_user_id
+                 FROM clients
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(client_id.to_owned()),
+                "client by id optional",
+            )
+            .await?;
+        rows.into_iter().next().map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_client_with_consistency(
+        &self,
+        client_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Client> {
+        let client = self
+            .find_client_by_id_with_consistency(client_id, consistency)
+            .await?
+            .ok_or_else(|| anyhow!("client not found: {client_id}"))?;
+        Ok(client)
+    }
+
+    pub async fn find_client_by_slug_with_consistency(
+        &self,
+        slug: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<Client>> {
+        let rows: Vec<ClientRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, organization_id, slug, name, description, client_type, app_type,
+                        first_party, consent_policy, active, created_by_user_id
+                 FROM clients
+                 WHERE slug = $1
+                 LIMIT 1",
+                params!(slug.to_owned()),
+                "client by slug optional",
+            )
+            .await?;
+        rows.into_iter().next().map(TryInto::try_into).transpose()
+    }
+
+    pub async fn upsert_client_action(&self, client_action: &ClientAction) -> Result<()> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM clients WHERE id = $1",
+                params!(client_action.client_id.clone()),
+                "client existence for action",
+            )
+            .await?
+        {
+            return Err(anyhow!("client {} does not exist", client_action.client_id));
+        }
+        let grantable_count = self
+            .query_count(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count
+                 FROM actions
+                 WHERE id = $1
+                   AND grantable_to_clients = 1",
+                params!(client_action.action_id.clone()),
+                "grantable client action",
+            )
+            .await?;
+        if grantable_count == 0 {
+            return Err(anyhow!(
+                "action {} is not grantable to clients",
+                client_action.action_id
+            ));
+        }
+        self.runtime
+            .execute(
+                "INSERT INTO client_actions (client_id, action_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT(client_id, action_id) DO NOTHING",
+                params!(
+                    client_action.client_id.clone(),
+                    client_action.action_id.clone()
+                ),
+            )
+            .await
+            .context("upsert client action")?;
+        Ok(())
+    }
+
+    pub async fn replace_client_actions(
+        &self,
+        client_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM clients WHERE id = $1",
+                params!(client_id.to_owned()),
+                "client existence for action replace",
+            )
+            .await?
+        {
+            return Err(anyhow!("client {client_id} does not exist"));
+        }
+        let mut deduped = Vec::new();
+        let mut seen = HashSet::new();
+        for action_id in action_ids {
+            let trimmed = action_id.trim();
+            if trimmed.is_empty() {
+                return Err(anyhow!("client action ids must not be empty"));
+            }
+            if seen.insert(trimmed.to_owned()) {
+                deduped.push(trimmed.to_owned());
+            }
+        }
+
+        if !deduped.is_empty() {
+            let placeholders = (1..=deduped.len())
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let grantable_rows: Vec<ActionLookupRow> = self
+                .query_rows_with(
+                    ReadConsistency::Strong,
+                    format!(
+                        "SELECT id
+                         FROM actions
+                         WHERE grantable_to_clients = 1
+                           AND id IN ({placeholders})"
+                    ),
+                    deduped
+                        .iter()
+                        .cloned()
+                        .map(hiqlite::Param::from)
+                        .collect::<Vec<_>>(),
+                    "grantable client action replace set",
+                )
+                .await?;
+            let grantable_ids = grantable_rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<HashSet<_>>();
+            if let Some(missing) = deduped
+                .iter()
+                .find(|action_id| !grantable_ids.contains(*action_id))
+            {
+                return Err(anyhow!("action {missing} is not grantable to clients"));
+            }
+        }
+
+        let mut queries = Vec::with_capacity(1 + deduped.len());
+        queries.push((
+            Cow::Borrowed("DELETE FROM client_actions WHERE client_id = $1"),
+            params!(client_id.to_owned()),
+        ));
+        for action_id in &deduped {
+            queries.push((
+                Cow::Borrowed(
+                    "INSERT INTO client_actions (client_id, action_id)
+                     VALUES ($1, $2)
+                     ON CONFLICT(client_id, action_id) DO NOTHING",
+                ),
+                params!(client_id.to_owned(), action_id.clone()),
+            ));
+        }
+
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("replace client actions transaction")?;
+        self.list_client_actions_with_consistency(client_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
+    pub async fn list_client_actions_with_consistency(
+        &self,
+        client_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Action>> {
+        let rows: Vec<ActionRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT a.id, a.code, a.name, a.description, a.risk_level, a.visibility_granting,
+                        a.grantable_to_clients, a.consent_label, a.consent_description
+                 FROM client_actions ca
+                 JOIN actions a ON a.id = ca.action_id
+                 WHERE ca.client_id = $1
+                 ORDER BY a.code ASC",
+                params!(client_id.to_owned()),
+                "client actions",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn upsert_client_grant(&self, client_grant: &ClientGrant) -> Result<String> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM users WHERE id = $1",
+                params!(client_grant.user_id.clone()),
+                "client grant user existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "client grant user {} does not exist",
+                client_grant.user_id
+            ));
+        }
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM clients WHERE id = $1",
+                params!(client_grant.client_id.clone()),
+                "client grant client existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "client grant client {} does not exist",
+                client_grant.client_id
+            ));
+        }
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                params!(client_grant.organization_id.clone()),
+                "client grant organization existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "client grant organization {} does not exist",
+                client_grant.organization_id
+            ));
+        }
+        if client_grant.status == ClientGrantStatus::Active {
+            let existing: Vec<ClientGrantLookupRow> = self
+                .query_consistent_rows(
+                    "SELECT id, created_at
+                     FROM client_grants
+                     WHERE user_id = $1
+                       AND client_id = $2
+                       AND organization_id = $3
+                       AND status = 'active'
+                     LIMIT 1",
+                    params!(
+                        client_grant.user_id.clone(),
+                        client_grant.client_id.clone(),
+                        client_grant.organization_id.clone()
+                    ),
+                    "active client grant lookup",
+                )
+                .await?;
+            if let Some(existing) = existing.into_iter().next() {
+                self.runtime
+                    .transaction([
+                        (
+                            Cow::Borrowed(
+                                "UPDATE client_grants
+                                 SET user_id = $1,
+                                     client_id = $2,
+                                     organization_id = $3,
+                                     status = $4,
+                                     consented_at = $5,
+                                     revoked_at = $6,
+                                     revoked_by_user_id = $7,
+                                     updated_at = $8
+                                 WHERE id = $9",
+                            ),
+                            params!(
+                                client_grant.user_id.clone(),
+                                client_grant.client_id.clone(),
+                                client_grant.organization_id.clone(),
+                                client_grant_status_str(&client_grant.status),
+                                client_grant.consented_at.clone(),
+                                client_grant.revoked_at.clone(),
+                                client_grant.revoked_by_user_id.clone(),
+                                client_grant.updated_at.clone(),
+                                existing.id.clone()
+                            ),
+                        ),
+                        (
+                            Cow::Borrowed(
+                                "DELETE FROM client_grant_actions WHERE client_grant_id = $1",
+                            ),
+                            params!(existing.id.clone()),
+                        ),
+                    ])
+                    .await
+                    .context("reset existing active client grant transaction")?;
+                return Ok(existing.id);
+            }
+        }
+
+        self.runtime
+            .execute(
+                "INSERT INTO client_grants (
+                    id, user_id, client_id, organization_id, status, consented_at,
+                    revoked_at, revoked_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT(id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    client_id = excluded.client_id,
+                    organization_id = excluded.organization_id,
+                    status = excluded.status,
+                    consented_at = excluded.consented_at,
+                    revoked_at = excluded.revoked_at,
+                    revoked_by_user_id = excluded.revoked_by_user_id,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at",
+                params!(
+                    client_grant.id.clone(),
+                    client_grant.user_id.clone(),
+                    client_grant.client_id.clone(),
+                    client_grant.organization_id.clone(),
+                    client_grant_status_str(&client_grant.status),
+                    client_grant.consented_at.clone(),
+                    client_grant.revoked_at.clone(),
+                    client_grant.revoked_by_user_id.clone(),
+                    client_grant.created_at.clone(),
+                    client_grant.updated_at.clone()
+                ),
+            )
+            .await
+            .context("upsert client grant")?;
+        Ok(client_grant.id.clone())
+    }
+
+    pub async fn upsert_client_grant_action(
+        &self,
+        client_grant_action: &ClientGrantAction,
+    ) -> Result<()> {
+        let allowed_count = self
+            .query_count(
+                self.runtime.default_read_consistency(),
+                "SELECT COUNT(*) as count
+                 FROM client_grants cg
+                 JOIN client_actions ca
+                   ON ca.client_id = cg.client_id
+                 WHERE cg.id = $1
+                   AND ca.action_id = $2",
+                params!(
+                    client_grant_action.client_grant_id.clone(),
+                    client_grant_action.action_id.clone()
+                ),
+                "client grant action subset",
+            )
+            .await?;
+        if allowed_count == 0 {
+            return Err(anyhow!(
+                "client grant action must be included in client_actions for the parent client"
+            ));
+        }
+        self.runtime
+            .execute(
+                "INSERT INTO client_grant_actions (client_grant_id, action_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT(client_grant_id, action_id) DO NOTHING",
+                params!(
+                    client_grant_action.client_grant_id.clone(),
+                    client_grant_action.action_id.clone()
+                ),
+            )
+            .await
+            .context("upsert client grant action")?;
+        Ok(())
+    }
+
     pub async fn upsert_agreement(&self, agreement: &Agreement) -> Result<()> {
         let now = now_string();
         self.runtime
@@ -1709,6 +2606,73 @@ impl Database {
         Ok(())
     }
 
+    pub async fn upsert_agreement_document(&self, document: &AgreementDocument) -> Result<()> {
+        self.runtime
+            .execute(
+                "INSERT INTO agreement_documents (
+                    id, agreement_id, document_type, file_name, object_key, content_type, document_no, uploaded_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT(id) DO UPDATE SET
+                    agreement_id = excluded.agreement_id,
+                    document_type = excluded.document_type,
+                    file_name = excluded.file_name,
+                    object_key = excluded.object_key,
+                    content_type = excluded.content_type,
+                    document_no = excluded.document_no,
+                    uploaded_at = excluded.uploaded_at",
+                params!(
+                    document.id.clone(),
+                    document.agreement_id.clone(),
+                    agreement_document_type_str(&document.document_type),
+                    document.file_name.clone(),
+                    document.object_key.clone(),
+                    document.content_type.clone(),
+                    document.document_no.clone(),
+                    document.uploaded_at.clone()
+                ),
+            )
+            .await
+            .context("upsert agreement document")?;
+        Ok(())
+    }
+
+    pub async fn list_agreement_documents(
+        &self,
+        agreement_id: &str,
+    ) -> Result<Vec<AgreementDocument>> {
+        let rows: Vec<AgreementDocumentRow> = self
+            .query_default_rows(
+                "SELECT id, agreement_id, document_type, file_name, object_key, content_type, document_no, uploaded_at
+                 FROM agreement_documents
+                 WHERE agreement_id = $1
+                 ORDER BY uploaded_at DESC, file_name ASC",
+                params!(agreement_id.to_owned()),
+                "agreement documents",
+            )
+            .await
+            .context("list agreement documents")?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn get_agreement_document(&self, id: &str) -> Result<AgreementDocument> {
+        let rows: Vec<AgreementDocumentRow> = self
+            .query_default_rows(
+                "SELECT id, agreement_id, document_type, file_name, object_key, content_type, document_no, uploaded_at
+                 FROM agreement_documents
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(id.to_owned()),
+                "agreement document",
+            )
+            .await
+            .context("get agreement document")?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("agreement document not found"))?;
+        row.try_into()
+    }
+
     pub async fn save_certificate(
         &self,
         organization_id: &str,
@@ -1718,13 +2682,37 @@ impl Database {
         wrapped_dek: &[u8],
         kms_key_id: &str,
     ) -> Result<StoredCertificate> {
-        self.upsert_organization_identity(organization_id, business_no, common_name)
+        self.upsert_organization_identity(organization_id, None, "")
             .await?;
+
+        let mut party_id = self.find_organization_party_id(organization_id).await?;
+        if party_id.is_none() {
+            if let Some(business_no) = business_no {
+                if let Some(existing_party_id) =
+                    self.find_party_id_by_business_no(business_no).await?
+                {
+                    let now = now_string();
+                    self.upsert_organization_party_link(
+                        organization_id,
+                        &existing_party_id,
+                        organization_party_relation_type_str_legal(),
+                        &now,
+                    )
+                    .await?;
+                    party_id = Some(existing_party_id);
+                }
+            }
+        }
+        let party_id = party_id.ok_or_else(|| {
+            anyhow!(
+                "organization missing legal party link; register legal identity before uploading a certificate"
+            )
+        })?;
 
         self.runtime
             .execute(
-                "UPDATE certificates SET active = 0 WHERE organization_id = $1",
-                params!(organization_id.to_owned()),
+                "UPDATE certificates SET active = 0 WHERE party_id = $1",
+                params!(party_id.clone()),
             )
             .await
             .context("deactivate prior certificates")?;
@@ -1733,11 +2721,11 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
+                "INSERT INTO certificates (id, party_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 params!(
                     id.clone(),
-                    organization_id.to_owned(),
+                    party_id,
                     common_name.to_owned(),
                     encrypted_blob.to_owned(),
                     STANDARD.encode(wrapped_dek),
@@ -1755,9 +2743,12 @@ impl Database {
     pub async fn get_organization(&self, organization_id: &str) -> Result<Organization> {
         let rows: Vec<OrganizationRow> = self
             .query_default_rows(
-                "SELECT id, business_no, name, inactivated_at
-                 FROM organizations
-                 WHERE id = $1
+                "SELECT o.id, opl.party_id, o.business_no, o.name, o.inactivated_at
+                 FROM organizations o
+                 LEFT JOIN organization_party_links opl
+                   ON opl.organization_id = o.id
+                  AND opl.relation_type = 'legal'
+                 WHERE o.id = $1
                  LIMIT 1",
                 params!(organization_id.to_owned()),
                 "organization",
@@ -1769,6 +2760,28 @@ impl Database {
             .next()
             .ok_or_else(|| anyhow!("organization not found"))?;
         Ok(row.into())
+    }
+
+    pub async fn get_organization_business_no(
+        &self,
+        organization_id: &str,
+    ) -> Result<Option<String>> {
+        let rows: Vec<OrganizationRow> = self
+            .query_default_rows(
+                "SELECT o.id, opl.party_id, COALESCE(p.business_no, o.business_no) AS business_no, o.name, o.inactivated_at
+                 FROM organizations o
+                 LEFT JOIN organization_party_links opl
+                   ON opl.organization_id = o.id
+                  AND opl.relation_type = 'legal'
+                 LEFT JOIN parties p ON p.id = opl.party_id
+                 WHERE o.id = $1
+                 LIMIT 1",
+                params!(organization_id.to_owned()),
+                "organization business number",
+            )
+            .await
+            .context("query organization business number")?;
+        Ok(rows.into_iter().next().and_then(|row| row.business_no))
     }
 
     pub async fn deactivate_organization(&self, organization_id: &str) -> Result<Organization> {
@@ -1808,10 +2821,13 @@ impl Database {
     ) -> Result<StoredCertificate> {
         let rows: Vec<StoredCertificateRow> = self
             .query_consistent_rows(
-                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
-                 FROM certificates c
-                 JOIN organizations o ON o.id = c.organization_id
-                 WHERE c.organization_id = $1
+                "SELECT c.id, c.party_id, p.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                 FROM organization_party_links opl
+                 JOIN parties p ON p.id = opl.party_id
+                 JOIN certificates c ON c.party_id = opl.party_id
+                 JOIN organizations o ON o.id = opl.organization_id
+                 WHERE opl.organization_id = $1
+                   AND opl.relation_type = 'legal'
                    AND c.active = 1
                    AND o.inactivated_at IS NULL
                  ORDER BY c.last_used_at DESC NULLS LAST, c.created_at DESC
@@ -1849,9 +2865,9 @@ impl Database {
         let rows: Vec<StoredCertificateRow> = self
             .query_rows_with(
                 ReadConsistency::Strong,
-                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                "SELECT c.id, c.party_id, p.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
                  FROM certificates c
-                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 LEFT JOIN parties p ON p.id = c.party_id
                  WHERE c.id = $1
                  LIMIT 1",
                 params!(certificate_id.to_owned()),
@@ -1876,10 +2892,13 @@ impl Database {
     pub async fn list_certificates(&self, organization_id: &str) -> Result<Vec<StoredCertificate>> {
         let rows: Vec<StoredCertificateRow> = self
             .query_consistent_rows(
-                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
-                 FROM certificates c
-                 JOIN organizations o ON o.id = c.organization_id
-                 WHERE c.organization_id = $1
+                "SELECT c.id, c.party_id, p.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                 FROM organization_party_links opl
+                 JOIN organizations o ON o.id = opl.organization_id
+                 JOIN parties p ON p.id = opl.party_id
+                 JOIN certificates c ON c.party_id = opl.party_id
+                 WHERE opl.organization_id = $1
+                   AND opl.relation_type = 'legal'
                    AND o.inactivated_at IS NULL
                  ORDER BY c.active DESC, c.last_used_at DESC NULLS LAST, c.created_at DESC",
                 params!(organization_id.to_owned()),
@@ -2128,7 +3147,6 @@ impl Database {
             .context("finish sync run")?;
         Ok(())
     }
-
     pub async fn upsert_plant(&self, plant: &Plant) -> Result<()> {
         let now = now_string();
         self.runtime
@@ -3656,7 +4674,7 @@ impl From<&mut Row<'_>> for StoredCertificateRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
-            organization_id: row.get("organization_id"),
+            party_id: row.get("party_id"),
             business_no: row.get("business_no"),
             common_name: row.get("common_name"),
             encrypted_blob: row.get("encrypted_blob"),
@@ -3675,7 +4693,7 @@ impl TryFrom<StoredCertificateRow> for StoredCertificate {
     fn try_from(row: StoredCertificateRow) -> Result<Self> {
         Ok(Self {
             id: row.id,
-            organization_id: row.organization_id,
+            party_id: row.party_id,
             business_no: row.business_no,
             common_name: row.common_name,
             encrypted_blob: row.encrypted_blob,
@@ -3878,10 +4896,83 @@ impl From<&mut Row<'_>> for OrganizationRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
+            party_id: row.get("party_id"),
             business_no: row.get("business_no"),
             name: row.get("name"),
             inactivated_at: row.get("inactivated_at"),
         }
+    }
+}
+
+impl From<&mut Row<'_>> for PartyRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            business_no: row.get("business_no"),
+            legal_name: row.get("legal_name"),
+            active: row.get("active"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for AgreementDocumentRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            agreement_id: row.get("agreement_id"),
+            document_type: row.get("document_type"),
+            file_name: row.get("file_name"),
+            object_key: row.get("object_key"),
+            content_type: row.get("content_type"),
+            document_no: row.get("document_no"),
+            uploaded_at: row.get("uploaded_at"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for ActionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            code: row.get("code"),
+            name: row.get("name"),
+            description: row.get("description"),
+            risk_level: row.get("risk_level"),
+            visibility_granting: row.get("visibility_granting"),
+            grantable_to_clients: row.get("grantable_to_clients"),
+            consent_label: row.get("consent_label"),
+            consent_description: row.get("consent_description"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for ClientRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            slug: row.get("slug"),
+            name: row.get("name"),
+            description: row.get("description"),
+            client_type: row.get("client_type"),
+            app_type: row.get("app_type"),
+            first_party: row.get("first_party"),
+            consent_policy: row.get("consent_policy"),
+            active: row.get("active"),
+            created_by_user_id: row.get("created_by_user_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for ClientGrantLookupRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self { id: row.get("id") }
+    }
+}
+
+impl From<&mut Row<'_>> for ActionLookupRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self { id: row.get("id") }
     }
 }
 
@@ -4025,10 +5116,77 @@ impl From<OrganizationRow> for Organization {
     fn from(value: OrganizationRow) -> Self {
         Self {
             id: value.id,
+            party_id: value.party_id,
             business_no: value.business_no,
             name: value.name,
             inactivated_at: value.inactivated_at,
         }
+    }
+}
+
+impl From<PartyRow> for Party {
+    fn from(value: PartyRow) -> Self {
+        Self {
+            id: value.id,
+            business_no: value.business_no,
+            legal_name: value.legal_name,
+            active: value.active == 1,
+        }
+    }
+}
+
+impl TryFrom<AgreementDocumentRow> for AgreementDocument {
+    type Error = anyhow::Error;
+
+    fn try_from(value: AgreementDocumentRow) -> Result<Self> {
+        Ok(Self {
+            id: value.id,
+            agreement_id: value.agreement_id,
+            document_type: agreement_document_type_from_str(&value.document_type)?,
+            file_name: value.file_name,
+            object_key: value.object_key,
+            content_type: value.content_type,
+            document_no: value.document_no,
+            uploaded_at: value.uploaded_at,
+        })
+    }
+}
+
+impl TryFrom<ActionRow> for Action {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ActionRow) -> Result<Self> {
+        Ok(Self {
+            id: value.id,
+            code: value.code,
+            name: value.name,
+            description: value.description,
+            risk_level: action_risk_level_from_str(&value.risk_level)?,
+            visibility_granting: value.visibility_granting == 1,
+            grantable_to_clients: value.grantable_to_clients == 1,
+            consent_label: value.consent_label,
+            consent_description: value.consent_description,
+        })
+    }
+}
+
+impl TryFrom<ClientRow> for Client {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ClientRow) -> Result<Self> {
+        Ok(Self {
+            id: value.id,
+            organization_id: value.organization_id,
+            slug: value.slug,
+            name: value.name,
+            description: value.description,
+            client_type: client_type_from_str(&value.client_type)?,
+            app_type: client_app_type_from_str(&value.app_type)?,
+            first_party: value.first_party == 1,
+            consent_policy: client_consent_policy_from_str(&value.consent_policy)?,
+            active: value.active == 1,
+            created_by_user_id: value.created_by_user_id,
+        })
     }
 }
 
@@ -4191,6 +5349,10 @@ fn role_binding_resource_type_from_str(value: &str) -> Result<RoleBindingResourc
     }
 }
 
+fn organization_party_relation_type_str_legal() -> &'static str {
+    "legal"
+}
+
 fn role_binding_state_str(state: &RoleBindingState) -> &'static str {
     match state {
         RoleBindingState::Active => "active",
@@ -4222,6 +5384,96 @@ fn agreement_status_str(status: &domain::AgreementStatus) -> &'static str {
         domain::AgreementStatus::Active => "active",
         domain::AgreementStatus::Expired => "expired",
         domain::AgreementStatus::Terminated => "terminated",
+    }
+}
+
+fn agreement_document_type_str(document_type: &AgreementDocumentType) -> &'static str {
+    match document_type {
+        AgreementDocumentType::MasterContract => "master_contract",
+        AgreementDocumentType::Appendix => "appendix",
+        AgreementDocumentType::Amendment => "amendment",
+        AgreementDocumentType::AuthorizationLetter => "authorization_letter",
+        AgreementDocumentType::InvoiceBasis => "invoice_basis",
+        AgreementDocumentType::Other => "other",
+    }
+}
+
+fn client_type_str(client_type: &ClientType) -> &'static str {
+    match client_type {
+        ClientType::Confidential => "confidential",
+        ClientType::Public => "public",
+    }
+}
+
+fn client_app_type_str(app_type: &ClientAppType) -> &'static str {
+    match app_type {
+        ClientAppType::Web => "web",
+        ClientAppType::Mobile => "mobile",
+        ClientAppType::Server => "server",
+        ClientAppType::Internal => "internal",
+    }
+}
+
+fn client_consent_policy_str(policy: &ClientConsentPolicy) -> &'static str {
+    match policy {
+        ClientConsentPolicy::Explicit => "explicit",
+        ClientConsentPolicy::AutoApprove => "auto_approve",
+    }
+}
+
+fn client_grant_status_str(status: &ClientGrantStatus) -> &'static str {
+    match status {
+        ClientGrantStatus::Active => "active",
+        ClientGrantStatus::Revoked => "revoked",
+        ClientGrantStatus::Expired => "expired",
+    }
+}
+
+fn agreement_document_type_from_str(value: &str) -> Result<AgreementDocumentType> {
+    match value {
+        "master_contract" => Ok(AgreementDocumentType::MasterContract),
+        "appendix" => Ok(AgreementDocumentType::Appendix),
+        "amendment" => Ok(AgreementDocumentType::Amendment),
+        "authorization_letter" => Ok(AgreementDocumentType::AuthorizationLetter),
+        "invoice_basis" => Ok(AgreementDocumentType::InvoiceBasis),
+        "other" => Ok(AgreementDocumentType::Other),
+        other => Err(anyhow!("invalid agreement document type {other}")),
+    }
+}
+
+fn action_risk_level_from_str(value: &str) -> Result<ActionRiskLevel> {
+    match value {
+        "low" => Ok(ActionRiskLevel::Low),
+        "medium" => Ok(ActionRiskLevel::Medium),
+        "high" => Ok(ActionRiskLevel::High),
+        "critical" => Ok(ActionRiskLevel::Critical),
+        other => Err(anyhow!("invalid action risk level {other}")),
+    }
+}
+
+fn client_type_from_str(value: &str) -> Result<ClientType> {
+    match value {
+        "confidential" => Ok(ClientType::Confidential),
+        "public" => Ok(ClientType::Public),
+        other => Err(anyhow!("invalid client type {other}")),
+    }
+}
+
+fn client_app_type_from_str(value: &str) -> Result<ClientAppType> {
+    match value {
+        "web" => Ok(ClientAppType::Web),
+        "mobile" => Ok(ClientAppType::Mobile),
+        "server" => Ok(ClientAppType::Server),
+        "internal" => Ok(ClientAppType::Internal),
+        other => Err(anyhow!("invalid client app type {other}")),
+    }
+}
+
+fn client_consent_policy_from_str(value: &str) -> Result<ClientConsentPolicy> {
+    match value {
+        "explicit" => Ok(ClientConsentPolicy::Explicit),
+        "auto_approve" => Ok(ClientConsentPolicy::AutoApprove),
+        other => Err(anyhow!("invalid client consent policy {other}")),
     }
 }
 

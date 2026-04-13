@@ -116,13 +116,12 @@ async fn seed_authorization_fixture(
     runtime: &HiqliteRuntime,
     artifacts_root: &Path,
 ) {
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
-
     runtime
         .execute(
             "INSERT INTO users (id, email, display_name, active, created_at)
@@ -151,6 +150,28 @@ async fn seed_authorization_fixture(
         )
         .await
         .expect("insert direct user");
+    db.bind_identity_to_user(
+        "group-user",
+        "trailbase",
+        "group-user",
+        Some("group@example.com"),
+        "Group User",
+        true,
+        true,
+    )
+    .await
+    .expect("bind group identity");
+    db.bind_identity_to_user(
+        "direct-user",
+        "trailbase",
+        "direct-user",
+        Some("direct@example.com"),
+        "Direct User",
+        true,
+        true,
+    )
+    .await
+    .expect("bind direct identity");
     runtime
         .execute(
             "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)

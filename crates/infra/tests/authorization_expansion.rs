@@ -87,10 +87,15 @@ async fn keeps_organization_access_explicit_without_hierarchy_tables() {
     );
     db.ensure_schema().await.expect("ensure schema");
 
-    db.upsert_organization_with_owner("distributor-org", "Distributor Org", "Distributor Org")
-        .await
-        .expect("upsert distributor");
-    db.upsert_organization_with_owner("dealer-org", "Dealer Org", "Dealer Org")
+    db.upsert_organization_with_owner(
+        "distributor-org",
+        "Distributor Org",
+        None,
+        "Distributor Org",
+    )
+    .await
+    .expect("upsert distributor");
+    db.upsert_organization_with_owner("dealer-org", "Dealer Org", None, "Dealer Org")
         .await
         .expect("upsert dealer");
 

@@ -55,7 +55,7 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
              VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "epc-org".into(),
-                Option::<String>::Some("2768603291".to_owned()).into(),
+                Option::<String>::None.into(),
                 "EPC Org".into(),
                 Option::<String>::None.into(),
                 "2026-04-03T00:00:00Z".into(),
@@ -70,7 +70,7 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
              VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "foreign-org".into(),
-                Option::<String>::Some("9999999999".to_owned()).into(),
+                Option::<String>::None.into(),
                 "Foreign Org".into(),
                 Option::<String>::None.into(),
                 "2026-04-03T00:00:00Z".into(),

@@ -46,10 +46,29 @@ impl HealthStatus {
 pub struct Organization {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub party_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub business_no: Option<String>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inactivated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPartyLink {
+    pub organization_id: String,
+    pub party_id: String,
+    pub relation_type: OrganizationPartyRelationType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationPartyRelationType {
+    Legal,
+    Billing,
+    Contract,
+    Owner,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,6 +124,31 @@ pub struct Agreement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgreementDocument {
+    pub id: String,
+    pub agreement_id: String,
+    pub document_type: AgreementDocumentType,
+    pub file_name: String,
+    pub object_key: String,
+    pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_no: Option<String>,
+    pub uploaded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgreementDocumentType {
+    MasterContract,
+    Appendix,
+    Amendment,
+    AuthorizationLetter,
+    InvoiceBasis,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgreementType {
     Delegation,
@@ -133,6 +177,11 @@ pub struct Action {
     pub description: Option<String>,
     pub risk_level: ActionRiskLevel,
     pub visibility_granting: bool,
+    pub grantable_to_clients: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +195,85 @@ pub enum ActionRiskLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct Client {
+    pub id: String,
+    pub organization_id: String,
+    pub slug: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub client_type: ClientType,
+    pub app_type: ClientAppType,
+    pub first_party: bool,
+    pub consent_policy: ClientConsentPolicy,
+    pub active: bool,
+    pub created_by_user_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientType {
+    Confidential,
+    Public,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAppType {
+    Web,
+    Mobile,
+    Server,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientConsentPolicy {
+    Explicit,
+    AutoApprove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientAction {
+    pub client_id: String,
+    pub action_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientGrant {
+    pub id: String,
+    pub user_id: String,
+    pub client_id: String,
+    pub organization_id: String,
+    pub status: ClientGrantStatus,
+    pub consented_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_by_user_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientGrantStatus {
+    Active,
+    Revoked,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientGrantAction {
+    pub client_grant_id: String,
+    pub action_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Role {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,21 +282,6 @@ pub struct Role {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RoleRule {
-    pub id: String,
-    pub role_id: String,
-    pub effect: RoleRuleEffect,
-    pub action_pattern: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RoleRuleEffect {
-    Allow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,6 +334,14 @@ pub struct User {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Party {
+    pub id: String,
+    pub business_no: String,
+    pub legal_name: String,
+    pub active: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Plant {

@@ -310,6 +310,8 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .expect("register response");
     assert_eq!(register_response.status(), StatusCode::CREATED);
     let register_json = json_body(register_response).await;
+    assert_eq!(register_json["organizationId"], "bootstrap-user");
+    assert_eq!(register_json["partyId"], "party-2768603291");
     let certificate_id = register_json["id"]
         .as_str()
         .expect("certificate id")
@@ -331,6 +333,8 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(list_response.status(), StatusCode::OK);
     let list_json = json_body(list_response).await;
     assert_eq!(list_json.as_array().expect("list array").len(), 1);
+    assert_eq!(list_json[0]["organizationId"], "bootstrap-user");
+    assert_eq!(list_json[0]["partyId"], "party-2768603291");
 
     let issue_response = app
         .clone()

@@ -87,10 +87,10 @@ async fn expands_group_and_user_visibility_from_profile_read_only() {
     );
     db.ensure_schema().await.expect("ensure schema");
 
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
 

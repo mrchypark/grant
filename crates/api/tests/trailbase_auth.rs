@@ -169,10 +169,10 @@ async fn query_identity_meta(
 #[tokio::test]
 async fn trailbase_bearer_token_resolves_user_and_allows_list() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
     db.upsert_agreement(&domain::Agreement {
@@ -376,10 +376,10 @@ async fn bootstrap_trailbase_owner_binds_first_user_to_bootstrap_org() {
 #[tokio::test]
 async fn current_user_returns_local_user_and_active_organizations() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("alpha-org", "Alpha Org", "Alpha Org")
+    db.upsert_organization_with_owner("alpha-org", "Alpha Org", None, "Alpha Org")
         .await
         .expect("upsert alpha org");
-    db.upsert_organization_with_owner("beta-org", "Beta Org", "Beta Org")
+    db.upsert_organization_with_owner("beta-org", "Beta Org", None, "Beta Org")
         .await
         .expect("upsert beta org");
     let user = db
@@ -445,7 +445,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
 #[tokio::test]
 async fn trailbase_identity_relinks_same_email_after_restore() {
     let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("restore-org", "Restore Org", "Restore Org")
+    db.upsert_organization_with_owner("restore-org", "Restore Org", None, "Restore Org")
         .await
         .expect("upsert restore org");
 

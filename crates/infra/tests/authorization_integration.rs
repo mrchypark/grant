@@ -334,10 +334,10 @@ fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
 }
 
 async fn seed_gateway_scope_fixture(db: &Database) {
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("owner org");
-    db.upsert_organization_with_owner("operator-org", "Operator Org", "Operator Org")
+    db.upsert_organization_with_owner("operator-org", "Operator Org", None, "Operator Org")
         .await
         .expect("operator org");
     db.upsert_organization_identity("owner-org", Some("1234567890"), "Owner Org")
@@ -412,13 +412,10 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
     );
     db.ensure_schema().await.expect("ensure schema");
 
-    db.upsert_organization_with_owner("generator-org", "Generator Org", "Generator Org")
+    db.upsert_organization_with_owner("generator-org", "Generator Org", None, "Generator Org")
         .await
         .expect("upsert generator org");
-    db.upsert_organization_with_owner("distributor-org", "Distributor Org", "Distributor Org")
-        .await
-        .expect("upsert distributor org");
-    db.upsert_organization_with_owner("dealer-org", "Dealer Org", "Dealer Org")
+    db.upsert_organization_with_owner("dealer-org", "Dealer Org", None, "Dealer Org")
         .await
         .expect("upsert dealer org");
 
@@ -427,9 +424,9 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
             "INSERT INTO users (id, email, display_name, active, created_at)
              VALUES ($1, $2, $3, $4, $5)",
             vec![
-                "dist-user".into(),
+                "dealer-user".into(),
                 "dist@example.com".into(),
-                "Distributor User".into(),
+                "Dealer User".into(),
                 1_i64.into(),
                 "2026-04-03T00:00:00Z".into(),
             ],
@@ -441,9 +438,9 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
             "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
             vec![
-                "membership-dist-user".into(),
-                "distributor-org".into(),
-                "dist-user".into(),
+                "membership-dealer-user".into(),
+                "dealer-org".into(),
+                "dealer-user".into(),
                 "member".into(),
                 "active".into(),
                 "2026-04-03T00:00:00Z".into(),
@@ -457,9 +454,9 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
             "INSERT INTO groups (id, organization_id, name, description, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
-                "dist-ops".into(),
-                "distributor-org".into(),
-                "Distributor Ops".into(),
+                "dealer-ops".into(),
+                "dealer-org".into(),
+                "Dealer Ops".into(),
                 Option::<String>::None.into(),
                 "2026-04-03T00:00:00Z".into(),
                 "2026-04-03T00:00:00Z".into(),
@@ -471,7 +468,7 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         .execute(
             "INSERT INTO group_memberships (group_id, organization_membership_id)
              VALUES ($1, $2)",
-            vec!["dist-ops".into(), "membership-dist-user".into()],
+            vec!["dealer-ops".into(), "membership-dealer-user".into()],
         )
         .await
         .expect("insert group membership");
@@ -578,8 +575,8 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::Group,
-        subject_id: "dist-ops".to_owned(),
-        subject_organization_id: "distributor-org".to_owned(),
+        subject_id: "dealer-ops".to_owned(),
+        subject_organization_id: "dealer-org".to_owned(),
         resource_type: RoleBindingResourceType::Plant,
         resource_id: "plant-1".to_owned(),
         role_id: "role-plant-profile-reader".to_owned(),
@@ -609,12 +606,6 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         plant_id: "plant-1".to_owned(),
         action_id: "plant.profile.read".to_owned(),
     }));
-    assert!(org_rows.contains(&OrganizationPlantActionRow {
-        organization_id: "distributor-org".to_owned(),
-        plant_id: "plant-1".to_owned(),
-        action_id: "plant.profile.read".to_owned(),
-    }));
-
     let user_rows: HashSet<UserPlantActionRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -628,8 +619,8 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         .into_iter()
         .collect();
     assert!(user_rows.contains(&UserPlantActionRow {
-        user_id: "dist-user".to_owned(),
-        organization_id: "distributor-org".to_owned(),
+        user_id: "dealer-user".to_owned(),
+        organization_id: "dealer-org".to_owned(),
         plant_id: "plant-1".to_owned(),
         action_id: "plant.profile.read".to_owned(),
     }));
@@ -647,8 +638,8 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         .into_iter()
         .collect();
     assert!(visibility_rows.contains(&UserPlantVisibilityRow {
-        user_id: "dist-user".to_owned(),
-        organization_id: "distributor-org".to_owned(),
+        user_id: "dealer-user".to_owned(),
+        organization_id: "dealer-org".to_owned(),
         plant_id: "plant-1".to_owned(),
     }));
 
@@ -1360,10 +1351,10 @@ async fn rebuild_keeps_existing_visibility_readable_during_save_role_binding() {
     );
     db.ensure_schema().await.expect("ensure schema");
 
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("upsert owner org");
-    db.upsert_organization_with_owner("worker-org", "Worker Org", "Worker Org")
+    db.upsert_organization_with_owner("worker-org", "Worker Org", None, "Worker Org")
         .await
         .expect("upsert worker org");
 

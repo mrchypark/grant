@@ -128,10 +128,10 @@ fn empty_post_request(path: &str, token: &str, organization_id: &str) -> Request
 }
 
 async fn seed_creator_context(db: &Database) {
-    db.upsert_organization_with_owner("creator-org", "Creator Org", "Creator Org")
+    db.upsert_organization_with_owner("creator-org", "Creator Org", None, "Creator Org")
         .await
         .expect("creator org");
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("owner org");
 

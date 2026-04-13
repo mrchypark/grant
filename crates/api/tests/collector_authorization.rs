@@ -124,10 +124,10 @@ fn sync_request(organization_id: &str, token: &str, active_organization_id: &str
 }
 
 async fn seed_sync_fixture(db: &Database) {
-    db.upsert_organization_with_owner("owner-org", "Owner Org", "Owner Org")
+    db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("owner org");
-    db.upsert_organization_with_owner("operator-org", "Operator Org", "Operator Org")
+    db.upsert_organization_with_owner("operator-org", "Operator Org", None, "Operator Org")
         .await
         .expect("operator org");
     db.upsert_organization_identity("owner-org", Some("1234567890"), "Owner Org")

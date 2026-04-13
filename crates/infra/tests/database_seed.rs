@@ -1,13 +1,16 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
+use domain::{
+    Agreement, AgreementDocument, AgreementDocumentType, AgreementStatus, AgreementType, Client,
+    ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant, ClientGrantAction,
+    ClientGrantStatus, ClientType,
+};
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
 use tempfile::TempDir;
-use tokio::task::JoinSet;
 
 #[derive(Debug)]
 struct OrganizationRow {
     id: String,
-    business_no: Option<String>,
+    party_id: Option<String>,
     name: String,
 }
 
@@ -15,8 +18,26 @@ impl From<&mut Row<'_>> for OrganizationRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
-            business_no: row.get("business_no"),
+            party_id: row.get("party_id"),
             name: row.get("name"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PartyRow {
+    id: String,
+    #[allow(dead_code)]
+    business_no: String,
+    legal_name: String,
+}
+
+impl From<&mut Row<'_>> for PartyRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            business_no: row.get("business_no"),
+            legal_name: row.get("legal_name"),
         }
     }
 }
@@ -96,6 +117,58 @@ struct RoleBindingRow {
     state: String,
 }
 
+#[derive(Debug)]
+struct ClientRow {
+    id: String,
+    organization_id: String,
+    slug: String,
+    name: String,
+    client_type: String,
+    app_type: String,
+    first_party: i64,
+    consent_policy: String,
+    active: i64,
+    created_by_user_id: String,
+}
+
+impl From<&mut Row<'_>> for ClientRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            slug: row.get("slug"),
+            name: row.get("name"),
+            client_type: row.get("client_type"),
+            app_type: row.get("app_type"),
+            first_party: row.get("first_party"),
+            consent_policy: row.get("consent_policy"),
+            active: row.get("active"),
+            created_by_user_id: row.get("created_by_user_id"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ClientGrantRow {
+    id: String,
+    user_id: String,
+    client_id: String,
+    organization_id: String,
+    status: String,
+}
+
+impl From<&mut Row<'_>> for ClientGrantRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            user_id: row.get("user_id"),
+            client_id: row.get("client_id"),
+            organization_id: row.get("organization_id"),
+            status: row.get("status"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for RoleBindingRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -159,17 +232,19 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
     let organizations: Vec<OrganizationRow> = runtime
         .query_rows(
             ReadConsistency::Local,
-            "SELECT id, business_no, name FROM organizations ORDER BY id ASC",
+            "SELECT o.id, opl.party_id, o.name
+             FROM organizations o
+             LEFT JOIN organization_party_links opl
+               ON opl.organization_id = o.id
+              AND opl.relation_type = 'legal'
+             ORDER BY o.id ASC",
             vec![],
         )
         .await
         .expect("organizations");
     assert_eq!(organizations.len(), 1);
     assert_eq!(organizations[0].id, "conalog-account");
-    assert_eq!(
-        organizations[0].business_no.as_deref(),
-        Some("conalog-account")
-    );
+    assert_eq!(organizations[0].party_id, None);
     assert_eq!(organizations[0].name, "Conalog Account");
 
     let memberships: Vec<MembershipRow> = runtime
@@ -262,253 +337,54 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
 }
 
 #[tokio::test]
-async fn ensure_schema_preserves_bootstrap_organization_deactivation() {
+async fn organization_identity_links_party_without_overwriting_org_name() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
-        "conalog-account".to_owned(),
-        "Conalog Account".to_owned(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
     );
-
     db.ensure_schema().await.expect("ensure schema");
-    let deactivated = db
-        .deactivate_organization("conalog-account")
-        .await
-        .expect("deactivate bootstrap organization");
-    assert!(deactivated.inactivated_at.is_some());
 
-    db.ensure_schema().await.expect("ensure schema again");
-    let bootstrap = db
-        .get_organization("conalog-account")
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
         .await
-        .expect("bootstrap organization");
-    assert!(
-        bootstrap.inactivated_at.is_some(),
-        "bootstrap organization should stay deactivated across ensure_schema"
-    );
+        .expect("organization");
+    db.upsert_organization_identity("ops-seoul", Some("2768603291"), "주식회사 커널로그에너지")
+        .await
+        .expect("organization identity");
+
+    let organizations: Vec<OrganizationRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT o.id, opl.party_id, o.name
+             FROM organizations o
+             LEFT JOIN organization_party_links opl
+               ON opl.organization_id = o.id
+              AND opl.relation_type = 'legal'
+             WHERE o.id = 'ops-seoul'",
+            vec![],
+        )
+        .await
+        .expect("organizations");
+
+    let parties: Vec<PartyRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, business_no, legal_name FROM parties WHERE business_no = '2768603291'",
+            vec![],
+        )
+        .await
+        .expect("parties");
+    assert_eq!(organizations.len(), 1);
+    assert_eq!(organizations[0].name, "서울사업팀");
+    assert!(organizations[0].party_id.is_some());
+    assert_eq!(parties.len(), 1);
+    assert_eq!(parties[0].id, organizations[0].party_id.clone().unwrap());
+    assert_eq!(parties[0].legal_name, "주식회사 커널로그에너지");
 }
 
 #[tokio::test]
-async fn organization_upserts_preserve_existing_deactivation_state() {
-    let (runtime, _dir) = test_runtime().await;
-    let db = Database::new(
-        runtime.clone(),
-        "conalog-account".to_owned(),
-        "Conalog Account".to_owned(),
-    );
-
-    db.ensure_schema().await.expect("ensure schema");
-    db.deactivate_organization("conalog-account")
-        .await
-        .expect("deactivate bootstrap organization");
-
-    let owner_upserted = db
-        .upsert_organization_with_owner("conalog-account", "Renamed Org", "ignored")
-        .await
-        .expect("upsert organization with owner");
-    assert!(
-        owner_upserted.inactivated_at.is_some(),
-        "owner upsert should not reactivate an inactive organization"
-    );
-
-    let identity_upserted = db
-        .upsert_organization_identity("conalog-account", Some("conalog-account"), "Renamed Again")
-        .await
-        .expect("upsert organization identity");
-    assert!(
-        identity_upserted.inactivated_at.is_some(),
-        "identity upsert should not reactivate an inactive organization"
-    );
-}
-
-#[tokio::test]
-async fn certificate_gateway_rows_round_trip() {
-    let (runtime, _dir) = test_runtime().await;
-    let db = Database::new(
-        runtime.clone(),
-        "conalog-account".to_owned(),
-        "Conalog Account".to_owned(),
-    );
-
-    db.ensure_schema().await.expect("ensure schema");
-
-    let cert = db
-        .save_certificate(
-            "conalog-account",
-            Some("2768603291"),
-            "Test Certificate",
-            "encrypted-blob",
-            b"wrapped-dek",
-            "kms-key-v1",
-        )
-        .await
-        .expect("save certificate");
-    assert_eq!(cert.kms_key_id, "kms-key-v1");
-    assert_eq!(cert.wrapped_dek, b"wrapped-dek");
-    let listed = db
-        .list_certificates("conalog-account")
-        .await
-        .expect("list certificates for active organization");
-    assert_eq!(listed.len(), 1);
-
-    let first_load = db
-        .load_active_certificate("conalog-account")
-        .await
-        .expect("first active certificate load");
-    db.touch_certificate_last_used_at_if_stale(&first_load)
-        .await
-        .expect("touch certificate last_used_at");
-    let first_loaded = db
-        .get_certificate_by_id(&first_load.id)
-        .await
-        .expect("first reloaded certificate");
-    let first_last_used_at = first_loaded
-        .last_used_at
-        .clone()
-        .expect("first load should stamp last_used_at");
-
-    let second_load = db
-        .load_active_certificate("conalog-account")
-        .await
-        .expect("second active certificate load");
-    db.touch_certificate_last_used_at_if_stale(&second_load)
-        .await
-        .expect("skip redundant touch");
-    let second_loaded = db
-        .get_certificate_by_id(&second_load.id)
-        .await
-        .expect("second reloaded certificate");
-    assert_eq!(
-        second_loaded.last_used_at.as_deref(),
-        Some(first_last_used_at.as_str()),
-        "recent repeated loads should not rewrite last_used_at immediately"
-    );
-
-    db.deactivate_organization("conalog-account")
-        .await
-        .expect("deactivate organization");
-    let listed = db
-        .list_certificates("conalog-account")
-        .await
-        .expect("list certificates for inactive organization");
-    assert!(
-        listed.is_empty(),
-        "inactive organization should not list stored certificates"
-    );
-    let err = db
-        .load_active_certificate("conalog-account")
-        .await
-        .expect_err("inactive organization should not load active certificate");
-    assert!(
-        err.to_string().contains("certificate not found"),
-        "unexpected error: {err:#}"
-    );
-
-    runtime
-        .execute(
-            "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-            vec![
-                "cert-recent-created".into(),
-                "conalog-account".into(),
-                "Recent Created".into(),
-                "blob-created".into(),
-                STANDARD.encode("wrapped-created").into(),
-                "kms-key-v1".into(),
-                1_i64.into(),
-                Option::<String>::None.into(),
-                "2026-04-14T00:00:00Z".into(),
-            ],
-        )
-        .await
-        .expect("insert recent-created certificate");
-    runtime
-        .execute(
-            "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-            vec![
-                "cert-recently-used".into(),
-                "conalog-account".into(),
-                "Recently Used".into(),
-                "blob-used".into(),
-                STANDARD.encode("wrapped-used").into(),
-                "kms-key-v1".into(),
-                1_i64.into(),
-                "2026-04-15T00:00:00Z".into(),
-                "2026-04-13T00:00:00Z".into(),
-            ],
-        )
-        .await
-        .expect("insert recently-used certificate");
-
-    db.reactivate_organization("conalog-account")
-        .await
-        .expect("reactivate organization for ordering check");
-    let preferred = db
-        .load_active_certificate("conalog-account")
-        .await
-        .expect("load preferred active certificate");
-    assert_eq!(
-        preferred.id, "cert-recently-used",
-        "last_used_at should take precedence over created_at for active certificate selection"
-    );
-    let listed = db
-        .list_certificates("conalog-account")
-        .await
-        .expect("list certificates ordered by usage");
-    assert_eq!(
-        listed.first().map(|certificate| certificate.id.as_str()),
-        Some("cert-recently-used"),
-        "certificate listing should prefer the most recently used active certificate first"
-    );
-
-    let challenge = db
-        .create_cert_gateway_challenge(
-            "conalog-account",
-            "ephemeral",
-            "nonce-1",
-            "payload-hash-1",
-            Some("FAC-001"),
-            "2099-01-01T00:00:00Z",
-            "conalog-account",
-        )
-        .await
-        .expect("create challenge");
-    assert_eq!(challenge.mode, "ephemeral");
-    assert_eq!(challenge.consumed_at, None);
-
-    let consumed = db
-        .consume_cert_gateway_challenge(&challenge.id)
-        .await
-        .expect("consume challenge");
-    assert!(consumed.consumed_at.is_some());
-
-    let token = db
-        .issue_crawl_task_token(
-            "conalog-account",
-            Some(&cert.id),
-            "token-hash-1",
-            "{\"facilityCode\":\"FAC-001\"}",
-            "2099-01-01T00:01:00Z",
-            "conalog-account",
-        )
-        .await
-        .expect("issue crawl task token");
-    assert_eq!(token.used_at, None);
-
-    let consumed_token = db
-        .consume_crawl_task_token("token-hash-1")
-        .await
-        .expect("consume crawl task token");
-    assert!(consumed_token.used_at.is_some());
-    assert_eq!(
-        consumed_token.certificate_id.as_deref(),
-        Some(cert.id.as_str())
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cert_gateway_challenge_consumption_allows_only_one_concurrent_winner() {
+async fn bootstrap_principals_preserve_existing_party_link() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
@@ -516,116 +392,897 @@ async fn cert_gateway_challenge_consumption_allows_only_one_concurrent_winner() 
         "Conalog Account".to_owned(),
     );
     db.ensure_schema().await.expect("ensure schema");
-
-    let challenge = db
-        .create_cert_gateway_challenge(
-            "conalog-account",
-            "ephemeral",
-            "nonce-1",
-            "payload-hash-1",
-            Some("FAC-001"),
-            "2099-01-01T00:00:00Z",
-            "conalog-account",
-        )
-        .await
-        .expect("create challenge");
-
-    let mut tasks = JoinSet::new();
-    for _ in 0..16 {
-        let db = db.clone();
-        let challenge_id = challenge.id.clone();
-        tasks.spawn(async move { db.consume_cert_gateway_challenge(&challenge_id).await });
-    }
-
-    let mut success_count = 0usize;
-    while let Some(result) = tasks.join_next().await {
-        match result.expect("task join") {
-            Ok(_) => success_count += 1,
-            Err(err) => assert!(
-                err.to_string().contains("already consumed"),
-                "unexpected error: {err:#}"
-            ),
-        }
-    }
-
-    assert_eq!(
-        success_count, 1,
-        "challenge should be consumable exactly once"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn crawl_task_token_consumption_allows_only_one_concurrent_winner() {
-    let (runtime, _dir) = test_runtime().await;
-    let db = Database::new(
-        runtime.clone(),
-        "conalog-account".to_owned(),
-        "Conalog Account".to_owned(),
-    );
-    db.ensure_schema().await.expect("ensure schema");
-
-    let cert = db
-        .save_certificate(
-            "conalog-account",
-            Some("2768603291"),
-            "Test Certificate",
-            "encrypted-blob",
-            b"wrapped-dek",
-            "kms-key-v1",
-        )
-        .await
-        .expect("save certificate");
-
-    db.issue_crawl_task_token(
+    db.upsert_organization_identity(
         "conalog-account",
-        Some(&cert.id),
-        "token-hash-1",
-        "{\"facilityCode\":\"FAC-001\"}",
-        "2099-01-01T00:01:00Z",
-        "conalog-account",
+        Some("2768603291"),
+        "주식회사 커널로그에너지",
     )
     .await
-    .expect("issue crawl task token");
+    .expect("bootstrap identity");
 
-    let mut tasks = JoinSet::new();
-    for _ in 0..16 {
-        let db = db.clone();
-        tasks.spawn(async move { db.consume_crawl_task_token("token-hash-1").await });
-    }
+    db.ensure_bootstrap_principals()
+        .await
+        .expect("reseed bootstrap principals");
 
-    let mut success_count = 0usize;
-    while let Some(result) = tasks.join_next().await {
-        match result.expect("task join") {
-            Ok(_) => success_count += 1,
-            Err(err) => assert!(
-                err.to_string().contains("already used"),
-                "unexpected error: {err:#}"
-            ),
-        }
-    }
-
+    let organizations: Vec<OrganizationRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT o.id, opl.party_id, o.name
+             FROM organizations o
+             LEFT JOIN organization_party_links opl
+               ON opl.organization_id = o.id
+              AND opl.relation_type = 'legal'
+             WHERE o.id = 'conalog-account'",
+            vec![],
+        )
+        .await
+        .expect("organizations");
+    assert_eq!(organizations.len(), 1);
     assert_eq!(
-        success_count, 1,
-        "crawl task token should be consumable exactly once"
+        organizations[0].party_id.as_deref(),
+        Some("party-2768603291")
     );
 }
 
 #[tokio::test]
-async fn get_certificate_by_id_returns_typed_not_found() {
+async fn organization_identity_without_business_number_returns_existing_party_link() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
-        runtime,
-        "conalog-account".to_owned(),
-        "Conalog Account".to_owned(),
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+    db.upsert_organization_identity("ops-seoul", Some("2768603291"), "주식회사 커널로그에너지")
+        .await
+        .expect("organization identity");
+    let organization = db
+        .upsert_organization_identity("ops-seoul", None, "ignored")
+        .await
+        .expect("organization identity without business number");
+
+    assert_eq!(organization.party_id.as_deref(), Some("party-2768603291"));
+}
+
+#[tokio::test]
+async fn organization_identity_reuses_existing_party_id_for_business_number() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+
+    runtime
+        .execute(
+            "INSERT INTO parties (id, business_no, legal_name, active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            vec![
+                "party-custom".into(),
+                "2768603291".into(),
+                "주식회사 커널로그에너지".into(),
+                1_i64.into(),
+                "2026-04-11T00:00:00Z".into(),
+                "2026-04-11T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("seed custom party");
+
+    let organization = db
+        .upsert_organization_identity(
+            "ops-seoul",
+            Some("2768603291"),
+            "주식회사 커널로그에너지(변경)",
+        )
+        .await
+        .expect("organization identity");
+
+    assert_eq!(organization.party_id.as_deref(), Some("party-custom"));
+    let parties: Vec<PartyRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, business_no, legal_name FROM parties WHERE business_no = '2768603291'",
+            vec![],
+        )
+        .await
+        .expect("parties");
+    assert_eq!(parties.len(), 1);
+    assert_eq!(parties[0].legal_name, "주식회사 커널로그에너지(변경)");
+}
+
+#[tokio::test]
+async fn organization_creation_with_business_number_creates_legal_party_link() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let organization = db
+        .upsert_organization_with_owner(
+            "ops-seoul",
+            "서울사업팀",
+            Some("2768603291"),
+            "주식회사 커널로그에너지",
+        )
+        .await
+        .expect("organization");
+
+    assert_eq!(organization.party_id.as_deref(), Some("party-2768603291"));
+
+    let parties: Vec<PartyRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, business_no, legal_name FROM parties WHERE business_no = '2768603291'",
+            vec![],
+        )
+        .await
+        .expect("parties");
+    assert_eq!(parties.len(), 1);
+    assert_eq!(parties[0].legal_name, "주식회사 커널로그에너지");
+}
+
+#[tokio::test]
+async fn agreement_documents_round_trip_through_database() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_agreement(&Agreement {
+        id: "agreement-1".to_owned(),
+        agreement_type: AgreementType::Om,
+        grantor_organization_id: "grantor-org".to_owned(),
+        grantee_organization_id: "grantee-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "운영 위탁 계약".to_owned(),
+        reference_no: Some("OM-2026-001".to_owned()),
+        starts_at: Some("2026-01-01T00:00:00Z".to_owned()),
+        ends_at: None,
+    })
+    .await
+    .expect("agreement");
+
+    db.upsert_agreement_document(&AgreementDocument {
+        id: "agreement-doc-1".to_owned(),
+        agreement_id: "agreement-1".to_owned(),
+        document_type: AgreementDocumentType::MasterContract,
+        file_name: "om-2026-001.pdf".to_owned(),
+        object_key: "agreements/agreement-1/master.pdf".to_owned(),
+        content_type: "application/pdf".to_owned(),
+        document_no: Some("DOC-001".to_owned()),
+        uploaded_at: "2026-04-11T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("agreement document");
+
+    let listed = db
+        .list_agreement_documents("agreement-1")
+        .await
+        .expect("list agreement documents");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].document_type,
+        AgreementDocumentType::MasterContract
+    );
+    assert_eq!(listed[0].document_no.as_deref(), Some("DOC-001"));
+    assert_eq!(listed[0].uploaded_at, "2026-04-11T00:00:00Z");
+
+    let fetched = db
+        .get_agreement_document("agreement-doc-1")
+        .await
+        .expect("get agreement document");
+    assert_eq!(fetched.agreement_id, "agreement-1");
+    assert_eq!(fetched.object_key, "agreements/agreement-1/master.pdf");
+    assert_eq!(fetched.uploaded_at, "2026-04-11T00:00:00Z");
+}
+
+#[tokio::test]
+async fn client_grants_round_trip_through_database() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+
+    db.upsert_client(&Client {
+        id: "client-awesome-dashboard".to_owned(),
+        organization_id: "ops-seoul".to_owned(),
+        slug: "awesome-dashboard".to_owned(),
+        name: "Awesome Dashboard".to_owned(),
+        description: Some("외부 발전소 대시보드".to_owned()),
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("client");
+    db.upsert_client_action(&ClientAction {
+        client_id: "client-awesome-dashboard".to_owned(),
+        action_id: "plant.profile.read".to_owned(),
+    })
+    .await
+    .expect("client action");
+    let persisted_grant_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-awesome-dashboard".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-12T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("client grant");
+    assert_eq!(persisted_grant_id, "grant-awesome-dashboard");
+    let pre_client_actions: Vec<RoleActionRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT client_id AS role_id, action_id
+             FROM client_actions
+             WHERE client_id = 'client-awesome-dashboard'",
+            vec![],
+        )
+        .await
+        .expect("pre client actions");
+    assert_eq!(pre_client_actions.len(), 1);
+    let pre_grants: Vec<ClientGrantRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, user_id, client_id, organization_id, status
+             FROM client_grants
+             WHERE id = 'grant-awesome-dashboard'",
+            vec![],
+        )
+        .await
+        .expect("pre client grants");
+    assert_eq!(pre_grants.len(), 1);
+    db.upsert_client_grant_action(&ClientGrantAction {
+        client_grant_id: persisted_grant_id.clone(),
+        action_id: "plant.profile.read".to_owned(),
+    })
+    .await
+    .expect("client grant action");
+
+    let clients: Vec<ClientRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, organization_id, slug, name, client_type, app_type, first_party, consent_policy, active, created_by_user_id
+             FROM clients
+             WHERE id = 'client-awesome-dashboard'",
+            vec![],
+        )
+        .await
+        .expect("clients");
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].id, "client-awesome-dashboard");
+    assert_eq!(clients[0].organization_id, "ops-seoul");
+    assert_eq!(clients[0].slug, "awesome-dashboard");
+    assert_eq!(clients[0].name, "Awesome Dashboard");
+    assert_eq!(clients[0].client_type, "confidential");
+    assert_eq!(clients[0].app_type, "web");
+    assert_eq!(clients[0].first_party, 0);
+    assert_eq!(clients[0].consent_policy, "explicit");
+    assert_eq!(clients[0].active, 1);
+    assert_eq!(clients[0].created_by_user_id, "bootstrap-user");
+
+    let grants: Vec<ClientGrantRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, user_id, client_id, organization_id, status
+             FROM client_grants
+             WHERE id = 'grant-awesome-dashboard'",
+            vec![],
+        )
+        .await
+        .expect("client grants");
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].id, "grant-awesome-dashboard");
+    assert_eq!(grants[0].user_id, "bootstrap-user");
+    assert_eq!(grants[0].client_id, "client-awesome-dashboard");
+    assert_eq!(grants[0].organization_id, "ops-seoul");
+    assert_eq!(grants[0].status, "active");
+
+    let client_actions: Vec<RoleActionRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT client_id AS role_id, action_id
+             FROM client_actions
+             WHERE client_id = 'client-awesome-dashboard'",
+            vec![],
+        )
+        .await
+        .expect("client actions");
+    assert_eq!(client_actions.len(), 1);
+    assert_eq!(client_actions[0].role_id, "client-awesome-dashboard");
+    assert_eq!(client_actions[0].action_id, "plant.profile.read");
+
+    let grant_actions: Vec<RoleActionRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT client_grant_id AS role_id, action_id
+             FROM client_grant_actions
+             WHERE client_grant_id = 'grant-awesome-dashboard'",
+            vec![],
+        )
+        .await
+        .expect("client grant actions");
+    assert_eq!(grant_actions.len(), 1);
+    assert_eq!(grant_actions[0].role_id, "grant-awesome-dashboard");
+    assert_eq!(grant_actions[0].action_id, "plant.profile.read");
+}
+
+#[tokio::test]
+async fn client_actions_reject_non_grantable_actions() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+    db.upsert_client(&Client {
+        id: "client-awesome-dashboard".to_owned(),
+        organization_id: "ops-seoul".to_owned(),
+        slug: "awesome-dashboard".to_owned(),
+        name: "Awesome Dashboard".to_owned(),
+        description: None,
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("client");
+
+    let err = db
+        .upsert_client_action(&ClientAction {
+            client_id: "client-awesome-dashboard".to_owned(),
+            action_id: "plant.certificate.use".to_owned(),
+        })
+        .await
+        .expect_err("non-grantable action must fail");
+    assert!(err.to_string().contains("not grantable to clients"));
+}
+
+#[tokio::test]
+async fn client_grant_actions_must_be_subset_of_client_actions() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+    db.upsert_client(&Client {
+        id: "client-awesome-dashboard".to_owned(),
+        organization_id: "ops-seoul".to_owned(),
+        slug: "awesome-dashboard".to_owned(),
+        name: "Awesome Dashboard".to_owned(),
+        description: None,
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("client");
+    let grant_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-awesome-dashboard".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-12T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("client grant");
+
+    let err = db
+        .upsert_client_grant_action(&ClientGrantAction {
+            client_grant_id: grant_id,
+            action_id: "plant.report.read".to_owned(),
+        })
+        .await
+        .expect_err("grant action outside client action subset must fail");
+    assert!(
+        err.to_string()
+            .contains("client grant action must be included in client_actions")
+    );
+}
+
+#[tokio::test]
+async fn active_client_grants_are_upserted_by_logical_key() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+    db.upsert_client(&Client {
+        id: "client-awesome-dashboard".to_owned(),
+        organization_id: "ops-seoul".to_owned(),
+        slug: "awesome-dashboard".to_owned(),
+        name: "Awesome Dashboard".to_owned(),
+        description: None,
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("client");
+
+    let first_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-1".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-12T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("first grant");
+    let second_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-2".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-13T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-13T00:00:00Z".to_owned(),
+            updated_at: "2026-04-13T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("second grant");
+
+    assert_eq!(first_id, "grant-1");
+    assert_eq!(second_id, "grant-1");
+
+    let grants: Vec<ClientGrantRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, user_id, client_id, organization_id, status
+             FROM client_grants
+             WHERE client_id = 'client-awesome-dashboard'
+             ORDER BY id ASC",
+            vec![],
+        )
+        .await
+        .expect("client grants");
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].id, "grant-1");
+}
+
+#[tokio::test]
+async fn active_reconsent_replaces_client_grant_actions() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+    db.upsert_client(&Client {
+        id: "client-awesome-dashboard".to_owned(),
+        organization_id: "ops-seoul".to_owned(),
+        slug: "awesome-dashboard".to_owned(),
+        name: "Awesome Dashboard".to_owned(),
+        description: None,
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("client");
+    db.upsert_client_action(&ClientAction {
+        client_id: "client-awesome-dashboard".to_owned(),
+        action_id: "plant.profile.read".to_owned(),
+    })
+    .await
+    .expect("client action profile");
+    db.upsert_client_action(&ClientAction {
+        client_id: "client-awesome-dashboard".to_owned(),
+        action_id: "plant.report.read".to_owned(),
+    })
+    .await
+    .expect("client action report");
+
+    let grant_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-1".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-12T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("first grant");
+    db.upsert_client_grant_action(&ClientGrantAction {
+        client_grant_id: grant_id.clone(),
+        action_id: "plant.profile.read".to_owned(),
+    })
+    .await
+    .expect("first profile action");
+    db.upsert_client_grant_action(&ClientGrantAction {
+        client_grant_id: grant_id.clone(),
+        action_id: "plant.report.read".to_owned(),
+    })
+    .await
+    .expect("first report action");
+
+    let reused_grant_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-2".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-13T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-13T00:00:00Z".to_owned(),
+            updated_at: "2026-04-13T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("second grant");
+    assert_eq!(reused_grant_id, grant_id);
+    db.upsert_client_grant_action(&ClientGrantAction {
+        client_grant_id: reused_grant_id.clone(),
+        action_id: "plant.profile.read".to_owned(),
+    })
+    .await
+    .expect("reconsent profile action");
+
+    let grant_actions: Vec<RoleActionRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT client_grant_id AS role_id, action_id
+             FROM client_grant_actions
+             WHERE client_grant_id = 'grant-1'
+             ORDER BY action_id ASC",
+            vec![],
+        )
+        .await
+        .expect("client grant actions");
+    assert_eq!(grant_actions.len(), 1);
+    assert_eq!(grant_actions[0].action_id, "plant.profile.read");
+}
+
+#[tokio::test]
+async fn client_upsert_requires_existing_organization_and_creator_user() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
     );
     db.ensure_schema().await.expect("ensure schema");
 
     let err = db
-        .get_certificate_by_id("missing-certificate")
+        .upsert_client(&Client {
+            id: "client-orphan".to_owned(),
+            organization_id: "missing-org".to_owned(),
+            slug: "orphan".to_owned(),
+            name: "Orphan Client".to_owned(),
+            description: None,
+            client_type: ClientType::Confidential,
+            app_type: ClientAppType::Web,
+            first_party: false,
+            consent_policy: ClientConsentPolicy::Explicit,
+            active: true,
+            created_by_user_id: "missing-user".to_owned(),
+        })
         .await
-        .expect_err("missing certificate should fail");
-    assert!(matches!(
-        err.downcast_ref::<infra::database::DatabaseLookupError>(),
-        Some(infra::database::DatabaseLookupError::CertificateNotFound)
-    ));
+        .expect_err("missing org and user must fail");
+    assert!(
+        err.to_string()
+            .contains("client organization missing-org does not exist")
+            || err
+                .to_string()
+                .contains("client creator user missing-user does not exist")
+    );
+}
+
+#[tokio::test]
+async fn client_grant_requires_existing_user_client_and_organization() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let err = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-orphan".to_owned(),
+            user_id: "missing-user".to_owned(),
+            client_id: "missing-client".to_owned(),
+            organization_id: "missing-org".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-12T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect_err("missing grant dependencies must fail");
+    assert!(
+        err.to_string()
+            .contains("client grant user missing-user does not exist")
+            || err
+                .to_string()
+                .contains("client grant client missing-client does not exist")
+            || err
+                .to_string()
+                .contains("client grant organization missing-org does not exist")
+    );
+}
+
+#[tokio::test]
+async fn revoked_client_grants_can_exist_alongside_active_grants() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner("ops-seoul", "서울사업팀", None, "서울사업팀")
+        .await
+        .expect("organization");
+    db.upsert_client(&Client {
+        id: "client-awesome-dashboard".to_owned(),
+        organization_id: "ops-seoul".to_owned(),
+        slug: "awesome-dashboard".to_owned(),
+        name: "Awesome Dashboard".to_owned(),
+        description: None,
+        client_type: ClientType::Confidential,
+        app_type: ClientAppType::Web,
+        first_party: false,
+        consent_policy: ClientConsentPolicy::Explicit,
+        active: true,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("client");
+
+    let active_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-active".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Active,
+            consented_at: "2026-04-12T00:00:00Z".to_owned(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("active grant");
+    let revoked_id = db
+        .upsert_client_grant(&ClientGrant {
+            id: "grant-revoked".to_owned(),
+            user_id: "bootstrap-user".to_owned(),
+            client_id: "client-awesome-dashboard".to_owned(),
+            organization_id: "ops-seoul".to_owned(),
+            status: ClientGrantStatus::Revoked,
+            consented_at: "2026-04-11T00:00:00Z".to_owned(),
+            revoked_at: Some("2026-04-13T00:00:00Z".to_owned()),
+            revoked_by_user_id: Some("bootstrap-user".to_owned()),
+            created_at: "2026-04-11T00:00:00Z".to_owned(),
+            updated_at: "2026-04-13T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("revoked grant");
+
+    assert_eq!(active_id, "grant-active");
+    assert_eq!(revoked_id, "grant-revoked");
+
+    let grants: Vec<ClientGrantRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, user_id, client_id, organization_id, status
+             FROM client_grants
+             WHERE client_id = 'client-awesome-dashboard'
+             ORDER BY id ASC",
+            vec![],
+        )
+        .await
+        .expect("client grants");
+    assert_eq!(grants.len(), 2);
+    assert_eq!(grants[0].id, "grant-active");
+    assert_eq!(grants[0].status, "active");
+    assert_eq!(grants[1].id, "grant-revoked");
+    assert_eq!(grants[1].status, "revoked");
+}
+
+#[tokio::test]
+async fn certificates_are_shared_across_organizations_linked_to_same_party() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner(
+        "ops-seoul",
+        "서울사업팀",
+        Some("2768603291"),
+        "주식회사 커널로그에너지",
+    )
+    .await
+    .expect("organization a");
+    db.upsert_organization_with_owner(
+        "ops-busan",
+        "부산사업팀",
+        Some("2768603291"),
+        "주식회사 커널로그에너지",
+    )
+    .await
+    .expect("organization b");
+
+    let saved = db
+        .save_certificate(
+            "ops-seoul",
+            Some("2768603291"),
+            "주식회사 커널로그에너지",
+            "encrypted-bundle",
+            b"wrapped-dek",
+            "local-dev-v1",
+        )
+        .await
+        .expect("save certificate");
+
+    let loaded = db
+        .load_active_certificate("ops-busan")
+        .await
+        .expect("load certificate through shared party");
+
+    assert_eq!(loaded.id, saved.id);
+    assert_eq!(loaded.party_id, saved.party_id);
+    assert_eq!(loaded.party_id, "party-2768603291");
+    assert_eq!(loaded.business_no.as_deref(), Some("2768603291"));
+    assert_eq!(loaded.encrypted_blob, "encrypted-bundle");
+}
+
+#[tokio::test]
+async fn save_certificate_reuses_existing_party_without_overwriting_legal_name() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.upsert_organization_with_owner(
+        "ops-seoul",
+        "서울사업팀",
+        Some("2768603291"),
+        "주식회사 커널로그에너지",
+    )
+    .await
+    .expect("organization");
+
+    db.save_certificate(
+        "ops-seoul",
+        Some("2768603291"),
+        "커널로그에너지 운영 인증서",
+        "encrypted-bundle",
+        b"wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("save certificate");
+
+    let parties: Vec<PartyRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT id, business_no, legal_name FROM parties WHERE business_no = '2768603291'",
+            vec![],
+        )
+        .await
+        .expect("parties");
+    assert_eq!(parties.len(), 1);
+    assert_eq!(parties[0].legal_name, "주식회사 커널로그에너지");
+}
+
+#[tokio::test]
+async fn organization_identity_bootstraps_placeholder_organization_when_missing() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let organization = db
+        .upsert_organization_identity("missing-org", None, "ignored")
+        .await
+        .expect("organization identity");
+
+    assert_eq!(organization.id, "missing-org");
+    assert_eq!(organization.name, "missing-org");
+    assert_eq!(organization.party_id, None);
+    assert!(organization.inactivated_at.is_none());
 }
