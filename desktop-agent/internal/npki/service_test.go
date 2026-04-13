@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -210,6 +211,14 @@ func TestServiceListCertificatesDeduplicatesSymlinksToSameBundle(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+}
+
+func TestSplitRootListPreservesWindowsDrivePaths(t *testing.T) {
+	got := splitRootList(`C:\NPKI;D:\NPKI,/custom/npki`)
+	want := []string{`C:\NPKI`, `D:\NPKI`, `/custom/npki`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitRootList() = %#v, want %#v", got, want)
 	}
 }
 

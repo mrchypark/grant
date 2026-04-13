@@ -335,9 +335,13 @@ func normalizeRoots(roots []string) []string {
 		if root == "" {
 			continue
 		}
-		expanded, err := filepath.Abs(os.ExpandEnv(root))
-		if err != nil {
-			continue
+		expanded := os.ExpandEnv(root)
+		if !looksLikeWindowsPath(expanded) {
+			absolute, err := filepath.Abs(expanded)
+			if err != nil {
+				continue
+			}
+			expanded = absolute
 		}
 		if _, ok := seen[expanded]; ok {
 			continue
@@ -383,10 +387,44 @@ func discoverDefaultRoots() []string {
 }
 
 func splitRootList(value string) []string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ':' || r == ';' || r == ','
-	})
+	fields := make([]string, 0)
+	start := 0
+	for i, r := range value {
+		if r == ';' || r == ',' || (r == ':' && !isWindowsDriveDelimiter(value, i)) {
+			fields = append(fields, value[start:i])
+			start = i + 1
+		}
+	}
+	fields = append(fields, value[start:])
 	return normalizeRoots(fields)
+}
+
+func isWindowsDriveDelimiter(value string, index int) bool {
+	if index <= 0 || index >= len(value) {
+		return false
+	}
+	drive := value[index-1]
+	if !unicode.IsLetter(rune(drive)) {
+		return false
+	}
+	if index > 1 {
+		prev := value[index-2]
+		if prev != ';' && prev != ',' && prev != ':' && !unicode.IsSpace(rune(prev)) {
+			return false
+		}
+	}
+	if index == len(value)-1 {
+		return true
+	}
+	next := value[index+1]
+	return next == '\\' || next == '/'
+}
+
+func looksLikeWindowsPath(value string) bool {
+	if len(value) >= 2 && unicode.IsLetter(rune(value[0])) && value[1] == ':' {
+		return true
+	}
+	return strings.HasPrefix(value, `\\`)
 }
 
 type encryptedPrivateKey struct {
