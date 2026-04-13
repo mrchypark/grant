@@ -2005,35 +2005,130 @@ impl Database {
         Ok(())
     }
 
+    fn validate_client_references<'a>(
+        &'a self,
+        client: &'a Client,
+    ) -> impl std::future::Future<Output = Result<()>> + 'a {
+        async move {
+            if !self
+                .exists_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                    params!(client.organization_id.clone()),
+                    "client organization existence",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "client organization {} does not exist",
+                    client.organization_id
+                ));
+            }
+            if !self
+                .exists_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) as count FROM users WHERE id = $1",
+                    params!(client.created_by_user_id.clone()),
+                    "client creator existence",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "client creator user {} does not exist",
+                    client.created_by_user_id
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    pub async fn insert_client(&self, client: &Client) -> Result<()> {
+        self.validate_client_references(client).await?;
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO clients (
+                    id, organization_id, slug, name, description, client_type, app_type,
+                    first_party, consent_policy, active, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                params!(
+                    client.id.clone(),
+                    client.organization_id.clone(),
+                    client.slug.clone(),
+                    client.name.clone(),
+                    client.description.clone(),
+                    client_type_str(&client.client_type),
+                    client_app_type_str(&client.app_type),
+                    if client.first_party { 1_i64 } else { 0_i64 },
+                    client_consent_policy_str(&client.consent_policy),
+                    if client.active { 1_i64 } else { 0_i64 },
+                    client.created_by_user_id.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("insert client")?;
+        Ok(())
+    }
+
+    pub async fn update_client(&self, client: &Client) -> Result<()> {
+        self.validate_client_references(client).await?;
+        let now = now_string();
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE clients
+                 SET organization_id = $2,
+                     slug = $3,
+                     name = $4,
+                     description = $5,
+                     client_type = $6,
+                     app_type = $7,
+                     first_party = $8,
+                     consent_policy = $9,
+                     active = $10,
+                     created_by_user_id = $11,
+                     updated_at = $12
+                 WHERE id = $1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM clients AS conflicting
+                       WHERE conflicting.slug = $3
+                         AND conflicting.id <> $1
+                   )",
+                params!(
+                    client.id.clone(),
+                    client.organization_id.clone(),
+                    client.slug.clone(),
+                    client.name.clone(),
+                    client.description.clone(),
+                    client_type_str(&client.client_type),
+                    client_app_type_str(&client.app_type),
+                    if client.first_party { 1_i64 } else { 0_i64 },
+                    client_consent_policy_str(&client.consent_policy),
+                    if client.active { 1_i64 } else { 0_i64 },
+                    client.created_by_user_id.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("update client")?;
+        if updated == 0 {
+            if self
+                .find_client_by_id_with_consistency(&client.id, Some(ReadConsistency::Strong))
+                .await?
+                .is_none()
+            {
+                return Err(anyhow!("client not found: {}", client.id));
+            }
+            return Err(anyhow!("client slug already exists: {}", client.slug));
+        }
+        Ok(())
+    }
+
     pub async fn upsert_client(&self, client: &Client) -> Result<()> {
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
-                params!(client.organization_id.clone()),
-                "client organization existence",
-            )
-            .await?
-        {
-            return Err(anyhow!(
-                "client organization {} does not exist",
-                client.organization_id
-            ));
-        }
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM users WHERE id = $1",
-                params!(client.created_by_user_id.clone()),
-                "client creator existence",
-            )
-            .await?
-        {
-            return Err(anyhow!(
-                "client creator user {} does not exist",
-                client.created_by_user_id
-            ));
-        }
+        self.validate_client_references(client).await?;
         let now = now_string();
         self.runtime
             .execute(

@@ -1465,24 +1465,26 @@ impl ApiError {
             };
         }
         let message = err.to_string();
+        let contains_chain =
+            |needle: &str| err.chain().any(|cause| cause.to_string().contains(needle));
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
-        } else if message.contains("already exists")
-            || message.contains("UNIQUE constraint failed")
-            || message.contains("unique constraint failed")
+        } else if contains_chain("already exists")
+            || contains_chain("UNIQUE constraint failed")
+            || contains_chain("unique constraint failed")
         {
             StatusCode::CONFLICT
         } else if message.contains("unavailable:") {
             StatusCode::SERVICE_UNAVAILABLE
-        } else if message.contains("not found") {
+        } else if contains_chain("not found") {
             StatusCode::NOT_FOUND
-        } else if message.contains("must not be empty")
-            || message.contains("is not grantable to clients")
-            || message.contains("expired")
-            || message.contains("consumed")
-            || message.contains("payload mismatch")
-            || message.contains("mismatch")
-            || message.contains("already used")
+        } else if contains_chain("must not be empty")
+            || contains_chain("is not grantable to clients")
+            || contains_chain("expired")
+            || contains_chain("consumed")
+            || contains_chain("payload mismatch")
+            || contains_chain("mismatch")
+            || contains_chain("already used")
         {
             StatusCode::BAD_REQUEST
         } else {

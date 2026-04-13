@@ -437,6 +437,60 @@ async fn client_create_reports_duplicate_slug_as_conflict() {
 }
 
 #[tokio::test]
+async fn client_update_reports_duplicate_slug_as_conflict() {
+    let (service, db, _dir) = test_service().await;
+    seed_client_manager(&db, "org-a").await;
+    let app = api::build_router(service);
+
+    for (id, slug, name) in [
+        ("client-a", "slug-a", "Client A"),
+        ("client-b", "slug-b", "Client B"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/organizations/org-a/clients",
+                "bootstrap-user",
+                "org-a",
+                Some(json!({
+                    "id": id,
+                    "slug": slug,
+                    "name": name,
+                    "clientType": "public",
+                    "appType": "web",
+                    "firstParty": false,
+                    "consentPolicy": "explicit",
+                    "active": true
+                })),
+            ))
+            .await
+            .expect("create response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let update = app
+        .oneshot(app_request(
+            Method::PUT,
+            "/api/v1/organizations/org-a/clients/client-b",
+            "bootstrap-user",
+            "org-a",
+            Some(json!({
+                "slug": "slug-a",
+                "name": "Client B Updated",
+                "clientType": "public",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": true
+            })),
+        ))
+        .await
+        .expect("update response");
+    assert_eq!(update.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn replace_client_actions_rejects_requests_over_sqlite_parameter_limit() {
     let (service, db, _dir) = test_service().await;
     seed_client_manager(&db, "creator-org").await;

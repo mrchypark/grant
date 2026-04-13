@@ -1188,28 +1188,6 @@ impl AppService {
         .await?;
         let client_id = require_non_empty("id", &input.id)?;
         let slug = require_non_empty("slug", &input.slug)?;
-        if self
-            .db
-            .find_client_by_id_with_consistency(&client_id, Some(ReadConsistency::Strong))
-            .await?
-            .is_some()
-        {
-            return Err(conflict_error(format!(
-                "client id already exists: {}",
-                client_id
-            )));
-        }
-        if self
-            .db
-            .find_client_by_slug_with_consistency(&slug, Some(ReadConsistency::Strong))
-            .await?
-            .is_some()
-        {
-            return Err(conflict_error(format!(
-                "client slug already exists: {}",
-                slug
-            )));
-        }
         let client = Client {
             id: client_id,
             organization_id: organization_id.to_owned(),
@@ -1223,7 +1201,7 @@ impl AppService {
             active: input.active,
             created_by_user_id: user_id.to_owned(),
         };
-        self.db.upsert_client(&client).await?;
+        self.db.insert_client(&client).await?;
         Ok(client)
     }
 
@@ -1243,18 +1221,6 @@ impl AppService {
             )
             .await?;
         let slug = require_non_empty("slug", &input.slug)?;
-        if let Some(other) = self
-            .db
-            .find_client_by_slug_with_consistency(&slug, Some(ReadConsistency::Strong))
-            .await?
-        {
-            if other.id != existing.id {
-                return Err(conflict_error(format!(
-                    "client slug already exists: {}",
-                    slug
-                )));
-            }
-        }
         let client = Client {
             id: existing.id,
             organization_id: existing.organization_id,
@@ -1268,7 +1234,7 @@ impl AppService {
             active: input.active,
             created_by_user_id: existing.created_by_user_id,
         };
-        self.db.upsert_client(&client).await?;
+        self.db.update_client(&client).await?;
         Ok(client)
     }
 
@@ -2159,10 +2125,6 @@ fn not_found_error(message: impl Into<String>) -> anyhow::Error {
 
 fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::Forbidden, message)
-}
-
-fn conflict_error(message: impl Into<String>) -> anyhow::Error {
-    service_error(ServiceErrorKind::Conflict, message)
 }
 
 fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -> anyhow::Error {
