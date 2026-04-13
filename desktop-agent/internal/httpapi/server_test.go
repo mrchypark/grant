@@ -280,6 +280,16 @@ func TestServerRejectsOversizedSignBody(t *testing.T) {
 	}
 }
 
+func TestSummarizeGatewayErrorBodyMarshalsStructuredValues(t *testing.T) {
+	body := []byte(`{"error":{"code":"gateway_denied","message":"denied"}}`)
+
+	got := summarizeGatewayErrorBody(body)
+
+	if got != `{"code":"gateway_denied","message":"denied"}` {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{

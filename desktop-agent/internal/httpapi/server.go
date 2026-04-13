@@ -793,7 +793,7 @@ func summarizeGatewayErrorBody(raw []byte) string {
 	if err := json.Unmarshal(raw, &body); err == nil {
 		for _, key := range []string{"message", "error", "detail"} {
 			if value, ok := body[key]; ok {
-				if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				if text := summarizeGatewayErrorValue(value); text != "" {
 					return text
 				}
 			}
@@ -803,4 +803,15 @@ func summarizeGatewayErrorBody(raw []byte) string {
 		return trimmed[:200]
 	}
 	return trimmed
+}
+
+func summarizeGatewayErrorValue(value any) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+	return strings.TrimSpace(string(encoded))
 }

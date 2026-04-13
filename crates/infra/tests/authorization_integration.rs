@@ -998,6 +998,74 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
 }
 
 #[tokio::test]
+async fn crawl_task_token_start_rejects_inactive_organization_without_consuming_token() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-005".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+    let cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
+            challenge_signature_base64: signature,
+            bundle,
+        })
+        .await
+        .expect("register certificate");
+
+    let issued = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: cert.id,
+            facility_code: Some("FAC-005".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-02".to_owned()),
+            mode: SyncMode::Delta,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("issue crawl task token");
+
+    db.deactivate_organization("bootstrap-user")
+        .await
+        .expect("deactivate organization");
+
+    let inactive_err = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            token: issued.token.clone(),
+        })
+        .await
+        .expect_err("inactive organization should not start crawl");
+    assert!(inactive_err.to_string().contains("inactive"));
+
+    db.reactivate_organization("bootstrap-user")
+        .await
+        .expect("reactivate organization");
+
+    let run = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            token: issued.token,
+        })
+        .await
+        .expect("token should remain usable after reactivation");
+    assert_eq!(run.status, "completed");
+    assert_eq!(run.plant_id.as_deref(), Some("FAC-005"));
+}
+
+#[tokio::test]
 async fn gateway_sync_scope_requires_permission_for_existing_plant() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
     seed_gateway_scope_fixture(&db).await;

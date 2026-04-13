@@ -36,6 +36,18 @@ static void certd_request_cancel_approval_modal(void) {
 	});
 }
 
+static void certd_activate_approval_app(void) {
+	void (^activate)(void) = ^{
+		[NSApplication sharedApplication];
+		[NSApp activateIgnoringOtherApps:YES];
+	};
+	if ([NSThread isMainThread]) {
+		activate();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), activate);
+	}
+}
+
 static char *certd_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex) {
 	__block char *result = NULL;
 	__block int didCancel = 0;
@@ -143,7 +155,11 @@ var requestApprovalModalCancellation = func() {
 	C.certd_request_cancel_approval_modal()
 }
 
-var showApprovalModal = func(input approvalModalInput) (string, bool) {
+var activateApprovalModalApplication = func() {
+	C.certd_activate_approval_app()
+}
+
+var runApprovalModal = func(input approvalModalInput) (string, bool) {
 	origin := C.CString(input.Origin)
 	organization := C.CString(input.OrganizationID)
 	businessNo := C.CString(input.BusinessNo)
@@ -168,6 +184,11 @@ var showApprovalModal = func(input approvalModalInput) (string, bool) {
 	}
 	defer C.free(unsafe.Pointer(raw))
 	return C.GoString(raw), true
+}
+
+var showApprovalModal = func(input approvalModalInput) (string, bool) {
+	activateApprovalModalApplication()
+	return runApprovalModal(input)
 }
 
 func NewPrompter() *Prompter {

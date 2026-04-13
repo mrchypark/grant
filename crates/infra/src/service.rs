@@ -627,6 +627,12 @@ impl AppService {
                 issued.organization_id, organization_id
             )));
         }
+        let organization = self.db.get_organization(&organization_id).await?;
+        if organization.inactivated_at.is_some() {
+            return Err(forbidden_error(format!(
+                "forbidden: organization {organization_id} is inactive"
+            )));
+        }
         let consumed = self.db.consume_crawl_task_token(&token_hash).await?;
 
         let scope: CrawlTaskScope =
