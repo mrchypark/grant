@@ -112,6 +112,7 @@ spec:
             - |
               mkdir -p "${TRAILBASE_DATA_DIR}"
               mkdir -p "$(dirname "${LITESTREAM_DB_PATH}")"
+              chown -R 65532:65532 "${TRAILBASE_DATA_DIR}"
               chmod -R 0770 "${TRAILBASE_DATA_DIR}"
               cat >/tmp/litestream.yml <<EOF
               dbs:
@@ -124,6 +125,8 @@ spec:
                       secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
               EOF
               litestream restore -config /tmp/litestream.yml -if-db-not-exists -if-replica-exists "${LITESTREAM_DB_PATH}"
+              chown -R 65532:65532 "${TRAILBASE_DATA_DIR}"
+              chmod -R 0770 "${TRAILBASE_DATA_DIR}"
           envFrom:
             - configMapRef:
                 name: trailbase-config

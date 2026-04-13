@@ -105,6 +105,7 @@ jobs:
           CLUSTER_NAME: certd-vind-ci
           CI_CLUSTER_BACKEND: vind
           CI_DOCKER_BUILDER_PRUNE: "1"
+          CI_SKIP_CLUSTER_DELETE_ON_FAILURE: "1"
           CI_RUN_E2E: "0"
           CI_RUN_CHAOS: "1"
           NAMESPACE: certd

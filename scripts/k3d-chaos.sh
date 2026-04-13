@@ -881,8 +881,9 @@ scenario_trailbase_cache_ttl() {
   kubectl -n "${NAMESPACE}" scale deployment/trailbase --replicas=1 >/dev/null
   if ! kubectl -n "${NAMESPACE}" rollout status deployment/trailbase \
     --timeout="${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS}s" >/dev/null; then
-    echo "[trailbase] rollout did not complete within ${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS}s; continuing with direct recovery probes" >&2
+    echo "[trailbase] rollout did not complete within ${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS}s; failing fast" >&2
     dump_trailbase_debug
+    return 1
   fi
   local recovered_token=""
   retry_capture_into recovered_token \
@@ -890,17 +891,9 @@ scenario_trailbase_cache_ttl() {
     "${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS}" \
     login_trailbase || true
   if [[ -z "${recovered_token}" || "${recovered_token}" == "null" ]]; then
-    echo "[trailbase] restored user login failed; attempting reseed fallback" >&2
-    seed_trailbase_user >&2
-    retry_capture_into recovered_token \
-      "${TRAILBASE_RECOVERY_LOGIN_RETRIES}" \
-      "${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS}" \
-      login_trailbase || true
-    if [[ -z "${recovered_token}" || "${recovered_token}" == "null" ]]; then
-      dump_trailbase_debug
-      echo "failed to login after trailbase recovery" >&2
-      exit 1
-    fi
+    echo "[trailbase] login did not recover after rollout; failing fast" >&2
+    dump_trailbase_debug
+    return 1
   fi
   observe_core_api "trailbase-recovered" "${recovered_token}" "${active_org}" >&2
   inspect_plant "${recovered_token}" "${active_org}" "${facility_code}" | jq >&2

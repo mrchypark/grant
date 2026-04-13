@@ -14,6 +14,7 @@ KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
 VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"
 CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"
+CI_SKIP_CLUSTER_DELETE_ON_FAILURE="${CI_SKIP_CLUSTER_DELETE_ON_FAILURE:-0}"
 CI_RUN_E2E="${CI_RUN_E2E:-1}"
 CI_RUN_CHAOS="${CI_RUN_CHAOS:-1}"
 
@@ -56,7 +57,12 @@ if [[ "${CI_CLUSTER_BACKEND}" != "vind" ]]; then
 fi
 
 cleanup() {
+  local exit_code="$?"
   if [[ "${KEEP_CLUSTER}" != "1" ]]; then
+    if [[ "${exit_code}" -ne 0 && "${CI_SKIP_CLUSTER_DELETE_ON_FAILURE}" == "1" ]]; then
+      echo "[cleanup] skipping cluster delete after failure"
+      return
+    fi
     CLUSTER_NAME="${CLUSTER_NAME}" \
     KEEP_CLUSTER="${KEEP_CLUSTER}" \
       bash "${ROOT_DIR}/scripts/vind-cluster.sh" delete >/dev/null 2>&1 || true

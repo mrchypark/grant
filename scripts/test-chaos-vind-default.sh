@@ -47,6 +47,10 @@ require_not_contains() {
 
 ci_run_e2e_pattern="CI_RUN_E2E=\"\${CI_RUN_E2E:-1}\""
 ci_run_chaos_pattern="CI_RUN_CHAOS=\"\${CI_RUN_CHAOS:-1}\""
+ci_skip_cluster_delete_pattern="CI_SKIP_CLUSTER_DELETE_ON_FAILURE=\"\${CI_SKIP_CLUSTER_DELETE_ON_FAILURE:-0}\""
+trailbase_rollout_failfast_pattern="echo \"[trailbase] rollout did not complete within \${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS}s; failing fast\" >&2"
+trailbase_data_dir_chown_pattern="chown -R 65532:65532 \"\${TRAILBASE_DATA_DIR}\""
+trailbase_data_dir_chmod_pattern="chmod -R 0770 \"\${TRAILBASE_DATA_DIR}\""
 
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'CI_CLUSTER_BACKEND="${CI_CLUSTER_BACKEND:-vind}"'
@@ -54,6 +58,7 @@ require_contains "scripts/ci-chaos-local.sh" 'CI_CLUSTER_BACKEND="${CI_CLUSTER_B
 require_contains "scripts/ci-chaos-local.sh" 'VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"'
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"'
+require_contains "scripts/ci-chaos-local.sh" "${ci_skip_cluster_delete_pattern}"
 require_contains "scripts/ci-chaos-local.sh" "${ci_run_e2e_pattern}"
 require_contains "scripts/ci-chaos-local.sh" "${ci_run_chaos_pattern}"
 require_contains "scripts/ci-chaos-local.sh" 'docker builder prune -af >/dev/null || true'
@@ -81,6 +86,7 @@ require_contains ".github/workflows/chaos-local.yml" 'CI_CLUSTER_BACKEND: vind'
 require_contains ".github/workflows/chaos-local.yml" 'CI_DOCKER_BUILDER_PRUNE: "1"'
 require_contains ".github/workflows/chaos-local.yml" 'CI_RUN_E2E: "0"'
 require_contains ".github/workflows/chaos-local.yml" 'CI_RUN_CHAOS: "1"'
+require_contains ".github/workflows/chaos-local.yml" 'CI_SKIP_CLUSTER_DELETE_ON_FAILURE: "1"'
 require_not_contains ".github/workflows/chaos-local.yml" 'Install kind'
 require_not_contains ".github/workflows/chaos-local.yml" 'setup-vind'
 
@@ -110,10 +116,14 @@ require_contains "scripts/k3d-chaos.sh" 'if "$@" >"${capture_file}"; then'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS="${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS:-180}"'
 require_contains "scripts/k3d-chaos.sh" 'dump_trailbase_debug()'
-require_contains "scripts/k3d-chaos.sh" 'retry_capture_into recovered_token'
+require_contains "scripts/k3d-chaos.sh" "${trailbase_rollout_failfast_pattern}"
+require_contains "scripts/k3d-chaos.sh" 'echo "[trailbase] login did not recover after rollout; failing fast" >&2'
 # shellcheck disable=SC2016
 require_not_contains "scripts/k3d-chaos.sh" 'recovered_token="$(login_trailbase || true)"'
+require_not_contains "scripts/k3d-chaos.sh" '[trailbase] restored user login failed; attempting reseed fallback'
 require_not_contains "scripts/k3d-chaos.sh" 'retry_json_query()'
+require_contains "deploy/k8s/trailbase-deployment.yaml" "${trailbase_data_dir_chown_pattern}"
+require_contains "deploy/k8s/trailbase-deployment.yaml" "${trailbase_data_dir_chmod_pattern}"
 require_contains "scripts/vind-bootstrap.sh" 'minio-statefulset-ephemeral.yaml'
 require_contains "scripts/vind-bootstrap.sh" 'dump_minio_debug'
 require_contains "scripts/vind-bootstrap.sh" 'kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers'
