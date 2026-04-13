@@ -3,7 +3,8 @@ use crate::{
     runtime::{HiqliteRuntime, Readiness},
 };
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use domain::{
     Agreement, DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization,
     Plant, RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
@@ -11,7 +12,9 @@ use domain::{
 };
 use hiqlite::Row;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+use std::{error::Error as StdError, fmt};
+use tracing::warn;
 use uuid::Uuid;
 
 macro_rules! params {
@@ -19,6 +22,29 @@ macro_rules! params {
         vec![$(::hiqlite::Param::from($value)),*]
     };
 }
+
+const CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS: i64 = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseLookupError {
+    PlantNotFound,
+    CertificateNotFound,
+    CertGatewayChallengeNotFound,
+    CrawlTaskTokenNotFound,
+}
+
+impl fmt::Display for DatabaseLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlantNotFound => f.write_str("plant not found"),
+            Self::CertificateNotFound => f.write_str("certificate not found"),
+            Self::CertGatewayChallengeNotFound => f.write_str("cert gateway challenge not found"),
+            Self::CrawlTaskTokenNotFound => f.write_str("crawl task token not found"),
+        }
+    }
+}
+
+impl StdError for DatabaseLookupError {}
 
 #[derive(Clone)]
 pub struct Database {
@@ -34,8 +60,37 @@ pub struct StoredCertificate {
     pub business_no: Option<String>,
     pub common_name: String,
     pub encrypted_blob: String,
+    pub wrapped_dek: Vec<u8>,
+    pub kms_key_id: String,
     pub active: i64,
     pub last_used_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CertGatewayChallenge {
+    pub id: String,
+    pub organization_id: String,
+    pub mode: String,
+    pub nonce: String,
+    pub payload_hash: String,
+    pub facility_code: Option<String>,
+    pub expires_at: String,
+    pub consumed_at: Option<String>,
+    pub created_by_user_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrawlTaskToken {
+    pub id: String,
+    pub organization_id: String,
+    pub certificate_id: Option<String>,
+    pub token_hash: String,
+    pub scope_json: String,
+    pub expires_at: String,
+    pub used_at: Option<String>,
+    pub created_by_user_id: String,
     pub created_at: String,
 }
 
@@ -82,6 +137,20 @@ struct CountSumRow {
 struct CountSumIntRow {
     count: i64,
     total: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredCertificateRow {
+    id: String,
+    organization_id: String,
+    business_no: Option<String>,
+    common_name: String,
+    encrypted_blob: String,
+    wrapped_dek_b64: String,
+    kms_key_id: String,
+    active: i64,
+    last_used_at: Option<String>,
+    created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -179,23 +248,11 @@ struct RoleOrgRow {
 }
 
 #[derive(Debug, Clone)]
-struct OrganizationIdRow {
-    id: String,
-}
-
-#[derive(Debug, Clone)]
 struct OrganizationRow {
     id: String,
     business_no: Option<String>,
     name: String,
-    legal_entity_id: Option<String>,
-    active: i64,
-}
-
-#[derive(Debug, Clone)]
-struct OrganizationEdgeRow {
-    parent_organization_id: String,
-    child_organization_id: String,
+    inactivated_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +321,33 @@ struct RecRow {
     virtual_account: Option<String>,
     bank_name: Option<String>,
     status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CertGatewayChallengeRow {
+    id: String,
+    organization_id: String,
+    mode: String,
+    nonce: String,
+    payload_hash: String,
+    facility_code: Option<String>,
+    expires_at: String,
+    consumed_at: Option<String>,
+    created_by_user_id: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct CrawlTaskTokenRow {
+    id: String,
+    organization_id: String,
+    certificate_id: Option<String>,
+    token_hash: String,
+    scope_json: String,
+    expires_at: String,
+    used_at: Option<String>,
+    created_by_user_id: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -461,16 +545,9 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     business_no TEXT UNIQUE,
                     name TEXT NOT NULL,
-                    legal_entity_id TEXT,
-                    active INTEGER NOT NULL DEFAULT 1,
+                    inactivated_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS organization_edges (
-                    parent_organization_id TEXT NOT NULL,
-                    child_organization_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (parent_organization_id, child_organization_id)
                 );
                 CREATE TABLE IF NOT EXISTS organization_memberships (
                     id TEXT PRIMARY KEY,
@@ -556,12 +633,6 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS organization_closure (
-                    ancestor_organization_id TEXT NOT NULL,
-                    descendant_organization_id TEXT NOT NULL,
-                    depth INTEGER NOT NULL,
-                    PRIMARY KEY (ancestor_organization_id, descendant_organization_id)
-                );
                 CREATE TABLE IF NOT EXISTS effective_organization_plant_actions (
                     organization_id TEXT NOT NULL,
                     plant_id TEXT NOT NULL,
@@ -611,8 +682,6 @@ impl Database {
                         resource_id,
                         role_id
                     );
-                CREATE INDEX IF NOT EXISTS idx_organization_closure_descendant
-                    ON organization_closure (descendant_organization_id, ancestor_organization_id);
                 CREATE INDEX IF NOT EXISTS idx_effective_organization_plant_actions_org_plant
                     ON effective_organization_plant_actions (organization_id, plant_id, action_id);
                 CREATE INDEX IF NOT EXISTS idx_effective_user_plant_actions_user_org
@@ -624,12 +693,43 @@ impl Database {
                     organization_id TEXT NOT NULL,
                     common_name TEXT NOT NULL,
                     encrypted_blob TEXT NOT NULL,
+                    wrapped_dek TEXT NOT NULL,
+                    kms_key_id TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
                     last_used_at TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_certificates_organization_active
                     ON certificates (organization_id, active, created_at DESC);
+                CREATE TABLE IF NOT EXISTS cert_gateway_challenges (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    nonce TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    facility_code TEXT,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    created_by_user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_cert_gateway_challenges_org_expires
+                    ON cert_gateway_challenges (organization_id, expires_at DESC);
+                CREATE TABLE IF NOT EXISTS crawl_task_tokens (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    certificate_id TEXT,
+                    token_hash TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT,
+                    created_by_user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_crawl_task_tokens_token_hash
+                    ON crawl_task_tokens (token_hash);
+                CREATE INDEX IF NOT EXISTS idx_crawl_task_tokens_org_expires
+                    ON crawl_task_tokens (organization_id, expires_at DESC);
                 CREATE TABLE IF NOT EXISTS plants (
                     id TEXT PRIMARY KEY,
                     facility_code TEXT NOT NULL UNIQUE,
@@ -655,8 +755,6 @@ impl Database {
                     duration_ms INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_sync_runs_plant_started
-                    ON sync_runs (plant_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_plants_owner_facility
                     ON plants (owner_organization_id, facility_code);
                 CREATE TABLE IF NOT EXISTS generation_records (
@@ -718,6 +816,14 @@ impl Database {
             )
             .await
             .context("create schema")?;
+        self.runtime
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_runs_plant_started
+                 ON sync_runs (plant_id, started_at DESC)",
+                params![],
+            )
+            .await
+            .context("create sync_runs plant index")?;
         Ok(())
     }
 
@@ -747,19 +853,17 @@ impl Database {
             .context("upsert bootstrap user")?;
         self.runtime
             .execute(
-                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    active = excluded.active,
                     updated_at = excluded.updated_at",
                 params!(
                     self.bootstrap_user_id.clone(),
                     Some(self.bootstrap_user_id.clone()),
                     self.bootstrap_user_name.clone(),
                     Option::<String>::None,
-                    1_i64,
                     now.clone(),
                     now.clone()
                 ),
@@ -948,19 +1052,17 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    active = excluded.active,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
                     Some(organization_id.to_owned()),
                     display_name.to_owned(),
                     Option::<String>::None,
-                    1_i64,
                     now.clone(),
                     now.clone()
                 ),
@@ -984,13 +1086,7 @@ impl Database {
             )
             .await
             .context("upsert organization membership")?;
-        Ok(Organization {
-            id: organization_id.to_owned(),
-            business_no: Some(organization_id.to_owned()),
-            name: display_name.to_owned(),
-            legal_entity_id: None,
-            active: true,
-        })
+        self.get_organization(organization_id).await
     }
 
     pub async fn upsert_organization_identity(
@@ -1002,32 +1098,24 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT(id) DO UPDATE SET
                     business_no = excluded.business_no,
                     name = excluded.name,
-                    active = excluded.active,
                     updated_at = excluded.updated_at",
                 params!(
                     organization_id.to_owned(),
                     business_no.map(ToOwned::to_owned),
                     display_name.to_owned(),
                     Option::<String>::None,
-                    1_i64,
                     now.clone(),
                     now.clone()
                 ),
             )
             .await
             .context("upsert organization identity")?;
-        Ok(Organization {
-            id: organization_id.to_owned(),
-            business_no: business_no.map(ToOwned::to_owned),
-            name: display_name.to_owned(),
-            legal_entity_id: None,
-            active: true,
-        })
+        self.get_organization(organization_id).await
     }
 
     pub async fn resolve_or_create_user_identity(
@@ -1454,7 +1542,7 @@ impl Database {
             .await
     }
 
-    pub async fn has_active_organization_membership_with_consistency(
+    pub async fn has_organization_membership_with_consistency(
         &self,
         user_id: &str,
         organization_id: &str,
@@ -1466,7 +1554,36 @@ impl Database {
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT COUNT(*) as count
                  FROM organization_memberships
-                 WHERE user_id = $1 AND organization_id = $2 AND status = 'active'",
+                 WHERE user_id = $1
+                   AND organization_id = $2
+                   AND status = 'active'",
+                params!(user_id.to_owned(), organization_id.to_owned()),
+            )
+            .await
+            .context("check organization membership including inactive organization")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("membership count query returned no row"))?;
+        Ok(row.count > 0)
+    }
+
+    pub async fn has_active_organization_membership_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        let row: CountRow = self
+            .runtime
+            .query_rows(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT COUNT(*) as count
+                 FROM organization_memberships om
+                 JOIN organizations o ON o.id = om.organization_id
+                 WHERE om.user_id = $1
+                   AND om.organization_id = $2
+                   AND om.status = 'active'
+                   AND o.inactivated_at IS NULL",
                 params!(user_id.to_owned(), organization_id.to_owned()),
             )
             .await
@@ -1500,12 +1617,12 @@ impl Database {
             .runtime
             .query_rows(
                 self.validation_read_consistency_with_override(consistency),
-                "SELECT o.id, o.business_no, o.name, o.legal_entity_id, o.active
+                "SELECT o.id, o.business_no, o.name, o.inactivated_at
                  FROM organizations o
                  JOIN organization_memberships om ON om.organization_id = o.id
                  WHERE om.user_id = $1
                    AND om.status = 'active'
-                   AND o.active = 1
+                   AND o.inactivated_at IS NULL
                  ORDER BY o.name ASC, o.id ASC",
                 params!(user_id.to_owned()),
             )
@@ -1598,6 +1715,8 @@ impl Database {
         business_no: Option<&str>,
         common_name: &str,
         encrypted_blob: &str,
+        wrapped_dek: &[u8],
+        kms_key_id: &str,
     ) -> Result<StoredCertificate> {
         self.upsert_organization_identity(organization_id, business_no, common_name)
             .await?;
@@ -1614,13 +1733,15 @@ impl Database {
         let now = now_string();
         self.runtime
             .execute(
-                "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, active, last_used_at, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO certificates (id, organization_id, common_name, encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 params!(
                     id.clone(),
                     organization_id.to_owned(),
                     common_name.to_owned(),
                     encrypted_blob.to_owned(),
+                    STANDARD.encode(wrapped_dek),
+                    kms_key_id.to_owned(),
                     1_i64,
                     Option::<String>::None,
                     now
@@ -1634,7 +1755,7 @@ impl Database {
     pub async fn get_organization(&self, organization_id: &str) -> Result<Organization> {
         let rows: Vec<OrganizationRow> = self
             .query_default_rows(
-                "SELECT id, business_no, name, legal_entity_id, active
+                "SELECT id, business_no, name, inactivated_at
                  FROM organizations
                  WHERE id = $1
                  LIMIT 1",
@@ -1650,35 +1771,299 @@ impl Database {
         Ok(row.into())
     }
 
+    pub async fn deactivate_organization(&self, organization_id: &str) -> Result<Organization> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "UPDATE organizations
+                 SET inactivated_at = $1, updated_at = $2
+                 WHERE id = $3",
+                params!(now.clone(), now, organization_id.to_owned()),
+            )
+            .await
+            .context("deactivate organization")?;
+        self.get_organization(organization_id).await
+    }
+
+    pub async fn reactivate_organization(&self, organization_id: &str) -> Result<Organization> {
+        self.runtime
+            .execute(
+                "UPDATE organizations
+                 SET inactivated_at = $1, updated_at = $2
+                 WHERE id = $3",
+                params!(
+                    Option::<String>::None,
+                    now_string(),
+                    organization_id.to_owned()
+                ),
+            )
+            .await
+            .context("reactivate organization")?;
+        self.get_organization(organization_id).await
+    }
+
     pub async fn load_active_certificate(
         &self,
         organization_id: &str,
     ) -> Result<StoredCertificate> {
-        let rows: Vec<StoredCertificate> = self
+        let rows: Vec<StoredCertificateRow> = self
             .query_consistent_rows(
-                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.active, c.last_used_at, c.created_at
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
                  FROM certificates c
-                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 JOIN organizations o ON o.id = c.organization_id
                  WHERE c.organization_id = $1
-                 ORDER BY c.active DESC, c.created_at DESC
+                   AND c.active = 1
+                   AND o.inactivated_at IS NULL
+                 ORDER BY c.last_used_at DESC NULLS LAST, c.created_at DESC
                  LIMIT 1",
                 params!(organization_id.to_owned()),
                 "active certificate",
             )
             .await
             .context("query active certificate")?;
-        let cert = rows
+        let cert: StoredCertificate = rows
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("certificate not found"))?;
-        self.runtime
-            .execute(
-                "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
-                params!(now_string(), cert.id.clone()),
+            .ok_or_else(|| anyhow!("certificate not found"))?
+            .try_into()?;
+        Ok(cert)
+    }
+
+    pub async fn touch_certificate_last_used_at_if_stale(
+        &self,
+        cert: &StoredCertificate,
+    ) -> Result<()> {
+        if should_refresh_certificate_last_used_at(cert.last_used_at.as_deref())? {
+            self.runtime
+                .execute(
+                    "UPDATE certificates SET last_used_at = $1 WHERE id = $2",
+                    params!(now_string(), cert.id.clone()),
+                )
+                .await
+                .context("update certificate last_used_at")?;
+        }
+        Ok(())
+    }
+
+    pub async fn get_certificate_by_id(&self, certificate_id: &str) -> Result<StoredCertificate> {
+        let rows: Vec<StoredCertificateRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                 FROM certificates c
+                 LEFT JOIN organizations o ON o.id = c.organization_id
+                 WHERE c.id = $1
+                 LIMIT 1",
+                params!(certificate_id.to_owned()),
+                "certificate by id",
             )
             .await
-            .context("update certificate last_used_at")?;
-        Ok(cert)
+            .context("query certificate by id")?;
+        if rows.is_empty() {
+            return Err(DatabaseLookupError::CertificateNotFound.into());
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple rows returned: certificate by id, expected 1"
+            ));
+        }
+        rows.into_iter()
+            .next()
+            .expect("single certificate row")
+            .try_into()
+    }
+
+    pub async fn list_certificates(&self, organization_id: &str) -> Result<Vec<StoredCertificate>> {
+        let rows: Vec<StoredCertificateRow> = self
+            .query_consistent_rows(
+                "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
+                 FROM certificates c
+                 JOIN organizations o ON o.id = c.organization_id
+                 WHERE c.organization_id = $1
+                   AND o.inactivated_at IS NULL
+                 ORDER BY c.active DESC, c.last_used_at DESC NULLS LAST, c.created_at DESC",
+                params!(organization_id.to_owned()),
+                "organization certificates",
+            )
+            .await
+            .context("query organization certificates")?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn create_cert_gateway_challenge(
+        &self,
+        organization_id: &str,
+        mode: &str,
+        nonce: &str,
+        payload_hash: &str,
+        facility_code: Option<&str>,
+        expires_at: &str,
+        created_by_user_id: &str,
+    ) -> Result<CertGatewayChallenge> {
+        let id = Uuid::new_v4().simple().to_string();
+        let created_at = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO cert_gateway_challenges (id, organization_id, mode, nonce, payload_hash, facility_code, expires_at, consumed_at, created_by_user_id, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                params!(
+                    id.clone(),
+                    organization_id.to_owned(),
+                    mode.to_owned(),
+                    nonce.to_owned(),
+                    payload_hash.to_owned(),
+                    facility_code.map(str::to_owned),
+                    expires_at.to_owned(),
+                    Option::<String>::None,
+                    created_by_user_id.to_owned(),
+                    created_at
+                ),
+            )
+            .await
+            .context("insert cert gateway challenge")?;
+        self.get_cert_gateway_challenge(&id).await
+    }
+
+    pub async fn consume_cert_gateway_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Result<CertGatewayChallenge> {
+        let consumed_at = now_string();
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE cert_gateway_challenges
+                 SET consumed_at = $1
+                 WHERE id = $2
+                   AND consumed_at IS NULL",
+                params!(consumed_at.clone(), challenge_id.to_owned()),
+            )
+            .await
+            .context("consume cert gateway challenge")?;
+        if updated == 0 {
+            let challenge = self.get_cert_gateway_challenge(challenge_id).await?;
+            if challenge.consumed_at.is_some() {
+                anyhow::bail!("cert gateway challenge already consumed");
+            }
+            anyhow::bail!("cert gateway challenge not found");
+        }
+        let challenge = self.get_cert_gateway_challenge(challenge_id).await?;
+        Ok(challenge)
+    }
+
+    pub async fn issue_crawl_task_token(
+        &self,
+        organization_id: &str,
+        certificate_id: Option<&str>,
+        token_hash: &str,
+        scope_json: &str,
+        expires_at: &str,
+        created_by_user_id: &str,
+    ) -> Result<CrawlTaskToken> {
+        let id = Uuid::new_v4().simple().to_string();
+        let created_at = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO crawl_task_tokens (id, organization_id, certificate_id, token_hash, scope_json, expires_at, used_at, created_by_user_id, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                params!(
+                    id.clone(),
+                    organization_id.to_owned(),
+                    certificate_id.map(str::to_owned),
+                    token_hash.to_owned(),
+                    scope_json.to_owned(),
+                    expires_at.to_owned(),
+                    Option::<String>::None,
+                    created_by_user_id.to_owned(),
+                    created_at
+                ),
+            )
+            .await
+            .context("insert crawl task token")?;
+        self.get_crawl_task_token_by_hash(token_hash).await
+    }
+
+    pub async fn consume_crawl_task_token(&self, token_hash: &str) -> Result<CrawlTaskToken> {
+        let used_at = now_string();
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE crawl_task_tokens
+                 SET used_at = $1
+                 WHERE token_hash = $2
+                   AND used_at IS NULL",
+                params!(used_at.clone(), token_hash.to_owned()),
+            )
+            .await
+            .context("consume crawl task token")?;
+        if updated == 0 {
+            let token = self.get_crawl_task_token_by_hash(token_hash).await?;
+            if token.used_at.is_some() {
+                anyhow::bail!("crawl task token already used");
+            }
+            anyhow::bail!("crawl task token not found");
+        }
+        let token = self.get_crawl_task_token_by_hash(token_hash).await?;
+        Ok(token)
+    }
+
+    pub async fn get_cert_gateway_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Result<CertGatewayChallenge> {
+        let rows: Vec<CertGatewayChallengeRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT id, organization_id, mode, nonce, payload_hash, facility_code, expires_at, consumed_at, created_by_user_id, created_at
+                 FROM cert_gateway_challenges
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(challenge_id.to_owned()),
+                "cert gateway challenge",
+            )
+            .await
+            .context("query cert gateway challenge")?;
+        if rows.is_empty() {
+            return Err(DatabaseLookupError::CertGatewayChallengeNotFound.into());
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple rows returned: cert gateway challenge, expected 1"
+            ));
+        }
+        Ok(rows
+            .into_iter()
+            .next()
+            .expect("single cert gateway challenge row")
+            .into())
+    }
+
+    pub async fn get_crawl_task_token_by_hash(&self, token_hash: &str) -> Result<CrawlTaskToken> {
+        let rows: Vec<CrawlTaskTokenRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT id, organization_id, certificate_id, token_hash, scope_json, expires_at, used_at, created_by_user_id, created_at
+                 FROM crawl_task_tokens
+                 WHERE token_hash = $1
+                 LIMIT 1",
+                params!(token_hash.to_owned()),
+                "crawl task token",
+            )
+            .await
+            .context("query crawl task token")?;
+        if rows.is_empty() {
+            return Err(DatabaseLookupError::CrawlTaskTokenNotFound.into());
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple rows returned: crawl task token, expected 1"
+            ));
+        }
+        Ok(rows
+            .into_iter()
+            .next()
+            .expect("single crawl task token row")
+            .into())
     }
 
     pub async fn start_sync_run(
@@ -1927,7 +2312,7 @@ impl Database {
     pub async fn list_document_objects(&self, plant_id: &str) -> Result<Vec<String>> {
         let rows: Vec<DocumentRow> = self
             .query_consistent_rows(
-                "SELECT id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
+                "SELECT id, plant_id, category, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type
                  FROM documents WHERE plant_id = $1",
                 params!(plant_id.to_owned()),
                 "document objects",
@@ -2055,6 +2440,52 @@ impl Database {
             )
             .await?
             > 0)
+    }
+
+    pub async fn list_user_plant_action_facility_codes_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        action_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<String>> {
+        #[derive(Debug)]
+        struct FacilityCodeRow {
+            facility_code: String,
+        }
+
+        impl From<&mut Row<'_>> for FacilityCodeRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    facility_code: row.get("facility_code"),
+                }
+            }
+        }
+
+        let rows: Vec<FacilityCodeRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT DISTINCT p.facility_code
+                 FROM effective_user_plant_visibility v
+                 JOIN effective_user_plant_actions a
+                   ON a.user_id = v.user_id
+                  AND a.organization_id = v.organization_id
+                  AND a.plant_id = v.plant_id
+                 JOIN plants p ON p.id = v.plant_id
+                 WHERE v.user_id = $1
+                   AND v.organization_id = $2
+                   AND a.action_id = $3
+                 ORDER BY p.facility_code ASC",
+                params!(
+                    user_id.to_owned(),
+                    organization_id.to_owned(),
+                    action_id.to_owned()
+                ),
+                "effective user plant action facility codes",
+            )
+            .await
+            .context("list user plant action facility codes")?;
+        Ok(rows.into_iter().map(|row| row.facility_code).collect())
     }
 
     pub async fn has_user_organization_action(
@@ -2228,7 +2659,9 @@ impl Database {
             )
             .await
             .context("query plant")?;
-        let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
+        let plant_row = plants
+            .pop()
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))?;
         Ok(plant_row.into())
     }
 
@@ -2270,7 +2703,9 @@ impl Database {
             )
             .await
             .context("query plant")?;
-        let plant_row = plants.pop().ok_or_else(|| anyhow!("plant not found"))?;
+        let plant_row = plants
+            .pop()
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))?;
         let resolved_plant_id = plant_row.id.clone();
 
         let mut runs: Vec<SyncRunRow> = self
@@ -2594,24 +3029,6 @@ impl Database {
 
     async fn rebuild_organization_expansion(&self) -> Result<()> {
         let consistency = self.validation_read_consistency();
-        let org_rows: Vec<OrganizationIdRow> = self
-            .query_rows_with(
-                consistency.clone(),
-                "SELECT id FROM organizations ORDER BY id ASC",
-                vec![],
-                "organization ids for closure rebuild",
-            )
-            .await?;
-        let edge_rows: Vec<OrganizationEdgeRow> = self
-            .query_rows_with(
-                consistency.clone(),
-                "SELECT parent_organization_id, child_organization_id
-                 FROM organization_edges
-                 ORDER BY parent_organization_id ASC, child_organization_id ASC",
-                vec![],
-                "organization edges for closure rebuild",
-            )
-            .await?;
         let seed_rows: Vec<OrganizationPlantActionSeedRow> = self
             .query_rows_with(
                 consistency.clone(),
@@ -2693,50 +3110,13 @@ impl Database {
             )
             .await?;
 
-        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
-        for edge in &edge_rows {
-            children_by_parent
-                .entry(edge.parent_organization_id.clone())
-                .or_default()
-                .push(edge.child_organization_id.clone());
-        }
-
-        let mut closure_rows: Vec<(String, String, i64)> = Vec::new();
-        for org in &org_rows {
-            let mut queue = VecDeque::from([(org.id.clone(), 0_i64)]);
-            let mut seen: HashSet<String> = HashSet::new();
-            while let Some((descendant, depth)) = queue.pop_front() {
-                if !seen.insert(descendant.clone()) {
-                    continue;
-                }
-                closure_rows.push((org.id.clone(), descendant.clone(), depth));
-                if let Some(children) = children_by_parent.get(&descendant) {
-                    for child in children {
-                        queue.push_back((child.clone(), depth + 1));
-                    }
-                }
-            }
-        }
-
-        let mut ancestors_by_descendant: HashMap<String, Vec<String>> = HashMap::new();
-        for (ancestor, descendant, _) in &closure_rows {
-            ancestors_by_descendant
-                .entry(descendant.clone())
-                .or_default()
-                .push(ancestor.clone());
-        }
-
         let mut org_action_rows: HashSet<(String, String, String)> = HashSet::new();
         for seed in &seed_rows {
-            if let Some(ancestors) = ancestors_by_descendant.get(&seed.organization_id) {
-                for ancestor in ancestors {
-                    org_action_rows.insert((
-                        ancestor.clone(),
-                        seed.plant_id.clone(),
-                        seed.action_id.clone(),
-                    ));
-                }
-            }
+            org_action_rows.insert((
+                seed.organization_id.clone(),
+                seed.plant_id.clone(),
+                seed.action_id.clone(),
+            ));
         }
 
         let membership_by_id: HashMap<String, (String, String)> = membership_rows
@@ -2816,9 +3196,6 @@ impl Database {
         // HashSet iteration is non-deterministic; keep transaction input ordered so rebuilds are
         // reproducible in tests/debugging while using the cheaper unstable sort because duplicates
         // have already been eliminated by the sets above.
-        let mut closure_rows = closure_rows;
-        closure_rows.sort_unstable();
-
         let mut org_action_rows: Vec<_> = org_action_rows.into_iter().collect();
         org_action_rows.sort_unstable();
 
@@ -2830,24 +3207,11 @@ impl Database {
 
         let updated_at = Utc::now().to_rfc3339();
         let mut queries: Vec<(&'static str, Vec<hiqlite::Param>)> = Vec::with_capacity(
-            4 + closure_rows.len()
-                + org_action_rows.len()
-                + user_action_rows.len()
-                + visibility_rows.len(),
+            3 + org_action_rows.len() + user_action_rows.len() + visibility_rows.len(),
         );
-        queries.push(("DELETE FROM organization_closure", vec![]));
         queries.push(("DELETE FROM effective_organization_plant_actions", vec![]));
         queries.push(("DELETE FROM effective_user_plant_actions", vec![]));
         queries.push(("DELETE FROM effective_user_plant_visibility", vec![]));
-
-        for (ancestor, descendant, depth) in closure_rows {
-            queries.push((
-                "INSERT INTO organization_closure (
-                    ancestor_organization_id, descendant_organization_id, depth
-                 ) VALUES ($1, $2, $3)",
-                params!(ancestor, descendant, depth),
-            ));
-        }
 
         for (organization_id, plant_id, action_id) in org_action_rows {
             queries.push((
@@ -3209,7 +3573,7 @@ fn validation_read_consistency_for_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::validation_read_consistency_for_mode;
+    use super::{should_refresh_certificate_last_used_at, validation_read_consistency_for_mode};
     use crate::config::{ReadConsistency, RuntimeMode};
 
     #[test]
@@ -3226,6 +3590,13 @@ mod tests {
             validation_read_consistency_for_mode(&RuntimeMode::Embedded),
             ReadConsistency::Local
         );
+    }
+
+    #[test]
+    fn invalid_last_used_at_refreshes_instead_of_failing() {
+        let should_refresh = should_refresh_certificate_last_used_at(Some("not-a-timestamp"))
+            .expect("invalid timestamp should not fail");
+        assert!(should_refresh);
     }
 }
 
@@ -3262,7 +3633,26 @@ fn now_string() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
 }
 
-impl From<&mut Row<'_>> for StoredCertificate {
+fn should_refresh_certificate_last_used_at(last_used_at: Option<&str>) -> Result<bool> {
+    let Some(last_used_at) = last_used_at else {
+        return Ok(true);
+    };
+    let parsed = match DateTime::parse_from_rfc3339(last_used_at) {
+        Ok(parsed) => parsed.with_timezone(&Utc),
+        Err(err) => {
+            warn!(
+                last_used_at,
+                error = %err,
+                "failed to parse certificate last_used_at; refreshing timestamp"
+            );
+            return Ok(true);
+        }
+    };
+    Ok(Utc::now().signed_duration_since(parsed)
+        >= ChronoDuration::seconds(CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS))
+}
+
+impl From<&mut Row<'_>> for StoredCertificateRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
@@ -3270,9 +3660,98 @@ impl From<&mut Row<'_>> for StoredCertificate {
             business_no: row.get("business_no"),
             common_name: row.get("common_name"),
             encrypted_blob: row.get("encrypted_blob"),
+            wrapped_dek_b64: row.get("wrapped_dek"),
+            kms_key_id: row.get("kms_key_id"),
             active: row.get("active"),
             last_used_at: row.get("last_used_at"),
             created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl TryFrom<StoredCertificateRow> for StoredCertificate {
+    type Error = anyhow::Error;
+
+    fn try_from(row: StoredCertificateRow) -> Result<Self> {
+        Ok(Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            business_no: row.business_no,
+            common_name: row.common_name,
+            encrypted_blob: row.encrypted_blob,
+            wrapped_dek: STANDARD
+                .decode(row.wrapped_dek_b64)
+                .context("decode wrapped_dek from base64")?,
+            kms_key_id: row.kms_key_id,
+            active: row.active,
+            last_used_at: row.last_used_at,
+            created_at: row.created_at,
+        })
+    }
+}
+
+impl From<&mut Row<'_>> for CertGatewayChallengeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            mode: row.get("mode"),
+            nonce: row.get("nonce"),
+            payload_hash: row.get("payload_hash"),
+            facility_code: row.get("facility_code"),
+            expires_at: row.get("expires_at"),
+            consumed_at: row.get("consumed_at"),
+            created_by_user_id: row.get("created_by_user_id"),
+            created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl From<CertGatewayChallengeRow> for CertGatewayChallenge {
+    fn from(row: CertGatewayChallengeRow) -> Self {
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            mode: row.mode,
+            nonce: row.nonce,
+            payload_hash: row.payload_hash,
+            facility_code: row.facility_code,
+            expires_at: row.expires_at,
+            consumed_at: row.consumed_at,
+            created_by_user_id: row.created_by_user_id,
+            created_at: row.created_at,
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CrawlTaskTokenRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            certificate_id: row.get("certificate_id"),
+            token_hash: row.get("token_hash"),
+            scope_json: row.get("scope_json"),
+            expires_at: row.get("expires_at"),
+            used_at: row.get("used_at"),
+            created_by_user_id: row.get("created_by_user_id"),
+            created_at: row.get("created_at"),
+        }
+    }
+}
+
+impl From<CrawlTaskTokenRow> for CrawlTaskToken {
+    fn from(row: CrawlTaskTokenRow) -> Self {
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            certificate_id: row.certificate_id,
+            token_hash: row.token_hash,
+            scope_json: row.scope_json,
+            expires_at: row.expires_at,
+            used_at: row.used_at,
+            created_by_user_id: row.created_by_user_id,
+            created_at: row.created_at,
         }
     }
 }
@@ -3395,29 +3874,13 @@ impl From<&mut Row<'_>> for RoleOrgRow {
     }
 }
 
-impl From<&mut Row<'_>> for OrganizationIdRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self { id: row.get("id") }
-    }
-}
-
 impl From<&mut Row<'_>> for OrganizationRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
             business_no: row.get("business_no"),
             name: row.get("name"),
-            legal_entity_id: row.get("legal_entity_id"),
-            active: row.get("active"),
-        }
-    }
-}
-
-impl From<&mut Row<'_>> for OrganizationEdgeRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            parent_organization_id: row.get("parent_organization_id"),
-            child_organization_id: row.get("child_organization_id"),
+            inactivated_at: row.get("inactivated_at"),
         }
     }
 }
@@ -3564,8 +4027,7 @@ impl From<OrganizationRow> for Organization {
             id: value.id,
             business_no: value.business_no,
             name: value.name,
-            legal_entity_id: value.legal_entity_id,
-            active: value.active == 1,
+            inactivated_at: value.inactivated_at,
         }
     }
 }

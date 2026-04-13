@@ -105,6 +105,7 @@ async fn build_service_with_default_consistency(
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
+        kms: support::test_kms_config(),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_dir.path().to_path_buf(),
@@ -622,14 +623,13 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
     let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "local-org".into(),
                 Option::<String>::None.into(),
                 "Local Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],
@@ -710,14 +710,13 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
     let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "linked-org".into(),
                 Option::<String>::None.into(),
                 "Linked Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],
@@ -810,14 +809,13 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
     let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "strong-org".into(),
                 Option::<String>::None.into(),
                 "Strong Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],
@@ -899,14 +897,13 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
         build_service_with_default_consistency(ReadConsistency::Strong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "strong-org".into(),
                 Option::<String>::None.into(),
                 "Strong Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],
@@ -988,14 +985,13 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
         build_service_with_default_consistency(ReadConsistency::PreferStrong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "prefer-strong-org".into(),
                 Option::<String>::None.into(),
                 "Prefer Strong Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],
@@ -1080,14 +1076,13 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
         build_service_with_default_consistency(ReadConsistency::Strong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "strong-org".into(),
                 Option::<String>::None.into(),
                 "Strong Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],
@@ -1159,14 +1154,13 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
         build_service_with_default_consistency(ReadConsistency::PreferStrong).await;
     runtime
         .execute(
-            "INSERT INTO organizations (id, business_no, name, legal_entity_id, active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             vec![
                 "prefer-strong-org".into(),
                 Option::<String>::None.into(),
                 "Prefer Strong Org".into(),
                 Option::<String>::None.into(),
-                1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
                 "2026-04-06T00:00:00Z".into(),
             ],

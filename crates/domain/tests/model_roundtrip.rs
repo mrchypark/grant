@@ -1,7 +1,7 @@
 use domain::{
     Action, ActionRiskLevel, Agreement, AgreementStatus, AgreementType, DocumentArtifact,
-    DocumentCategory, GenerationRecord, Group, LegalEntity, MembershipRole, MembershipStatus,
-    Organization, OrganizationMembership, Plant, RateRecord, RecRecord, Role, RoleBinding,
+    DocumentCategory, GenerationRecord, Group, MembershipRole, MembershipStatus, Organization,
+    OrganizationMembership, Plant, RateRecord, RecRecord, Role, RoleBinding,
     RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, RoleRule, RoleRuleEffect,
     SyncMode, SyncRun, User,
 };
@@ -18,8 +18,7 @@ fn serializes_core_models() {
         id: "2768603291".into(),
         business_no: Some("2768603291".into()),
         name: "커널로그에너지".into(),
-        legal_entity_id: Some("legal_1".into()),
-        active: true,
+        inactivated_at: None,
     };
     let membership = OrganizationMembership {
         id: "org_mem_1".into(),
@@ -79,11 +78,6 @@ fn serializes_core_models() {
         created_by_user_id: user.id.clone(),
         created_at: "2026-03-31T00:00:00Z".into(),
         updated_at: "2026-03-31T00:00:00Z".into(),
-    };
-    let legal = LegalEntity {
-        id: "legal_1".into(),
-        name: "주식회사 커널로그에너지".into(),
-        representative_name: Some("오복성".into()),
     };
     let plant = Plant {
         id: "plant_1".into(),
@@ -155,7 +149,6 @@ fn serializes_core_models() {
         "role": role,
         "roleRule": role_rule,
         "binding": binding,
-        "legalEntity": legal,
         "plant": plant,
         "sync": sync,
         "generation": generation,

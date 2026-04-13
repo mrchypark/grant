@@ -1,10 +1,12 @@
 # Authorization Model Implementation Plan
 
+> Superseded on 2026-04-10. Current implementation does not use `organization_edges` or `organization_closure`; organization-to-organization plant access is now modeled only through explicit `agreements + role_bindings`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** `cert`의 기존 `business` 중심 권한 모델을 `organization + role_bindings + effective_*` 구조로 교체하고, plant 목록/단건 권한 체크를 전개 테이블 기반으로 전환한다.
 
-**Architecture:** 원본 규칙은 `actions`, `roles`, `role_actions`, `role_bindings`, `agreements`, `organization_edges`에 저장하고, 조회는 `organization_closure`, `effective_organization_plant_actions`, `effective_user_plant_actions`, `effective_user_plant_visibility`만 사용한다. `organization.*` 권한은 런타임 직접 평가로 처리하고, `plant.*` 권한만 plant 전개 테이블로 내린다.
+**Architecture:** 원본 규칙은 `actions`, `roles`, `role_actions`, `role_bindings`, `agreements`에 저장하고, 조회는 `effective_organization_plant_actions`, `effective_user_plant_actions`, `effective_user_plant_visibility`만 사용한다. `organization.*` 권한은 런타임 직접 평가로 처리하고, `plant.*` 권한만 plant 전개 테이블로 내린다.
 
 **Tech Stack:** Rust, hiqlite, SQLite, axum, serde, tokio
 
@@ -66,7 +68,6 @@ git commit -m "refactor: redefine domain authorization model"
 
 - 새 스키마 생성 후 다음 테이블이 존재하는지 검증하는 테스트를 추가한다.
   - `organizations`
-  - `organization_edges`
   - `organization_memberships`
   - `groups`
   - `group_memberships`
@@ -76,7 +77,6 @@ git commit -m "refactor: redefine domain authorization model"
   - `role_rules`
   - `role_actions`
   - `role_bindings`
-  - `organization_closure`
   - `effective_organization_plant_actions`
   - `effective_user_plant_actions`
   - `effective_user_plant_visibility`
@@ -92,7 +92,6 @@ Expected: 새 테이블 부재 또는 기존 스키마 assertion 실패
 
 - `create schema` SQL 블록을 새 모델로 교체한다.
 - 핵심 인덱스를 같이 추가한다.
-  - `organization_closure (ancestor_organization_id, descendant_organization_id)`
   - `effective_organization_plant_actions (organization_id, plant_id, action_id)`
   - `effective_user_plant_actions (user_id, organization_id, plant_id, action_id)`
   - `effective_user_plant_visibility (user_id, organization_id, plant_id)`
@@ -186,7 +185,7 @@ git add crates/infra/src/database.rs crates/infra/src/service.rs crates/infra/te
 git commit -m "feat: persist authorization role bindings"
 ```
 
-### Task 5: 조직 상속 전개기 구현
+### Task 5: 조직 명시 권한 전개기 구현
 
 **Files:**
 - Modify: `/Users/cypark/Documents/work/cert/crates/infra/src/database.rs`
@@ -195,21 +194,20 @@ git commit -m "feat: persist authorization role bindings"
 
 **Step 1: Write the failing test**
 
-- 총판 > 대리점 관계에서 하위 조직 plant binding이 상위 조직으로 상속되는 테스트를 추가한다.
-- 순환 없는 트리 전개 결과가 `organization_closure`에 정확히 저장되는지 검증한다.
-- 상속은 plant 접근 상한만 전개되고, 실제 사용자 action은 별도 내부 role 없이는 자동 부여되지 않는다는 테스트를 추가한다.
+- 각 조직은 자기 자신의 계약과 binding으로만 plant 권한을 얻는 테스트를 추가한다.
+- 계약이 종료되면 해당 조직의 plant action만 사라지고, 다른 조직의 명시 계약은 유지되는지 검증한다.
+- 실제 사용자 action은 소속 조직의 명시 plant action 상한 안에서만 전개된다는 테스트를 추가한다.
 
 **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p infra authorization_expansion -- --nocapture`
 
-Expected: closure/effective organization 전개 미구현
+Expected: explicit agreement/effective organization 전개 미구현
 
 **Step 3: Write minimal implementation**
 
-- `organization_closure` 재계산 함수를 추가한다.
 - `role_bindings(subject_type=organization, resource_type=plant)`를 `role_actions`와 join해서 `effective_organization_plant_actions`를 채운다.
-- 상속은 `organization_closure`를 통해 상위 조직으로만 전개한다.
+- 조직 상속은 두지 않고, 명시된 organization binding만 전개한다.
 
 **Step 4: Run test to verify it passes**
 

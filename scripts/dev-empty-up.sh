@@ -11,6 +11,11 @@ else
 fi
 
 MASTER_KEY="${CERTD_MASTER_KEY:-dev-only-master-key}"
+if command -v openssl >/dev/null 2>&1; then
+  KMS_MASTER_KEY_B64="${CERTD_KMS_MASTER_KEY_B64:-$(printf '%s' "$MASTER_KEY" | openssl base64 -A)}"
+else
+  KMS_MASTER_KEY_B64="${CERTD_KMS_MASTER_KEY_B64:-ZGV2LW9ubHktbWFzdGVyLWtleQ==}"
+fi
 
 free_port() {
   python3 - <<'PY'
@@ -40,6 +45,8 @@ export TRAILBASE_URL="$TRAILBASE_URL"
 export CERTD_BIND_ADDR="127.0.0.1:${CERTD_PORT}"
 export CERTD_URL="$CERTD_URL"
 export CERTD_MASTER_KEY="$MASTER_KEY"
+export CERTD_KMS_ACTIVE_KEY_ID="local-dev-v1"
+export CERTD_KMS_MASTER_KEYS="local-dev-v1:${KMS_MASTER_KEY_B64}"
 export CERTD_BOOTSTRAP_USER_ID="conalog-account"
 export CERTD_BOOTSTRAP_USER_NAME="Conalog Account"
 export CERTD_TRAILBASE_BASE_URL="$TRAILBASE_URL"

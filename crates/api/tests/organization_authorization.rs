@@ -75,6 +75,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
+        kms: support::test_kms_config(),
         artifacts: ArtifactConfig {
             backend: ArtifactBackendConfig::FileSystem {
                 root_dir: artifacts_root,
@@ -113,6 +114,16 @@ fn app_request(path: &str, token: &str, organization_id: &str, body: Value) -> R
         .header("authorization", support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+fn empty_post_request(path: &str, token: &str, organization_id: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("authorization", support::bearer_header(token))
+        .header("x-organization-id", organization_id)
+        .body(Body::empty())
         .expect("request")
 }
 
@@ -190,6 +201,24 @@ async fn bind_user_action(db: &Database, role_id: &str) {
     .expect("save user org binding");
 }
 
+async fn seed_org_permission_manage_role(db: &Database) {
+    db.upsert_role(&Role {
+        id: "role-org-permission-manage".to_owned(),
+        organization_id: None,
+        code: "organization.permission.manage".to_owned(),
+        name: "Org Permission Manage".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert org permission manage role");
+    db.upsert_role_action(
+        "role-org-permission-manage",
+        "organization.permission.manage",
+    )
+    .await
+    .expect("upsert org permission manage action");
+}
+
 #[tokio::test]
 async fn create_plant_requires_organization_scoped_create() {
     let (service, db, _dir) = test_service().await;
@@ -244,6 +273,117 @@ async fn create_for_owner_requires_extra_permission() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn deactivate_organization_requires_permission_manage() {
+    let (service, db, _dir) = test_service().await;
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    let app = api::build_router(service);
+
+    let response = app
+        .oneshot(empty_post_request(
+            "/api/v1/organizations/creator-org/deactivate",
+            "bootstrap-user",
+            "creator-org",
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn deactivate_and_reactivate_organization_updates_current_user_membership_view() {
+    let (service, db, _dir) = test_service().await;
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action(&db, "role-org-permission-manage").await;
+    let app = api::build_router(service.clone());
+
+    let deactivate = app
+        .clone()
+        .oneshot(empty_post_request(
+            "/api/v1/organizations/creator-org/deactivate",
+            "bootstrap-user",
+            "creator-org",
+        ))
+        .await
+        .expect("deactivate response");
+    assert_eq!(deactivate.status(), StatusCode::OK);
+
+    let current_after_deactivate = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::bearer_header("bootstrap-user"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("current user after deactivate");
+    assert_eq!(current_after_deactivate.status(), StatusCode::OK);
+    let current_after_deactivate_body = current_after_deactivate
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let current_after_deactivate_json: Value =
+        serde_json::from_slice(&current_after_deactivate_body).expect("json body");
+    let organizations = current_after_deactivate_json["organizations"]
+        .as_array()
+        .expect("organizations array");
+    assert!(
+        organizations
+            .iter()
+            .all(|item| item["id"].as_str() != Some("creator-org")),
+        "deactivated organization should disappear from active organization list"
+    );
+
+    let reactivate = app
+        .oneshot(empty_post_request(
+            "/api/v1/organizations/creator-org/reactivate",
+            "bootstrap-user",
+            "creator-org",
+        ))
+        .await
+        .expect("reactivate response");
+    assert_eq!(reactivate.status(), StatusCode::OK);
+
+    let current_after_reactivate = api::build_router(service)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header("x-organization-id", "creator-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("current user after reactivate");
+    assert_eq!(current_after_reactivate.status(), StatusCode::OK);
+    let current_after_reactivate_body = current_after_reactivate
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let current_after_reactivate_json: Value =
+        serde_json::from_slice(&current_after_reactivate_body).expect("json body");
+    let organizations = current_after_reactivate_json["organizations"]
+        .as_array()
+        .expect("organizations array");
+    assert!(
+        organizations
+            .iter()
+            .any(|item| item["id"].as_str() == Some("creator-org")),
+        "reactivated organization should reappear in active organization list"
+    );
 }
 
 #[tokio::test]

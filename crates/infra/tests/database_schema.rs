@@ -100,9 +100,10 @@ async fn ensure_schema_creates_authorization_tables() {
     let names: std::collections::BTreeSet<String> = rows.into_iter().map(|row| row.name).collect();
 
     for table in [
+        "cert_gateway_challenges",
+        "crawl_task_tokens",
         "user_identities",
         "organizations",
-        "organization_edges",
         "organization_memberships",
         "groups",
         "group_memberships",
@@ -112,7 +113,6 @@ async fn ensure_schema_creates_authorization_tables() {
         "role_rules",
         "role_actions",
         "role_bindings",
-        "organization_closure",
         "effective_organization_plant_actions",
         "effective_user_plant_actions",
         "effective_user_plant_visibility",
@@ -122,6 +122,8 @@ async fn ensure_schema_creates_authorization_tables() {
 
     assert!(!names.contains("businesses"));
     assert!(!names.contains("business_memberships"));
+    assert!(!names.contains("organization_edges"));
+    assert!(!names.contains("organization_closure"));
 
     let binding_columns: Vec<ColumnRow> = runtime
         .query_rows(
@@ -169,6 +171,66 @@ async fn ensure_schema_creates_authorization_tables() {
     assert!(plant_columns.contains(&"created_by_organization_id".to_owned()));
     assert!(plant_columns.contains(&"facility_code".to_owned()));
 
+    let certificate_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('certificates') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("certificates columns");
+    let certificate_columns: Vec<String> = certificate_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(certificate_columns.contains(&"wrapped_dek".to_owned()));
+    assert!(certificate_columns.contains(&"kms_key_id".to_owned()));
+
+    let challenge_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('cert_gateway_challenges') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("cert_gateway_challenges columns");
+    let challenge_columns: Vec<String> = challenge_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(challenge_columns.contains(&"expires_at".to_owned()));
+    assert!(challenge_columns.contains(&"consumed_at".to_owned()));
+
+    let crawl_token_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('crawl_task_tokens') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("crawl_task_tokens columns");
+    let crawl_token_columns: Vec<String> = crawl_token_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(crawl_token_columns.contains(&"token_hash".to_owned()));
+    assert!(crawl_token_columns.contains(&"used_at".to_owned()));
+
+    let organization_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('organizations') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("organizations columns");
+    let organization_columns: Vec<String> = organization_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert!(organization_columns.contains(&"inactivated_at".to_owned()));
+    assert!(!organization_columns.contains(&"active".to_owned()));
+
     let indexes: Vec<IndexRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -180,7 +242,9 @@ async fn ensure_schema_creates_authorization_tables() {
     let index_names: std::collections::BTreeSet<String> =
         indexes.into_iter().map(|index| index.name).collect();
     for index in [
+        "idx_cert_gateway_challenges_org_expires",
         "idx_certificates_organization_active",
+        "idx_crawl_task_tokens_org_expires",
         "idx_plants_owner_facility",
         "idx_sync_runs_plant_started",
         "idx_user_identities_provider_external",

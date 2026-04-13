@@ -22,3 +22,10 @@ debug
 # IDE
 .idea/
 .vscode/
+
+# Node.js
+node_modules/
+
+# Local example/build artifacts
+/desktop-agent/bin/
+/packages/certd-web-sdk/examples/browser/dist/

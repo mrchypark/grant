@@ -7,23 +7,6 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ClosureRow {
-    ancestor_organization_id: String,
-    descendant_organization_id: String,
-    depth: i64,
-}
-
-impl From<&mut Row<'_>> for ClosureRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            ancestor_organization_id: row.get("ancestor_organization_id"),
-            descendant_organization_id: row.get("descendant_organization_id"),
-            depth: row.get("depth"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OrganizationPlantActionRow {
     organization_id: String,
     plant_id: String,
@@ -95,7 +78,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 #[tokio::test]
-async fn expands_parent_organization_access_without_user_actions() {
+async fn keeps_organization_access_explicit_without_hierarchy_tables() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
@@ -110,19 +93,6 @@ async fn expands_parent_organization_access_without_user_actions() {
     db.upsert_organization_with_owner("dealer-org", "Dealer Org", "Dealer Org")
         .await
         .expect("upsert dealer");
-
-    runtime
-        .execute(
-            "INSERT INTO organization_edges (parent_organization_id, child_organization_id, created_at)
-             VALUES ($1, $2, $3)",
-            vec![
-                "distributor-org".into(),
-                "dealer-org".into(),
-                "2026-04-03T00:00:00Z".into(),
-            ],
-        )
-        .await
-        .expect("insert organization edge");
 
     runtime
         .execute(
@@ -210,42 +180,6 @@ async fn expands_parent_organization_access_without_user_actions() {
         .await
         .expect("save role binding");
 
-    let closure_rows: Vec<ClosureRow> = runtime
-        .query_rows(
-            ReadConsistency::Local,
-            "SELECT ancestor_organization_id, descendant_organization_id, depth
-             FROM organization_closure
-             ORDER BY ancestor_organization_id ASC, descendant_organization_id ASC, depth ASC",
-            vec![],
-        )
-        .await
-        .expect("closure rows");
-    let closure_rows: HashSet<ClosureRow> = closure_rows.into_iter().collect();
-    assert!(
-        closure_rows.contains(&ClosureRow {
-            ancestor_organization_id: "distributor-org".to_owned(),
-            descendant_organization_id: "distributor-org".to_owned(),
-            depth: 0,
-        }),
-        "missing distributor self row"
-    );
-    assert!(
-        closure_rows.contains(&ClosureRow {
-            ancestor_organization_id: "dealer-org".to_owned(),
-            descendant_organization_id: "dealer-org".to_owned(),
-            depth: 0,
-        }),
-        "missing dealer self row"
-    );
-    assert!(
-        closure_rows.contains(&ClosureRow {
-            ancestor_organization_id: "distributor-org".to_owned(),
-            descendant_organization_id: "dealer-org".to_owned(),
-            depth: 1,
-        }),
-        "missing distributor -> dealer inheritance row"
-    );
-
     let org_actions: Vec<OrganizationPlantActionRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -266,12 +200,12 @@ async fn expands_parent_organization_access_without_user_actions() {
         "missing direct dealer plant access"
     );
     assert!(
-        org_actions.contains(&OrganizationPlantActionRow {
+        !org_actions.contains(&OrganizationPlantActionRow {
             organization_id: "distributor-org".to_owned(),
             plant_id: "plant-1".to_owned(),
             action_id: "plant.profile.read".to_owned(),
         }),
-        "missing inherited distributor plant access"
+        "organization hierarchy should not synthesize distributor access"
     );
 
     let user_actions: Vec<UserPlantActionRow> = runtime

@@ -7,15 +7,20 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{any, get, post, put},
 };
+use base64::Engine;
 use domain::{
     DocumentArtifact, GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord,
     SyncMode, SyncRun, User,
 };
 use infra::{
     config::ReadConsistency,
+    crypto::CertificateBundle,
     database::StoredCertificate,
     service::{
-        AppService, BackupInfo, CreatePlantInput, PlantView, PutCertificateInput, SyncInput,
+        AppService, BackupInfo, CreateCertGatewayChallengeInput, CreatePlantInput,
+        ExecuteEphemeralCrawlInput, IssueCrawlTaskTokenInput, PlantView, PutCertificateInput,
+        RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
+        StartCrawlWithTaskTokenInput, SyncInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -32,8 +37,36 @@ pub fn build_router(service: Arc<AppService>) -> Router {
             post(sync_organization),
         )
         .route(
+            "/api/v1/organizations/{organizationId}/cert-gateway/challenges",
+            post(create_cert_gateway_challenge),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/cert-gateway/ephemeral-executions",
+            post(execute_ephemeral_crawl),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/certificates",
+            get(list_stored_certificates).post(register_stored_certificate),
+        )
+        .route(
             "/api/v1/organizations/{organizationId}/plants",
             post(create_plant),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/deactivate",
+            post(deactivate_organization),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/reactivate",
+            post(reactivate_organization),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/certificates/{certificateId}/crawl-tokens",
+            post(issue_crawl_task_token),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/crawls",
+            post(start_crawl),
         )
         .route(
             "/api/v1/admin/backups",
@@ -58,7 +91,35 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
             any(requires_voter_node),
         )
         .route(
+            "/api/v1/organizations/{organizationId}/cert-gateway/challenges",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/cert-gateway/ephemeral-executions",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/certificates",
+            any(requires_voter_node),
+        )
+        .route(
             "/api/v1/organizations/{organizationId}/plants",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/deactivate",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/reactivate",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/certificates/{certificateId}/crawl-tokens",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/crawls",
             any(requires_voter_node),
         )
         .route("/api/v1/admin/backups", any(requires_voter_node))
@@ -134,6 +195,75 @@ struct SyncRequest {
     start_month: Option<String>,
     end_month: Option<String>,
     mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateCertGatewayChallengeRequest {
+    mode: String,
+    facility_code: Option<String>,
+    ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CertGatewayChallengeResponse {
+    challenge_id: String,
+    mode: String,
+    nonce: String,
+    payload: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofBundleRequest {
+    business_no: String,
+    password: String,
+    common_name: String,
+    sign_cert_der_base64: String,
+    sign_pri_key_base64: String,
+    km_cert_der_base64: String,
+    km_pri_key_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterStoredCertificateRequest {
+    challenge_id: String,
+    challenge_payload: String,
+    challenge_signature_base64: String,
+    bundle: ProofBundleRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteEphemeralCrawlRequest {
+    challenge_id: String,
+    challenge_payload: String,
+    challenge_signature_base64: String,
+    bundle: ProofBundleRequest,
+    facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueCrawlTaskTokenRequest {
+    facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    mode: Option<String>,
+    ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrawlTaskTokenResponse {
+    crawl_task_token: String,
+    expires_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,15 +425,7 @@ async fn sync_organization(
     Json(body): Json<SyncRequest>,
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
     let mode = parse_sync_mode(body.mode.as_deref())?;
     let run = service
         .sync_authorized(
@@ -320,6 +442,165 @@ async fn sync_organization(
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::CREATED, Json(map_sync(run))))
+}
+
+async fn create_cert_gateway_challenge(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateCertGatewayChallengeRequest>,
+) -> ApiResult<(StatusCode, Json<CertGatewayChallengeResponse>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id,
+            mode: body.mode,
+            facility_code: body.facility_code,
+            created_by_user_id: ctx.user_id,
+            ttl_seconds: body.ttl_seconds.unwrap_or(120),
+        })
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CertGatewayChallengeResponse {
+            challenge_id: challenge.id,
+            mode: challenge.mode,
+            nonce: challenge.nonce,
+            payload: challenge.payload,
+            expires_at: challenge.expires_at,
+        }),
+    ))
+}
+
+async fn execute_ephemeral_crawl(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ExecuteEphemeralCrawlRequest>,
+) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
+    let facility_code = service
+        .authorize_gateway_sync_scope(
+            &ctx.user_id,
+            &organization_id,
+            body.facility_code.as_deref(),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    let run = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id,
+            challenge_id: body.challenge_id,
+            challenge_payload: body.challenge_payload,
+            challenge_signature_base64: body.challenge_signature_base64,
+            bundle: map_proof_bundle(body.bundle)?,
+            facility_code,
+            start_month: body.start_month,
+            end_month: body.end_month,
+            mode: parse_sync_mode(body.mode.as_deref())?,
+        })
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::ACCEPTED, Json(map_sync(run))))
+}
+
+async fn register_stored_certificate(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterStoredCertificateRequest>,
+) -> ApiResult<(StatusCode, Json<CertificateResponse>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
+    service
+        .authorize_certificate_registration(&ctx.user_id, &organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    let cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id,
+            challenge_id: body.challenge_id,
+            challenge_payload: body.challenge_payload,
+            challenge_signature_base64: body.challenge_signature_base64,
+            bundle: map_proof_bundle(body.bundle)?,
+        })
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(map_certificate(cert))))
+}
+
+async fn list_stored_certificates(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<CertificateResponse>>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
+    let certificates = service
+        .list_stored_certificates(&organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(
+        certificates.into_iter().map(map_certificate).collect(),
+    ))
+}
+
+async fn issue_crawl_task_token(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, certificate_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<IssueCrawlTaskTokenRequest>,
+) -> ApiResult<(StatusCode, Json<CrawlTaskTokenResponse>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
+    let facility_code = service
+        .authorize_gateway_sync_scope(
+            &ctx.user_id,
+            &organization_id,
+            body.facility_code.as_deref(),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    let issued = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id,
+            certificate_id,
+            facility_code,
+            start_month: body.start_month,
+            end_month: body.end_month,
+            mode: parse_sync_mode(body.mode.as_deref())?,
+            created_by_user_id: ctx.user_id,
+            ttl_seconds: body.ttl_seconds.unwrap_or(60),
+        })
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CrawlTaskTokenResponse {
+            crawl_task_token: issued.token,
+            expires_at: issued.expires_at,
+        }),
+    ))
+}
+
+async fn start_crawl(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
+    let token = bearer_token(&headers)?
+        .ok_or_else(|| ApiError::bad_request(anyhow!("missing authorization header")))?;
+    let run = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id,
+            token,
+        })
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::ACCEPTED, Json(map_sync(run))))
 }
 
 async fn list_plants(
@@ -363,15 +644,7 @@ async fn create_plant(
     Json(body): Json<CreatePlantRequest>,
 ) -> ApiResult<(StatusCode, Json<Plant>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if path_organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                path_organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_active_organization_path_matches(&path_organization_id, &ctx.organization_id)?;
 
     let plant = service
         .create_plant(
@@ -391,6 +664,39 @@ async fn create_plant(
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::CREATED, Json(plant)))
+}
+
+async fn deactivate_organization(
+    State(service): State<Arc<AppService>>,
+    Path(path_organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Organization>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&path_organization_id, &ctx.organization_id)?;
+    let organization = service
+        .deactivate_organization(&ctx.user_id, &ctx.organization_id, &path_organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(organization))
+}
+
+async fn reactivate_organization(
+    State(service): State<Arc<AppService>>,
+    Path(path_organization_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Organization>> {
+    let ctx = request_context_for_inactive_organization(
+        service.as_ref(),
+        &headers,
+        &path_organization_id,
+        Some(ReadConsistency::Strong),
+    )
+    .await?;
+    let organization = service
+        .reactivate_organization(&ctx.user_id, &ctx.organization_id, &path_organization_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(organization))
 }
 
 async fn list_plant_generation(
@@ -659,6 +965,24 @@ fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
     }
 }
 
+fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
+    Ok(CertificateBundle {
+        business_no: body.business_no,
+        password: body.password,
+        common_name: body.common_name,
+        sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
+        sign_pri_key: decode_base64_field("signPriKeyBase64", &body.sign_pri_key_base64)?,
+        km_cert_der: decode_base64_field("kmCertDerBase64", &body.km_cert_der_base64)?,
+        km_pri_key: decode_base64_field("kmPriKeyBase64", &body.km_pri_key_base64)?,
+    })
+}
+
+fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
+}
+
 fn map_certificate(cert: StoredCertificate) -> CertificateResponse {
     CertificateResponse {
         id: cert.id,
@@ -736,6 +1060,41 @@ async fn request_context(
     })
 }
 
+async fn request_context_for_inactive_organization(
+    service: &AppService,
+    headers: &HeaderMap,
+    target_organization_id: &str,
+    read_consistency: Option<ReadConsistency>,
+) -> ApiResult<RequestContext> {
+    let bearer_token = bearer_token(headers)?;
+    let current = service
+        .current_user(bearer_token.as_deref(), None, read_consistency.clone())
+        .await
+        .map_err(ApiError::from_auth)?;
+    let has_membership = service
+        .db()
+        .has_organization_membership_with_consistency(
+            &current.user.id,
+            target_organization_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    if !has_membership {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "forbidden: user {} is not an active member of organization {}",
+                current.user.id, target_organization_id
+            ),
+        });
+    }
+    Ok(RequestContext {
+        user_id: current.user.id,
+        organization_id: target_organization_id.to_owned(),
+    })
+}
+
 fn read_consistency_override(query: &ReadConsistencyQuery) -> ApiResult<Option<ReadConsistency>> {
     let Some(value) = query.consistency.as_deref() else {
         return Ok(None);
@@ -746,6 +1105,22 @@ fn read_consistency_override(query: &ReadConsistencyQuery) -> ApiResult<Option<R
             "invalid consistency: {other}"
         ))),
     }
+}
+
+fn ensure_active_organization_path_matches(
+    path_organization_id: &str,
+    active_organization_id: &str,
+) -> ApiResult<()> {
+    if path_organization_id == active_organization_id {
+        return Ok(());
+    }
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        message: format!(
+            "forbidden: organization path {} does not match active organization {}",
+            path_organization_id, active_organization_id
+        ),
+    })
 }
 
 fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
@@ -832,6 +1207,12 @@ impl ApiError {
     }
 
     fn bad_request_if_known(err: anyhow::Error) -> Self {
+        if let Some(status) = structured_status(&err) {
+            return Self {
+                status,
+                message: err.to_string(),
+            };
+        }
         let message = err.to_string();
         let status = if message.contains("businessNo")
             || message.contains("organizationId")
@@ -856,6 +1237,12 @@ impl ApiError {
     }
 
     fn from_domain(err: anyhow::Error) -> Self {
+        if let Some(status) = structured_status(&err) {
+            return Self {
+                status,
+                message: err.to_string(),
+            };
+        }
         let message = err.to_string();
         let status = if message.contains("forbidden:") {
             StatusCode::FORBIDDEN
@@ -863,6 +1250,14 @@ impl ApiError {
             StatusCode::SERVICE_UNAVAILABLE
         } else if message.contains("not found") {
             StatusCode::NOT_FOUND
+        } else if message.contains("expired")
+            || message.contains("consumed")
+            || message.contains("payload mismatch")
+            || message.contains("mismatch")
+            || message.contains("already used")
+            || message.contains("must not be empty")
+        {
+            StatusCode::BAD_REQUEST
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
@@ -870,6 +1265,12 @@ impl ApiError {
     }
 
     fn from_auth(err: anyhow::Error) -> Self {
+        if let Some(status) = structured_status(&err) {
+            return Self {
+                status,
+                message: err.to_string(),
+            };
+        }
         let message = err.to_string();
         let status = if message.contains("unauthorized:") {
             StatusCode::UNAUTHORIZED
@@ -886,6 +1287,20 @@ impl ApiError {
     }
 }
 
+fn structured_status(err: &anyhow::Error) -> Option<StatusCode> {
+    err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<ServiceError>()
+            .map(|err| match err.kind() {
+                ServiceErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+                ServiceErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+                ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
+                ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
+                ServiceErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            })
+    })
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = Json(serde_json::json!({
@@ -897,9 +1312,10 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::ApiError;
+    use super::{ApiError, decode_base64_field, ensure_active_organization_path_matches};
     use anyhow::anyhow;
     use axum::http::StatusCode;
+    use infra::service::{ServiceError, ServiceErrorKind};
 
     #[test]
     fn auth_unavailable_errors_map_to_service_unavailable() {
@@ -912,5 +1328,39 @@ mod tests {
         let err =
             ApiError::from_domain(anyhow!("unavailable: quorum validation path is not ready"));
         assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn structured_service_errors_override_string_matching() {
+        let err = ApiError::from_domain(anyhow::Error::new(ServiceError::new(
+            ServiceErrorKind::BadRequest,
+            "challengeSignatureBase64 must not be empty",
+        )));
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "challengeSignatureBase64 must not be empty");
+    }
+
+    #[test]
+    fn generic_invalid_domain_errors_stay_internal() {
+        let err = ApiError::from_domain(anyhow!("invalid internal state"));
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn decode_base64_field_trims_surrounding_whitespace() {
+        let decoded = decode_base64_field("signCertDerBase64", "  Zm9vYmFy\n")
+            .expect("trimmed base64 should decode");
+        assert_eq!(decoded, b"foobar");
+    }
+
+    #[test]
+    fn organization_path_match_helper_returns_forbidden_on_mismatch() {
+        let err = ensure_active_organization_path_matches("org-b", "org-a")
+            .expect_err("mismatched organization path should be rejected");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.message,
+            "forbidden: organization path org-b does not match active organization org-a"
+        );
     }
 }

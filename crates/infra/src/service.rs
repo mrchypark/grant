@@ -6,26 +6,71 @@ use crate::{
     bridge::{self, BridgeDocument, BridgeOptions, BridgeRateRecord},
     config::{AppConfig, ReadConsistency},
     crypto::{
-        CertificateBundle, decode_base64, decrypt_bundle, encrypt_bundle, extract_common_name,
-        normalize_business_no,
+        CertificateBundle, decode_base64, decrypt_bundle_with_key, encrypt_bundle_with_key,
+        extract_common_name, generate_data_encryption_key, normalize_business_no,
     },
     database::{
-        Database, PersistedDocument, PlantSummary, StoredCertificate, StoredDocument,
-        StoredRateRecord,
+        Database, DatabaseLookupError, PersistedDocument, PlantSummary, StoredCertificate,
+        StoredDocument, StoredRateRecord,
     },
+    kms::{EnvKmsProvider, KmsProvider},
+    npki::verify_challenge_signature,
 };
 use anyhow::{Context, Result};
-use chrono::{Datelike, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
     DocumentArtifact, DocumentCategory, GenerationRecord, HealthStatus, Organization, Plant,
     RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
     RoleBindingSubjectType, SyncMode, SyncRun, User,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap, error::Error as StdError, fmt, future::Future, path::Path, pin::Pin,
+    sync::Arc,
+};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
+type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceErrorKind {
+    BadRequest,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub struct ServiceError {
+    kind: ServiceErrorKind,
+    message: String,
+}
+
+impl ServiceError {
+    pub fn new(kind: ServiceErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> ServiceErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl StdError for ServiceError {}
 
 #[derive(Clone)]
 pub struct AppService {
@@ -33,6 +78,7 @@ pub struct AppService {
     db: Database,
     artifacts: ArtifactStore,
     auth: AuthResolver,
+    collector: SnapshotCollector,
 }
 
 #[derive(Debug, Clone)]
@@ -97,14 +143,102 @@ pub struct CurrentUserView {
     pub active_organization_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateCertGatewayChallengeInput {
+    pub organization_id: String,
+    pub mode: String,
+    pub facility_code: Option<String>,
+    pub created_by_user_id: String,
+    pub ttl_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CertGatewayChallengeView {
+    pub id: String,
+    pub mode: String,
+    pub nonce: String,
+    pub payload: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegisterCertificateFromProofInput {
+    pub organization_id: String,
+    pub challenge_id: String,
+    pub challenge_payload: String,
+    pub challenge_signature_base64: String,
+    pub bundle: CertificateBundle,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecuteEphemeralCrawlInput {
+    pub organization_id: String,
+    pub challenge_id: String,
+    pub challenge_payload: String,
+    pub challenge_signature_base64: String,
+    pub bundle: CertificateBundle,
+    pub facility_code: Option<String>,
+    pub start_month: Option<String>,
+    pub end_month: Option<String>,
+    pub mode: SyncMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueCrawlTaskTokenInput {
+    pub organization_id: String,
+    pub certificate_id: String,
+    pub facility_code: Option<String>,
+    pub start_month: Option<String>,
+    pub end_month: Option<String>,
+    pub mode: SyncMode,
+    pub created_by_user_id: String,
+    pub ttl_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssuedCrawlTaskToken {
+    pub token: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartCrawlWithTaskTokenInput {
+    pub organization_id: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrawlTaskScope {
+    certificate_id: String,
+    facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    mode: String,
+}
+
 impl AppService {
     pub fn new(cfg: AppConfig, db: Database, artifacts: ArtifactStore) -> Self {
+        Self::new_with_collector(cfg, db, artifacts, bridge::collect_snapshot)
+    }
+
+    pub fn new_with_collector<F, Fut>(
+        cfg: AppConfig,
+        db: Database,
+        artifacts: ArtifactStore,
+        collector: F,
+    ) -> Self
+    where
+        F: Fn(BridgeOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bridge::BridgeRun>> + Send + 'static,
+    {
         let auth = AuthResolver::new(&cfg.auth);
         Self {
             cfg,
             db,
             artifacts,
             auth,
+            collector: Arc::new(move |opts| Box::pin(collector(opts))),
         }
     }
 
@@ -126,6 +260,10 @@ impl AppService {
 
     pub fn trailbase_base_url(&self) -> &str {
         &self.cfg.auth.trailbase.base_url
+    }
+
+    pub fn db(&self) -> &Database {
+        &self.db
     }
 
     pub async fn authenticate_request(
@@ -252,15 +390,308 @@ impl AppService {
             km_cert_der,
             km_pri_key,
         };
-        let encrypted = encrypt_bundle(&self.cfg.security.master_key, &bundle)?;
-        self.db
-            .save_certificate(
-                &organization_id,
-                Some(&business_no),
-                &common_name,
-                &encrypted,
-            )
+        self.store_certificate_bundle(&organization_id, bundle)
             .await
+    }
+
+    pub async fn create_cert_gateway_challenge(
+        &self,
+        input: CreateCertGatewayChallengeInput,
+    ) -> Result<CertGatewayChallengeView> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let mode = parse_cert_gateway_mode(&input.mode)?;
+        let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
+        let nonce = Uuid::new_v4().simple().to_string();
+        let expires_at = (Utc::now() + ChronoDuration::seconds(input.ttl_seconds)).to_rfc3339();
+        let payload = build_challenge_payload(
+            &organization_id,
+            &mode,
+            &nonce,
+            input.facility_code.as_deref(),
+            &expires_at,
+        );
+        let challenge = self
+            .db
+            .create_cert_gateway_challenge(
+                &organization_id,
+                mode,
+                &nonce,
+                &hash_hex(&payload),
+                input.facility_code.as_deref(),
+                &expires_at,
+                &created_by_user_id,
+            )
+            .await?;
+        Ok(CertGatewayChallengeView {
+            id: challenge.id,
+            mode: challenge.mode,
+            nonce: challenge.nonce,
+            payload,
+            expires_at: challenge.expires_at,
+        })
+    }
+
+    pub async fn register_certificate_from_proof(
+        &self,
+        input: RegisterCertificateFromProofInput,
+    ) -> Result<StoredCertificate> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        self.consume_valid_challenge(
+            &input.challenge_id,
+            &input.challenge_payload,
+            &input.challenge_signature_base64,
+            &input.bundle.sign_cert_der,
+            "stored",
+            &organization_id,
+        )
+        .await?;
+        self.store_certificate_bundle(&organization_id, input.bundle)
+            .await
+    }
+
+    pub async fn authorize_certificate_registration(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+    ) -> Result<()> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "register stored certificates",
+        )
+        .await
+    }
+
+    pub async fn list_stored_certificates(
+        &self,
+        organization_id: &str,
+    ) -> Result<Vec<StoredCertificate>> {
+        let organization_id = require_non_empty("organizationId", organization_id)?;
+        self.db.list_certificates(&organization_id).await
+    }
+
+    pub async fn execute_ephemeral_crawl(
+        &self,
+        input: ExecuteEphemeralCrawlInput,
+    ) -> Result<SyncRun> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        self.consume_valid_challenge(
+            &input.challenge_id,
+            &input.challenge_payload,
+            &input.challenge_signature_base64,
+            &input.bundle.sign_cert_der,
+            "ephemeral",
+            &organization_id,
+        )
+        .await?;
+        let business_no = self
+            .resolve_organization_business_no(&organization_id, Some(&input.bundle.business_no))
+            .await?;
+
+        self.run_sync_with_bundle(
+            &organization_id,
+            business_no,
+            input.bundle,
+            input.facility_code,
+            input.start_month,
+            input.end_month,
+            input.mode,
+        )
+        .await
+    }
+
+    pub async fn issue_crawl_task_token(
+        &self,
+        input: IssueCrawlTaskTokenInput,
+    ) -> Result<IssuedCrawlTaskToken> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let certificate_id = require_non_empty("certificateId", &input.certificate_id)?;
+        let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
+        let certificate = self
+            .db
+            .get_certificate_by_id(&certificate_id)
+            .await
+            .map_err(map_missing_certificate)?;
+        if certificate.organization_id != organization_id {
+            return Err(bad_request_error(
+                "certificate does not belong to organization",
+            ));
+        }
+        if certificate.active != 1 {
+            return Err(bad_request_error("certificate is inactive"));
+        }
+
+        let scope = CrawlTaskScope {
+            certificate_id: certificate.id,
+            facility_code: input.facility_code,
+            start_month: input.start_month,
+            end_month: input.end_month,
+            mode: sync_mode_label(&input.mode).to_owned(),
+        };
+        let scope_json = serde_json::to_string(&scope).context("serialize crawl task scope")?;
+        let token = format!("{}.{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let token_hash = hash_hex(&token);
+        let expires_at = (Utc::now() + ChronoDuration::seconds(input.ttl_seconds)).to_rfc3339();
+        let issued = self
+            .db
+            .issue_crawl_task_token(
+                &organization_id,
+                Some(&certificate_id),
+                &token_hash,
+                &scope_json,
+                &expires_at,
+                &created_by_user_id,
+            )
+            .await?;
+        Ok(IssuedCrawlTaskToken {
+            token,
+            expires_at: issued.expires_at,
+        })
+    }
+
+    pub async fn authorize_gateway_sync_scope(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: Option<&str>,
+    ) -> Result<Option<String>> {
+        match facility_code
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(facility_code) => match self.db.get_plant_by_facility_code(facility_code).await {
+                Ok(_) => {
+                    self.authorize_sync(user_id, organization_id, Some(facility_code))
+                        .await?;
+                    Ok(Some(facility_code.to_owned()))
+                }
+                Err(err)
+                    if matches!(
+                        err.downcast_ref::<DatabaseLookupError>(),
+                        Some(DatabaseLookupError::PlantNotFound)
+                    ) =>
+                {
+                    self.authorize_organization_action(
+                        user_id,
+                        organization_id,
+                        organization_id,
+                        "organization.plant.create",
+                        &format!("create plant {}", facility_code),
+                    )
+                    .await?;
+                    Ok(Some(facility_code.to_owned()))
+                }
+                Err(err) => Err(err),
+            },
+            None => {
+                let executable = self
+                    .db
+                    .list_user_plant_action_facility_codes_with_consistency(
+                        user_id,
+                        organization_id,
+                        "plant.sync.execute",
+                        Some(ReadConsistency::Strong),
+                    )
+                    .await?;
+
+                match executable.len() {
+                    0 => {
+                        self.authorize_organization_action(
+                            user_id,
+                            organization_id,
+                            organization_id,
+                            "organization.plant.create",
+                            "create plants",
+                        )
+                        .await?;
+                        Ok(None)
+                    }
+                    1 => Ok(executable.into_iter().next()),
+                    _ => Err(bad_request_error(
+                        "facilityCode is required when multiple executable plants are visible",
+                    )),
+                }
+            }
+        }
+    }
+
+    pub async fn consume_crawl_task_token_and_start_crawl(
+        &self,
+        input: StartCrawlWithTaskTokenInput,
+    ) -> Result<SyncRun> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let token = require_non_empty("token", &input.token)?;
+        let token_hash = hash_hex(&token);
+        let issued = self
+            .db
+            .get_crawl_task_token_by_hash(&token_hash)
+            .await
+            .map_err(map_missing_crawl_task_token)?;
+        if is_expired(&issued.expires_at)? {
+            return Err(bad_request_error("crawl task token has expired"));
+        }
+        if issued.organization_id != organization_id {
+            return Err(forbidden_error(format!(
+                "forbidden: crawl task token organization {} does not match request organization {}",
+                issued.organization_id, organization_id
+            )));
+        }
+        let organization = self.db.get_organization(&organization_id).await?;
+        if organization.inactivated_at.is_some() {
+            return Err(forbidden_error(format!(
+                "forbidden: organization {organization_id} is inactive"
+            )));
+        }
+        let scope: CrawlTaskScope =
+            serde_json::from_str(&issued.scope_json).context("parse crawl task scope")?;
+        let mode = parse_sync_mode(&scope.mode)?;
+        let certificate = if let Some(certificate_id) = issued.certificate_id.as_deref() {
+            let certificate = self
+                .db
+                .get_certificate_by_id(certificate_id)
+                .await
+                .map_err(map_missing_certificate)?;
+            if certificate.organization_id != issued.organization_id {
+                anyhow::bail!("crawl task token certificate organization mismatch");
+            }
+            if certificate.active != 1 {
+                return Err(bad_request_error("certificate is inactive"));
+            }
+            Some(certificate)
+        } else {
+            None
+        };
+        let consumed = self.db.consume_crawl_task_token(&token_hash).await?;
+
+        if let Some(certificate) = certificate {
+            let business_no = self
+                .resolve_organization_business_no(
+                    &consumed.organization_id,
+                    certificate.business_no.as_deref(),
+                )
+                .await?;
+            let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
+            let dek = kms.unwrap(&certificate.kms_key_id, &certificate.wrapped_dek)?;
+            let bundle = decrypt_bundle_with_key(&dek, &certificate.encrypted_blob)?;
+            self.db
+                .touch_certificate_last_used_at_if_stale(&certificate)
+                .await?;
+
+            return self
+                .run_sync_with_bundle(
+                    &consumed.organization_id,
+                    business_no,
+                    bundle,
+                    scope.facility_code,
+                    scope.start_month,
+                    scope.end_month,
+                    mode,
+                )
+                .await;
+        }
+        anyhow::bail!("crawl task token missing certificate");
     }
 
     pub async fn sync(&self, input: SyncInput) -> Result<SyncRun> {
@@ -269,7 +700,42 @@ impl AppService {
             .resolve_organization_business_no(&organization_id, None)
             .await?;
         let cert = self.db.load_active_certificate(&organization_id).await?;
-        let bundle = decrypt_bundle(&self.cfg.security.master_key, &cert.encrypted_blob)?;
+        self.db
+            .touch_certificate_last_used_at_if_stale(&cert)
+            .await?;
+        let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
+        let dek = kms.unwrap(&cert.kms_key_id, &cert.wrapped_dek)?;
+        let bundle = decrypt_bundle_with_key(&dek, &cert.encrypted_blob)?;
+
+        self.run_sync_with_bundle(
+            &organization_id,
+            business_no,
+            bundle,
+            input.facility_code,
+            input.start_month,
+            input.end_month,
+            input.mode,
+        )
+        .await
+    }
+
+    async fn run_sync_with_bundle(
+        &self,
+        organization_id: &str,
+        business_no: String,
+        bundle: CertificateBundle,
+        facility_code: Option<String>,
+        start_month: Option<String>,
+        end_month: Option<String>,
+        requested_mode: SyncMode,
+    ) -> Result<SyncRun> {
+        let input = SyncInput {
+            organization_id: organization_id.to_owned(),
+            facility_code,
+            start_month,
+            end_month,
+            mode: requested_mode,
+        };
 
         let (effective_mode, start_month, end_month, skip_documents) =
             self.resolve_sync_plan(&input).await?;
@@ -319,7 +785,7 @@ impl AppService {
                     id: snapshot.facility.code.clone(),
                     facility_code: snapshot.facility.code.clone(),
                     name: snapshot.facility.name.clone(),
-                    owner_organization_id: organization_id.clone(),
+                    owner_organization_id: organization_id.to_owned(),
                     created_by_organization_id: None,
                     contract_no: snapshot.facility.contract_no.clone(),
                     address: snapshot.facility.address.clone(),
@@ -370,7 +836,7 @@ impl AppService {
                     );
                     let persisted_docs = self
                         .persist_documents(
-                            &organization_id,
+                            organization_id,
                             &plant.facility_code,
                             &snapshot.documents,
                         )
@@ -407,7 +873,7 @@ impl AppService {
 
                 Ok(SyncRun {
                     id: run.id,
-                    organization_id,
+                    organization_id: organization_id.to_owned(),
                     plant_id: Some(plant.facility_code),
                     mode: effective_mode,
                     status: "completed".to_owned(),
@@ -619,6 +1085,44 @@ impl AppService {
         Ok(plant)
     }
 
+    pub async fn deactivate_organization(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+    ) -> Result<Organization> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            target_organization_id,
+            "organization.permission.manage",
+            &format!("deactivate organization {}", target_organization_id),
+        )
+        .await?;
+        self.db
+            .deactivate_organization(target_organization_id)
+            .await
+    }
+
+    pub async fn reactivate_organization(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+    ) -> Result<Organization> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            target_organization_id,
+            "organization.permission.manage",
+            &format!("reactivate organization {}", target_organization_id),
+        )
+        .await?;
+        self.db
+            .reactivate_organization(target_organization_id)
+            .await
+    }
+
     pub async fn list_generation_authorized(
         &self,
         user_id: &str,
@@ -799,6 +1303,34 @@ impl AppService {
         Ok(())
     }
 
+    async fn authorize_organization_action(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_organization_id: &str,
+        action_id: &str,
+        target_label: &str,
+    ) -> Result<()> {
+        let allowed = self
+            .db
+            .has_user_organization_action(
+                user_id,
+                organization_id,
+                target_organization_id,
+                action_id,
+            )
+            .await?;
+        if !allowed {
+            anyhow::bail!(
+                "forbidden: user {} in organization {} cannot {}",
+                user_id,
+                organization_id,
+                target_label
+            );
+        }
+        Ok(())
+    }
+
     pub async fn save_role_binding(&self, binding: &RoleBinding) -> Result<()> {
         self.db.save_role_binding(binding).await
     }
@@ -857,7 +1389,7 @@ impl AppService {
         skip_documents: bool,
         bundle: CertificateBundle,
     ) -> Result<bridge::BridgeRun> {
-        bridge::collect_snapshot(BridgeOptions {
+        (self.collector)(BridgeOptions {
             business_no,
             facility_code,
             start_month,
@@ -1018,6 +1550,80 @@ impl AppService {
         normalize_business_no(organization_id)
     }
 
+    async fn store_certificate_bundle(
+        &self,
+        organization_id: &str,
+        mut bundle: CertificateBundle,
+    ) -> Result<StoredCertificate> {
+        let business_no = self
+            .resolve_organization_business_no(organization_id, Some(&bundle.business_no))
+            .await?;
+        let common_name = extract_common_name(&bundle.sign_cert_der)?;
+        bundle.business_no = business_no.clone();
+        bundle.common_name = common_name.clone();
+
+        let dek = generate_data_encryption_key();
+        let encrypted = encrypt_bundle_with_key(&dek, &bundle)?;
+        let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
+        let wrapped_dek = kms.wrap(&dek)?;
+        self.db
+            .save_certificate(
+                organization_id,
+                Some(&business_no),
+                &common_name,
+                &encrypted,
+                &wrapped_dek,
+                kms.active_key_id(),
+            )
+            .await
+    }
+
+    async fn consume_valid_challenge(
+        &self,
+        challenge_id: &str,
+        challenge_payload: &str,
+        challenge_signature_base64: &str,
+        sign_cert_der: &[u8],
+        expected_mode: &str,
+        organization_id: &str,
+    ) -> Result<()> {
+        let challenge = self
+            .db
+            .get_cert_gateway_challenge(challenge_id)
+            .await
+            .map_err(|err| map_missing_cert_gateway_challenge(err, challenge_id))?;
+        if challenge.organization_id != organization_id {
+            return Err(bad_request_error(
+                "cert gateway challenge organization mismatch",
+            ));
+        }
+        if challenge.mode != expected_mode {
+            return Err(bad_request_error(format!(
+                "cert gateway challenge mode mismatch: expected {}, got {}",
+                expected_mode, challenge.mode
+            )));
+        }
+        if challenge.consumed_at.is_some() {
+            return Err(bad_request_error("cert gateway challenge already consumed"));
+        }
+        if is_expired(&challenge.expires_at)? {
+            return Err(bad_request_error("cert gateway challenge has expired"));
+        }
+        if hash_hex(challenge_payload) != challenge.payload_hash {
+            return Err(bad_request_error("cert gateway challenge payload mismatch"));
+        }
+        let challenge_signature_base64 =
+            require_non_empty("challengeSignatureBase64", challenge_signature_base64)?;
+        verify_challenge_signature(
+            sign_cert_der,
+            challenge_payload,
+            &challenge_signature_base64,
+        )
+        .map_err(|err| bad_request_error(err.to_string()))?;
+        self.db.consume_cert_gateway_challenge(challenge_id).await?;
+        Ok(())
+    }
+
     async fn persist_documents(
         &self,
         organization_id: &str,
@@ -1075,17 +1681,16 @@ fn normalize_active_organization(
     if organizations.iter().any(|org| org.id == requested) {
         return Ok(Some(requested.to_owned()));
     }
-    anyhow::bail!(
+    Err(forbidden_error(format!(
         "forbidden: trailbase user {} is not an active member of organization {}",
-        identity.external_user_id,
-        requested
-    );
+        identity.external_user_id, requested
+    )))
 }
 
 fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        anyhow::bail!("{field_name} must not be empty");
+        return Err(bad_request_error(format!("{field_name} must not be empty")));
     }
     Ok(trimmed.to_owned())
 }
@@ -1252,6 +1857,125 @@ fn current_month_seoul() -> String {
     format!("{:04}-{:02}", now.year(), now.month())
 }
 
+fn build_challenge_payload(
+    organization_id: &str,
+    mode: &str,
+    nonce: &str,
+    facility_code: Option<&str>,
+    expires_at: &str,
+) -> String {
+    format!(
+        "cert-gateway:{organization_id}:{mode}:{}:{nonce}:{expires_at}",
+        facility_code.unwrap_or("")
+    )
+}
+
+fn hash_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn parse_sync_mode(value: &str) -> Result<SyncMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "full" => Ok(SyncMode::Full),
+        "delta" => Ok(SyncMode::Delta),
+        other => Err(bad_request_error(format!("unsupported sync mode: {other}"))),
+    }
+}
+
+fn parse_cert_gateway_mode(value: &str) -> Result<&'static str> {
+    match require_non_empty("mode", value)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "stored" => Ok("stored"),
+        "ephemeral" => Ok("ephemeral"),
+        other => Err(bad_request_error(format!(
+            "unsupported cert gateway mode: {other}"
+        ))),
+    }
+}
+
+fn sync_mode_label(mode: &SyncMode) -> &'static str {
+    match mode {
+        SyncMode::Full => "full",
+        SyncMode::Delta => "delta",
+    }
+}
+
+fn is_expired(expires_at: &str) -> Result<bool> {
+    let expires_at = DateTime::parse_from_rfc3339(expires_at)
+        .with_context(|| format!("parse expiresAt {expires_at}"))?
+        .with_timezone(&Utc);
+    Ok(Utc::now() > expires_at)
+}
+
 fn now_string() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ServiceError::new(kind, message))
+}
+
+fn bad_request_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::BadRequest, message)
+}
+
+fn not_found_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::NotFound, message)
+}
+
+fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::Forbidden, message)
+}
+
+fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -> anyhow::Error {
+    if err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DatabaseLookupError>(),
+            Some(DatabaseLookupError::CertGatewayChallengeNotFound)
+        )
+    }) || err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("no row returned: cert gateway challenge")
+    }) {
+        return not_found_error("cert gateway challenge not found");
+    }
+    err
+}
+
+fn map_missing_crawl_task_token(err: anyhow::Error) -> anyhow::Error {
+    if err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DatabaseLookupError>(),
+            Some(DatabaseLookupError::CrawlTaskTokenNotFound)
+        )
+    }) || err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("no row returned: crawl task token")
+    }) {
+        return not_found_error("crawl task token not found");
+    }
+    err
+}
+
+fn map_missing_certificate(err: anyhow::Error) -> anyhow::Error {
+    if err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DatabaseLookupError>(),
+            Some(DatabaseLookupError::CertificateNotFound)
+        )
+    }) || err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("no row returned: certificate by id")
+    }) {
+        return not_found_error("certificate not found");
+    }
+    err
 }
