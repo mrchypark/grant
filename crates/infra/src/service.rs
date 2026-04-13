@@ -399,7 +399,7 @@ impl AppService {
         input: CreateCertGatewayChallengeInput,
     ) -> Result<CertGatewayChallengeView> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
-        let mode = require_non_empty("mode", &input.mode)?;
+        let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
         let nonce = Uuid::new_v4().simple().to_string();
         let expires_at = (Utc::now() + ChronoDuration::seconds(input.ttl_seconds)).to_rfc3339();
@@ -414,7 +414,7 @@ impl AppService {
             .db
             .create_cert_gateway_challenge(
                 &organization_id,
-                &mode,
+                mode,
                 &nonce,
                 &hash_hex(&payload),
                 input.facility_code.as_deref(),
@@ -1881,6 +1881,20 @@ fn parse_sync_mode(value: &str) -> Result<SyncMode> {
         "full" => Ok(SyncMode::Full),
         "delta" => Ok(SyncMode::Delta),
         other => Err(bad_request_error(format!("unsupported sync mode: {other}"))),
+    }
+}
+
+fn parse_cert_gateway_mode(value: &str) -> Result<&'static str> {
+    match require_non_empty("mode", value)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "stored" => Ok("stored"),
+        "ephemeral" => Ok("ephemeral"),
+        other => Err(bad_request_error(format!(
+            "unsupported cert gateway mode: {other}"
+        ))),
     }
 }
 

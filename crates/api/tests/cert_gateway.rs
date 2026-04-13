@@ -552,6 +552,26 @@ async fn issue_crawl_task_token_returns_not_found_for_unknown_certificate() {
 }
 
 #[tokio::test]
+async fn create_cert_gateway_challenge_rejects_unsupported_mode() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "store" }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = json_body(response).await;
+    assert_eq!(body["error"], "unsupported cert gateway mode: store");
+}
+
+#[tokio::test]
 async fn stored_registration_requires_challenge_signature() {
     let (app, _db_dir, _artifacts_dir) = build_app().await;
 
