@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/chaos-local.yml"
+      - ".github/workflows/e2e-local.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Dockerfile"
@@ -104,6 +105,8 @@ jobs:
           CLUSTER_NAME: certd-vind-ci
           CI_CLUSTER_BACKEND: vind
           CI_DOCKER_BUILDER_PRUNE: "1"
+          CI_RUN_E2E: "0"
+          CI_RUN_CHAOS: "1"
           NAMESPACE: certd
           CERTD_MASTER_KEY: local-dev-master-key
           RESET_CLUSTER: "1"

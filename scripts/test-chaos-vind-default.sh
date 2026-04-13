@@ -45,15 +45,23 @@ require_not_contains() {
   fi
 }
 
+ci_run_e2e_pattern="CI_RUN_E2E=\"\${CI_RUN_E2E:-1}\""
+ci_run_chaos_pattern="CI_RUN_CHAOS=\"\${CI_RUN_CHAOS:-1}\""
+
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'CI_CLUSTER_BACKEND="${CI_CLUSTER_BACKEND:-vind}"'
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"'
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"'
+require_contains "scripts/ci-chaos-local.sh" "${ci_run_e2e_pattern}"
+require_contains "scripts/ci-chaos-local.sh" "${ci_run_chaos_pattern}"
 require_contains "scripts/ci-chaos-local.sh" 'docker builder prune -af >/dev/null || true'
 require_contains "scripts/ci-chaos-local.sh" 'docker image prune -f >/dev/null || true'
 require_contains "scripts/ci-chaos-local.sh" 'log_storage_state'
+require_contains "scripts/ci-chaos-local.sh" 'run_phase()'
+require_contains "scripts/ci-chaos-local.sh" '[phase] starting'
+require_contains "scripts/ci-chaos-local.sh" '[phase] completed'
 # shellcheck disable=SC2016
 require_contains "scripts/ci-chaos-local.sh" 'bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"'
 # shellcheck disable=SC2016
@@ -71,8 +79,18 @@ require_contains ".github/workflows/chaos-local.yml" 'Reclaim runner disk'
 require_contains ".github/workflows/chaos-local.yml" 'vcluster version'
 require_contains ".github/workflows/chaos-local.yml" 'CI_CLUSTER_BACKEND: vind'
 require_contains ".github/workflows/chaos-local.yml" 'CI_DOCKER_BUILDER_PRUNE: "1"'
+require_contains ".github/workflows/chaos-local.yml" 'CI_RUN_E2E: "0"'
+require_contains ".github/workflows/chaos-local.yml" 'CI_RUN_CHAOS: "1"'
 require_not_contains ".github/workflows/chaos-local.yml" 'Install kind'
 require_not_contains ".github/workflows/chaos-local.yml" 'setup-vind'
+
+require_contains ".github/workflows/e2e-local.yml" 'name: e2e-local'
+require_contains ".github/workflows/e2e-local.yml" 'Install vCluster CLI'
+require_contains ".github/workflows/e2e-local.yml" 'CI_CLUSTER_BACKEND: vind'
+require_contains ".github/workflows/e2e-local.yml" 'CI_DOCKER_BUILDER_PRUNE: "1"'
+require_contains ".github/workflows/e2e-local.yml" 'CI_RUN_E2E: "1"'
+require_contains ".github/workflows/e2e-local.yml" 'CI_RUN_CHAOS: "0"'
+require_not_contains ".github/workflows/e2e-local.yml" 'Install kind'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos-load.sh" 'HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"'
 # shellcheck disable=SC2016
