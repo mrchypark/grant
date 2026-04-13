@@ -2342,7 +2342,7 @@ impl Database {
         }
         if client_grant.status == ClientGrantStatus::Active {
             let existing: Vec<ClientGrantLookupRow> = self
-                .query_default_rows(
+                .query_consistent_rows(
                     "SELECT id, created_at
                      FROM client_grants
                      WHERE user_id = $1

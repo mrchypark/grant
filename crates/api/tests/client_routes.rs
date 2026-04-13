@@ -437,6 +437,57 @@ async fn client_create_reports_duplicate_slug_as_conflict() {
 }
 
 #[tokio::test]
+async fn replace_client_actions_rejects_requests_over_sqlite_parameter_limit() {
+    let (service, db, _dir) = test_service().await;
+    seed_client_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/organizations/creator-org/clients",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "client-action-limit",
+                "slug": "action-limit",
+                "name": "Action Limit",
+                "clientType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": true
+            })),
+        ))
+        .await
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let replace = app
+        .oneshot(app_request(
+            Method::PUT,
+            "/api/v1/organizations/creator-org/clients/client-action-limit/actions",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "actionIds": (0..1000).map(|index| format!("action-{index}")).collect::<Vec<_>>()
+            })),
+        ))
+        .await
+        .expect("replace response");
+    assert_eq!(replace.status(), StatusCode::BAD_REQUEST);
+    let body = replace
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"], "actionIds must contain at most 999 items");
+}
+
+#[tokio::test]
 async fn client_routes_hide_clients_owned_by_other_organizations() {
     let (service, db, _dir) = test_service().await;
     seed_client_manager(&db, "org-a").await;

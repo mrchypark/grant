@@ -497,6 +497,7 @@ curl -sS -X PUT \
 ```json
 {
   "id": "75c4b33393cb4375b1e66e38cb22c25e",
+  "organizationId": "2768603291",
   "partyId": "party-2768603291",
   "businessNo": "2768603291",
   "commonName": "커널로그에너지"

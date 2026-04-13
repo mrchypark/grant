@@ -277,6 +277,26 @@ fn from_env_rejects_dot_segment_default_post_login_path() {
     );
 }
 
+#[test]
+fn from_env_rejects_login_path_with_query_default_post_login_path() {
+    let err = with_env(
+        &[
+            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            (
+                "TRAILBASE_DEFAULT_POST_LOGIN_PATH",
+                Some("/login?return_to=/teams"),
+            ),
+        ],
+        || BridgeConfig::from_env().expect_err("login path with query should fail"),
+    );
+
+    assert!(
+        err.to_string()
+            .contains("TRAILBASE_DEFAULT_POST_LOGIN_PATH"),
+        "expected error to mention the env key, got {err}",
+    );
+}
+
 #[tokio::test]
 async fn serves_login_assets_from_public_dir() {
     let temp_dir = tempfile::tempdir().expect("public dir");
@@ -398,6 +418,20 @@ async fn custom_login_entrypoint_is_reachable_when_fallback_disabled() {
             .get(axum::http::header::VARY)
             .and_then(|value| value.to_str().ok()),
         Some("authorization, cookie"),
+    );
+    assert_eq!(
+        headers
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        ),
+    );
+    assert_eq!(
+        headers
+            .get("x-frame-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY"),
     );
 
     let body = String::from_utf8(body).expect("utf8");

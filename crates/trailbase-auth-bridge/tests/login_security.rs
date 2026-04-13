@@ -393,6 +393,21 @@ async fn login_shell_rejects_auth_surface_return_to_targets() {
 }
 
 #[tokio::test]
+async fn login_shell_rejects_login_return_to_targets_with_query_suffix() {
+    let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login())
+        .await
+        .expect("test app");
+
+    let (_, _, body) = app
+        .request_response(Method::GET, "/login?return_to=%2Flogin%3Freturn_to%3D%2Fteams")
+        .await
+        .expect("login shell");
+
+    let html = String::from_utf8(body).expect("utf8");
+    assert_eq!(extract_meta_content(&html, "post-login-path"), "/post-login");
+}
+
+#[tokio::test]
 async fn login_shell_rejects_dot_segment_return_to_targets() {
     let app = build_test_app_with_login_routes(None, "bridge-secret", active_custom_login())
         .await

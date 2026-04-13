@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
+const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -43,6 +44,7 @@ pub enum ServiceErrorKind {
     Unauthorized,
     Forbidden,
     NotFound,
+    Conflict,
     Unavailable,
 }
 
@@ -1161,11 +1163,10 @@ impl AppService {
             .get_client_with_consistency(client_id, read_consistency)
             .await?;
         if client.organization_id != organization_id {
-            anyhow::bail!(
+            return Err(not_found_error(format!(
                 "client not found: {} in organization {}",
-                client_id,
-                organization_id
-            );
+                client_id, organization_id
+            )));
         }
         Ok(client)
     }
@@ -1193,7 +1194,10 @@ impl AppService {
             .await?
             .is_some()
         {
-            anyhow::bail!("client id already exists: {}", client_id);
+            return Err(conflict_error(format!(
+                "client id already exists: {}",
+                client_id
+            )));
         }
         if self
             .db
@@ -1201,7 +1205,10 @@ impl AppService {
             .await?
             .is_some()
         {
-            anyhow::bail!("client slug already exists: {}", slug);
+            return Err(conflict_error(format!(
+                "client slug already exists: {}",
+                slug
+            )));
         }
         let client = Client {
             id: client_id,
@@ -1242,7 +1249,10 @@ impl AppService {
             .await?
         {
             if other.id != existing.id {
-                anyhow::bail!("client slug already exists: {}", slug);
+                return Err(conflict_error(format!(
+                    "client slug already exists: {}",
+                    slug
+                )));
             }
         }
         let client = Client {
@@ -1295,6 +1305,11 @@ impl AppService {
             Some(ReadConsistency::Strong),
         )
         .await?;
+        if action_ids.len() > MAX_CLIENT_ACTION_IDS_PER_REQUEST {
+            return Err(bad_request_error(format!(
+                "actionIds must contain at most {MAX_CLIENT_ACTION_IDS_PER_REQUEST} items"
+            )));
+        }
         self.db.replace_client_actions(client_id, action_ids).await
     }
 
@@ -2144,6 +2159,10 @@ fn not_found_error(message: impl Into<String>) -> anyhow::Error {
 
 fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::Forbidden, message)
+}
+
+fn conflict_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::Conflict, message)
 }
 
 fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -> anyhow::Error {

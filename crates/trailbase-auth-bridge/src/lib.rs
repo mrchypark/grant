@@ -391,6 +391,16 @@ fn login_shell_handler(login_routes: &LoginRouteConfig, post_login_path: &str) -
         header::HeaderValue::from_str(&csrf_cookie)
             .expect("login csrf cookie must serialize to a valid header value"),
     );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
     with_login_entry_cache_headers(response)
 }
 
@@ -588,7 +598,11 @@ fn normalize_post_login_path(value: &str, key: &str) -> Result<String> {
     if !path.starts_with('/') || path.starts_with("//") {
         anyhow::bail!("{key} must be a same-origin absolute path");
     }
-    if path == "/login" || path.starts_with("/_/auth/") || path.starts_with("/api/auth/") {
+    let path_component = path.split(['?', '#']).next().unwrap_or(path);
+    if path_component == "/login"
+        || path_component.starts_with("/_/auth/")
+        || path_component.starts_with("/api/auth/")
+    {
         anyhow::bail!("{key} must not target auth entry routes");
     }
     if path.split('/').any(|segment| segment == "." || segment == "..") {

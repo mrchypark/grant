@@ -220,6 +220,7 @@ struct CertificateUploadRequest {
 #[serde(rename_all = "camelCase")]
 struct CertificateResponse {
     id: String,
+    organization_id: String,
     party_id: String,
     business_no: Option<String>,
     common_name: String,
@@ -450,7 +451,7 @@ async fn put_organization_certificate(
 ) -> ApiResult<Json<CertificateResponse>> {
     let cert = service
         .put_certificate(PutCertificateInput {
-            organization_id,
+            organization_id: organization_id.clone(),
             business_no: body.business_no,
             password: body.password,
             sign_cert_der_b64: body.sign_cert_der_base64,
@@ -460,7 +461,7 @@ async fn put_organization_certificate(
         })
         .await
         .map_err(ApiError::bad_request_if_known)?;
-    Ok(Json(map_certificate(cert)))
+    Ok(Json(map_certificate(cert, &organization_id)))
 }
 
 async fn get_current_user(
@@ -522,15 +523,7 @@ async fn list_clients(
 ) -> ApiResult<Json<Vec<Client>>> {
     let read_consistency = read_consistency_override(&query)?;
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_request_context_organization(&organization_id, &ctx)?;
     let clients = service
         .list_clients_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
         .await
@@ -545,15 +538,7 @@ async fn create_client(
     Json(body): Json<CreateClientRequest>,
 ) -> ApiResult<(StatusCode, Json<Client>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_request_context_organization(&organization_id, &ctx)?;
     let client = service
         .create_client(
             &ctx.user_id,
@@ -583,15 +568,7 @@ async fn get_client(
 ) -> ApiResult<Json<Client>> {
     let read_consistency = read_consistency_override(&query)?;
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_request_context_organization(&organization_id, &ctx)?;
     let client = service
         .get_client_authorized(
             &ctx.user_id,
@@ -611,15 +588,7 @@ async fn update_client(
     Json(body): Json<UpdateClientRequest>,
 ) -> ApiResult<Json<Client>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_request_context_organization(&organization_id, &ctx)?;
     let client = service
         .update_client(
             &ctx.user_id,
@@ -649,15 +618,7 @@ async fn list_client_actions(
 ) -> ApiResult<Json<Vec<Action>>> {
     let read_consistency = read_consistency_override(&query)?;
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_request_context_organization(&organization_id, &ctx)?;
     let actions = service
         .list_client_actions_authorized(
             &ctx.user_id,
@@ -677,15 +638,7 @@ async fn replace_client_actions(
     Json(body): Json<ReplaceClientActionsRequest>,
 ) -> ApiResult<Json<Vec<Action>>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    if organization_id != ctx.organization_id {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: organization path {} does not match active organization {}",
-                organization_id, ctx.organization_id
-            ),
-        });
-    }
+    ensure_request_context_organization(&organization_id, &ctx)?;
     let actions = service
         .replace_client_actions_authorized(
             &ctx.user_id,
@@ -775,7 +728,7 @@ async fn register_stored_certificate(
         .map_err(ApiError::from_domain)?;
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
-            organization_id,
+            organization_id: organization_id.clone(),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
@@ -783,7 +736,10 @@ async fn register_stored_certificate(
         })
         .await
         .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(map_certificate(cert))))
+    Ok((
+        StatusCode::CREATED,
+        Json(map_certificate(cert, &organization_id)),
+    ))
 }
 
 async fn list_stored_certificates(
@@ -798,7 +754,10 @@ async fn list_stored_certificates(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(
-        certificates.into_iter().map(map_certificate).collect(),
+        certificates
+            .into_iter()
+            .map(|cert| map_certificate(cert, &organization_id))
+            .collect(),
     ))
 }
 
@@ -1237,9 +1196,10 @@ fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
 }
 
-fn map_certificate(cert: StoredCertificate) -> CertificateResponse {
+fn map_certificate(cert: StoredCertificate, organization_id: &str) -> CertificateResponse {
     CertificateResponse {
         id: cert.id,
+        organization_id: organization_id.to_owned(),
         party_id: cert.party_id,
         business_no: cert.business_no,
         common_name: cert.common_name,
@@ -1375,6 +1335,13 @@ fn ensure_active_organization_path_matches(
             path_organization_id, active_organization_id
         ),
     })
+}
+
+fn ensure_request_context_organization(
+    path_organization_id: &str,
+    ctx: &RequestContext,
+) -> ApiResult<()> {
+    ensure_active_organization_path_matches(path_organization_id, &ctx.organization_id)
 }
 
 fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
@@ -1556,6 +1523,7 @@ fn structured_status(err: &anyhow::Error) -> Option<StatusCode> {
                 ServiceErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
                 ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
                 ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
+                ServiceErrorKind::Conflict => StatusCode::CONFLICT,
                 ServiceErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             })
     })
@@ -1595,23 +1563,28 @@ mod tests {
 
     #[test]
     fn certificate_response_exposes_party_identity() {
-        let response = map_certificate(StoredCertificate {
-            id: "cert-1".to_owned(),
-            party_id: "party-2768603291".to_owned(),
-            business_no: Some("2768603291".to_owned()),
-            common_name: "주식회사 커널로그에너지".to_owned(),
-            encrypted_blob: "blob".to_owned(),
-            wrapped_dek: Vec::new(),
-            kms_key_id: "kms-key-v1".to_owned(),
-            active: 1,
-            last_used_at: None,
-            created_at: "2026-04-12T00:00:00Z".to_owned(),
-        });
+        let response = map_certificate(
+            StoredCertificate {
+                id: "cert-1".to_owned(),
+                party_id: "party-2768603291".to_owned(),
+                business_no: Some("2768603291".to_owned()),
+                common_name: "주식회사 커널로그에너지".to_owned(),
+                encrypted_blob: "blob".to_owned(),
+                wrapped_dek: Vec::new(),
+                kms_key_id: "kms-key-v1".to_owned(),
+                active: 1,
+                last_used_at: None,
+                created_at: "2026-04-12T00:00:00Z".to_owned(),
+            },
+            "org-2768603291",
+        );
 
+        assert_eq!(response.organization_id, "org-2768603291");
         assert_eq!(response.party_id, "party-2768603291");
         assert_eq!(response.business_no.as_deref(), Some("2768603291"));
     }
 
+    #[test]
     fn structured_service_errors_override_string_matching() {
         let err = ApiError::from_domain(anyhow::Error::new(ServiceError::new(
             ServiceErrorKind::BadRequest,

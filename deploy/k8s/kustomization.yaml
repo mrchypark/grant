@@ -21,7 +21,4 @@ resources:
   - minio-pdb.yaml
   - minio-statefulset.yaml
   - ingress.yaml
-configMapGenerator:
-  - name: trailbase-config
-    envs:
-      - trailbase-config.env
+  - trailbase-configmap.yaml

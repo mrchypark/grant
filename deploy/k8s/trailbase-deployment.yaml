@@ -19,16 +19,12 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: trailbase
-          image: trailbase-auth-bridge:premium-login-local
-          imagePullPolicy: Never
+          image: trailbase-auth-bridge:local
+          imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
-          # This manifest targets an explicitly loaded local image. CI/staging should
-          # stamp an immutable tag or digest before promotion.
-          # Premium login rollout stays env-driven through the ConfigMap so rollback
-          # to TrailBase's built-in auth UI does not require rebuilding the image.
           envFrom:
             - configMapRef:
                 name: trailbase-config
