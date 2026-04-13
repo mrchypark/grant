@@ -16,14 +16,10 @@ import (
 
 func run(addr string, handler http.Handler, _ RunOptions) error {
 	if !shouldUseTray("darwin", os.Getenv("DESKTOP_AGENT_DISABLE_TRAY")) {
-		return http.ListenAndServe(addr, handler)
+		return newHTTPServer(addr, handler).ListenAndServe()
 	}
 
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 15 * time.Second,
-	}
+	server := newHTTPServer(addr, handler)
 
 	errCh := make(chan error, 1)
 	quitCh := make(chan struct{})

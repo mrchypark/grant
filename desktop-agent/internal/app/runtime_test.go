@@ -1,6 +1,10 @@
 package app
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+	"time"
+)
 
 func TestShouldUseTray(t *testing.T) {
 	testCases := []struct {
@@ -21,5 +25,13 @@ func TestShouldUseTray(t *testing.T) {
 				t.Fatalf("shouldUseTray(%q, %q) = %v, want %v", tc.goos, tc.disableEnv, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewHTTPServerSetsReadHeaderTimeout(t *testing.T) {
+	server := newHTTPServer("127.0.0.1:0", http.NewServeMux())
+
+	if server.ReadHeaderTimeout != 15*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", server.ReadHeaderTimeout, 15*time.Second)
 	}
 }

@@ -556,3 +556,31 @@ async fn stored_registration_requires_challenge_signature() {
         "challengeSignatureBase64 must not be empty"
     );
 }
+
+#[tokio::test]
+async fn stored_registration_returns_not_found_for_unknown_challenge_id() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    let register_response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/certificates",
+            "bootstrap-user",
+            "bootstrap-user",
+            {
+                let challenge_payload = "stale-challenge-payload";
+                let (bundle, challenge_signature_base64) = signed_proof_bundle(challenge_payload);
+                json!({
+                    "challengeId": "missing-challenge-id",
+                    "challengePayload": challenge_payload,
+                    "challengeSignatureBase64": challenge_signature_base64,
+                    "bundle": bundle
+                })
+            },
+        ))
+        .await
+        .expect("register response");
+    assert_eq!(register_response.status(), StatusCode::NOT_FOUND);
+    let register_json = json_body(register_response).await;
+    assert_eq!(register_json["error"], "cert gateway challenge not found");
+}

@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 	"strings"
+	"time"
 )
 
 type RunOptions struct {
@@ -15,4 +16,12 @@ func shouldUseTray(goos string, disableEnv string) bool {
 
 func Run(addr string, handler http.Handler, opts RunOptions) error {
 	return run(addr, handler, opts)
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 15 * time.Second,
+	}
 }

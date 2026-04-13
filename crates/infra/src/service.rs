@@ -1558,7 +1558,11 @@ impl AppService {
         expected_mode: &str,
         organization_id: &str,
     ) -> Result<()> {
-        let challenge = self.db.get_cert_gateway_challenge(challenge_id).await?;
+        let challenge = self
+            .db
+            .get_cert_gateway_challenge(challenge_id)
+            .await
+            .map_err(|err| map_missing_cert_gateway_challenge(err, challenge_id))?;
         if challenge.organization_id != organization_id {
             return Err(bad_request_error(
                 "cert gateway challenge organization mismatch",
@@ -1877,6 +1881,21 @@ fn bad_request_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::BadRequest, message)
 }
 
+fn not_found_error(message: impl Into<String>) -> anyhow::Error {
+    service_error(ServiceErrorKind::NotFound, message)
+}
+
 fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::Forbidden, message)
+}
+
+fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -> anyhow::Error {
+    if err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("no row returned: cert gateway challenge")
+    }) {
+        return not_found_error("cert gateway challenge not found");
+    }
+    err
 }
