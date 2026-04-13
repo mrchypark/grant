@@ -1066,6 +1066,151 @@ async fn crawl_task_token_start_rejects_inactive_organization_without_consuming_
 }
 
 #[tokio::test]
+async fn issue_crawl_task_token_rejects_inactive_certificate() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let first_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-006".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create first challenge");
+    let (first_bundle, first_signature) = fake_bundle_and_signature(&first_challenge.payload);
+    let first_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: first_challenge.id.clone(),
+            challenge_payload: first_challenge.payload.clone(),
+            challenge_signature_base64: first_signature,
+            bundle: first_bundle,
+        })
+        .await
+        .expect("register first certificate");
+
+    let second_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-006".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create second challenge");
+    let (second_bundle, second_signature) = fake_bundle_and_signature(&second_challenge.payload);
+    service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: second_challenge.id.clone(),
+            challenge_payload: second_challenge.payload.clone(),
+            challenge_signature_base64: second_signature,
+            bundle: second_bundle,
+        })
+        .await
+        .expect("register second certificate");
+
+    let err = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: first_cert.id,
+            facility_code: Some("FAC-006".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-02".to_owned()),
+            mode: SyncMode::Delta,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("inactive certificate should not mint crawl tokens");
+    assert!(err.to_string().contains("certificate is inactive"));
+}
+
+#[tokio::test]
+async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_token() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let first_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-007".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create first challenge");
+    let (first_bundle, first_signature) = fake_bundle_and_signature(&first_challenge.payload);
+    let first_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: first_challenge.id.clone(),
+            challenge_payload: first_challenge.payload.clone(),
+            challenge_signature_base64: first_signature,
+            bundle: first_bundle,
+        })
+        .await
+        .expect("register first certificate");
+
+    let issued = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: first_cert.id.clone(),
+            facility_code: Some("FAC-007".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-02".to_owned()),
+            mode: SyncMode::Delta,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("issue crawl task token");
+
+    let second_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-007".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create second challenge");
+    let (second_bundle, second_signature) = fake_bundle_and_signature(&second_challenge.payload);
+    service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: second_challenge.id.clone(),
+            challenge_payload: second_challenge.payload.clone(),
+            challenge_signature_base64: second_signature,
+            bundle: second_bundle,
+        })
+        .await
+        .expect("register second certificate");
+
+    let first_err = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            token: issued.token.clone(),
+        })
+        .await
+        .expect_err("inactive certificate should not start crawl");
+    assert!(first_err.to_string().contains("certificate is inactive"));
+
+    let second_err = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            token: issued.token,
+        })
+        .await
+        .expect_err("inactive certificate should not consume the token");
+    assert!(second_err.to_string().contains("certificate is inactive"));
+}
+
+#[tokio::test]
 async fn gateway_sync_scope_requires_permission_for_existing_plant() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
     seed_gateway_scope_fixture(&db).await;

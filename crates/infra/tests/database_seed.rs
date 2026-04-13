@@ -452,6 +452,15 @@ async fn certificate_gateway_rows_round_trip() {
         preferred.id, "cert-recently-used",
         "last_used_at should take precedence over created_at for active certificate selection"
     );
+    let listed = db
+        .list_certificates("conalog-account")
+        .await
+        .expect("list certificates ordered by usage");
+    assert_eq!(
+        listed.first().map(|certificate| certificate.id.as_str()),
+        Some("cert-recently-used"),
+        "certificate listing should prefer the most recently used active certificate first"
+    );
 
     let challenge = db
         .create_cert_gateway_challenge(
@@ -599,4 +608,24 @@ async fn crawl_task_token_consumption_allows_only_one_concurrent_winner() {
         success_count, 1,
         "crawl task token should be consumable exactly once"
     );
+}
+
+#[tokio::test]
+async fn get_certificate_by_id_returns_typed_not_found() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let err = db
+        .get_certificate_by_id("missing-certificate")
+        .await
+        .expect_err("missing certificate should fail");
+    assert!(matches!(
+        err.downcast_ref::<infra::database::DatabaseLookupError>(),
+        Some(infra::database::DatabaseLookupError::CertificateNotFound)
+    ));
 }

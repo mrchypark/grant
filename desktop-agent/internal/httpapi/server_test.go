@@ -290,6 +290,16 @@ func TestSummarizeGatewayErrorBodyMarshalsStructuredValues(t *testing.T) {
 	}
 }
 
+func TestSummarizeGatewayErrorValueDropsNonJSONValues(t *testing.T) {
+	got := summarizeGatewayErrorValue(map[string]any{
+		"channel": make(chan int),
+	})
+
+	if got != "" {
+		t.Fatalf("summary = %q, want empty string", got)
+	}
+}
+
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{

@@ -28,12 +28,18 @@ const CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS: i64 = 60;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseLookupError {
     PlantNotFound,
+    CertificateNotFound,
+    CertGatewayChallengeNotFound,
+    CrawlTaskTokenNotFound,
 }
 
 impl fmt::Display for DatabaseLookupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PlantNotFound => f.write_str("plant not found"),
+            Self::CertificateNotFound => f.write_str("certificate not found"),
+            Self::CertGatewayChallengeNotFound => f.write_str("cert gateway challenge not found"),
+            Self::CrawlTaskTokenNotFound => f.write_str("crawl task token not found"),
         }
     }
 }
@@ -1840,8 +1846,8 @@ impl Database {
     }
 
     pub async fn get_certificate_by_id(&self, certificate_id: &str) -> Result<StoredCertificate> {
-        let row: StoredCertificateRow = self
-            .query_row_with(
+        let rows: Vec<StoredCertificateRow> = self
+            .query_rows_with(
                 ReadConsistency::Strong,
                 "SELECT c.id, c.organization_id, o.business_no, c.common_name, c.encrypted_blob, c.wrapped_dek, c.kms_key_id, c.active, c.last_used_at, c.created_at
                  FROM certificates c
@@ -1853,7 +1859,18 @@ impl Database {
             )
             .await
             .context("query certificate by id")?;
-        row.try_into()
+        if rows.is_empty() {
+            return Err(DatabaseLookupError::CertificateNotFound.into());
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple rows returned: certificate by id, expected 1"
+            ));
+        }
+        rows.into_iter()
+            .next()
+            .expect("single certificate row")
+            .try_into()
     }
 
     pub async fn list_certificates(&self, organization_id: &str) -> Result<Vec<StoredCertificate>> {
@@ -1864,7 +1881,7 @@ impl Database {
                  JOIN organizations o ON o.id = c.organization_id
                  WHERE c.organization_id = $1
                    AND o.inactivated_at IS NULL
-                 ORDER BY c.active DESC, c.created_at DESC",
+                 ORDER BY c.active DESC, c.last_used_at DESC NULLS LAST, c.created_at DESC",
                 params!(organization_id.to_owned()),
                 "organization certificates",
             )
@@ -1994,8 +2011,8 @@ impl Database {
         &self,
         challenge_id: &str,
     ) -> Result<CertGatewayChallenge> {
-        let row: CertGatewayChallengeRow = self
-            .query_row_with(
+        let rows: Vec<CertGatewayChallengeRow> = self
+            .query_rows_with(
                 ReadConsistency::Strong,
                 "SELECT id, organization_id, mode, nonce, payload_hash, facility_code, expires_at, consumed_at, created_by_user_id, created_at
                  FROM cert_gateway_challenges
@@ -2006,12 +2023,24 @@ impl Database {
             )
             .await
             .context("query cert gateway challenge")?;
-        Ok(row.into())
+        if rows.is_empty() {
+            return Err(DatabaseLookupError::CertGatewayChallengeNotFound.into());
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple rows returned: cert gateway challenge, expected 1"
+            ));
+        }
+        Ok(rows
+            .into_iter()
+            .next()
+            .expect("single cert gateway challenge row")
+            .into())
     }
 
     pub async fn get_crawl_task_token_by_hash(&self, token_hash: &str) -> Result<CrawlTaskToken> {
-        let row: CrawlTaskTokenRow = self
-            .query_row_with(
+        let rows: Vec<CrawlTaskTokenRow> = self
+            .query_rows_with(
                 ReadConsistency::Strong,
                 "SELECT id, organization_id, certificate_id, token_hash, scope_json, expires_at, used_at, created_by_user_id, created_at
                  FROM crawl_task_tokens
@@ -2022,7 +2051,19 @@ impl Database {
             )
             .await
             .context("query crawl task token")?;
-        Ok(row.into())
+        if rows.is_empty() {
+            return Err(DatabaseLookupError::CrawlTaskTokenNotFound.into());
+        }
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple rows returned: crawl task token, expected 1"
+            ));
+        }
+        Ok(rows
+            .into_iter()
+            .next()
+            .expect("single crawl task token row")
+            .into())
     }
 
     pub async fn start_sync_run(

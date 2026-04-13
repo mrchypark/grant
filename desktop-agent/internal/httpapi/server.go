@@ -811,7 +811,7 @@ func summarizeGatewayErrorValue(value any) string {
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return strings.TrimSpace(fmt.Sprint(value))
+		return ""
 	}
 	return strings.TrimSpace(string(encoded))
 }

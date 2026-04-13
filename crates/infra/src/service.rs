@@ -509,11 +509,18 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let certificate_id = require_non_empty("certificateId", &input.certificate_id)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
-        let certificate = self.db.get_certificate_by_id(&certificate_id).await?;
+        let certificate = self
+            .db
+            .get_certificate_by_id(&certificate_id)
+            .await
+            .map_err(map_missing_certificate)?;
         if certificate.organization_id != organization_id {
             return Err(bad_request_error(
                 "certificate does not belong to organization",
             ));
+        }
+        if certificate.active != 1 {
+            return Err(bad_request_error("certificate is inactive"));
         }
 
         let scope = CrawlTaskScope {
@@ -637,16 +644,28 @@ impl AppService {
                 "forbidden: organization {organization_id} is inactive"
             )));
         }
-        let consumed = self.db.consume_crawl_task_token(&token_hash).await?;
-
         let scope: CrawlTaskScope =
-            serde_json::from_str(&consumed.scope_json).context("parse crawl task scope")?;
+            serde_json::from_str(&issued.scope_json).context("parse crawl task scope")?;
         let mode = parse_sync_mode(&scope.mode)?;
-        if let Some(certificate_id) = consumed.certificate_id.as_deref() {
-            let certificate = self.db.get_certificate_by_id(certificate_id).await?;
-            if certificate.organization_id != consumed.organization_id {
+        let certificate = if let Some(certificate_id) = issued.certificate_id.as_deref() {
+            let certificate = self
+                .db
+                .get_certificate_by_id(certificate_id)
+                .await
+                .map_err(map_missing_certificate)?;
+            if certificate.organization_id != issued.organization_id {
                 anyhow::bail!("crawl task token certificate organization mismatch");
             }
+            if certificate.active != 1 {
+                return Err(bad_request_error("certificate is inactive"));
+            }
+            Some(certificate)
+        } else {
+            None
+        };
+        let consumed = self.db.consume_crawl_task_token(&token_hash).await?;
+
+        if let Some(certificate) = certificate {
             let business_no = self
                 .resolve_organization_business_no(
                     &consumed.organization_id,
@@ -1901,6 +1920,11 @@ fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
 
 fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -> anyhow::Error {
     if err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DatabaseLookupError>(),
+            Some(DatabaseLookupError::CertGatewayChallengeNotFound)
+        )
+    }) || err.chain().any(|cause| {
         cause
             .to_string()
             .contains("no row returned: cert gateway challenge")
@@ -1912,11 +1936,32 @@ fn map_missing_cert_gateway_challenge(err: anyhow::Error, _challenge_id: &str) -
 
 fn map_missing_crawl_task_token(err: anyhow::Error) -> anyhow::Error {
     if err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DatabaseLookupError>(),
+            Some(DatabaseLookupError::CrawlTaskTokenNotFound)
+        )
+    }) || err.chain().any(|cause| {
         cause
             .to_string()
             .contains("no row returned: crawl task token")
     }) {
         return not_found_error("crawl task token not found");
+    }
+    err
+}
+
+fn map_missing_certificate(err: anyhow::Error) -> anyhow::Error {
+    if err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DatabaseLookupError>(),
+            Some(DatabaseLookupError::CertificateNotFound)
+        )
+    }) || err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("no row returned: certificate by id")
+    }) {
+        return not_found_error("certificate not found");
     }
     err
 }
