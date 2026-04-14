@@ -105,21 +105,6 @@ func loadOrCreateSessionSecret() ([]byte, error) {
 		return nil, err
 	}
 
-	legacySecretPath := filepath.Join(configDir, "certd-desktop-agent", "session-secret.bin")
-	if secret, err := os.ReadFile(legacySecretPath); err == nil {
-		if len(secret) < 32 {
-			return nil, errors.New("desktop agent session secret is too short")
-		}
-		if err := os.WriteFile(secretPath, secret, 0o600); err != nil {
-			return nil, err
-		}
-		_ = os.Remove(legacySecretPath)
-		_ = os.Remove(filepath.Dir(legacySecretPath))
-		return secret, nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, err
