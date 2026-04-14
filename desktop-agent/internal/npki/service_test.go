@@ -248,6 +248,41 @@ func TestDefaultDiscoveredRootsTTLIsLongEnough(t *testing.T) {
 	}
 }
 
+func TestServiceRefreshDiscoveredRootsClosesOwnedDoneChannel(t *testing.T) {
+	service := NewService(ServiceConfig{
+		AutoDiscover: true,
+		DiscoverRoots: func() []string {
+			return nil
+		},
+	})
+
+	done := make(chan struct{})
+	service.mu.Lock()
+	service.refreshing = true
+	service.refreshDone = done
+	service.mu.Unlock()
+
+	service.refreshDiscoveredRoots()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("refreshDone was not closed")
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.refreshing {
+		t.Fatal("refreshing = true, want false")
+	}
+	if service.refreshDone != nil {
+		t.Fatalf("refreshDone = %v, want nil", service.refreshDone)
+	}
+	if !service.rootsCached {
+		t.Fatal("rootsCached = false, want true")
+	}
+}
+
 func TestServiceRefreshesAutoDiscoveredRootsAfterTTL(t *testing.T) {
 	firstRoot := t.TempDir()
 	secondRoot := t.TempDir()

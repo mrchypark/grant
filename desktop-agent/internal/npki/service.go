@@ -350,7 +350,7 @@ func (s *Service) cachedDiscoveredRoots() []string {
 	s.mu.Unlock()
 
 	if !hadCached {
-		go s.refreshDiscoveredRoots(done)
+		go s.refreshDiscoveredRoots()
 		return s.waitForDiscoveredRoots(done, staleRoots)
 	}
 
@@ -373,22 +373,16 @@ func (s *Service) waitForDiscoveredRoots(done <-chan struct{}, fallback []string
 	}
 }
 
-func (s *Service) refreshDiscoveredRoots(done ...chan struct{}) {
-	var doneCh chan struct{}
-	if len(done) > 0 {
-		doneCh = done[0]
-	}
+func (s *Service) refreshDiscoveredRoots() {
 	roots := normalizeRoots(s.discoverRoots())
 	expiresAt := s.now().Add(s.rootsTTL)
 
 	s.mu.Lock()
+	doneCh := s.refreshDone
 	s.cachedRoots = roots
 	s.cacheExpires = expiresAt
 	s.rootsCached = true
 	s.refreshing = false
-	if doneCh == nil {
-		doneCh = s.refreshDone
-	}
 	s.refreshDone = nil
 	s.mu.Unlock()
 	if doneCh != nil {
