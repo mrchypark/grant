@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -39,7 +40,11 @@ var (
 )
 
 type ServiceConfig struct {
-	Roots []string
+	Roots         []string
+	AutoDiscover  bool
+	RootsTTL      time.Duration
+	DiscoverRoots func() []string
+	Now           func() time.Time
 }
 
 type CertificateMetadata struct {
@@ -74,16 +79,57 @@ type SignResult struct {
 
 type Service struct {
 	roots []string
+
+	rootsTTL      time.Duration
+	discoverRoots func() []string
+	now           func() time.Time
+
+	mu           sync.Mutex
+	cachedRoots  []string
+	cacheExpires time.Time
+	rootsCached  bool
 }
 
+const defaultDiscoveredRootsTTL = 5 * time.Second
+
 func NewService(config ServiceConfig) *Service {
-	return &Service{
+	service := &Service{
 		roots: normalizeRoots(config.Roots),
+		now:   config.Now,
 	}
+	if service.now == nil {
+		service.now = time.Now
+	}
+	if len(service.roots) == 0 && config.AutoDiscover {
+		service.rootsTTL = config.RootsTTL
+		if service.rootsTTL <= 0 {
+			service.rootsTTL = defaultDiscoveredRootsTTL
+		}
+		service.discoverRoots = config.DiscoverRoots
+		if service.discoverRoots == nil {
+			service.discoverRoots = discoverDefaultRoots
+		}
+	}
+	return service
 }
 
 func DefaultConfig() ServiceConfig {
-	return ServiceConfig{Roots: discoverDefaultRoots()}
+	if raw := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_NPKI_DIRS")); raw != "" {
+		return ServiceConfig{Roots: splitRootList(raw)}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ServiceConfig{}
+	}
+
+	return ServiceConfig{
+		AutoDiscover: true,
+		RootsTTL:     defaultDiscoveredRootsTTL,
+		DiscoverRoots: func() []string {
+			return discoverDefaultRootsFor(runtime.GOOS, home, "/Volumes")
+		},
+	}
 }
 
 func (s *Service) ListCertificates(context.Context) ([]CertificateMetadata, error) {
@@ -248,7 +294,7 @@ func (s *Service) discoverBundles() ([]string, error) {
 	walked := make(map[string]struct{})
 	seenBundles := make(map[string]struct{})
 
-	for _, root := range s.roots {
+	for _, root := range s.bundleRoots() {
 		if err := walkBundleRoot(root, &dirs, walked, seenBundles); err != nil {
 			return nil, err
 		}
@@ -256,6 +302,32 @@ func (s *Service) discoverBundles() ([]string, error) {
 
 	slices.Sort(dirs)
 	return dirs, nil
+}
+
+func (s *Service) bundleRoots() []string {
+	if len(s.roots) > 0 {
+		return append([]string(nil), s.roots...)
+	}
+	if s.discoverRoots == nil {
+		return nil
+	}
+	return s.cachedDiscoveredRoots()
+}
+
+func (s *Service) cachedDiscoveredRoots() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	if s.rootsCached && now.Before(s.cacheExpires) {
+		return append([]string(nil), s.cachedRoots...)
+	}
+
+	roots := normalizeRoots(s.discoverRoots())
+	s.cachedRoots = roots
+	s.cacheExpires = now.Add(s.rootsTTL)
+	s.rootsCached = true
+	return append([]string(nil), roots...)
 }
 
 func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, seenBundles map[string]struct{}) error {
