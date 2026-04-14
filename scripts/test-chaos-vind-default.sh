@@ -103,12 +103,34 @@ require_contains "scripts/k3d-chaos-load.sh" 'HTTP_CURL_TIMEOUT_SECONDS="${HTTP_
 require_contains "scripts/k3d-chaos-load.sh" '--max-time "${HTTP_CURL_TIMEOUT_SECONDS}"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos-load.sh" '--connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}"'
+require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_TRAILBASE_LOCAL_PORT="${WORKLOAD_TRAILBASE_LOCAL_PORT:-14090}"'
+require_contains "scripts/k3d-chaos-load.sh" '"/api/auth/v1/login"'
+require_contains "scripts/k3d-chaos-load.sh" 'http://127.0.0.1:${WORKLOAD_TRAILBASE_LOCAL_PORT}'
+require_contains "scripts/k3d-chaos-load.sh" 'reserve_local_port()'
+require_contains "scripts/k3d-chaos-load.sh" 'validate_certd_health()'
+require_contains "scripts/k3d-chaos-load.sh" 'lsof -nP -iTCP:'
+require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_VOTER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_VOTER_LOCAL_PORT}" "voter")"'
+require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_LEARNER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_LEARNER_LOCAL_PORT}" "learner")"'
+require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_TRAILBASE_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_TRAILBASE_LOCAL_PORT}" "trailbase")"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos.sh" 'HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos.sh" '--max-time "${HTTP_CURL_TIMEOUT_SECONDS}"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos.sh" '--connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}"'
+require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_LOCAL_PORT="${TRAILBASE_LOCAL_PORT:-14000}"'
+require_contains "scripts/k3d-chaos.sh" 'port-forward svc/trailbase "${TRAILBASE_LOCAL_PORT}:4000"'
+require_contains "scripts/k3d-chaos.sh" 'http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/auth/v1/login'
+require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_RECOVERED_AUTH_TOKEN=""'
+require_contains "scripts/k3d-chaos.sh" 'auth_token="${TRAILBASE_RECOVERED_AUTH_TOKEN}"'
+require_not_contains "scripts/k3d-chaos.sh" 'auth_token="$(scenario_trailbase_cache_ttl'
+require_contains "scripts/k3d-chaos.sh" 'reserve_local_port()'
+require_contains "scripts/k3d-chaos.sh" 'validate_certd_health()'
+require_contains "scripts/k3d-chaos.sh" 'validate_trailbase_health()'
+require_contains "scripts/k3d-chaos.sh" 'lsof -nP -iTCP:'
+require_contains "scripts/k3d-chaos.sh" 'LOCAL_PORT="$(reserve_local_port "${LOCAL_PORT}" "certd")"'
+require_contains "scripts/k3d-chaos.sh" 'LEARNER_LOCAL_PORT="$(reserve_local_port "${LEARNER_LOCAL_PORT}" "learner")"'
+require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_LOCAL_PORT="$(reserve_local_port "${TRAILBASE_LOCAL_PORT}" "trailbase")"'
 # shellcheck disable=SC2016
 require_contains "scripts/k3d-chaos.sh" 'capture_file="$(mktemp "${TMPDIR:-/tmp}/retry-capture.XXXXXX")"'
 # shellcheck disable=SC2016
@@ -129,6 +151,7 @@ require_contains "scripts/vind-bootstrap.sh" 'dump_minio_debug'
 require_contains "scripts/vind-bootstrap.sh" 'kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers'
 require_contains "scripts/vind-bootstrap.sh" "vcluster.cp.%s"
 require_contains "scripts/vind-bootstrap.sh" 'ctr -n k8s.io images import -'
+require_contains "scripts/vind-bootstrap.sh" 'k3d image import'
 # shellcheck disable=SC2016
 require_contains "scripts/vind-bootstrap.sh" 'ensure_runtime_image "${IMAGE_NAME}"'
 # shellcheck disable=SC2016
@@ -140,8 +163,27 @@ require_contains "scripts/vind-cluster.sh" 'kubectl taint nodes --all node-role.
 require_contains "scripts/vind-cluster.sh" 'remain NoSchedule-tainted after normalization'
 # shellcheck disable=SC2016
 require_contains "scripts/vind-cluster.sh" 'vcluster create "${CLUSTER_NAME}" --driver docker --connect=false'
+require_contains "scripts/vind-cluster.sh" 'k3d cluster create "${CLUSTER_NAME}"'
+require_contains "scripts/vind-cluster.sh" 'falling back to k3d'
 require_contains "scripts/vind-exec.sh" '--background-proxy=false'
 require_contains "scripts/vind-exec.sh" 'VIND_EXEC_ACTIVE=1'
+require_contains "scripts/vind-exec.sh" 'kubectl config use-context "k3d-${CLUSTER_NAME}"'
+require_contains "scripts/k3d-e2e.sh" 'TRAILBASE_LOCAL_PORT="${TRAILBASE_LOCAL_PORT:-14000}"'
+require_contains "scripts/k3d-e2e.sh" 'port-forward svc/trailbase "${TRAILBASE_LOCAL_PORT}:4000"'
+require_contains "scripts/k3d-e2e.sh" 'http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/auth/v1/login'
+require_contains "scripts/k3d-e2e.sh" 'reserve_local_port()'
+require_contains "scripts/k3d-e2e.sh" 'validate_certd_health()'
+require_contains "scripts/k3d-e2e.sh" 'validate_trailbase_health()'
+require_contains "scripts/k3d-e2e.sh" 'lsof -nP -iTCP:'
+require_contains "scripts/k3d-e2e.sh" 'LOCAL_PORT="$(reserve_local_port "${LOCAL_PORT}" "certd")"'
+require_contains "scripts/k3d-e2e.sh" 'TRAILBASE_LOCAL_PORT="$(reserve_local_port "${TRAILBASE_LOCAL_PORT}" "trailbase")"'
+
+require_contains "README.md" '로컬 검증 엔트리포인트는 `vind`만 지원한다.'
+require_contains "README.md" 'bash ./scripts/ci-chaos-local.sh'
+require_contains "README.md" 'bash ./scripts/vind-cluster.sh ensure-context'
+require_not_contains "README.md" './scripts/dev-empty-up.sh'
+require_not_contains "README.md" 'docker-compose.empty.yml'
+require_not_contains "README.md" 'docker-compose-chaos.sh'
 
 expect_direct_invocation_failure "scripts/vind-bootstrap.sh" 'run via scripts/vind-exec.sh or pass KUBECONTEXT explicitly'
 expect_direct_invocation_failure "scripts/vind-chaos.sh" 'run via scripts/vind-exec.sh or pass KUBE_CONTEXT explicitly'
@@ -154,7 +196,14 @@ for stale_file in \
   "scripts/kind-bootstrap.sh" \
   "scripts/kind-chaos.sh" \
   "scripts/dev-kind-up.sh" \
-  "scripts/dev-kind-down.sh"
+  "scripts/dev-kind-down.sh" \
+  "scripts/dev-empty-up.sh" \
+  "scripts/dev-empty-seed-user.sh" \
+  "scripts/dev-empty-bootstrap-owner.sh" \
+  "scripts/dev-empty-down.sh" \
+  "scripts/docker-compose-chaos.sh" \
+  "docker-compose.empty.yml" \
+  "Dockerfile.dev"
 do
   if [[ -f "${stale_file}" ]]; then
     fail "${stale_file} should be removed once vind is the only local chaos backend"

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAMESPACE="${NAMESPACE:-certd}"
 LOCAL_PORT="${LOCAL_PORT:-18080}"
+TRAILBASE_LOCAL_PORT="${TRAILBASE_LOCAL_PORT:-14000}"
 TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL:-trailbase-user@example.com}"
 TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD:-secret}"
 BOOTSTRAP_ORGANIZATION_ID="${BOOTSTRAP_ORGANIZATION_ID:-conalog-account}"
@@ -19,6 +20,8 @@ CERT_PASSWORD="${CERT_PASSWORD:-}"
 CERT_BUSINESS_NO="${CERT_BUSINESS_NO:-}"
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
 
+declare -a RESERVED_LOCAL_PORTS=()
+
 need() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "missing command: $1" >&2
@@ -26,18 +29,93 @@ need() {
   }
 }
 
-wait_for_http() {
-  local url="$1"
-  local attempts="${2:-60}"
-  local delay="${3:-2}"
-  for _ in $(seq 1 "$attempts"); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+port_is_reserved() {
+  local port="$1"
+  local reserved_port
+  for reserved_port in "${RESERVED_LOCAL_PORTS[@]:-}"; do
+    if [[ "${reserved_port}" == "${port}" ]]; then
       return 0
     fi
-    sleep "$delay"
   done
-  echo "timed out waiting for $url" >&2
+  return 1
+}
+
+port_is_available() {
+  local port="$1"
+  if port_is_reserved "${port}"; then
+    return 1
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    ! lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+    return
+  fi
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket() as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+reserve_local_port() {
+  local requested_port="$1"
+  local label="$2"
+  local candidate_port=""
+  local offset
+  for offset in $(seq 0 49); do
+    candidate_port="$((requested_port + offset))"
+    if port_is_available "${candidate_port}"; then
+      RESERVED_LOCAL_PORTS+=("${candidate_port}")
+      if [[ "${candidate_port}" != "${requested_port}" ]]; then
+        echo "[ports] ${label} local port ${requested_port} busy; using ${candidate_port}" >&2
+      fi
+      printf '%s' "${candidate_port}"
+      return 0
+    fi
+  done
+  echo "failed to reserve local port for ${label} near ${requested_port}" >&2
   exit 1
+}
+
+validate_certd_health() {
+  local body="$1"
+  jq -e '
+    .status == "ok" and
+    (.readReady | type == "boolean") and
+    (.writeReady | type == "boolean") and
+    (.runtimeMode | type == "string") and
+    (.defaultReadConsistency | type == "string")
+  ' >/dev/null <<<"${body}"
+}
+
+validate_trailbase_health() {
+  local body="${1//$'\r'/}"
+  [[ "$(printf '%s' "${body}" | tr '[:upper:]' '[:lower:]')" == "ok" ]]
+}
+
+wait_for_http() {
+  local url="$1"
+  local validator="${2:-}"
+  local attempts="${3:-60}"
+  local delay="${4:-2}"
+  local body=""
+  for _ in $(seq 1 "${attempts}"); do
+    if body="$(curl -fsS "${url}" 2>/dev/null)"; then
+      if [[ -z "${validator}" ]] || "${validator}" "${body}"; then
+        return 0
+      fi
+    fi
+    sleep "${delay}"
+  done
+  echo "timed out waiting for ${url}" >&2
+  return 1
 }
 
 retry_capture() {
@@ -66,7 +144,7 @@ seed_trailbase_user() {
 
 login_trailbase() {
   curl -fsS -X POST \
-    "http://127.0.0.1:${LOCAL_PORT}/api/auth/v1/login" \
+    "http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/auth/v1/login" \
     -H 'content-type: application/json' \
     --data-binary "$(jq -n \
       --arg email "$TRAILBASE_USER_EMAIL" \
@@ -198,18 +276,30 @@ need curl
 need jq
 need base64
 
+LOCAL_PORT="$(reserve_local_port "${LOCAL_PORT}" "certd")"
+TRAILBASE_LOCAL_PORT="$(reserve_local_port "${TRAILBASE_LOCAL_PORT}" "trailbase")"
+
 port_forward_log="$(mktemp)"
+trailbase_port_forward_log="$(mktemp)"
 cleanup() {
   if [[ -n "${pf_pid:-}" ]]; then
     kill "${pf_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${trailbase_pf_pid:-}" ]]; then
+    kill "${trailbase_pf_pid}" >/dev/null 2>&1 || true
+  fi
   rm -f "$port_forward_log"
+  rm -f "$trailbase_port_forward_log"
 }
 trap cleanup EXIT
 
 kubectl -n "${NAMESPACE}" port-forward svc/certd "${LOCAL_PORT}:80" >"${port_forward_log}" 2>&1 &
 pf_pid=$!
-wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz"
+wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz" validate_certd_health
+
+kubectl -n "${NAMESPACE}" port-forward svc/trailbase "${TRAILBASE_LOCAL_PORT}:4000" >"${trailbase_port_forward_log}" 2>&1 &
+trailbase_pf_pid=$!
+wait_for_http "http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/healthcheck" validate_trailbase_health
 
 seed_trailbase_user
 

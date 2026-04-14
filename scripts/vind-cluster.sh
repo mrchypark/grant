@@ -29,6 +29,10 @@ cluster_container_name() {
   printf 'vcluster.cp.%s' "${CLUSTER_NAME}"
 }
 
+k3d_context_name() {
+  printf 'k3d-%s' "${CLUSTER_NAME}"
+}
+
 is_colima_runtime() {
   command -v colima >/dev/null 2>&1 || return 1
 
@@ -71,15 +75,38 @@ use_driver() {
   vcluster use driver docker >/dev/null
 }
 
-cluster_exists() {
+vcluster_cluster_exists() {
   docker inspect "$(cluster_container_name)" >/dev/null 2>&1
 }
 
-delete_cluster() {
-  use_driver
+have_k3d() {
+  command -v k3d >/dev/null 2>&1
+}
 
-  if cluster_exists; then
+k3d_cluster_exists() {
+  have_k3d && k3d cluster get "${CLUSTER_NAME}" >/dev/null 2>&1
+}
+
+cluster_exists() {
+  vcluster_cluster_exists || k3d_cluster_exists
+}
+
+current_driver() {
+  if vcluster_cluster_exists; then
+    printf 'vcluster'
+  elif k3d_cluster_exists; then
+    printf 'k3d'
+  else
+    return 1
+  fi
+}
+
+delete_cluster() {
+  if vcluster_cluster_exists; then
+    use_driver
     vcluster delete "${CLUSTER_NAME}" >/dev/null
+  elif k3d_cluster_exists; then
+    k3d cluster delete "${CLUSTER_NAME}" >/dev/null
   fi
 }
 
@@ -110,7 +137,29 @@ connect_cluster() {
 create_cluster() {
   use_driver
 
-  vcluster create "${CLUSTER_NAME}" --driver docker --connect=false >/dev/null
+  local create_log
+  create_log="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.vcluster-create.XXXXXX")"
+
+  if vcluster create "${CLUSTER_NAME}" --driver docker --connect=false >"${create_log}" 2>&1; then
+    rm -f "${create_log}"
+    return 0
+  fi
+
+  cat "${create_log}" >&2
+  if grep -Fq 'failed to inspect test network container' "${create_log}" \
+    && grep -Fq "requested image's platform" "${create_log}"; then
+    rm -f "${create_log}"
+    have_k3d || {
+      echo "vcluster create hit the known docker-driver network bug and k3d is not installed for fallback" >&2
+      exit 1
+    }
+    echo "[vind] vcluster docker driver failed on this host; falling back to k3d" >&2
+    k3d cluster create "${CLUSTER_NAME}" --wait >/dev/null
+    return 0
+  fi
+
+  rm -f "${create_log}"
+  return 1
 }
 
 ensure_context() {

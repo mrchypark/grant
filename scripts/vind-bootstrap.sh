@@ -26,7 +26,30 @@ cluster_container_name() {
   printf 'vcluster.cp.%s' "${CLUSTER_NAME}"
 }
 
-import_image_with_ctr() {
+k3d_context_name() {
+  printf 'k3d-%s' "${CLUSTER_NAME}"
+}
+
+runtime_kind() {
+  if docker inspect "$(cluster_container_name)" >/dev/null 2>&1; then
+    printf 'vcluster'
+  elif command -v k3d >/dev/null 2>&1 && k3d cluster get "${CLUSTER_NAME}" >/dev/null 2>&1; then
+    printf 'k3d'
+  else
+    return 1
+  fi
+}
+
+image_refs_to_match() {
+  local image="$1"
+
+  printf '%s\n' "${image}"
+  if [[ "${image%%/*}" == "${image}" ]]; then
+    printf 'docker.io/library/%s\n' "${image}"
+  fi
+}
+
+import_image_with_ctr_vcluster() {
   local image="$1"
   local container_name
   local tar_file
@@ -43,30 +66,92 @@ import_image_with_ctr() {
   rm -f "${tar_file}"
 }
 
+k3d_node_names() {
+  docker ps --format '{{.Names}}' | grep -E "^k3d-${CLUSTER_NAME}-(server|agent)-" || true
+}
+
+import_image_with_ctr_k3d() {
+  local image="$1"
+  local tar_file
+  local nodes
+
+  nodes="$(k3d_node_names)"
+  if [[ -z "${nodes}" ]]; then
+    echo "failed to find k3d node containers for ${CLUSTER_NAME}" >&2
+    exit 1
+  fi
+
+  tar_file="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.image.XXXXXX")"
+  docker save "${image}" -o "${tar_file}"
+  for node in ${nodes}; do
+    docker cp "${tar_file}" "${node}:/tmp/k3d-image-import.tar"
+    docker exec "${node}" ctr -n k8s.io images import /tmp/k3d-image-import.tar >/dev/null
+    docker exec "${node}" rm -f /tmp/k3d-image-import.tar >/dev/null 2>&1 || true
+  done
+  rm -f "${tar_file}"
+}
+
 ensure_runtime_image() {
   local image="$1"
-  local container_name
-  local -a refs_to_match
+  local kind
+  local refs_file
 
-  container_name="$(cluster_container_name)"
-  refs_to_match=("${image}")
-  if [[ "${image%%/*}" == "${image}" ]]; then
-    refs_to_match+=("docker.io/library/${image}")
-  fi
-
-  if docker exec "${container_name}" ctr -n k8s.io images ls -q \
-    | grep -F -x -f <(printf '%s\n' "${refs_to_match[@]}") >/dev/null 2>&1; then
-    echo "[vind] image already present in runtime: ${image}"
-    return 0
-  fi
-
-  echo "[vind] importing image into runtime: ${image}"
-  import_image_with_ctr "${image}"
-  docker exec "${container_name}" ctr -n k8s.io images ls -q \
-    | grep -F -x -f <(printf '%s\n' "${refs_to_match[@]}") >/dev/null 2>&1 || {
-    echo "failed to import image into vcluster runtime: ${image}" >&2
+  kind="$(runtime_kind)" || {
+    echo "missing vind runtime for ${CLUSTER_NAME}; expected vcluster or k3d" >&2
     exit 1
   }
+
+  refs_file="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.refs.XXXXXX")"
+  image_refs_to_match "${image}" >"${refs_file}"
+
+  if [[ "${kind}" == "vcluster" ]]; then
+    local container_name
+    container_name="$(cluster_container_name)"
+
+    if docker exec "${container_name}" ctr -n k8s.io images ls -q \
+      | grep -F -x -f "${refs_file}" >/dev/null 2>&1; then
+      echo "[vind] image already present in runtime: ${image}"
+      rm -f "${refs_file}"
+      return 0
+    fi
+
+    echo "[vind] importing image into runtime: ${image}"
+    import_image_with_ctr_vcluster "${image}"
+    docker exec "${container_name}" ctr -n k8s.io images ls -q \
+      | grep -F -x -f "${refs_file}" >/dev/null 2>&1 || {
+      rm -f "${refs_file}"
+      echo "failed to import image into vcluster runtime: ${image}" >&2
+      exit 1
+    }
+  else
+    local nodes
+    nodes="$(k3d_node_names)"
+    if [[ -z "${nodes}" ]]; then
+      rm -f "${refs_file}"
+      echo "failed to find k3d node containers for ${CLUSTER_NAME}" >&2
+      exit 1
+    fi
+
+    if docker exec "$(printf '%s\n' "${nodes}" | head -n1)" ctr -n k8s.io images ls -q \
+      | grep -F -x -f "${refs_file}" >/dev/null 2>&1; then
+      echo "[vind] image already present in runtime: ${image}"
+      rm -f "${refs_file}"
+      return 0
+    fi
+
+    echo "[vind] importing image into k3d runtime: ${image}"
+    if ! k3d image import "${image}" -c "${CLUSTER_NAME}" >/dev/null 2>&1; then
+      import_image_with_ctr_k3d "${image}"
+    fi
+    docker exec "$(printf '%s\n' "${nodes}" | head -n1)" ctr -n k8s.io images ls -q \
+      | grep -F -x -f "${refs_file}" >/dev/null 2>&1 || {
+      rm -f "${refs_file}"
+      echo "failed to import image into k3d runtime: ${image}" >&2
+      exit 1
+    }
+  fi
+
+  rm -f "${refs_file}"
 }
 
 CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
