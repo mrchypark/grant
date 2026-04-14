@@ -88,6 +88,7 @@ type Service struct {
 	cachedRoots  []string
 	cacheExpires time.Time
 	rootsCached  bool
+	refreshing   bool
 }
 
 const defaultDiscoveredRootsTTL = 5 * time.Second
@@ -100,13 +101,13 @@ func NewService(config ServiceConfig) *Service {
 	if service.now == nil {
 		service.now = time.Now
 	}
-	if len(service.roots) == 0 && config.AutoDiscover {
+	if config.AutoDiscover {
 		service.rootsTTL = config.RootsTTL
 		if service.rootsTTL <= 0 {
 			service.rootsTTL = defaultDiscoveredRootsTTL
 		}
 		service.discoverRoots = config.DiscoverRoots
-		if service.discoverRoots == nil {
+		if service.discoverRoots == nil && len(service.roots) == 0 {
 			service.discoverRoots = discoverDefaultRoots
 		}
 	}
@@ -123,11 +124,13 @@ func DefaultConfig() ServiceConfig {
 		return ServiceConfig{}
 	}
 
+	roots := defaultLocalRootsFor(runtime.GOOS, home)
 	return ServiceConfig{
-		AutoDiscover: true,
+		Roots:        roots,
+		AutoDiscover: runtime.GOOS == "darwin",
 		RootsTTL:     defaultDiscoveredRootsTTL,
 		DiscoverRoots: func() []string {
-			return discoverDefaultRootsFor(runtime.GOOS, home, "/Volumes")
+			return discoverMountedNPKIRoots("/Volumes")
 		},
 	}
 }
@@ -305,29 +308,44 @@ func (s *Service) discoverBundles() ([]string, error) {
 }
 
 func (s *Service) bundleRoots() []string {
-	if len(s.roots) > 0 {
-		return append([]string(nil), s.roots...)
-	}
+	roots := append([]string(nil), s.roots...)
 	if s.discoverRoots == nil {
-		return nil
+		return roots
 	}
-	return s.cachedDiscoveredRoots()
+	return append(roots, s.cachedDiscoveredRoots()...)
 }
 
 func (s *Service) cachedDiscoveredRoots() []string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	now := s.now()
 	if s.rootsCached && now.Before(s.cacheExpires) {
-		return append([]string(nil), s.cachedRoots...)
+		roots := append([]string(nil), s.cachedRoots...)
+		s.mu.Unlock()
+		return roots
 	}
 
+	staleRoots := append([]string(nil), s.cachedRoots...)
+	if s.refreshing {
+		s.mu.Unlock()
+		return staleRoots
+	}
+	s.refreshing = true
+	s.mu.Unlock()
+
+	go s.refreshDiscoveredRoots()
+	return staleRoots
+}
+
+func (s *Service) refreshDiscoveredRoots() {
 	roots := normalizeRoots(s.discoverRoots())
+	expiresAt := s.now().Add(s.rootsTTL)
+
+	s.mu.Lock()
 	s.cachedRoots = roots
-	s.cacheExpires = now.Add(s.rootsTTL)
+	s.cacheExpires = expiresAt
 	s.rootsCached = true
-	return append([]string(nil), roots...)
+	s.refreshing = false
+	s.mu.Unlock()
 }
 
 func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, seenBundles map[string]struct{}) error {
@@ -438,29 +456,35 @@ func discoverDefaultRoots() []string {
 }
 
 func discoverDefaultRootsFor(goos string, home string, volumesRoot string) []string {
+	roots := defaultLocalRootsFor(goos, home)
+	if goos == "darwin" {
+		roots = append(roots, discoverMountedNPKIRoots(volumesRoot)...)
+	}
+	return normalizeRoots(roots)
+}
+
+func defaultLocalRootsFor(goos string, home string) []string {
 	switch goos {
 	case "windows":
 		localAppData := os.Getenv("LOCALAPPDATA")
 		appData := os.Getenv("APPDATA")
-		return normalizeRoots([]string{
+		return []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
 			filepath.Join(localAppData, "NPKI"),
 			filepath.Join(appData, "NPKI"),
-		})
+		}
 	case "darwin":
-		roots := []string{
+		return []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
 			filepath.Join(home, "Library", "Preferences", "NPKI"),
 		}
-		roots = append(roots, discoverMountedNPKIRoots(volumesRoot)...)
-		return normalizeRoots(roots)
 	default:
-		return normalizeRoots([]string{
+		return []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
-		})
+		}
 	}
 }
 
