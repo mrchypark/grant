@@ -188,12 +188,15 @@ require_contains "scripts/k3d-e2e.sh" 'lsof -nP -iTCP:'
 require_contains "scripts/k3d-e2e.sh" 'LOCAL_PORT="$(reserve_local_port "${LOCAL_PORT}" "certd")"'
 require_contains "scripts/k3d-e2e.sh" 'TRAILBASE_LOCAL_PORT="$(reserve_local_port "${TRAILBASE_LOCAL_PORT}" "trailbase")"'
 
-require_contains "README.md" '로컬 검증 엔트리포인트는 `vind`만 지원한다.'
+require_contains "README.md" './docs/local-development.md'
 require_contains "README.md" 'bash ./scripts/ci-chaos-local.sh'
-require_contains "README.md" 'bash ./scripts/vind-cluster.sh ensure-context'
 require_not_contains "README.md" './scripts/dev-empty-up.sh'
 require_not_contains "README.md" 'docker-compose.empty.yml'
 require_not_contains "README.md" 'docker-compose-chaos.sh'
+
+require_contains "docs/local-development.md" '로컬 검증 엔트리포인트는 `vind`만 공식 지원한다.'
+require_contains "docs/local-development.md" 'bash ./scripts/ci-chaos-local.sh'
+require_contains "docs/local-development.md" 'bash ./scripts/vind-cluster.sh ensure-context'
 
 expect_direct_invocation_failure "scripts/vind-bootstrap.sh" 'run via scripts/vind-exec.sh or pass KUBECONTEXT explicitly'
 expect_direct_invocation_failure "scripts/vind-chaos.sh" 'run via scripts/vind-exec.sh or pass KUBE_CONTEXT explicitly'
