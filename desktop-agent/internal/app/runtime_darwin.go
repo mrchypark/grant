@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cypark/account/desktop-agent/internal/localization"
 	"github.com/getlantern/systray"
 )
 
@@ -42,14 +43,16 @@ func run(addr string, handler http.Handler, _ RunOptions) error {
 	}()
 
 	onReady := func() {
-		systray.SetTitle("certd")
-		systray.SetTooltip("certd desktop agent")
+		copy := localization.ForLanguage(localization.SystemLanguage())
+		templateIconBytes, regularIconBytes := trayIconBytes()
+		systray.SetTemplateIcon(templateIconBytes, regularIconBytes)
+		systray.SetTooltip(copy.AppTooltip)
 
-		statusItem := systray.AddMenuItem(fmt.Sprintf("Agent listening on %s", addr), "agent status")
+		statusItem := systray.AddMenuItem(fmt.Sprintf(copy.StatusListening, addr), copy.AppTooltip)
 		statusItem.Disable()
-		openItem := systray.AddMenuItem("Open Example Page", "open the local browser example")
+		openItem := systray.AddMenuItem(copy.OpenExamplePage, copy.OpenExampleTooltip)
 		systray.AddSeparator()
-		quitItem := systray.AddMenuItem("Quit certd Agent", "quit agent")
+		quitItem := systray.AddMenuItem(copy.QuitApp, copy.QuitAppTooltip)
 
 		go func() {
 			for {

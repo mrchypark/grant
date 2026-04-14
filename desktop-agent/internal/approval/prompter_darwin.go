@@ -11,10 +11,10 @@ package approval
 #include <stdlib.h>
 #include <string.h>
 
-static volatile int certd_should_cancel_modal = 0;
-static NSAlert *certd_current_alert = nil;
+static volatile int repass_should_cancel_modal = 0;
+static NSAlert *repass_current_alert = nil;
 
-static NSArray<NSString *> *certd_split_labels(const char *joined) {
+static NSArray<NSString *> *repass_split_labels(const char *joined) {
 	if (joined == NULL || joined[0] == '\0') {
 		return @[];
 	}
@@ -22,21 +22,21 @@ static NSArray<NSString *> *certd_split_labels(const char *joined) {
 	return [source componentsSeparatedByString:@"\x1f"];
 }
 
-static void certd_reset_approval_modal_cancellation(void) {
-	certd_should_cancel_modal = 0;
+static void repass_reset_approval_modal_cancellation(void) {
+	repass_should_cancel_modal = 0;
 }
 
-static void certd_request_cancel_approval_modal(void) {
-	certd_should_cancel_modal = 1;
+static void repass_request_cancel_approval_modal(void) {
+	repass_should_cancel_modal = 1;
 	dispatch_async(dispatch_get_main_queue(), ^{
-		if (certd_current_alert != nil) {
+		if (repass_current_alert != nil) {
 			[NSApp abortModal];
-			[[certd_current_alert window] orderOut:nil];
+			[[repass_current_alert window] orderOut:nil];
 		}
 	});
 }
 
-static void certd_activate_approval_app(void) {
+static void repass_activate_approval_app(void) {
 	void (^activate)(void) = ^{
 		[NSApplication sharedApplication];
 		[NSApp activateIgnoringOtherApps:YES];
@@ -48,7 +48,7 @@ static void certd_activate_approval_app(void) {
 	}
 }
 
-static long certd_prepare_approval_app(void) {
+static long repass_prepare_approval_app(void) {
 	__block long previousPolicy = (long)NSApplicationActivationPolicyAccessory;
 
 	void (^prepare)(void) = ^{
@@ -68,7 +68,7 @@ static long certd_prepare_approval_app(void) {
 	return previousPolicy;
 }
 
-static void certd_restore_approval_app(long previousPolicy) {
+static void repass_restore_approval_app(long previousPolicy) {
 	void (^restore)(void) = ^{
 		[NSApplication sharedApplication];
 		NSApplicationActivationPolicy policy = (NSApplicationActivationPolicy)previousPolicy;
@@ -83,7 +83,7 @@ static void certd_restore_approval_app(long previousPolicy) {
 	}
 }
 
-static char *certd_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex) {
+static char *repass_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex, const char *title, const char *infoFormat, const char *approveLabel, const char *cancelLabel, const char *certificateLabel, const char *passwordLabel, const char *passwordPlaceholder) {
 	__block char *result = NULL;
 	__block int didCancel = 0;
 
@@ -91,23 +91,24 @@ static char *certd_show_approval_modal(const char *origin, const char *organizat
 		@autoreleasepool {
 			[NSApplication sharedApplication];
 
-			NSArray<NSString *> *labels = certd_split_labels(labelsJoined);
+			NSArray<NSString *> *labels = repass_split_labels(labelsJoined);
 			if ([labels count] == 0) {
 				return;
 			}
 
 			NSAlert *alert = [[NSAlert alloc] init];
 			[alert setAlertStyle:NSAlertStyleWarning];
-			[alert setMessageText:@"certd 승인 요청"];
+			[alert setMessageText:[NSString stringWithUTF8String:title]];
 
-			NSString *info = [NSString stringWithFormat:@"Origin: %s\n조직: %s\n사업자번호: %s\n동작: %s\n\n사용할 인증서를 선택하고 비밀번호를 입력하세요.", origin, organization, businessNo, action];
+			NSString *infoTemplate = [NSString stringWithUTF8String:infoFormat];
+			NSString *info = [NSString stringWithFormat:infoTemplate, origin, organization, businessNo, action];
 			[alert setInformativeText:info];
-			[alert addButtonWithTitle:@"Approve"];
-			[alert addButtonWithTitle:@"Cancel"];
+			[alert addButtonWithTitle:[NSString stringWithUTF8String:approveLabel]];
+			[alert addButtonWithTitle:[NSString stringWithUTF8String:cancelLabel]];
 
 			NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 116)];
 
-			NSTextField *certLabel = [NSTextField labelWithString:@"공동인증서"];
+			NSTextField *certLabel = [NSTextField labelWithString:[NSString stringWithUTF8String:certificateLabel]];
 			[certLabel setFrame:NSMakeRect(0, 86, 120, 17)];
 			[accessory addSubview:certLabel];
 
@@ -118,24 +119,24 @@ static char *certd_show_approval_modal(const char *origin, const char *organizat
 			}
 			[accessory addSubview:popup];
 
-			NSTextField *passwordLabel = [NSTextField labelWithString:@"비밀번호"];
-			[passwordLabel setFrame:NSMakeRect(0, 30, 120, 17)];
-			[accessory addSubview:passwordLabel];
+			NSTextField *passwordFieldLabel = [NSTextField labelWithString:[NSString stringWithUTF8String:passwordLabel]];
+			[passwordFieldLabel setFrame:NSMakeRect(0, 30, 120, 17)];
+			[accessory addSubview:passwordFieldLabel];
 
 			NSSecureTextField *passwordField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 360, 24)];
-			[passwordField setPlaceholderString:@"공동인증서 비밀번호"];
+			[passwordField setPlaceholderString:[NSString stringWithUTF8String:passwordPlaceholder]];
 			[accessory addSubview:passwordField];
 
 			[alert setAccessoryView:accessory];
 			[[alert window] setInitialFirstResponder:passwordField];
-			if (certd_should_cancel_modal) {
+			if (repass_should_cancel_modal) {
 				didCancel = 1;
 				return;
 			}
 
-			certd_current_alert = alert;
+			repass_current_alert = alert;
 			NSInteger response = [alert runModal];
-			certd_current_alert = nil;
+			repass_current_alert = nil;
 			if (response != NSAlertFirstButtonReturn) {
 				didCancel = 1;
 				return;
@@ -170,6 +171,7 @@ import (
 	"unsafe"
 
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
+	"github.com/cypark/account/desktop-agent/internal/localization"
 )
 
 type Prompter struct{}
@@ -181,31 +183,44 @@ type approvalModalInput struct {
 	Action         string
 	Labels         []string
 	DefaultIndex   int
+	Copy           localization.Strings
 }
 
 var resetApprovalModalCancellation = func() {
-	C.certd_reset_approval_modal_cancellation()
+	C.repass_reset_approval_modal_cancellation()
 }
 
 var requestApprovalModalCancellation = func() {
-	C.certd_request_cancel_approval_modal()
+	C.repass_request_cancel_approval_modal()
 }
 
 var activateApprovalModalApplication = func() {
-	C.certd_activate_approval_app()
+	C.repass_activate_approval_app()
 }
 
 var prepareApprovalApplicationPolicy = func() int64 {
-	return int64(C.certd_prepare_approval_app())
+	return int64(C.repass_prepare_approval_app())
 }
 
 var restoreApprovalApplicationPolicy = func(previousPolicy int64) {
-	C.certd_restore_approval_app(C.long(previousPolicy))
+	C.repass_restore_approval_app(C.long(previousPolicy))
 }
 
 var approvalAppPolicyMu sync.Mutex
 var approvalAppPolicyDepth int
 var approvalAppPreviousPolicy int64
+var approvalModalSlot = make(chan struct{}, 1)
+
+var acquireApprovalModal = func(ctx context.Context) (func(), error) {
+	select {
+	case approvalModalSlot <- struct{}{}:
+		return func() {
+			<-approvalModalSlot
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 var prepareApprovalModalApplication = func() func() {
 	approvalAppPolicyMu.Lock()
@@ -235,19 +250,40 @@ var runApprovalModal = func(input approvalModalInput) (string, bool) {
 	businessNo := C.CString(input.BusinessNo)
 	action := C.CString(input.Action)
 	labels := C.CString(strings.Join(input.Labels, "\x1f"))
+	title := C.CString(input.Copy.ApprovalTitle)
+	infoFormat := C.CString(input.Copy.ApprovalInfoFormat)
+	approveLabel := C.CString(input.Copy.Approve)
+	cancelLabel := C.CString(input.Copy.Cancel)
+	certificateLabel := C.CString(input.Copy.CertificateLabel)
+	passwordLabel := C.CString(input.Copy.PasswordLabel)
+	passwordPlaceholder := C.CString(input.Copy.PasswordPlaceholder)
 	defer C.free(unsafe.Pointer(origin))
 	defer C.free(unsafe.Pointer(organization))
 	defer C.free(unsafe.Pointer(businessNo))
 	defer C.free(unsafe.Pointer(action))
 	defer C.free(unsafe.Pointer(labels))
+	defer C.free(unsafe.Pointer(title))
+	defer C.free(unsafe.Pointer(infoFormat))
+	defer C.free(unsafe.Pointer(approveLabel))
+	defer C.free(unsafe.Pointer(cancelLabel))
+	defer C.free(unsafe.Pointer(certificateLabel))
+	defer C.free(unsafe.Pointer(passwordLabel))
+	defer C.free(unsafe.Pointer(passwordPlaceholder))
 
-	raw := C.certd_show_approval_modal(
+	raw := C.repass_show_approval_modal(
 		origin,
 		organization,
 		businessNo,
 		action,
 		labels,
 		C.int(input.DefaultIndex),
+		title,
+		infoFormat,
+		approveLabel,
+		cancelLabel,
+		certificateLabel,
+		passwordLabel,
+		passwordPlaceholder,
 	)
 	if raw == nil {
 		return "", false
@@ -273,6 +309,11 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	if err := ctx.Err(); err != nil {
 		return httpapi.ApprovalDecision{}, err
 	}
+	releaseModal, err := acquireApprovalModal(ctx)
+	if err != nil {
+		return httpapi.ApprovalDecision{}, err
+	}
+	defer releaseModal()
 
 	joinedLabels := make([]string, 0, len(prompt.Certificates))
 	defaultIndex := 0
@@ -294,6 +335,7 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	}
 	resultCh := make(chan modalResult, 1)
 	go func() {
+		copy := localization.ForLanguage(localization.SystemLanguage())
 		businessNo := prompt.BusinessNo
 		if strings.TrimSpace(businessNo) == "" {
 			businessNo = "-"
@@ -305,6 +347,7 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 			Action:         prompt.Action,
 			Labels:         joinedLabels,
 			DefaultIndex:   defaultIndex,
+			Copy:           copy,
 		})
 		resultCh <- modalResult{packed: packed, approved: approved}
 	}()

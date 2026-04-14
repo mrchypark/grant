@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,6 +167,185 @@ func TestPrepareApprovalModalApplicationRestoresOriginalPolicyOnce(t *testing.T)
 	want := []string{"prepare", "activate", "restore:7"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func TestPromptApprovalSerializesConcurrentModals(t *testing.T) {
+	originalShow := showApprovalModal
+	originalRun := runApprovalModal
+	originalReset := resetApprovalModalCancellation
+	originalCancel := requestApprovalModalCancellation
+	defer func() {
+		showApprovalModal = originalShow
+		runApprovalModal = originalRun
+		resetApprovalModalCancellation = originalReset
+		requestApprovalModalCancellation = originalCancel
+	}()
+
+	resetApprovalModalCancellation = func() {}
+	requestApprovalModalCancellation = func() {}
+
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+	var calls atomic.Int32
+
+	showApprovalModal = func(input approvalModalInput) (string, bool) {
+		switch calls.Add(1) {
+		case 1:
+			close(firstStarted)
+			<-firstRelease
+			return "0\x1ffirst-password", true
+		case 2:
+			secondStarted <- struct{}{}
+			return "0\x1fsecond-password", true
+		default:
+			t.Fatalf("showApprovalModal called more than twice")
+			return "", false
+		}
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := NewPrompter().PromptApproval(context.Background(), approvalPromptFixture("cert-1"))
+		firstDone <- err
+	}()
+
+	<-firstStarted
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := NewPrompter().PromptApproval(context.Background(), approvalPromptFixture("cert-2"))
+		secondDone <- err
+	}()
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second modal started before first modal finished")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(firstRelease)
+
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second modal did not start after first modal finished")
+	}
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first PromptApproval returned err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first PromptApproval did not finish")
+	}
+
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second PromptApproval returned err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second PromptApproval did not finish")
+	}
+}
+
+func TestPromptApprovalCancelWhileWaitingDoesNotCancelActiveModal(t *testing.T) {
+	originalShow := showApprovalModal
+	originalRun := runApprovalModal
+	originalReset := resetApprovalModalCancellation
+	originalCancel := requestApprovalModalCancellation
+	defer func() {
+		showApprovalModal = originalShow
+		runApprovalModal = originalRun
+		resetApprovalModalCancellation = originalReset
+		requestApprovalModalCancellation = originalCancel
+	}()
+
+	resetApprovalModalCancellation = func() {}
+	cancelRequested := make(chan struct{}, 1)
+	requestApprovalModalCancellation = func() {
+		select {
+		case cancelRequested <- struct{}{}:
+		default:
+		}
+	}
+
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	var calls atomic.Int32
+	showApprovalModal = func(input approvalModalInput) (string, bool) {
+		switch calls.Add(1) {
+		case 1:
+			close(firstStarted)
+			<-firstRelease
+			return "0\x1fsecret-password", true
+		case 2:
+			t.Fatal("waiting prompt reached showApprovalModal before the active modal completed")
+			return "", false
+		default:
+			t.Fatalf("showApprovalModal called more than twice")
+			return "", false
+		}
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := NewPrompter().PromptApproval(context.Background(), approvalPromptFixture("cert-1"))
+		firstDone <- err
+	}()
+
+	<-firstStarted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := NewPrompter().PromptApproval(ctx, approvalPromptFixture("cert-2"))
+		secondDone <- err
+	}()
+
+	cancel()
+
+	select {
+	case <-cancelRequested:
+		t.Fatal("waiting prompt canceled the active modal")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("second PromptApproval err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second PromptApproval did not finish after cancellation")
+	}
+
+	close(firstRelease)
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first PromptApproval returned err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first PromptApproval did not finish")
+	}
+}
+
+func approvalPromptFixture(certificateID string) httpapi.ApprovalPrompt {
+	return httpapi.ApprovalPrompt{
+		Origin:         "http://127.0.0.1:4173",
+		Action:         "ephemeral",
+		OrganizationID: "org-1",
+		BusinessNo:     "2768603291",
+		Certificates: []npki.CertificateMetadata{{
+			ID:         certificateID,
+			CommonName: "Test Certificate",
+			BusinessNo: "2768603291",
+		}},
 	}
 }
 
