@@ -158,13 +158,15 @@ require_contains "scripts/vind-bootstrap.sh" 'ensure_runtime_image "${IMAGE_NAME
 require_contains "scripts/vind-bootstrap.sh" 'ensure_runtime_image "${TRAILBASE_IMAGE}"'
 # shellcheck disable=SC2016
 require_contains "scripts/vind-cluster.sh" 'VIND_UNTAINT_CONTROL_PLANE_NODES="${VIND_UNTAINT_CONTROL_PLANE_NODES:-1}"'
+require_contains "scripts/vind-cluster.sh" 'VIND_ALLOW_K3D_FALLBACK="${VIND_ALLOW_K3D_FALLBACK:-0}"'
 require_contains "scripts/vind-cluster.sh" 'kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-'
 require_contains "scripts/vind-cluster.sh" 'kubectl taint nodes --all node-role.kubernetes.io/master:NoSchedule-'
 require_contains "scripts/vind-cluster.sh" 'remain NoSchedule-tainted after normalization'
 # shellcheck disable=SC2016
 require_contains "scripts/vind-cluster.sh" 'vcluster create "${CLUSTER_NAME}" --driver docker --connect=false'
-require_contains "scripts/vind-cluster.sh" 'k3d cluster create "${CLUSTER_NAME}"'
-require_contains "scripts/vind-cluster.sh" 'falling back to k3d'
+require_contains "scripts/vind-cluster.sh" 'ensure_arm64_probe_image()'
+require_contains "scripts/vind-cluster.sh" 'docker pull --platform linux/arm64 alpine:latest'
+require_not_contains "scripts/vind-cluster.sh" 'echo "[vind] vcluster docker driver failed on this host; falling back to k3d" >&2'
 require_contains "scripts/vind-exec.sh" '--background-proxy=false'
 require_contains "scripts/vind-exec.sh" 'VIND_EXEC_ACTIVE=1'
 require_contains "scripts/vind-exec.sh" 'kubectl config use-context "k3d-${CLUSTER_NAME}"'

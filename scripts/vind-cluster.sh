@@ -6,6 +6,7 @@ RESET_CLUSTER="${RESET_CLUSTER:-0}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
 VIND_UNTAINT_CONTROL_PLANE_NODES="${VIND_UNTAINT_CONTROL_PLANE_NODES:-1}"
+VIND_ALLOW_K3D_FALLBACK="${VIND_ALLOW_K3D_FALLBACK:-0}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -65,6 +66,43 @@ ensure_colima_kernel_modules() {
 vind preflight failed: Colima is active but br_netfilter is not loaded.
 Run:
   colima ssh -- sudo modprobe br_netfilter
+and retry, or set VIND_COLIMA_AUTOFIX=1 to let the script attempt it automatically.
+EOF
+    exit 1
+  fi
+}
+
+docker_server_architecture() {
+  docker version -f '{{.Server.Arch}}' 2>/dev/null || true
+}
+
+probe_image_architecture() {
+  docker image inspect alpine:latest --format '{{.Architecture}}' 2>/dev/null || true
+}
+
+ensure_arm64_probe_image() {
+  if ! is_colima_runtime; then
+    return 0
+  fi
+
+  if [[ "$(docker_server_architecture)" != "arm64" ]]; then
+    return 0
+  fi
+
+  if [[ "$(probe_image_architecture)" == "arm64" ]]; then
+    return 0
+  fi
+
+  if [[ "${VIND_COLIMA_AUTOFIX}" == "1" ]]; then
+    echo "[vind] refreshing alpine:latest for arm64 probe containers" >&2
+    docker pull --platform linux/arm64 alpine:latest >/dev/null
+  fi
+
+  if [[ "$(probe_image_architecture)" != "arm64" ]]; then
+    cat >&2 <<'EOF'
+vind preflight failed: alpine:latest is not pinned to arm64 on this Colima runtime.
+Run:
+  docker pull --platform linux/arm64 alpine:latest
 and retry, or set VIND_COLIMA_AUTOFIX=1 to let the script attempt it automatically.
 EOF
     exit 1
@@ -149,11 +187,21 @@ create_cluster() {
   if grep -Fq 'failed to inspect test network container' "${create_log}" \
     && grep -Fq "requested image's platform" "${create_log}"; then
     rm -f "${create_log}"
+    if [[ "${VIND_ALLOW_K3D_FALLBACK}" != "1" ]]; then
+      cat >&2 <<'EOF'
+vind create failed due to the known docker-driver platform warning bug.
+Fix the local probe image first:
+  docker pull --platform linux/arm64 alpine:latest
+If you still want the legacy fallback behavior for this run, re-run with:
+  VIND_ALLOW_K3D_FALLBACK=1
+EOF
+      exit 1
+    fi
     have_k3d || {
       echo "vcluster create hit the known docker-driver network bug and k3d is not installed for fallback" >&2
       exit 1
     }
-    echo "[vind] vcluster docker driver failed on this host; falling back to k3d" >&2
+    echo "[vind] vcluster docker driver failed; using opt-in k3d fallback" >&2
     k3d cluster create "${CLUSTER_NAME}" --wait >/dev/null
     return 0
   fi
@@ -164,6 +212,7 @@ create_cluster() {
 
 ensure_context() {
   ensure_colima_kernel_modules
+  ensure_arm64_probe_image
 
   if [[ "${RESET_CLUSTER}" == "1" ]]; then
     delete_cluster
@@ -191,6 +240,7 @@ main() {
       ;;
     preflight)
       ensure_colima_kernel_modules
+      ensure_arm64_probe_image
       ;;
     *)
       usage

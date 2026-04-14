@@ -253,7 +253,9 @@ bash ./scripts/ci-chaos-local.sh
   - bootstrap, e2e, reduced chaos까지 단일 경로로 실행
 - `scripts/vind-cluster.sh`
   - Colima preflight
+  - ARM Colima에서는 `alpine:latest`를 arm64 probe image로 자동 보정
   - `vcluster` create/connect/delete
+  - 기본값으로는 `k3d` fallback 없이 `vind` 실패를 그대로 보고한다
   - control-plane taint normalization
 - `scripts/vind-exec.sh`
   - `vcluster connect ... -- <command>`를 phase 단위로 감싼다
@@ -267,6 +269,7 @@ bash ./scripts/ci-chaos-local.sh
 
 - `scripts/k3d-e2e.sh`, `scripts/k3d-chaos.sh`는 내부 phase 구현체로 남아 있지만, 로컬 진입점으로 직접 쓰지 않는다.
 - 로컬/CI 회귀 검증은 `vind` 경로만 신뢰한다.
+- Colima ARM 환경에서 `vind` create가 platform warning으로 실패하면 먼저 `docker pull --platform linux/arm64 alpine:latest`를 확인한다.
 
 ### production compose
 
