@@ -222,6 +222,25 @@ func TestSplitRootListPreservesWindowsDrivePaths(t *testing.T) {
 	}
 }
 
+func TestDiscoverDefaultRootsForDarwinIncludesMountedNPKIRoots(t *testing.T) {
+	home := t.TempDir()
+	volumesRoot := t.TempDir()
+	volumeNPKI := filepath.Join(volumesRoot, "Lexar", "NPKI")
+	if err := os.MkdirAll(volumeNPKI, 0o755); err != nil {
+		t.Fatalf("mkdir mounted npki root: %v", err)
+	}
+
+	got := discoverDefaultRootsFor("darwin", home, volumesRoot)
+	want := filepath.Clean(volumeNPKI)
+
+	for _, root := range got {
+		if root == want {
+			return
+		}
+	}
+	t.Fatalf("discoverDefaultRootsFor() = %#v, want mounted root %q included", got, want)
+}
+
 type fixtureOptions struct {
 	dirName         string
 	password        string

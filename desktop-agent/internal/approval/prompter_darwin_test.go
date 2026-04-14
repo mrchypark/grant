@@ -75,16 +75,19 @@ func TestPromptApprovalCancelsModalWhenContextIsDone(t *testing.T) {
 func TestPromptApprovalActivatesAppBeforeShowingModal(t *testing.T) {
 	originalShow := showApprovalModal
 	originalRun := runApprovalModal
-	originalActivate := activateApprovalModalApplication
+	originalPrepare := prepareApprovalModalApplication
 	defer func() {
 		showApprovalModal = originalShow
 		runApprovalModal = originalRun
-		activateApprovalModalApplication = originalActivate
+		prepareApprovalModalApplication = originalPrepare
 	}()
 
-	events := make([]string, 0, 2)
-	activateApprovalModalApplication = func() {
-		events = append(events, "activate")
+	events := make([]string, 0, 3)
+	prepareApprovalModalApplication = func() func() {
+		events = append(events, "prepare")
+		return func() {
+			events = append(events, "restore")
+		}
 	}
 	runApprovalModal = func(input approvalModalInput) (string, bool) {
 		events = append(events, "show")
@@ -111,7 +114,7 @@ func TestPromptApprovalActivatesAppBeforeShowingModal(t *testing.T) {
 	if decision.Password != "secret-password" {
 		t.Fatalf("password = %q, want secret-password", decision.Password)
 	}
-	if len(events) != 2 || events[0] != "activate" || events[1] != "show" {
-		t.Fatalf("events = %#v, want [activate show]", events)
+	if len(events) != 3 || events[0] != "prepare" || events[1] != "show" || events[2] != "restore" {
+		t.Fatalf("events = %#v, want [prepare show restore]", events)
 	}
 }

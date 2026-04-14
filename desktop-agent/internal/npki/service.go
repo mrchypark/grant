@@ -362,7 +362,11 @@ func discoverDefaultRoots() []string {
 		return nil
 	}
 
-	switch runtime.GOOS {
+	return discoverDefaultRootsFor(runtime.GOOS, home, "/Volumes")
+}
+
+func discoverDefaultRootsFor(goos string, home string, volumesRoot string) []string {
+	switch goos {
 	case "windows":
 		localAppData := os.Getenv("LOCALAPPDATA")
 		appData := os.Getenv("APPDATA")
@@ -373,17 +377,42 @@ func discoverDefaultRoots() []string {
 			filepath.Join(appData, "NPKI"),
 		})
 	case "darwin":
-		return normalizeRoots([]string{
+		roots := []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
 			filepath.Join(home, "Library", "Preferences", "NPKI"),
-		})
+		}
+		roots = append(roots, discoverMountedNPKIRoots(volumesRoot)...)
+		return normalizeRoots(roots)
 	default:
 		return normalizeRoots([]string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
 		})
 	}
+}
+
+func discoverMountedNPKIRoots(volumesRoot string) []string {
+	if strings.TrimSpace(volumesRoot) == "" {
+		return nil
+	}
+
+	entries, err := os.ReadDir(volumesRoot)
+	if err != nil {
+		return nil
+	}
+
+	roots := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		npkiRoot := filepath.Join(volumesRoot, entry.Name(), "NPKI")
+		if info, err := os.Stat(npkiRoot); err == nil && info.IsDir() {
+			roots = append(roots, npkiRoot)
+		}
+	}
+	return roots
 }
 
 func splitRootList(value string) []string {

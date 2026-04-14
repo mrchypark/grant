@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { CertdWebSdk } from "./index.ts";
@@ -280,6 +282,45 @@ test("registerStored() delegates approval and registration to the local agent", 
   }
 });
 
+test("runEphemeral() allows omitting businessNo so the server can use the linked organization number", async () => {
+  const mock = installFetchMock([
+    () => textResponse("ok"),
+    () =>
+      jsonResponse({
+        sessionToken: "agent-session-omitted-business-no",
+        expiresAt: "2026-04-09T00:05:00Z",
+      }, 201),
+    () =>
+      jsonResponse({
+        id: "sync-omitted-business-no",
+        organizationId: "org-1",
+        plantId: "FAC-001",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 0,
+      }, 202),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    const run = await sdk.runEphemeral("org-1", {});
+
+    assert.equal(run.id, "sync-omitted-business-no");
+    assert.deepEqual(JSON.parse(String(mock.calls[2].init?.body)), {
+      gatewayBaseUrl: "http://gateway.local",
+      organizationId: "org-1",
+    });
+  } finally {
+    mock.restore();
+  }
+});
+
 test("runEphemeral() reopens the local agent session after a 401 response", async () => {
   const mock = installFetchMock([
     () => textResponse("ok"),
@@ -377,25 +418,6 @@ test("runStored() issues a crawl task token and starts the stored crawl", async 
   }
 });
 
-test("runEphemeral() rejects when businessNo is missing", async () => {
-  const mock = installFetchMock([() => textResponse("ok")]);
-
-  try {
-    const sdk = new CertdWebSdk({
-      gatewayBaseUrl: "http://gateway.local",
-      agentBaseUrl: "http://127.0.0.1:8765",
-    });
-
-    await assert.rejects(
-      () => sdk.runEphemeral("org-1", { businessNo: "" }),
-      /businessNo is required/i,
-    );
-    assert.equal(mock.calls.length, 1);
-  } finally {
-    mock.restore();
-  }
-});
-
 test("runEphemeral() rejects when the local agent health check fails", async () => {
   const mock = installFetchMock([() => textResponse("down", 503)]);
 
@@ -417,4 +439,14 @@ test("runEphemeral() rejects when the local agent health check fails", async () 
   } finally {
     mock.restore();
   }
+});
+
+test("browser example defaults the agent base URL to the loopback desktop agent", async () => {
+  const htmlPath = fileURLToPath(new URL("../examples/browser/index.html", import.meta.url));
+  const html = await readFile(htmlPath, "utf8");
+
+  assert.match(
+    html,
+    /<input id="agentBaseUrl" value="http:\/\/127\.0\.0\.1:8765" \/>/,
+  );
 });
