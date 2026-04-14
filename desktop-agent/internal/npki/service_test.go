@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,7 +232,7 @@ func TestDiscoverDefaultRootsForDarwinIncludesMountedNPKIRoots(t *testing.T) {
 		t.Fatalf("mkdir mounted npki root: %v", err)
 	}
 
-	got := discoverDefaultRootsFor("darwin", home, volumesRoot)
+	got := discoverDefaultRootsFor(context.Background(), "darwin", home, volumesRoot)
 	want := filepath.Clean(volumeNPKI)
 
 	for _, root := range got {
@@ -251,7 +252,7 @@ func TestDefaultDiscoveredRootsTTLIsLongEnough(t *testing.T) {
 func TestServiceRefreshDiscoveredRootsClosesOwnedDoneChannel(t *testing.T) {
 	service := NewService(ServiceConfig{
 		AutoDiscover: true,
-		DiscoverRoots: func() []string {
+		DiscoverRoots: func(context.Context) []string {
 			return nil
 		},
 	})
@@ -311,7 +312,7 @@ func TestServiceRefreshesAutoDiscoveredRootsAfterTTL(t *testing.T) {
 		Now: func() time.Time {
 			return now
 		},
-		DiscoverRoots: func() []string {
+		DiscoverRoots: func(context.Context) []string {
 			return append([]string(nil), discoveredRoots...)
 		},
 	})
@@ -357,7 +358,7 @@ func TestServiceReturnsStaticRootsWhenColdDiscoveryExceedsInitialWait(t *testing
 		AutoDiscover:         true,
 		RootsTTL:             5 * time.Second,
 		InitialDiscoveryWait: 20 * time.Millisecond,
-		DiscoverRoots: func() []string {
+		DiscoverRoots: func(context.Context) []string {
 			<-releaseRefresh
 			return []string{mountedRoot}
 		},
@@ -407,7 +408,7 @@ func TestServiceReturnsStaleRootsWhileRefreshRunsInBackground(t *testing.T) {
 		Now: func() time.Time {
 			return now
 		},
-		DiscoverRoots: func() []string {
+		DiscoverRoots: func(context.Context) []string {
 			return append([]string(nil), discoveredRoots...)
 		},
 	})
@@ -417,7 +418,7 @@ func TestServiceReturnsStaleRootsWhileRefreshRunsInBackground(t *testing.T) {
 	now = now.Add(6 * time.Second)
 	refreshStarted := make(chan struct{}, 1)
 	releaseRefresh := make(chan struct{})
-	service.discoverRoots = func() []string {
+	service.discoverRoots = func(context.Context) []string {
 		refreshStarted <- struct{}{}
 		<-releaseRefresh
 		return []string{secondRoot}
@@ -479,7 +480,7 @@ func TestServiceMergesStaticRootsWithAsyncDiscoveredRoots(t *testing.T) {
 		Roots:        []string{staticRoot},
 		AutoDiscover: true,
 		RootsTTL:     5 * time.Second,
-		DiscoverRoots: func() []string {
+		DiscoverRoots: func(context.Context) []string {
 			return []string{mountedRoot}
 		},
 	})
@@ -492,6 +493,61 @@ func TestServiceMergesStaticRootsWithAsyncDiscoveredRoots(t *testing.T) {
 		t.Fatalf("initial certificate IDs = %#v, want both static and mounted roots %#v", ids, []string{staticCert.path, mountedCert.path})
 	}
 	waitForCertificateIDs(t, service, []string{staticCert.path, mountedCert.path})
+}
+
+func TestServiceRetriesDiscoveryAfterTimeout(t *testing.T) {
+	staticRoot := t.TempDir()
+	mountedRoot := t.TempDir()
+	staticCert := writeFixtureBundle(t, staticRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Static Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{69, 70, 71, 72},
+	})
+	mountedCert := writeFixtureBundle(t, mountedRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Mounted Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{73, 74, 75, 76},
+	})
+
+	var calls atomic.Int32
+	service := NewService(ServiceConfig{
+		Roots:                []string{staticRoot},
+		AutoDiscover:         true,
+		RootsTTL:             5 * time.Second,
+		InitialDiscoveryWait: 20 * time.Millisecond,
+		DiscoveryTimeout:     30 * time.Millisecond,
+		DiscoverRoots: func(ctx context.Context) []string {
+			if calls.Add(1) == 1 {
+				<-ctx.Done()
+				return []string{mountedRoot}
+			}
+			return []string{mountedRoot}
+		},
+	})
+
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("initial ListCertificates() error = %v", err)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path}) {
+		t.Fatalf("initial certificate IDs = %#v, want static roots only %#v", ids, []string{staticCert.path})
+	}
+
+	waitForRefreshIdle(t, service)
+	if gotCalls := calls.Load(); gotCalls != 1 {
+		t.Fatalf("discoverRoots call count = %d, want 1 after timed-out refresh", gotCalls)
+	}
+
+	waitForCertificateIDs(t, service, []string{staticCert.path, mountedCert.path})
+	if gotCalls := calls.Load(); gotCalls < 2 {
+		t.Fatalf("discoverRoots call count = %d, want retry after timeout", gotCalls)
+	}
 }
 
 func TestServiceAutoDiscoverUsesDefaultRootsEvenWithStaticRoots(t *testing.T) {
@@ -518,7 +574,7 @@ func TestServiceAutoDiscoverUsesDefaultRootsEvenWithStaticRoots(t *testing.T) {
 	defer func() {
 		defaultDiscoverRoots = originalDefaultDiscoverRoots
 	}()
-	defaultDiscoverRoots = func() []string {
+	defaultDiscoverRoots = func(context.Context) []string {
 		return []string{mountedRoot}
 	}
 
@@ -534,6 +590,25 @@ func TestServiceAutoDiscoverUsesDefaultRootsEvenWithStaticRoots(t *testing.T) {
 	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path, mountedCert.path}) {
 		t.Fatalf("certificate IDs = %#v, want %#v", ids, []string{staticCert.path, mountedCert.path})
 	}
+}
+
+func waitForRefreshIdle(t *testing.T, service *Service) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		service.mu.Lock()
+		refreshing := service.refreshing
+		service.mu.Unlock()
+		if !refreshing {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	t.Fatalf("service refresh remained active: refreshing=%v", service.refreshing)
 }
 
 func waitForCertificateIDs(t *testing.T, service *Service, want []string) {

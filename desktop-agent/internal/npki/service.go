@@ -46,7 +46,8 @@ type ServiceConfig struct {
 	AutoDiscover         bool
 	RootsTTL             time.Duration
 	InitialDiscoveryWait time.Duration
-	DiscoverRoots        func() []string
+	DiscoveryTimeout     time.Duration
+	DiscoverRoots        func(context.Context) []string
 	Now                  func() time.Time
 }
 
@@ -83,10 +84,11 @@ type SignResult struct {
 type Service struct {
 	roots []string
 
-	rootsTTL      time.Duration
-	initialWait   time.Duration
-	discoverRoots func() []string
-	now           func() time.Time
+	rootsTTL         time.Duration
+	initialWait      time.Duration
+	discoveryTimeout time.Duration
+	discoverRoots    func(context.Context) []string
+	now              func() time.Time
 
 	mu           sync.Mutex
 	cachedRoots  []string
@@ -98,6 +100,7 @@ type Service struct {
 
 const defaultDiscoveredRootsTTL = 60 * time.Second
 const defaultInitialDiscoveryWait = 250 * time.Millisecond
+const defaultDiscoveryTimeout = 2 * time.Second
 
 func NewService(config ServiceConfig) *Service {
 	service := &Service{
@@ -115,6 +118,10 @@ func NewService(config ServiceConfig) *Service {
 		service.initialWait = config.InitialDiscoveryWait
 		if service.initialWait <= 0 {
 			service.initialWait = defaultInitialDiscoveryWait
+		}
+		service.discoveryTimeout = config.DiscoveryTimeout
+		if service.discoveryTimeout <= 0 {
+			service.discoveryTimeout = defaultDiscoveryTimeout
 		}
 		service.discoverRoots = config.DiscoverRoots
 		if service.discoverRoots == nil {
@@ -136,11 +143,12 @@ func DefaultConfig() ServiceConfig {
 
 	roots := defaultLocalRootsFor(runtime.GOOS, home)
 	return ServiceConfig{
-		Roots:        roots,
-		AutoDiscover: runtime.GOOS == "darwin",
-		RootsTTL:     defaultDiscoveredRootsTTL,
-		DiscoverRoots: func() []string {
-			return discoverMountedNPKIRoots("/Volumes")
+		Roots:            roots,
+		AutoDiscover:     runtime.GOOS == "darwin",
+		RootsTTL:         defaultDiscoveredRootsTTL,
+		DiscoveryTimeout: defaultDiscoveryTimeout,
+		DiscoverRoots: func(ctx context.Context) []string {
+			return discoverMountedNPKIRoots(ctx, "/Volumes")
 		},
 	}
 }
@@ -374,19 +382,60 @@ func (s *Service) waitForDiscoveredRoots(done <-chan struct{}, fallback []string
 }
 
 func (s *Service) refreshDiscoveredRoots() {
-	roots := normalizeRoots(s.discoverRoots())
+	ctx, cancel := context.WithTimeout(context.Background(), s.discoveryTimeout)
+	defer cancel()
+
+	roots, completed := s.runDiscoveredRoots(ctx)
 	expiresAt := s.now().Add(s.rootsTTL)
 
 	s.mu.Lock()
 	doneCh := s.refreshDone
-	s.cachedRoots = roots
-	s.cacheExpires = expiresAt
-	s.rootsCached = true
+	if completed {
+		s.cachedRoots = roots
+		s.cacheExpires = expiresAt
+		s.rootsCached = true
+	} else if s.rootsCached {
+		s.cacheExpires = expiresAt
+	}
 	s.refreshing = false
 	s.refreshDone = nil
 	s.mu.Unlock()
 	if doneCh != nil {
 		close(doneCh)
+	}
+}
+
+func (s *Service) runDiscoveredRoots(ctx context.Context) ([]string, bool) {
+	type discoveryResult struct {
+		roots []string
+		ok    bool
+	}
+
+	results := make(chan discoveryResult, 1)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("npki discover roots panic: %v", recovered)
+				select {
+				case results <- discoveryResult{}:
+				case <-ctx.Done():
+				}
+			}
+		}()
+
+		roots := normalizeRoots(s.discoverRoots(ctx))
+		select {
+		case results <- discoveryResult{roots: roots, ok: true}:
+		case <-ctx.Done():
+		}
+	}()
+
+	select {
+	case result := <-results:
+		return result.roots, result.ok
+	case <-ctx.Done():
+		log.Printf("npki discover roots timed out after %s", s.discoveryTimeout)
+		return nil, false
 	}
 }
 
@@ -484,7 +533,7 @@ func normalizeRoots(roots []string) []string {
 	return normalized
 }
 
-func discoverDefaultRoots() []string {
+func discoverDefaultRoots(ctx context.Context) []string {
 	if raw := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_NPKI_DIRS")); raw != "" {
 		return splitRootList(raw)
 	}
@@ -494,13 +543,13 @@ func discoverDefaultRoots() []string {
 		return nil
 	}
 
-	return discoverDefaultRootsFor(runtime.GOOS, home, "/Volumes")
+	return discoverDefaultRootsFor(ctx, runtime.GOOS, home, "/Volumes")
 }
 
-func discoverDefaultRootsFor(goos string, home string, volumesRoot string) []string {
+func discoverDefaultRootsFor(ctx context.Context, goos string, home string, volumesRoot string) []string {
 	roots := defaultLocalRootsFor(goos, home)
 	if goos == "darwin" {
-		roots = append(roots, discoverMountedNPKIRoots(volumesRoot)...)
+		roots = append(roots, discoverMountedNPKIRoots(ctx, volumesRoot)...)
 	}
 	return normalizeRoots(roots)
 }
@@ -530,8 +579,11 @@ func defaultLocalRootsFor(goos string, home string) []string {
 	}
 }
 
-func discoverMountedNPKIRoots(volumesRoot string) []string {
+func discoverMountedNPKIRoots(ctx context.Context, volumesRoot string) []string {
 	if strings.TrimSpace(volumesRoot) == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
 		return nil
 	}
 
@@ -542,6 +594,9 @@ func discoverMountedNPKIRoots(volumesRoot string) []string {
 
 	roots := make([]string, 0, len(entries))
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return roots
+		}
 		if !entry.IsDir() {
 			continue
 		}
