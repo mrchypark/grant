@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAMESPACE="${NAMESPACE:-certd}"
 LOCAL_PORT="${LOCAL_PORT:-18080}"
 LEARNER_LOCAL_PORT="${LEARNER_LOCAL_PORT:-18081}"
+TRAILBASE_LOCAL_PORT="${TRAILBASE_LOCAL_PORT:-14000}"
 TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL:-trailbase-user@example.com}"
 TRAILBASE_USER_PASSWORD="${TRAILBASE_USER_PASSWORD:-secret}"
 BOOTSTRAP_ORGANIZATION_ID="${BOOTSTRAP_ORGANIZATION_ID:-conalog-account}"
@@ -39,6 +40,8 @@ TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT_SECONDS="${TRAILBASE_RECOVERY_ROLLOUT_TIMEOUT
 TRAILBASE_RECOVERY_LOGIN_RETRIES="${TRAILBASE_RECOVERY_LOGIN_RETRIES:-20}"
 TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS="${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS:-2}"
 
+declare -a RESERVED_LOCAL_PORTS=()
+
 need() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "missing command: $1" >&2
@@ -50,6 +53,79 @@ need kubectl
 need curl
 need jq
 need base64
+
+port_is_reserved() {
+  local port="$1"
+  local reserved_port
+  for reserved_port in "${RESERVED_LOCAL_PORTS[@]:-}"; do
+    if [[ "${reserved_port}" == "${port}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+port_is_available() {
+  local port="$1"
+  if port_is_reserved "${port}"; then
+    return 1
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 1
+    fi
+    return 0
+  fi
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket() as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+reserve_local_port() {
+  local requested_port="$1"
+  local label="$2"
+  local candidate_port=""
+  local offset
+  for offset in $(seq 0 49); do
+    candidate_port="$((requested_port + offset))"
+    if port_is_available "${candidate_port}"; then
+      RESERVED_LOCAL_PORTS+=("${candidate_port}")
+      if [[ "${candidate_port}" != "${requested_port}" ]]; then
+        echo "[ports] ${label} local port ${requested_port} busy; using ${candidate_port}" >&2
+      fi
+      printf '%s' "${candidate_port}"
+      return 0
+    fi
+  done
+  echo "failed to reserve local port for ${label} near ${requested_port}" >&2
+  exit 1
+}
+
+validate_certd_health() {
+  local body="$1"
+  jq -e '
+    .status == "ok" and
+    (.readReady | type == "boolean") and
+    (.writeReady | type == "boolean") and
+    (.runtimeMode | type == "string") and
+    (.defaultReadConsistency | type == "string")
+  ' >/dev/null <<<"${body}"
+}
+
+validate_trailbase_health() {
+  local body="${1//$'\r'/}"
+  [[ "$(printf '%s' "${body}" | tr '[:upper:]' '[:lower:]')" == "ok" ]]
+}
 
 retry_capture() {
   local captured_output=""
@@ -75,6 +151,9 @@ retry_capture_into() {
     if [[ -n "${learner_pf_pid}" ]]; then
       start_learner_port_forward >/dev/null 2>&1 || true
     fi
+    if [[ -n "${trailbase_pf_pid}" ]]; then
+      start_trailbase_port_forward >/dev/null 2>&1 || true
+    fi
     : >"${capture_file}"
     sleep "${delay}"
   done
@@ -91,10 +170,16 @@ if [[ -z "${CERTD_TRAILBASE_CACHE_TTL_SECONDS}" ]]; then
 fi
 CERTD_TRAILBASE_CACHE_TTL_SECONDS="${CERTD_TRAILBASE_CACHE_TTL_SECONDS:-45}"
 
+LOCAL_PORT="$(reserve_local_port "${LOCAL_PORT}" "certd")"
+LEARNER_LOCAL_PORT="$(reserve_local_port "${LEARNER_LOCAL_PORT}" "learner")"
+TRAILBASE_LOCAL_PORT="$(reserve_local_port "${TRAILBASE_LOCAL_PORT}" "trailbase")"
+
 pf_pid=""
 port_forward_log="$(mktemp)"
 learner_pf_pid=""
 learner_port_forward_log="$(mktemp)"
+trailbase_pf_pid=""
+trailbase_port_forward_log="$(mktemp)"
 chaos_load_pid=""
 chaos_phase_file=""
 
@@ -108,11 +193,15 @@ cleanup() {
   if [[ -n "${learner_pf_pid}" ]]; then
     kill "${learner_pf_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${trailbase_pf_pid}" ]]; then
+    kill "${trailbase_pf_pid}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${chaos_phase_file}" ]]; then
     rm -f "${chaos_phase_file}"
   fi
   rm -f "${port_forward_log}"
   rm -f "${learner_port_forward_log}"
+  rm -f "${trailbase_port_forward_log}"
 }
 trap cleanup EXIT
 
@@ -122,11 +211,15 @@ hiqlite_api_secret() {
 
 wait_for_http() {
   local url="$1"
-  local attempts="${2:-60}"
-  local delay="${3:-2}"
+  local validator="${2:-}"
+  local attempts="${3:-60}"
+  local delay="${4:-2}"
+  local body=""
   for _ in $(seq 1 "${attempts}"); do
-    if curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "${url}" >/dev/null 2>&1; then
-      return 0
+    if body="$(curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "${url}" 2>/dev/null)"; then
+      if [[ -z "${validator}" ]] || "${validator}" "${body}"; then
+        return 0
+      fi
     fi
     sleep "${delay}"
   done
@@ -151,11 +244,21 @@ stop_port_forward() {
 }
 
 ensure_local_api() {
-  curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz" >/dev/null 2>&1
+  local body
+  body="$(curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LOCAL_PORT}/healthz")" || return 1
+  validate_certd_health "${body}"
 }
 
 ensure_learner_api() {
-  curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1
+  local body
+  body="$(curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz")" || return 1
+  validate_certd_health "${body}"
+}
+
+ensure_trailbase_api() {
+  local body
+  body="$(curl -fsS --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" "http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/healthcheck")" || return 1
+  validate_trailbase_health "${body}"
 }
 
 ensure_trailbase_online() {
@@ -216,8 +319,10 @@ start_chaos_load() {
 
   start_port_forward
   start_learner_port_forward
+  start_trailbase_port_forward
   ensure_local_api
   ensure_learner_api
+  ensure_trailbase_api
 
   chaos_phase_file="${CERTD_CHAOS_LOAD_PHASE_FILE:-$(mktemp "${TMPDIR:-/tmp}/k3d-chaos-phase.XXXXXX")}"
   set_chaos_phase "pre-disruption"
@@ -226,6 +331,7 @@ start_chaos_load() {
   WORKLOAD_PHASE_FILE="${chaos_phase_file}" \
   WORKLOAD_VOTER_LOCAL_PORT="${LOCAL_PORT}" \
   WORKLOAD_LEARNER_LOCAL_PORT="${LEARNER_LOCAL_PORT}" \
+  WORKLOAD_TRAILBASE_LOCAL_PORT="${TRAILBASE_LOCAL_PORT}" \
   WORKLOAD_MANAGE_PORT_FORWARD=0 \
   CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
   TRAILBASE_USER_EMAIL="${TRAILBASE_USER_EMAIL}" \
@@ -244,7 +350,7 @@ start_port_forward() {
   : >"${port_forward_log}"
   kubectl -n "${NAMESPACE}" port-forward svc/certd "${LOCAL_PORT}:80" >"${port_forward_log}" 2>&1 &
   pf_pid=$!
-  if ! wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz"; then
+  if ! wait_for_http "http://127.0.0.1:${LOCAL_PORT}/healthz" validate_certd_health; then
     echo "[chaos] voter port-forward failed" >&2
     tail -n 50 "${port_forward_log}" >&2 || true
     return 1
@@ -259,9 +365,24 @@ start_learner_port_forward() {
   : >"${learner_port_forward_log}"
   kubectl -n "${NAMESPACE}" port-forward "svc/${LEARNER_DEPLOYMENT}" "${LEARNER_LOCAL_PORT}:8080" >"${learner_port_forward_log}" 2>&1 &
   learner_pf_pid=$!
-  if ! wait_for_http "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz"; then
+  if ! wait_for_http "http://127.0.0.1:${LEARNER_LOCAL_PORT}/healthz" validate_certd_health; then
     echo "[chaos] learner port-forward failed" >&2
     tail -n 50 "${learner_port_forward_log}" >&2 || true
+    return 1
+  fi
+}
+
+start_trailbase_port_forward() {
+  if [[ -n "${trailbase_pf_pid}" ]]; then
+    stop_port_forward "${trailbase_pf_pid}"
+    trailbase_pf_pid=""
+  fi
+  : >"${trailbase_port_forward_log}"
+  kubectl -n "${NAMESPACE}" port-forward svc/trailbase "${TRAILBASE_LOCAL_PORT}:4000" >"${trailbase_port_forward_log}" 2>&1 &
+  trailbase_pf_pid=$!
+  if ! wait_for_http "http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/healthcheck" validate_trailbase_health; then
+    echo "[chaos] trailbase port-forward failed" >&2
+    tail -n 50 "${trailbase_port_forward_log}" >&2 || true
     return 1
   fi
 }
@@ -394,9 +515,9 @@ seed_trailbase_user() {
 }
 
 login_trailbase() {
-  ensure_local_api
+  ensure_trailbase_api
   curl_certd -X POST \
-    "http://127.0.0.1:${LOCAL_PORT}/api/auth/v1/login" \
+    "http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/auth/v1/login" \
     -H 'content-type: application/json' \
     --data-binary "$(jq -n \
       --arg email "${TRAILBASE_USER_EMAIL}" \
@@ -858,9 +979,10 @@ scenario_learner_restart() {
 }
 
 scenario_trailbase_cache_ttl() {
-  local auth_token="$1"
-  local active_org="$2"
-  local facility_code="$3"
+  local __result_var="$1"
+  local auth_token="$2"
+  local active_org="$3"
+  local facility_code="$4"
 
   set_chaos_phase "trailbase-down"
   echo "[chaos] trailbase scale down + auth cache ttl" >&2
@@ -898,8 +1020,7 @@ scenario_trailbase_cache_ttl() {
   observe_core_api "trailbase-recovered" "${recovered_token}" "${active_org}" >&2
   inspect_plant "${recovered_token}" "${active_org}" "${facility_code}" | jq >&2
   set_chaos_phase "post-trailbase-recovery"
-
-  printf '%s\n' "${recovered_token}"
+  printf -v "${__result_var}" '%s' "${recovered_token}"
 }
 
 scenario_minio_restart() {
@@ -925,6 +1046,7 @@ main() {
   ensure_no_restore_mode
   ensure_trailbase_online
   start_port_forward
+  start_trailbase_port_forward
   seed_trailbase_user
 
   retry_capture_into auth_token 20 2 login_trailbase
@@ -960,6 +1082,7 @@ main() {
   echo "[baseline] plant"
   echo "${baseline_plant}" | jq
   local inspect_json
+  local recovered_auth_token=""
   retry_capture_into inspect_json 20 2 inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}"
   printf '%s\n' "${inspect_json}" | jq
   retry_capture 20 2 trigger_backup
@@ -974,7 +1097,8 @@ main() {
     echo "[skip] learner-voter partition scenario disabled; set CERTD_CHAOS_INCLUDE_LEARNER_PARTITION=1 to include it"
   fi
   scenario_learner_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
-  auth_token="$(scenario_trailbase_cache_ttl "${auth_token}" "${active_org}" "${baseline_facility_code}")"
+  scenario_trailbase_cache_ttl recovered_auth_token "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  auth_token="${recovered_auth_token}"
   if [[ "${CERTD_CHAOS_INCLUDE_MINIO}" == "1" ]]; then
     scenario_minio_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
   else

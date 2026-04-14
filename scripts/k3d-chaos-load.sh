@@ -13,6 +13,7 @@ WORKLOAD_MAX_CYCLES="${WORKLOAD_MAX_CYCLES:-0}"
 WORKLOAD_RUN_ID="${WORKLOAD_RUN_ID:-$(date +%s)}"
 WORKLOAD_VOTER_LOCAL_PORT="${WORKLOAD_VOTER_LOCAL_PORT:-18090}"
 WORKLOAD_LEARNER_LOCAL_PORT="${WORKLOAD_LEARNER_LOCAL_PORT:-18091}"
+WORKLOAD_TRAILBASE_LOCAL_PORT="${WORKLOAD_TRAILBASE_LOCAL_PORT:-14090}"
 WORKLOAD_VOTER_SERVICE="${WORKLOAD_VOTER_SERVICE:-certd}"
 WORKLOAD_LEARNER_SERVICE="${WORKLOAD_LEARNER_SERVICE:-certd-learner-1}"
 WORKLOAD_MANAGE_PORT_FORWARD="${WORKLOAD_MANAGE_PORT_FORWARD:-1}"
@@ -21,6 +22,8 @@ WORKLOAD_PHASE_FILE="${WORKLOAD_PHASE_FILE:-}"
 HTTP_CURL_TIMEOUT_SECONDS="${HTTP_CURL_TIMEOUT_SECONDS:-5}"
 HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"
 SANITIZED_RUN_ID="${WORKLOAD_RUN_ID//[^[:alnum:]]/}"
+
+declare -a RESERVED_LOCAL_PORTS=()
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -33,10 +36,90 @@ need kubectl
 need curl
 need jq
 
+port_is_reserved() {
+  local port="$1"
+  local reserved_port
+  for reserved_port in "${RESERVED_LOCAL_PORTS[@]:-}"; do
+    if [[ "${reserved_port}" == "${port}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+port_is_available() {
+  local port="$1"
+  if port_is_reserved "${port}"; then
+    return 1
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 1
+    fi
+    return 0
+  fi
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket() as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+reserve_local_port() {
+  local requested_port="$1"
+  local label="$2"
+  local candidate_port=""
+  local offset
+  for offset in $(seq 0 49); do
+    candidate_port="$((requested_port + offset))"
+    if port_is_available "${candidate_port}"; then
+      RESERVED_LOCAL_PORTS+=("${candidate_port}")
+      if [[ "${candidate_port}" != "${requested_port}" ]]; then
+        echo "[ports] ${label} local port ${requested_port} busy; using ${candidate_port}" >&2
+      fi
+      printf '%s' "${candidate_port}"
+      return 0
+    fi
+  done
+  echo "failed to reserve local port for ${label} near ${requested_port}" >&2
+  exit 1
+}
+
+validate_certd_health() {
+  local body="$1"
+  jq -e '
+    .status == "ok" and
+    (.readReady | type == "boolean") and
+    (.writeReady | type == "boolean") and
+    (.runtimeMode | type == "string") and
+    (.defaultReadConsistency | type == "string")
+  ' >/dev/null <<<"${body}"
+}
+
+validate_trailbase_health() {
+  local body="${1//$'\r'/}"
+  [[ "$(printf '%s' "${body}" | tr '[:upper:]' '[:lower:]')" == "ok" ]]
+}
+
 voter_pf_pid=""
 learner_pf_pid=""
+trailbase_pf_pid=""
+if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" == "1" ]]; then
+  WORKLOAD_VOTER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_VOTER_LOCAL_PORT}" "voter")"
+  WORKLOAD_LEARNER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_LEARNER_LOCAL_PORT}" "learner")"
+  WORKLOAD_TRAILBASE_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_TRAILBASE_LOCAL_PORT}" "trailbase")"
+fi
 voter_pf_log="$(mktemp)"
 learner_pf_log="$(mktemp)"
+trailbase_pf_log="$(mktemp)"
 workload_should_stop=0
 
 cleanup() {
@@ -47,21 +130,30 @@ cleanup() {
   if [[ -n "${learner_pf_pid}" ]]; then
     kill "${learner_pf_pid}" >/dev/null 2>&1 || true
   fi
-  rm -f "${voter_pf_log}" "${learner_pf_log}"
+  if [[ -n "${trailbase_pf_pid}" ]]; then
+    kill "${trailbase_pf_pid}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${voter_pf_log}" "${learner_pf_log}" "${trailbase_pf_log}"
 }
 trap cleanup EXIT
 trap 'workload_should_stop=1' INT TERM
 
 wait_for_http() {
   local url="$1"
-  local attempts="${2:-60}"
-  local delay="${3:-1}"
+  local validator="${2:-}"
+  local attempts="${3:-60}"
+  local delay="${4:-1}"
+  local body=""
   for _ in $(seq 1 "${attempts}"); do
-    if curl -fsS \
+    if body="$(
+      curl -fsS \
       --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
       --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
-      "${url}" >/dev/null 2>&1; then
-      return 0
+      "${url}" 2>/dev/null
+    )"; then
+      if [[ -z "${validator}" ]] || "${validator}" "${body}"; then
+        return 0
+      fi
     fi
     sleep "${delay}"
   done
@@ -91,9 +183,26 @@ start_port_forward() {
   : >"${log_file}"
   kubectl -n "${NAMESPACE}" port-forward "svc/${service_name}" "${local_port}:${target_port}" >"${log_file}" 2>&1 &
   printf -v "${pid_var_name}" '%s' "$!"
-  if ! wait_for_http "http://127.0.0.1:${local_port}/healthz"; then
+  if ! wait_for_http "http://127.0.0.1:${local_port}/healthz" validate_certd_health; then
     echo "[workload] port-forward failed for svc/${service_name}" >&2
     tail -n 50 "${log_file}" >&2 || true
+    return 1
+  fi
+}
+
+start_trailbase_port_forward() {
+  local current_pid="${trailbase_pf_pid:-}"
+
+  if [[ -n "${current_pid}" ]]; then
+    stop_port_forward "${current_pid}"
+  fi
+
+  : >"${trailbase_pf_log}"
+  kubectl -n "${NAMESPACE}" port-forward svc/trailbase "${WORKLOAD_TRAILBASE_LOCAL_PORT}:4000" >"${trailbase_pf_log}" 2>&1 &
+  trailbase_pf_pid="$!"
+  if ! wait_for_http "http://127.0.0.1:${WORKLOAD_TRAILBASE_LOCAL_PORT}/api/healthcheck" validate_trailbase_health; then
+    echo "[workload] port-forward failed for svc/trailbase" >&2
+    tail -n 50 "${trailbase_pf_log}" >&2 || true
     return 1
   fi
 }
@@ -102,10 +211,13 @@ ensure_target_api() {
   local target="$1"
   case "${target}" in
     voter)
-      if ! curl -fsS \
+      local body=""
+      if ! body="$(
+        curl -fsS \
         --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
         --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
-        "http://127.0.0.1:${WORKLOAD_VOTER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+        "http://127.0.0.1:${WORKLOAD_VOTER_LOCAL_PORT}/healthz"
+      )" || ! validate_certd_health "${body}"; then
         if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" != "1" ]]; then
           return 1
         fi
@@ -113,10 +225,13 @@ ensure_target_api() {
       fi
       ;;
     learner)
-      if ! curl -fsS \
+      local body=""
+      if ! body="$(
+        curl -fsS \
         --connect-timeout "${HTTP_CONNECT_TIMEOUT_SECONDS}" \
         --max-time "${HTTP_CURL_TIMEOUT_SECONDS}" \
-        "http://127.0.0.1:${WORKLOAD_LEARNER_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
+        "http://127.0.0.1:${WORKLOAD_LEARNER_LOCAL_PORT}/healthz"
+      )" || ! validate_certd_health "${body}"; then
         if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" != "1" ]]; then
           return 1
         fi
@@ -128,6 +243,10 @@ ensure_target_api() {
       exit 1
       ;;
   esac
+}
+
+trailbase_base_url() {
+  printf 'http://127.0.0.1:%s' "${WORKLOAD_TRAILBASE_LOCAL_PORT}"
 }
 
 current_phase() {
@@ -402,11 +521,13 @@ request_api_expect_error() {
 
 login_trailbase() {
   local target="$1"
-  local base_url="$2"
+  local _base_url="$2"
   local cycle="$3"
+  local trailbase_url
+  trailbase_url="$(trailbase_base_url)"
 
   request_api \
-    "${target}" "${base_url}" "${cycle}" 0 "login" POST "/api/auth/v1/login" "" \
+    "${target}" "${trailbase_url}" "${cycle}" 0 "login" POST "/api/auth/v1/login" "" \
     -H 'content-type: application/json' \
     --data-binary "$(jq -nc \
       --arg email "${TRAILBASE_USER_EMAIL}" \
@@ -545,14 +666,16 @@ inspect_plant() {
 
 logout_trailbase() {
   local target="$1"
-  local base_url="$2"
+  local _base_url="$2"
   local cycle="$3"
   local auth_token="$4"
   local refresh_token="$5"
   local csrf_token="$6"
+  local trailbase_url
+  trailbase_url="$(trailbase_base_url)"
 
   request_api \
-    "${target}" "${base_url}" "${cycle}" 0 "logout" POST "/api/auth/v1/logout" "" \
+    "${target}" "${trailbase_url}" "${cycle}" 0 "logout" POST "/api/auth/v1/logout" "" \
     -H 'content-type: application/json' \
     -H "authorization: Bearer ${auth_token}" \
     -H "x-csrf-token: ${csrf_token}" \
@@ -685,6 +808,7 @@ main() {
   if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" == "1" ]]; then
     start_port_forward "${WORKLOAD_VOTER_SERVICE}" "${WORKLOAD_VOTER_LOCAL_PORT}" 80 "${voter_pf_log}" voter_pf_pid
     start_port_forward "${WORKLOAD_LEARNER_SERVICE}" "${WORKLOAD_LEARNER_LOCAL_PORT}" 8080 "${learner_pf_log}" learner_pf_pid
+    start_trailbase_port_forward
   fi
 
   local voter_base learner_base voter_org learner_org

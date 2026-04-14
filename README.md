@@ -220,137 +220,56 @@ cp /Volumes/Lexar/NPKI/.../kmPri.key    ./secrets/cert/
 
 ## 로컬 실행
 
-### 빈 상태로 TrailBase + certd 같이 띄우기
+로컬 검증 엔트리포인트는 `vind`만 지원한다. 임시 compose 스택이나 ad-hoc 빈 상태 스크립트는 더 이상 유지하지 않는다.
 
-기존 인증서와 수집 데이터를 쓰지 않고 완전히 빈 상태로 시작하려면 아래 스크립트를 사용한다.
+필수 도구:
+
+- Docker
+- `kubectl`
+- `vcluster`
+- `curl`
+- `jq`
+
+권장 검증 순서:
+
+1. `docker buildx build --load -t certd:local .`
+2. `docker buildx build --load -f Dockerfile.trailbase-auth-bridge -t trailbase-auth-bridge:local .`
+3. `bash ./scripts/vind-cluster.sh ensure-context`
+4. `bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh`
+5. `bash ./scripts/vind-exec.sh bash ./scripts/k3d-e2e.sh`
+6. `bash ./scripts/vind-exec.sh bash ./scripts/vind-chaos.sh`
+
+단일 엔트리포인트로 e2e/chaos를 돌리려면 아래를 사용한다.
 
 ```bash
-./scripts/dev-empty-up.sh
-./scripts/dev-empty-seed-user.sh <root> <email> <password>
-./scripts/dev-empty-bootstrap-owner.sh <root> <email> <password>
+bash ./scripts/ci-chaos-local.sh
 ```
 
 설명:
 
-- `dev-empty-up.sh`
-  - TrailBase auth bridge와 `certd`를 새 데이터 디렉터리로 기동
-- `dev-empty-seed-user.sh`
-  - TrailBase verified 사용자를 생성
-  - 빈 상태에서도 바로 로그인 가능한 첫 owner 계정 준비용
-- `dev-empty-bootstrap-owner.sh`
-  - 해당 TrailBase 사용자를 `certd` bootstrap organization owner로 연결
+- `scripts/ci-chaos-local.sh`
+  - 이미지 빌드
+  - `vind` cluster lifecycle 관리
+  - bootstrap, e2e, reduced chaos까지 단일 경로로 실행
+- `scripts/vind-cluster.sh`
+  - Colima preflight
+  - ARM Colima에서는 `alpine:latest`를 arm64 probe image로 자동 보정
+  - `vcluster` create/connect/delete
+  - 기본값으로는 `k3d` fallback 없이 `vind` 실패를 그대로 보고한다
+  - control-plane taint normalization
+- `scripts/vind-exec.sh`
+  - `vcluster connect ... -- <command>`를 phase 단위로 감싼다
+- `scripts/vind-bootstrap.sh`
+  - Kubernetes 리소스 배포
+  - MinIO/TrailBase/certd rollout 대기
+- `scripts/vind-chaos.sh`
+  - `vind` 컨텍스트에서 reduced chaos 시나리오를 실행한다
 
-종료:
+주의:
 
-```bash
-./scripts/dev-empty-down.sh <root>
-```
-
-빈 상태 스택에서 기본 주소는 다음과 같다.
-- 실제 주소와 포트는 `<root>/env.sh`에 기록된다.
-- 대표 변수:
-  - `TRAILBASE_URL`
-  - `CERTD_URL`
-
-로그인 UI:
-- `$TRAILBASE_URL/_/auth/login`
-
-초기 owner bootstrap은 `x-certd-master-key`로 보호되는 admin endpoint를 사용한다.
-
-```bash
-POST /api/v1/admin/bootstrap/trailbase-owner
-```
-
-이 라우트는 TrailBase bearer token의 사용자 identity를 local bootstrap owner에 바인딩한다.
-
-### docker-compose로 빈 스택 띄우기
-
-재현 가능한 로컬 토폴로지가 필요하면 compose를 사용한다. 이 구성은 `TrailBase + certd + MinIO`를 함께 띄우고,
-
-- PDF artifact는 MinIO `cert-artifacts`
-- `hiqlite` backup은 MinIO `cert-backups`
-
-를 사용한다.
-
-```bash
-docker-compose -f docker-compose.empty.yml up -d --build
-```
-
-주소:
-
-- certd auth facade UI: `http://127.0.0.1:18080/auth/login`
-- TrailBase UI/API: `http://127.0.0.1:4000`
-- certd API: `http://127.0.0.1:18080`
-- MinIO API: `http://127.0.0.1:9000`
-- MinIO Console: `http://127.0.0.1:9001`
-
-첫 owner 계정 생성:
-
-```bash
-docker-compose -f docker-compose.empty.yml exec trailbase \
-  trailbase-auth-bridge seed-user \
-  --data-dir /data/trailbase \
-  --email owner@example.com \
-  --password secret123
-```
-
-owner bootstrap:
-
-```bash
-TOKEN="$(curl -sS -X POST http://127.0.0.1:4000/api/auth/v1/login \
-  -H 'content-type: application/json' \
-  -d '{"email":"owner@example.com","password":"secret123"}' | jq -r '.auth_token')"
-
-curl -sS -X POST http://127.0.0.1:18080/api/v1/admin/bootstrap/trailbase-owner \
-  -H "authorization: Bearer $TOKEN" \
-  -H 'x-certd-master-key: dev-only-master-key'
-```
-
-빈 발전소 목록 확인:
-
-```bash
-curl -sS http://127.0.0.1:18080/api/v1/plants \
-  -H "authorization: Bearer $TOKEN" \
-  -H 'x-organization-id: conalog-account' | jq
-```
-
-현재 사용자와 조직 확인:
-
-```bash
-curl -sS http://127.0.0.1:18080/api/v1/me \
-  -H "authorization: Bearer $TOKEN" \
-  -H 'x-organization-id: conalog-account' | jq
-```
-
-발전소 생성:
-
-```bash
-curl -sS -X POST http://127.0.0.1:18080/api/v1/organizations/conalog-account/plants \
-  -H "authorization: Bearer $TOKEN" \
-  -H 'x-organization-id: conalog-account' \
-  -H 'content-type: application/json' \
-  -d '{
-    "facilityCode":"LOCAL-PLANT-001",
-    "name":"빈스택 테스트 발전소",
-    "contractNo":"LOCAL-CONTRACT-001",
-    "address":"서울시 테스트구 테스트로 1",
-    "installedKw":99.9,
-    "recStartDate":"2026-01-01",
-    "confirmIssued":"N"
-  }' | jq
-```
-
-종료:
-
-```bash
-docker compose -f docker-compose.empty.yml down -v
-```
-
-로컬 기준 구성:
-
-- 메타데이터: `hiqlite` 단일 노드
-- PDF 저장: MinIO
-- backup: MinIO
+- `scripts/k3d-e2e.sh`, `scripts/k3d-chaos.sh`는 내부 phase 구현체로 남아 있지만, 로컬 진입점으로 직접 쓰지 않는다.
+- 로컬/CI 회귀 검증은 `vind` 경로만 신뢰한다.
+- Colima ARM 환경에서 `vind` create가 platform warning으로 실패하면 먼저 `docker pull --platform linux/arm64 alpine:latest`를 확인한다.
 
 ### production compose
 
@@ -380,90 +299,15 @@ docker-compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 - MinIO bucket은 `cert-artifacts`, `cert-backups`
 - 운영 비밀값은 `.env.prod`에서만 주입
 
-### 1. 작업 디렉터리 준비
+API 예시는 이미 `vind` 경로로 bootstrap이 끝났고, `scripts/k3d-e2e.sh` 또는 `scripts/vind-chaos.sh`가 사용하는 것처럼 `svc/certd`가 로컬 `127.0.0.1:18080`으로 포트포워딩되어 있다는 전제를 둔다.
 
-```bash
-export CERTD_ROOT="$(mktemp -d /tmp/certd-local.XXXXXX)"
-mkdir -p "$CERTD_ROOT/data" "$CERTD_ROOT/artifacts"
-echo "$CERTD_ROOT"
-```
-
-### 2. MinIO 실행
-
-MinIO는 기본적으로 `hiqlite` backup 검증용이다. PDF는 기본 설정이면 filesystem에 저장된다.
-
-```bash
-docker run -d \
-  --name cert-minio \
-  -p 9000:9000 \
-  -p 9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin \
-  -e MINIO_ROOT_PASSWORD=minioadmin \
-  quay.io/minio/minio server /data --console-address ':9001'
-```
-
-콘솔: [http://127.0.0.1:9001](http://127.0.0.1:9001)
-
-### 3. 환경변수 설정
+필요한 최소 변수:
 
 ```bash
 export BUSINESS_NO=2768603291
 export ORGANIZATION_ID=2768603291
 export FACILITY_CODE=PV15-R-090795
 export CERT_PASSWORD='...'
-
-export CERTD_BIND_ADDR=127.0.0.1:18080
-export CERTD_MASTER_KEY=local-dev-master-key
-export CERTD_BOOTSTRAP_USER_ID=conalog-account
-export CERTD_BOOTSTRAP_USER_NAME='Conalog Account'
-export CERTD_RUNTIME_MODE=embedded
-export CERTD_LOCAL_NODE_ROLE=voter
-export CERTD_READ_CONSISTENCY=local
-
-export ARTIFACTS_BACKEND=fs
-export ARTIFACTS_ROOT_DIR="$CERTD_ROOT/artifacts"
-
-export HQL_NODE_ID=1
-export HQL_NODES=$'1 127.0.0.1:18100 127.0.0.1:18200\n'
-export HQL_LISTEN_ADDR_API=127.0.0.1
-export HQL_LISTEN_ADDR_RAFT=127.0.0.1
-export HQL_DATA_DIR="$CERTD_ROOT/data"
-export HQL_SECRET_RAFT=SuperSecureSecret1337
-export HQL_SECRET_API=AnotherSecureSecret42
-export HQL_ENC_KEYS_FROM=env
-export ENC_KEYS=$'bVCyTsGaggVy5yqQ/UzluN29DZW41M3hTSkx6Y3NtZmRuQkR2TnJxUTYzcjQ=\n'
-export ENC_KEY_ACTIVE=bVCyTsGaggVy5yqQ
-
-export HQL_S3_URL=http://127.0.0.1:9000
-export HQL_S3_BUCKET=cert-artifacts
-export HQL_S3_REGION=us-east-1
-export HQL_S3_PATH_STYLE=true
-export HQL_S3_KEY=minioadmin
-export HQL_S3_SECRET=minioadmin
-```
-
-### 4. 서버 실행
-
-```bash
-cargo run -p app
-```
-
-health check:
-
-```bash
-curl -sS http://127.0.0.1:18080/healthz | jq
-```
-
-예시:
-
-```json
-{
-  "status": "ok",
-  "readReady": true,
-  "writeReady": true,
-  "runtimeMode": "embedded",
-  "defaultReadConsistency": "local"
-}
 ```
 
 ## API 사용 순서
@@ -786,9 +630,9 @@ export CERT_PASSWORD='...'
 
 이 스크립트는 `kubectl port-forward svc/certd 18080:80`를 열고, Keploy를 Docker 모드로 실행한 뒤 `--host 127.0.0.1 --port 18080` 기준으로 기존 testcase를 재생한다. `--base-path`는 현재 Keploy 버전에서 agent lifecycle과 충돌해 쓰지 않는다.
 
-### k3d TrailBase + certd chaos topology
+### vind TrailBase + certd chaos topology
 
-현재 k3d 검증은 `certd` 데이터 평면과 `TrailBase` 인증 평면을 분리해서 본다.
+현재 로컬 검증은 `vind`가 클러스터 lifecycle을 소유하고, 그 안에서 `certd` 데이터 평면과 `TrailBase` 인증 평면을 분리해서 본다.
 
 - `certd-voter`
   - `StatefulSet` 3개
@@ -817,74 +661,48 @@ export CERT_PASSWORD='...'
 
 주요 스크립트:
 
-- [scripts/k3d-bootstrap.sh](/Users/cypark/Documents/work/cert/scripts/k3d-bootstrap.sh)
-  - k3d 토폴로지 부팅
+- [scripts/ci-chaos-local.sh](scripts/ci-chaos-local.sh)
+  - 로컬/CI 공용 엔트리포인트
+  - 이미지 빌드
+  - `vind` cluster ensure
+  - bootstrap, e2e, reduced chaos 실행
+- [scripts/vind-cluster.sh](scripts/vind-cluster.sh)
+  - `vind` create/connect/delete
+  - Colima preflight
+  - node taint normalization
+- [scripts/vind-exec.sh](scripts/vind-exec.sh)
+  - phase 실행 시점에만 `vcluster connect`를 연다
+- [scripts/vind-bootstrap.sh](scripts/vind-bootstrap.sh)
   - MinIO bucket bootstrap
   - TrailBase rollout 대기
   - `certd` quorum/learner rollout 대기
-- [scripts/k3d-e2e.sh](/Users/cypark/Documents/work/cert/scripts/k3d-e2e.sh)
-  - TrailBase user seed
-  - login
-  - bootstrap owner
-  - 기본 plant/read/write e2e
-- [scripts/k3d-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-chaos.sh)
-  - voter kill
-  - learner restart
-  - TrailBase pod delete
-  - auth cache TTL 검증
-  - MinIO restart
-- [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh)
-  - `certd` full restore from MinIO backup
-  - restore 후 plant/documents 확인
-- [scripts/k3d-prod-restore-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-prod-restore-chaos.sh)
-  - 외부 API로 phase1/phase2 데이터 생성
-  - `backup1`, `backup2` point-in-time restore 검증
-  - TrailBase latest restore 후 다중 user login 검증
-- [scripts/k3d-trailbase-restore-check.sh](/Users/cypark/Documents/work/cert/scripts/k3d-trailbase-restore-check.sh)
-  - Litestream restore
-  - TrailBase login 회복
-- [scripts/k3d-seed-trailbase-user.sh](/Users/cypark/Documents/work/cert/scripts/k3d-seed-trailbase-user.sh)
-  - TrailBase verified user 생성
+- [scripts/vind-chaos.sh](scripts/vind-chaos.sh)
+  - reduced chaos wrapper
+  - 내부적으로 `scripts/k3d-chaos.sh` phase 구현체를 호출
 
-자주 쓰는 명령:
+권장 명령:
 
 ```bash
-./scripts/k3d-bootstrap.sh
-./scripts/k3d-e2e.sh
-./scripts/k3d-chaos.sh
-./scripts/k3d-backup-restore.sh
-./scripts/k3d-prod-restore-chaos.sh
-./scripts/k3d-trailbase-restore-check.sh
+bash ./scripts/ci-chaos-local.sh
 ```
 
-카오스/복구 스크립트도 이 경로를 기준으로 검증한다.
+phase를 수동으로 나눠 확인하려면:
 
-- [scripts/k3d-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-chaos.sh)
-  - baseline replay
-  - `certd` pod kill
-  - `mode=delta` sync
-  - replay 재실행
-  - `minio` pod kill
-  - 문서 download 확인
-  - replay 재실행
-- [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh)
-  - `cert-backups` 버킷 보장
-  - backup 생성
-  - `HQL_BACKUP_RESTORE`
-  - restore 후 plant/documents 확인
-  - replay 재실행
-- [scripts/k3d-prod-restore-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-prod-restore-chaos.sh)
-  - public API로 다중 plant 생성
-  - named backup object 기준 restore
-  - backup1 시점/backup2 시점 기대 데이터 검증
-  - TrailBase pod delete 후 latest auth restore 검증
+```bash
+bash ./scripts/vind-cluster.sh ensure-context
+bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
+bash ./scripts/vind-exec.sh bash ./scripts/k3d-e2e.sh
+bash ./scripts/vind-exec.sh bash ./scripts/vind-chaos.sh
+```
+
+`k3d-*` 스크립트는 phase 구현체와 DR 시나리오 보조 스크립트로 유지하지만, 로컬 검증 진입점으로 직접 지원하지 않는다.
 
 최근 검증 결과:
 
-- [scripts/k3d-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-chaos.sh): 통과
-- [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh): 통과
-- [scripts/k3d-prod-restore-chaos.sh](/Users/cypark/Documents/work/cert/scripts/k3d-prod-restore-chaos.sh): 통과
-- [scripts/k3d-trailbase-restore-check.sh](/Users/cypark/Documents/work/cert/scripts/k3d-trailbase-restore-check.sh): TrailBase restore 확인용
+- `scripts/ci-chaos-local.sh`: 통과
+- 내부 reduced chaos phase(`scripts/vind-chaos.sh` -> `scripts/k3d-chaos.sh`): 통과
+- DR 보조 스크립트(`scripts/k3d-backup-restore.sh`, `scripts/k3d-prod-restore-chaos.sh`): 통과
+- `scripts/k3d-trailbase-restore-check.sh`: TrailBase restore 확인용
 - restore 후 `GET /api/v1/plants/PV15-R-090795` 정상
 - restore 후 대표 PDF `HEAD` 정상
 - restore 후 Keploy replay `2 / 2` 통과
@@ -908,34 +726,10 @@ export CERT_PASSWORD='...'
 
 ## Docker
 
-이미지는 Rust 바이너리만 포함한다.
+이미지는 `vind` 로컬 검증 경로에서 그대로 사용한다.
 
 ```bash
 docker build -t certd:local .
-```
-
-예시 실행:
-
-```bash
-docker run --rm \
-  -p 18080:8080 \
-  -e CERTD_MASTER_KEY=local-dev-master-key \
-  -e CERTD_BOOTSTRAP_USER_ID=conalog-account \
-  -e CERTD_BOOTSTRAP_USER_NAME='Conalog Account' \
-  -e ARTIFACTS_BACKEND=fs \
-  -e ARTIFACTS_ROOT_DIR=/data/artifacts \
-  -e HQL_NODE_ID=1 \
-  -e HQL_NODES=$'1 0.0.0.0:8100 0.0.0.0:8200\n' \
-  -e HQL_LISTEN_ADDR_API=0.0.0.0 \
-  -e HQL_LISTEN_ADDR_RAFT=0.0.0.0 \
-  -e HQL_DATA_DIR=/data/db \
-  -e HQL_SECRET_RAFT=SuperSecureSecret1337 \
-  -e HQL_SECRET_API=AnotherSecureSecret42 \
-  -e HQL_ENC_KEYS_FROM=env \
-  -e ENC_KEYS=$'bVCyTsGaggVy5yqQ/UzluN29DZW41M3hTSkx6Y3NtZmRuQkR2TnJxUTYzcjQ=\n' \
-  -e ENC_KEY_ACTIVE=bVCyTsGaggVy5yqQ \
-  -v "$PWD/runtime:/data" \
-  certd:local
 ```
 
 ## 검증 기준
