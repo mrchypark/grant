@@ -43,7 +43,7 @@ async function loadCertificates() {
 async function runEphemeral() {
   const sdk = createSdk();
   const run = await sdk.runEphemeral(organizationId.value, {
-    businessNo: required(businessNo.value, "Business No"),
+    businessNo: optional(businessNo.value),
   });
   appendLog(`ephemeral completed -> ${JSON.stringify(run, null, 2)}`);
   setStatus(`Ephemeral ${run.status}`);
@@ -52,7 +52,7 @@ async function runEphemeral() {
 async function runStored() {
   const sdk = createSdk();
   const cert = await sdk.registerStored(organizationId.value, {
-    businessNo: required(businessNo.value, "Business No"),
+    businessNo: optional(businessNo.value),
   });
   appendLog(`stored registered -> ${JSON.stringify(cert, null, 2)}`);
   setStatus("Stored 등록 완료");
@@ -112,14 +112,6 @@ function appendLog(message: string) {
 function optional(value: string) {
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-function required(value: string, field: string) {
-  const trimmed = value.trim();
-  if (trimmed === "") {
-    throw new Error(`${field} is required`);
-  }
-  return trimmed;
 }
 
 function element<T extends HTMLElement>(id: string): T {

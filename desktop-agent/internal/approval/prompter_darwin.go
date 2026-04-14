@@ -48,6 +48,41 @@ static void certd_activate_approval_app(void) {
 	}
 }
 
+static long certd_prepare_approval_app(void) {
+	__block long previousPolicy = (long)NSApplicationActivationPolicyAccessory;
+
+	void (^prepare)(void) = ^{
+		[NSApplication sharedApplication];
+		previousPolicy = (long)[NSApp activationPolicy];
+		if ((NSApplicationActivationPolicy)previousPolicy != NSApplicationActivationPolicyRegular) {
+			[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		}
+		[NSApp unhide:nil];
+		[NSApp activateIgnoringOtherApps:YES];
+	};
+	if ([NSThread isMainThread]) {
+		prepare();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), prepare);
+	}
+	return previousPolicy;
+}
+
+static void certd_restore_approval_app(long previousPolicy) {
+	void (^restore)(void) = ^{
+		[NSApplication sharedApplication];
+		NSApplicationActivationPolicy policy = (NSApplicationActivationPolicy)previousPolicy;
+		if ([NSApp activationPolicy] != policy) {
+			[NSApp setActivationPolicy:policy];
+		}
+	};
+	if ([NSThread isMainThread]) {
+		restore();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), restore);
+	}
+}
+
 static char *certd_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex) {
 	__block char *result = NULL;
 	__block int didCancel = 0;
@@ -131,6 +166,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
@@ -157,6 +193,40 @@ var requestApprovalModalCancellation = func() {
 
 var activateApprovalModalApplication = func() {
 	C.certd_activate_approval_app()
+}
+
+var prepareApprovalApplicationPolicy = func() int64 {
+	return int64(C.certd_prepare_approval_app())
+}
+
+var restoreApprovalApplicationPolicy = func(previousPolicy int64) {
+	C.certd_restore_approval_app(C.long(previousPolicy))
+}
+
+var approvalAppPolicyMu sync.Mutex
+var approvalAppPolicyDepth int
+var approvalAppPreviousPolicy int64
+
+var prepareApprovalModalApplication = func() func() {
+	approvalAppPolicyMu.Lock()
+	if approvalAppPolicyDepth == 0 {
+		approvalAppPreviousPolicy = prepareApprovalApplicationPolicy()
+	} else {
+		activateApprovalModalApplication()
+	}
+	approvalAppPolicyDepth++
+	approvalAppPolicyMu.Unlock()
+
+	return func() {
+		approvalAppPolicyMu.Lock()
+		if approvalAppPolicyDepth > 0 {
+			approvalAppPolicyDepth--
+			if approvalAppPolicyDepth == 0 {
+				restoreApprovalApplicationPolicy(approvalAppPreviousPolicy)
+			}
+		}
+		approvalAppPolicyMu.Unlock()
+	}
 }
 
 var runApprovalModal = func(input approvalModalInput) (string, bool) {
@@ -187,7 +257,8 @@ var runApprovalModal = func(input approvalModalInput) (string, bool) {
 }
 
 var showApprovalModal = func(input approvalModalInput) (string, bool) {
-	activateApprovalModalApplication()
+	restore := prepareApprovalModalApplication()
+	defer restore()
 	return runApprovalModal(input)
 }
 
@@ -223,10 +294,14 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	}
 	resultCh := make(chan modalResult, 1)
 	go func() {
+		businessNo := prompt.BusinessNo
+		if strings.TrimSpace(businessNo) == "" {
+			businessNo = "-"
+		}
 		packed, approved := showApprovalModal(approvalModalInput{
 			Origin:         prompt.Origin,
 			OrganizationID: prompt.OrganizationID,
-			BusinessNo:     prompt.BusinessNo,
+			BusinessNo:     businessNo,
 			Action:         prompt.Action,
 			Labels:         joinedLabels,
 			DefaultIndex:   defaultIndex,

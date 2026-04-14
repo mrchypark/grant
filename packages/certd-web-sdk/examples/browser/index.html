@@ -216,7 +216,7 @@
             </label>
             <label>
               Agent Base URL
-              <input id="agentBaseUrl" value="/agent" />
+              <input id="agentBaseUrl" value="http://127.0.0.1:8765" />
             </label>
             <label>
               Bearer Token
@@ -241,10 +241,13 @@
             `인증서 목록 읽기`는 디버그용입니다. 실제 실행 시 인증서 선택과 비밀번호 입력은 agent의 네이티브 승인 모달에서 처리됩니다.
           </p>
           <p class="hint">
+            desktop agent는 loopback CORS origin을 직접 검사하므로, 기본값은 dev proxy 대신 `http://127.0.0.1:8765`에 바로 연결합니다.
+          </p>
+          <p class="hint">
             gateway 호출은 `Authorization: Bearer ...` 와 `x-organization-id` 헤더가 필요합니다. 로컬 dev stack에서는 TrailBase login 후 받은 token을 넣으시면 됩니다.
           </p>
           <p class="hint">
-            `Business No`는 `organizationId`와 다른 값입니다. 인증서에서 사업자번호를 못 읽는 경우 이 칸에 실제 10자리 사업자번호를 입력해야 합니다.
+            `Business No`는 선택 입력입니다. 조직에 이미 연결된 사업자번호가 있으면 비워 둘 수 있고, 아직 연결돼 있지 않거나 인증서에서 읽지 못할 때만 실제 10자리 값을 넣으면 됩니다.
           </p>
           <div id="status" class="status" style="margin-top:16px;">대기 중</div>
           <div id="certList" class="cert-list"></div>

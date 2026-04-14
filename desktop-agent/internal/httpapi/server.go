@@ -75,7 +75,7 @@ type ApprovalDecision struct {
 type ApprovalActionRequest struct {
 	GatewayBaseURL       string `json:"gatewayBaseUrl"`
 	OrganizationID       string `json:"organizationId"`
-	BusinessNo           string `json:"businessNo"`
+	BusinessNo           string `json:"businessNo,omitempty"`
 	BearerToken          string `json:"bearerToken,omitempty"`
 	ActiveOrganizationID string `json:"activeOrganizationId,omitempty"`
 	FacilityCode         string `json:"facilityCode,omitempty"`
@@ -310,9 +310,6 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 
 	if req.OrganizationID == "" {
 		return nil, 0, newHTTPStatusError(http.StatusBadRequest, "organizationId must not be empty")
-	}
-	if req.BusinessNo == "" {
-		return nil, 0, newHTTPStatusError(http.StatusBadRequest, "businessNo must not be empty")
 	}
 	gatewayBaseURL, err := s.trustedGatewayBaseURL(req.GatewayBaseURL)
 	if err != nil {

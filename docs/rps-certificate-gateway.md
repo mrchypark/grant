@@ -51,7 +51,6 @@ loopback agent는 허용 origin과 local session secret도 환경변수로 제�
 export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
 export DESKTOP_AGENT_GATEWAY_BASE_URL="https://certd.example.com"
 export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
-export DESKTOP_AGENT_DISABLE_TRAY=1
 ```
 
 - `DESKTOP_AGENT_ALLOWED_ORIGINS`
@@ -62,8 +61,6 @@ export DESKTOP_AGENT_DISABLE_TRAY=1
 - `DESKTOP_AGENT_SESSION_SECRET`
   - local session token HMAC에 쓰는 32-byte 이상 secret
   - 비워 두면 사용자 config 디렉터리에 device-local secret을 생성한다
-- `DESKTOP_AGENT_DISABLE_TRAY`
-  - macOS 기본 tray 실행을 끄고 기존 headless HTTP agent로 실행한다
 
 - macOS 기본 탐색 경로
   - `~/NPKI`
@@ -74,6 +71,8 @@ export DESKTOP_AGENT_DISABLE_TRAY=1
   - `%USERPROFILE%\\Documents\\NPKI`
   - `%LOCALAPPDATA%\\NPKI`
   - `%APPDATA%\\NPKI`
+
+macOS desktop agent는 항상 메뉴바(tray) 앱으로 실행된다. tray 없는 headless macOS 실행 모드는 더 이상 지원하지 않는다.
 
 USB에 인증서가 있을 때는 USB 루트를 직접 지정하면 된다.
 

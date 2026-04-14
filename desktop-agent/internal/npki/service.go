@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -38,8 +39,16 @@ var (
 	oidX509SerialNumber    = asn1.ObjectIdentifier{2, 5, 4, 5}
 )
 
+var defaultDiscoverRoots = discoverDefaultRoots
+
 type ServiceConfig struct {
-	Roots []string
+	Roots                []string
+	AutoDiscover         bool
+	RootsTTL             time.Duration
+	InitialDiscoveryWait time.Duration
+	DiscoveryTimeout     time.Duration
+	DiscoverRoots        func(context.Context) []string
+	Now                  func() time.Time
 }
 
 type CertificateMetadata struct {
@@ -74,16 +83,74 @@ type SignResult struct {
 
 type Service struct {
 	roots []string
+
+	rootsTTL         time.Duration
+	initialWait      time.Duration
+	discoveryTimeout time.Duration
+	discoverRoots    func(context.Context) []string
+	now              func() time.Time
+
+	mu           sync.Mutex
+	cachedRoots  []string
+	cacheExpires time.Time
+	rootsCached  bool
+	refreshing   bool
+	refreshDone  chan struct{}
 }
 
+const defaultDiscoveredRootsTTL = 60 * time.Second
+const defaultInitialDiscoveryWait = 250 * time.Millisecond
+const defaultDiscoveryTimeout = 2 * time.Second
+
 func NewService(config ServiceConfig) *Service {
-	return &Service{
+	service := &Service{
 		roots: normalizeRoots(config.Roots),
+		now:   config.Now,
 	}
+	if service.now == nil {
+		service.now = time.Now
+	}
+	if config.AutoDiscover {
+		service.rootsTTL = config.RootsTTL
+		if service.rootsTTL <= 0 {
+			service.rootsTTL = defaultDiscoveredRootsTTL
+		}
+		service.initialWait = config.InitialDiscoveryWait
+		if service.initialWait <= 0 {
+			service.initialWait = defaultInitialDiscoveryWait
+		}
+		service.discoveryTimeout = config.DiscoveryTimeout
+		if service.discoveryTimeout <= 0 {
+			service.discoveryTimeout = defaultDiscoveryTimeout
+		}
+		service.discoverRoots = config.DiscoverRoots
+		if service.discoverRoots == nil {
+			service.discoverRoots = defaultDiscoverRoots
+		}
+	}
+	return service
 }
 
 func DefaultConfig() ServiceConfig {
-	return ServiceConfig{Roots: discoverDefaultRoots()}
+	if raw := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_NPKI_DIRS")); raw != "" {
+		return ServiceConfig{Roots: splitRootList(raw)}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ServiceConfig{}
+	}
+
+	roots := defaultLocalRootsFor(runtime.GOOS, home)
+	return ServiceConfig{
+		Roots:            roots,
+		AutoDiscover:     runtime.GOOS == "darwin",
+		RootsTTL:         defaultDiscoveredRootsTTL,
+		DiscoveryTimeout: defaultDiscoveryTimeout,
+		DiscoverRoots: func(ctx context.Context) []string {
+			return discoverMountedNPKIRoots(ctx, "/Volumes")
+		},
+	}
 }
 
 func (s *Service) ListCertificates(context.Context) ([]CertificateMetadata, error) {
@@ -248,7 +315,7 @@ func (s *Service) discoverBundles() ([]string, error) {
 	walked := make(map[string]struct{})
 	seenBundles := make(map[string]struct{})
 
-	for _, root := range s.roots {
+	for _, root := range s.bundleRoots() {
 		if err := walkBundleRoot(root, &dirs, walked, seenBundles); err != nil {
 			return nil, err
 		}
@@ -256,6 +323,120 @@ func (s *Service) discoverBundles() ([]string, error) {
 
 	slices.Sort(dirs)
 	return dirs, nil
+}
+
+func (s *Service) bundleRoots() []string {
+	roots := append([]string(nil), s.roots...)
+	if s.discoverRoots == nil {
+		return roots
+	}
+	return append(roots, s.cachedDiscoveredRoots()...)
+}
+
+func (s *Service) cachedDiscoveredRoots() []string {
+	s.mu.Lock()
+	now := s.now()
+	if s.rootsCached && now.Before(s.cacheExpires) {
+		roots := append([]string(nil), s.cachedRoots...)
+		s.mu.Unlock()
+		return roots
+	}
+
+	staleRoots := append([]string(nil), s.cachedRoots...)
+	hadCached := s.rootsCached
+	if s.refreshing {
+		done := s.refreshDone
+		s.mu.Unlock()
+		if !hadCached && done != nil {
+			return s.waitForDiscoveredRoots(done, staleRoots)
+		}
+		return staleRoots
+	}
+	s.refreshing = true
+	s.refreshDone = make(chan struct{})
+	done := s.refreshDone
+	s.mu.Unlock()
+
+	if !hadCached {
+		go s.refreshDiscoveredRoots()
+		return s.waitForDiscoveredRoots(done, staleRoots)
+	}
+
+	go s.refreshDiscoveredRoots()
+	return staleRoots
+}
+
+func (s *Service) waitForDiscoveredRoots(done <-chan struct{}, fallback []string) []string {
+	timer := time.NewTimer(s.initialWait)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		s.mu.Lock()
+		roots := append([]string(nil), s.cachedRoots...)
+		s.mu.Unlock()
+		return roots
+	case <-timer.C:
+		return fallback
+	}
+}
+
+func (s *Service) refreshDiscoveredRoots() {
+	ctx, cancel := context.WithTimeout(context.Background(), s.discoveryTimeout)
+	defer cancel()
+
+	roots, completed := s.runDiscoveredRoots(ctx)
+	expiresAt := s.now().Add(s.rootsTTL)
+
+	s.mu.Lock()
+	doneCh := s.refreshDone
+	if completed {
+		s.cachedRoots = roots
+		s.cacheExpires = expiresAt
+		s.rootsCached = true
+	} else if s.rootsCached {
+		s.cacheExpires = expiresAt
+	}
+	s.refreshing = false
+	s.refreshDone = nil
+	s.mu.Unlock()
+	if doneCh != nil {
+		close(doneCh)
+	}
+}
+
+func (s *Service) runDiscoveredRoots(ctx context.Context) ([]string, bool) {
+	type discoveryResult struct {
+		roots []string
+		ok    bool
+	}
+
+	results := make(chan discoveryResult, 1)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("npki discover roots panic: %v", recovered)
+				select {
+				case results <- discoveryResult{}:
+				case <-ctx.Done():
+				}
+			}
+		}()
+
+		roots := normalizeRoots(s.discoverRoots(ctx))
+		select {
+		case results <- discoveryResult{roots: roots, ok: true}:
+		case <-ctx.Done():
+		}
+	}()
+
+	select {
+	case result := <-results:
+		return result.roots, result.ok
+	case <-ctx.Done():
+		log.Printf("npki discover roots timed out after %s", s.discoveryTimeout)
+		return nil, false
+	}
 }
 
 func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, seenBundles map[string]struct{}) error {
@@ -352,7 +533,7 @@ func normalizeRoots(roots []string) []string {
 	return normalized
 }
 
-func discoverDefaultRoots() []string {
+func discoverDefaultRoots(ctx context.Context) []string {
 	if raw := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_NPKI_DIRS")); raw != "" {
 		return splitRootList(raw)
 	}
@@ -362,28 +543,69 @@ func discoverDefaultRoots() []string {
 		return nil
 	}
 
-	switch runtime.GOOS {
+	return discoverDefaultRootsFor(ctx, runtime.GOOS, home, "/Volumes")
+}
+
+func discoverDefaultRootsFor(ctx context.Context, goos string, home string, volumesRoot string) []string {
+	roots := defaultLocalRootsFor(goos, home)
+	if goos == "darwin" {
+		roots = append(roots, discoverMountedNPKIRoots(ctx, volumesRoot)...)
+	}
+	return normalizeRoots(roots)
+}
+
+func defaultLocalRootsFor(goos string, home string) []string {
+	switch goos {
 	case "windows":
 		localAppData := os.Getenv("LOCALAPPDATA")
 		appData := os.Getenv("APPDATA")
-		return normalizeRoots([]string{
+		return []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
 			filepath.Join(localAppData, "NPKI"),
 			filepath.Join(appData, "NPKI"),
-		})
+		}
 	case "darwin":
-		return normalizeRoots([]string{
+		return []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
 			filepath.Join(home, "Library", "Preferences", "NPKI"),
-		})
+		}
 	default:
-		return normalizeRoots([]string{
+		return []string{
 			filepath.Join(home, "NPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
-		})
+		}
 	}
+}
+
+func discoverMountedNPKIRoots(ctx context.Context, volumesRoot string) []string {
+	if strings.TrimSpace(volumesRoot) == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+
+	entries, err := os.ReadDir(volumesRoot)
+	if err != nil {
+		return nil
+	}
+
+	roots := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return roots
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		npkiRoot := filepath.Join(volumesRoot, entry.Name(), "NPKI")
+		if info, err := os.Stat(npkiRoot); err == nil && info.IsDir() {
+			roots = append(roots, npkiRoot)
+		}
+	}
+	return roots
 }
 
 func splitRootList(value string) []string {

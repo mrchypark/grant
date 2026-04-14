@@ -30,7 +30,7 @@ export type AgentSession = {
 export type AgentApprovalRequest = {
   gatewayBaseUrl: string;
   organizationId: string;
-  businessNo: string;
+  businessNo?: string;
   bearerToken?: string;
   activeOrganizationId?: string;
   facilityCode?: string;
