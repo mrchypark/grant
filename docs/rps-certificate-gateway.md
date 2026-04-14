@@ -281,7 +281,12 @@ ok
 - 제품형 high-level SDK는 `/approve-ephemeral-run`, `/approve-stored-registration` 사용
 - 실제 NPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
 - macOS에서는 기본적으로 메뉴바(tray) 앱으로 실행되고 `Open Example Page`, `Quit certd Agent` 메뉴 제공
-- native approval modal은 현재 macOS AppKit(`NSAlert + certificate picker + secure password field`) 구현, Windows는 후속 구현 대상
+- native approval modal
+  - macOS: AppKit `NSAlert` + `NSPopUpButton`(인증서 선택) + `NSSecureTextField`(비밀번호) + `NSAlertStyleWarning`
+  - Windows: Win32 `DialogBoxIndirectParamW` 인메모리 DLGTEMPLATE로 경고 아이콘(`IDI_WARNING`) + 12pt 볼드 Segoe UI 헤딩 + ComboBox + `EM_SETCUEBANNER`로 플레이스홀더가 걸린 `ES_PASSWORD` Edit + Approve/Cancel을 단일 모달에 묶는다. cgo 없이 `golang.org/x/sys/windows` syscall만 사용하고, 모달 foreground 쟁취는 `AllowSetForegroundWindow` + `AttachThreadInput` 조합으로 처리한다
+  - 공통 파이프라인(직렬화 `acquireApprovalModal`, 컨텍스트 취소, 언어별 카피 주입)은 [`internal/approval/prompter.go`](../desktop-agent/internal/approval/prompter.go) 에 모여 있고 각 플랫폼은 `init()`에서 네이티브 호출을 모달 hook에 바인딩만 한다
+  - Windows 바이너리는 [`internal/approval/app.manifest`](../desktop-agent/internal/approval/app.manifest)를 `.syso` 리소스로 임베드해 ComCtl32 v6(모던 비주얼 스타일 + cue banner)와 Per-Monitor DPI v2를 활성화한다. 매니페스트 변경 후에는 `go generate ./internal/approval` 로 `.syso`를 재생성한다
+- approval 모달 표시 문자열은 [`internal/localization`](../desktop-agent/internal/localization/) 의 `ApprovalTitle`/`ApprovalInfoFormat`/`Approve`/`Cancel`/`CertificateLabel`/`PasswordLabel`/`PasswordPlaceholder` 카피를 사용해 시스템 언어에 따라 ko/en으로 분기된다
 
 ## JS SDK 사용 예시
 
