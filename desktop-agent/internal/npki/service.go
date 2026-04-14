@@ -39,6 +39,8 @@ var (
 	oidX509SerialNumber    = asn1.ObjectIdentifier{2, 5, 4, 5}
 )
 
+var defaultDiscoverRoots = discoverDefaultRoots
+
 type ServiceConfig struct {
 	Roots         []string
 	AutoDiscover  bool
@@ -89,6 +91,7 @@ type Service struct {
 	cacheExpires time.Time
 	rootsCached  bool
 	refreshing   bool
+	refreshDone  chan struct{}
 }
 
 const defaultDiscoveredRootsTTL = 5 * time.Second
@@ -107,8 +110,8 @@ func NewService(config ServiceConfig) *Service {
 			service.rootsTTL = defaultDiscoveredRootsTTL
 		}
 		service.discoverRoots = config.DiscoverRoots
-		if service.discoverRoots == nil && len(service.roots) == 0 {
-			service.discoverRoots = discoverDefaultRoots
+		if service.discoverRoots == nil {
+			service.discoverRoots = defaultDiscoverRoots
 		}
 	}
 	return service
@@ -326,17 +329,39 @@ func (s *Service) cachedDiscoveredRoots() []string {
 
 	staleRoots := append([]string(nil), s.cachedRoots...)
 	if s.refreshing {
+		done := s.refreshDone
 		s.mu.Unlock()
+		if !s.rootsCached && done != nil {
+			<-done
+			s.mu.Lock()
+			roots := append([]string(nil), s.cachedRoots...)
+			s.mu.Unlock()
+			return roots
+		}
 		return staleRoots
 	}
 	s.refreshing = true
+	s.refreshDone = make(chan struct{})
+	done := s.refreshDone
 	s.mu.Unlock()
+
+	if !s.rootsCached {
+		s.refreshDiscoveredRoots(done)
+		s.mu.Lock()
+		roots := append([]string(nil), s.cachedRoots...)
+		s.mu.Unlock()
+		return roots
+	}
 
 	go s.refreshDiscoveredRoots()
 	return staleRoots
 }
 
-func (s *Service) refreshDiscoveredRoots() {
+func (s *Service) refreshDiscoveredRoots(done ...chan struct{}) {
+	var doneCh chan struct{}
+	if len(done) > 0 {
+		doneCh = done[0]
+	}
 	roots := normalizeRoots(s.discoverRoots())
 	expiresAt := s.now().Add(s.rootsTTL)
 
@@ -345,7 +370,14 @@ func (s *Service) refreshDiscoveredRoots() {
 	s.cacheExpires = expiresAt
 	s.rootsCached = true
 	s.refreshing = false
+	if doneCh == nil {
+		doneCh = s.refreshDone
+	}
+	s.refreshDone = nil
 	s.mu.Unlock()
+	if doneCh != nil {
+		close(doneCh)
+	}
 }
 
 func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, seenBundles map[string]struct{}) error {

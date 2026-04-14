@@ -5,6 +5,9 @@ package approval
 import (
 	"context"
 	"errors"
+	"reflect"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,4 +120,55 @@ func TestPromptApprovalActivatesAppBeforeShowingModal(t *testing.T) {
 	if len(events) != 3 || events[0] != "prepare" || events[1] != "show" || events[2] != "restore" {
 		t.Fatalf("events = %#v, want [prepare show restore]", events)
 	}
+}
+
+func TestPrepareApprovalModalApplicationRestoresOriginalPolicyOnce(t *testing.T) {
+	originalPrepareApplicationPolicy := prepareApprovalApplicationPolicy
+	originalRestoreApplicationPolicy := restoreApprovalApplicationPolicy
+	originalActivate := activateApprovalModalApplication
+	originalDepth := approvalAppPolicyDepth
+	originalPolicy := approvalAppPreviousPolicy
+	defer func() {
+		prepareApprovalApplicationPolicy = originalPrepareApplicationPolicy
+		restoreApprovalApplicationPolicy = originalRestoreApplicationPolicy
+		activateApprovalModalApplication = originalActivate
+		approvalAppPolicyDepth = originalDepth
+		approvalAppPreviousPolicy = originalPolicy
+	}()
+
+	approvalAppPolicyDepth = 0
+	approvalAppPreviousPolicy = 0
+
+	var mu sync.Mutex
+	events := make([]string, 0, 4)
+	prepareApprovalApplicationPolicy = func() int64 {
+		mu.Lock()
+		events = append(events, "prepare")
+		mu.Unlock()
+		return 7
+	}
+	restoreApprovalApplicationPolicy = func(policy int64) {
+		mu.Lock()
+		events = append(events, "restore:"+fmtInt64(policy))
+		mu.Unlock()
+	}
+	activateApprovalModalApplication = func() {
+		mu.Lock()
+		events = append(events, "activate")
+		mu.Unlock()
+	}
+
+	restoreOuter := prepareApprovalModalApplication()
+	restoreInner := prepareApprovalModalApplication()
+	restoreOuter()
+	restoreInner()
+
+	want := []string{"prepare", "activate", "restore:7"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func fmtInt64(value int64) string {
+	return strconv.FormatInt(value, 10)
 }

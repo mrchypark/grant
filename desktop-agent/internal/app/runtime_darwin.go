@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -15,10 +14,6 @@ import (
 )
 
 func run(addr string, handler http.Handler, _ RunOptions) error {
-	if !shouldUseTray("darwin", os.Getenv("DESKTOP_AGENT_DISABLE_TRAY")) {
-		return newHTTPServer(addr, handler).ListenAndServe()
-	}
-
 	server := newHTTPServer(addr, handler)
 
 	errCh := make(chan error, 1)

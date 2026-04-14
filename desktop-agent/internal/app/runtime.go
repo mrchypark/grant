@@ -2,16 +2,11 @@ package app
 
 import (
 	"net/http"
-	"strings"
 	"time"
 )
 
 type RunOptions struct {
 	Addr string
-}
-
-func shouldUseTray(goos string, disableEnv string) bool {
-	return goos == "darwin" && strings.TrimSpace(disableEnv) == ""
 }
 
 func Run(addr string, handler http.Handler, opts RunOptions) error {

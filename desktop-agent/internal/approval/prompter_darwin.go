@@ -166,6 +166,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
@@ -194,10 +195,37 @@ var activateApprovalModalApplication = func() {
 	C.certd_activate_approval_app()
 }
 
+var prepareApprovalApplicationPolicy = func() int64 {
+	return int64(C.certd_prepare_approval_app())
+}
+
+var restoreApprovalApplicationPolicy = func(previousPolicy int64) {
+	C.certd_restore_approval_app(C.long(previousPolicy))
+}
+
+var approvalAppPolicyMu sync.Mutex
+var approvalAppPolicyDepth int
+var approvalAppPreviousPolicy int64
+
 var prepareApprovalModalApplication = func() func() {
-	previousPolicy := C.certd_prepare_approval_app()
+	approvalAppPolicyMu.Lock()
+	if approvalAppPolicyDepth == 0 {
+		approvalAppPreviousPolicy = prepareApprovalApplicationPolicy()
+	} else {
+		activateApprovalModalApplication()
+	}
+	approvalAppPolicyDepth++
+	approvalAppPolicyMu.Unlock()
+
 	return func() {
-		C.certd_restore_approval_app(previousPolicy)
+		approvalAppPolicyMu.Lock()
+		if approvalAppPolicyDepth > 0 {
+			approvalAppPolicyDepth--
+			if approvalAppPolicyDepth == 0 {
+				restoreApprovalApplicationPolicy(approvalAppPreviousPolicy)
+			}
+		}
+		approvalAppPolicyMu.Unlock()
 	}
 }
 
