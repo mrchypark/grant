@@ -36,7 +36,7 @@ func main() {
 		SessionTTL:     5 * time.Minute,
 		SessionSecret:  sessionSecret,
 	})
-	log.Printf("desktop agent listening on %s", addr)
+	log.Printf("REPass desktop agent listening on %s", addr)
 	if err := app.Run(addr, server.Handler(), app.RunOptions{Addr: addr}); err != nil {
 		log.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func loadOrCreateSessionSecret() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	stateDir := filepath.Join(configDir, "certd-desktop-agent")
+	stateDir := filepath.Join(configDir, "repass-desktop-agent")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -102,6 +102,19 @@ func loadOrCreateSessionSecret() ([]byte, error) {
 		}
 		return secret, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	legacySecretPath := filepath.Join(configDir, "certd-desktop-agent", "session-secret.bin")
+	if secret, err := os.ReadFile(legacySecretPath); err == nil {
+		if len(secret) < 32 {
+			return nil, errors.New("desktop agent session secret is too short")
+		}
+		if err := os.WriteFile(secretPath, secret, 0o600); err != nil {
+			return nil, err
+		}
+		return secret, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 

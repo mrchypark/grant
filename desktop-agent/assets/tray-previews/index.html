@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tray Icon Fingerprint RE Previews</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --page-bg: #f3f4f6;
+        --card-bg: #ffffff;
+        --panel-light: #ffffff;
+        --panel-dark: #111827;
+        --text: #111827;
+        --muted: #6b7280;
+        --border: #d1d5db;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --page-bg: #0f172a;
+          --card-bg: #111827;
+          --panel-light: #f9fafb;
+          --panel-dark: #020617;
+          --text: #f9fafb;
+          --muted: #94a3b8;
+          --border: #334155;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "SF Pro Display", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 28%),
+          radial-gradient(circle at top right, rgba(16, 185, 129, 0.08), transparent 24%),
+          var(--page-bg);
+        color: var(--text);
+      }
+
+      main {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 0 0 24px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+      }
+
+      .card {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 14px;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      }
+
+      .card.selected {
+        border-color: #60a5fa;
+        box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3), 0 14px 36px rgba(37, 99, 235, 0.14);
+      }
+
+      .card h2 {
+        margin: 0 0 4px;
+        font-size: 16px;
+      }
+
+      .selected-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 10px;
+        padding: 5px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #dbeafe;
+        background: rgba(37, 99, 235, 0.32);
+        border: 1px solid rgba(96, 165, 250, 0.45);
+      }
+
+      .card small {
+        display: block;
+        margin-bottom: 12px;
+        color: var(--muted);
+      }
+
+      .panels {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+      }
+
+      .panel {
+        border-radius: 14px;
+        min-height: 140px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--border);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .panel::after {
+        position: absolute;
+        left: 10px;
+        bottom: 8px;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        opacity: 0.65;
+      }
+
+      .panel.light {
+        background: var(--panel-light);
+      }
+
+      .panel.light::after {
+        content: "Light";
+        color: #6b7280;
+      }
+
+      .panel.invert {
+        background: var(--panel-dark);
+      }
+
+      .panel.invert::after {
+        content: "Invert";
+        color: rgba(255, 255, 255, 0.72);
+      }
+
+      .panel.invert img {
+        filter: invert(1);
+      }
+
+      .tray-strip {
+        margin-top: 22px;
+        padding: 18px 20px 20px;
+        border-radius: 22px;
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, #4397d5, #2a6ea7);
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+      }
+
+      .tray-strip h2 {
+        margin: 0 0 14px;
+        font-size: 15px;
+        color: rgba(255, 255, 255, 0.96);
+      }
+
+      .tray-row {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(110px, 1fr));
+        gap: 16px;
+        align-items: center;
+      }
+
+      .tray-item {
+        min-height: 72px;
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        background: rgba(255, 255, 255, 0.06);
+        display: grid;
+        place-items: center;
+        position: relative;
+        backdrop-filter: blur(3px);
+      }
+
+      .tray-item span {
+        position: absolute;
+        left: 10px;
+        bottom: 8px;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.78);
+      }
+
+      .tray-item img {
+        width: 24px;
+        height: 24px;
+        filter: invert(1);
+      }
+
+      img {
+        width: 78px;
+        height: 78px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Fingerprint + RE Tray Icon Concepts</h1>
+      <p>
+        오버레이형만 다시 정리했습니다. `Overlay 02`를 현재 선택안으로 고정했고, 카드에서는 모양 자체를,
+        아래 별도 메뉴바 스트립에서는 실제 트레이 크기에 가까운 읽힘을 비교할 수 있습니다.
+      </p>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Overlay 01</h2>
+          <small>Balanced large monogram</small>
+          <div class="panels">
+            <div class="panel light"><img src="./fingerprint-overlay-01.svg" alt="overlay 01 preview" /></div>
+            <div class="panel invert"><img src="./fingerprint-overlay-01.svg" alt="overlay 01 preview inverted" /></div>
+          </div>
+        </article>
+        <article class="card selected">
+          <h2>Overlay 02</h2>
+          <div class="selected-badge">Selected</div>
+          <small>Heavy compact tray-priority monogram</small>
+          <div class="panels">
+            <div class="panel light"><img src="./fingerprint-overlay-02.svg" alt="overlay 02 preview" /></div>
+            <div class="panel invert"><img src="./fingerprint-overlay-02.svg" alt="overlay 02 preview inverted" /></div>
+          </div>
+        </article>
+        <article class="card">
+          <h2>Overlay 03</h2>
+          <small>Narrow large monogram</small>
+          <div class="panels">
+            <div class="panel light"><img src="./fingerprint-overlay-03.svg" alt="overlay 03 preview" /></div>
+            <div class="panel invert"><img src="./fingerprint-overlay-03.svg" alt="overlay 03 preview inverted" /></div>
+          </div>
+        </article>
+        <article class="card">
+          <h2>Overlay 04</h2>
+          <small>Wide large monogram</small>
+          <div class="panels">
+            <div class="panel light"><img src="./fingerprint-overlay-04.svg" alt="overlay 04 preview" /></div>
+            <div class="panel invert"><img src="./fingerprint-overlay-04.svg" alt="overlay 04 preview inverted" /></div>
+          </div>
+        </article>
+        <article class="card">
+          <h2>Overlay 05</h2>
+          <small>Tray-first RE max</small>
+          <div class="panels">
+            <div class="panel light"><img src="./fingerprint-overlay-05.svg" alt="overlay 05 preview" /></div>
+            <div class="panel invert"><img src="./fingerprint-overlay-05.svg" alt="overlay 05 preview inverted" /></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="tray-strip">
+        <h2>Tray Simulation</h2>
+        <div class="tray-row">
+          <div class="tray-item"><img src="./fingerprint-overlay-01.svg" alt="overlay 01 in tray strip" /><span>01</span></div>
+          <div class="tray-item"><img src="./fingerprint-overlay-02.svg" alt="overlay 02 in tray strip" /><span>02</span></div>
+          <div class="tray-item"><img src="./fingerprint-overlay-03.svg" alt="overlay 03 in tray strip" /><span>03</span></div>
+          <div class="tray-item"><img src="./fingerprint-overlay-04.svg" alt="overlay 04 in tray strip" /><span>04</span></div>
+          <div class="tray-item"><img src="./fingerprint-overlay-05.svg" alt="overlay 05 in tray strip" /><span>05</span></div>
+        </div>
+      </section>
+
+      <p style="margin-top:16px">
+        최종 후보 SVG: <code>desktop-agent/assets/tray-icon.svg</code>
+      </p>
+    </main>
+  </body>
+</html>
