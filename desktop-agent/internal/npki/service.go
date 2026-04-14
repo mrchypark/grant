@@ -144,11 +144,17 @@ func DefaultConfig() ServiceConfig {
 	roots := defaultLocalRootsFor(runtime.GOOS, home)
 	return ServiceConfig{
 		Roots:            roots,
-		AutoDiscover:     runtime.GOOS == "darwin",
+		AutoDiscover:     runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		RootsTTL:         defaultDiscoveredRootsTTL,
 		DiscoveryTimeout: defaultDiscoveryTimeout,
 		DiscoverRoots: func(ctx context.Context) []string {
-			return discoverMountedNPKIRoots(ctx, "/Volumes")
+			switch runtime.GOOS {
+			case "darwin":
+				return discoverMountedNPKIRoots(ctx, "/Volumes")
+			case "windows":
+				return discoverWindowsDriveNPKIRoots(ctx)
+			}
+			return nil
 		},
 	}
 }
@@ -557,14 +563,23 @@ func discoverDefaultRootsFor(ctx context.Context, goos string, home string, volu
 func defaultLocalRootsFor(goos string, home string) []string {
 	switch goos {
 	case "windows":
-		localAppData := os.Getenv("LOCALAPPDATA")
-		appData := os.Getenv("APPDATA")
-		return []string{
-			filepath.Join(home, "NPKI"),
-			filepath.Join(home, "Documents", "NPKI"),
-			filepath.Join(localAppData, "NPKI"),
-			filepath.Join(appData, "NPKI"),
+		// 한국 공동인증서가 실제로 배포되는 위치:
+		//   - %USERPROFILE%\AppData\LocalLow\NPKI  (브라우저/낮은 무결성 플러그인)
+		//   - %ProgramFiles%\NPKI                  (64bit 기관 설치기)
+		//   - %ProgramFiles(x86)%\NPKI             (32bit 에뮬레이션 설치기)
+		// <드라이브>:\NPKI 은 AutoDiscover 경로(discoverWindowsDriveNPKIRoots)에서
+		// 현재 mount된 고정/이동식 드라이브만 GetLogicalDrives + GetDriveType 으로
+		// 훑어 추가한다.
+		roots := []string{
+			filepath.Join(home, "AppData", "LocalLow", "NPKI"),
 		}
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			roots = append(roots, filepath.Join(pf, "NPKI"))
+		}
+		if pfx86 := os.Getenv("ProgramFiles(x86)"); pfx86 != "" {
+			roots = append(roots, filepath.Join(pfx86, "NPKI"))
+		}
+		return roots
 	case "darwin":
 		return []string{
 			filepath.Join(home, "NPKI"),

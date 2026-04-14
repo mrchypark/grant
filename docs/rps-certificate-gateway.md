@@ -67,10 +67,10 @@ export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
   - `~/Documents/NPKI`
   - `~/Library/Preferences/NPKI`
 - Windows 기본 탐색 경로
-  - `%USERPROFILE%\\NPKI`
-  - `%USERPROFILE%\\Documents\\NPKI`
-  - `%LOCALAPPDATA%\\NPKI`
-  - `%APPDATA%\\NPKI`
+  - `%USERPROFILE%\\AppData\\LocalLow\\NPKI` (브라우저/낮은 무결성 플러그인 설치 경유)
+  - `%ProgramFiles%\\NPKI` (64bit 기관 설치기)
+  - `%ProgramFiles(x86)%\\NPKI` (32bit 에뮬레이션 설치기)
+  - `<드라이브>:\\NPKI` — 현재 mount된 고정/이동식 드라이브 루트를 `GetLogicalDrives` + `GetDriveType` 으로 훑어 NPKI 디렉터리가 있으면 AutoDiscover 경로로 편입. CD-ROM/네트워크 드라이브는 hang 방지를 위해 제외
 
 macOS와 Windows desktop agent 모두 tray 앱으로 상주 실행된다 (macOS 메뉴바, Windows 시스템 트레이). tray 없는 headless 실행 모드는 더 이상 지원하지 않는다. 표시 문자열은 [`internal/localization`](../desktop-agent/internal/localization/) 의 `ko`/`en` 카피를 사용한다. 트레이 아이콘은 [`desktop-agent/assets/`](../desktop-agent/assets/) 패키지의 `tray-icon.png`(macOS)/`tray-icon.ico`(Windows) 로 각 플랫폼별로 번들한다. Windows 빌드는 `-H=windowsgui` 링커 플래그로 콘솔 없이 실행되며 로컬에서는 `make build`, CI는 [`.github/workflows/desktop-agent.yml`](../.github/workflows/desktop-agent.yml) 의 ubuntu/macos/windows 매트릭스에서 자동 빌드한다.
 
