@@ -72,8 +72,10 @@ port_is_available() {
     return 1
   fi
   if command -v lsof >/dev/null 2>&1; then
-    ! lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
-    return
+    if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 1
+    fi
+    return 0
   fi
   python3 - "$port" <<'PY'
 import socket
