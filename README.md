@@ -661,22 +661,22 @@ export CERT_PASSWORD='...'
 
 주요 스크립트:
 
-- [scripts/ci-chaos-local.sh](/Users/cypark/.codex/worktrees/6cf6/account/scripts/ci-chaos-local.sh)
+- [scripts/ci-chaos-local.sh](scripts/ci-chaos-local.sh)
   - 로컬/CI 공용 엔트리포인트
   - 이미지 빌드
   - `vind` cluster ensure
   - bootstrap, e2e, reduced chaos 실행
-- [scripts/vind-cluster.sh](/Users/cypark/.codex/worktrees/6cf6/account/scripts/vind-cluster.sh)
+- [scripts/vind-cluster.sh](scripts/vind-cluster.sh)
   - `vind` create/connect/delete
   - Colima preflight
   - node taint normalization
-- [scripts/vind-exec.sh](/Users/cypark/.codex/worktrees/6cf6/account/scripts/vind-exec.sh)
+- [scripts/vind-exec.sh](scripts/vind-exec.sh)
   - phase 실행 시점에만 `vcluster connect`를 연다
-- [scripts/vind-bootstrap.sh](/Users/cypark/.codex/worktrees/6cf6/account/scripts/vind-bootstrap.sh)
+- [scripts/vind-bootstrap.sh](scripts/vind-bootstrap.sh)
   - MinIO bucket bootstrap
   - TrailBase rollout 대기
   - `certd` quorum/learner rollout 대기
-- [scripts/vind-chaos.sh](/Users/cypark/.codex/worktrees/6cf6/account/scripts/vind-chaos.sh)
+- [scripts/vind-chaos.sh](scripts/vind-chaos.sh)
   - reduced chaos wrapper
   - 내부적으로 `scripts/k3d-chaos.sh` phase 구현체를 호출
 

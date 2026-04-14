@@ -122,9 +122,11 @@ require_contains "scripts/k3d-chaos.sh" '--connect-timeout "${HTTP_CONNECT_TIMEO
 require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_LOCAL_PORT="${TRAILBASE_LOCAL_PORT:-14000}"'
 require_contains "scripts/k3d-chaos.sh" 'port-forward svc/trailbase "${TRAILBASE_LOCAL_PORT}:4000"'
 require_contains "scripts/k3d-chaos.sh" 'http://127.0.0.1:${TRAILBASE_LOCAL_PORT}/api/auth/v1/login'
-require_contains "scripts/k3d-chaos.sh" 'TRAILBASE_RECOVERED_AUTH_TOKEN=""'
-require_contains "scripts/k3d-chaos.sh" 'auth_token="${TRAILBASE_RECOVERED_AUTH_TOKEN}"'
+require_not_contains "scripts/k3d-chaos.sh" 'TRAILBASE_RECOVERED_AUTH_TOKEN=""'
+require_not_contains "scripts/k3d-chaos.sh" 'auth_token="${TRAILBASE_RECOVERED_AUTH_TOKEN}"'
 require_not_contains "scripts/k3d-chaos.sh" 'auth_token="$(scenario_trailbase_cache_ttl'
+require_contains "scripts/k3d-chaos.sh" 'scenario_trailbase_cache_ttl recovered_auth_token "${auth_token}" "${active_org}" "${baseline_facility_code}"'
+require_contains "scripts/k3d-chaos.sh" "printf -v \"\${__result_var}\" '%s' \"\${recovered_token}\""
 require_contains "scripts/k3d-chaos.sh" 'reserve_local_port()'
 require_contains "scripts/k3d-chaos.sh" 'validate_certd_health()'
 require_contains "scripts/k3d-chaos.sh" 'validate_trailbase_health()'

@@ -41,7 +41,6 @@ TRAILBASE_RECOVERY_LOGIN_RETRIES="${TRAILBASE_RECOVERY_LOGIN_RETRIES:-20}"
 TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS="${TRAILBASE_RECOVERY_LOGIN_RETRY_DELAY_SECONDS:-2}"
 
 declare -a RESERVED_LOCAL_PORTS=()
-TRAILBASE_RECOVERED_AUTH_TOKEN=""
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -980,9 +979,10 @@ scenario_learner_restart() {
 }
 
 scenario_trailbase_cache_ttl() {
-  local auth_token="$1"
-  local active_org="$2"
-  local facility_code="$3"
+  local __result_var="$1"
+  local auth_token="$2"
+  local active_org="$3"
+  local facility_code="$4"
 
   set_chaos_phase "trailbase-down"
   echo "[chaos] trailbase scale down + auth cache ttl" >&2
@@ -1020,7 +1020,7 @@ scenario_trailbase_cache_ttl() {
   observe_core_api "trailbase-recovered" "${recovered_token}" "${active_org}" >&2
   inspect_plant "${recovered_token}" "${active_org}" "${facility_code}" | jq >&2
   set_chaos_phase "post-trailbase-recovery"
-  TRAILBASE_RECOVERED_AUTH_TOKEN="${recovered_token}"
+  printf -v "${__result_var}" '%s' "${recovered_token}"
 }
 
 scenario_minio_restart() {
@@ -1082,6 +1082,7 @@ main() {
   echo "[baseline] plant"
   echo "${baseline_plant}" | jq
   local inspect_json
+  local recovered_auth_token=""
   retry_capture_into inspect_json 20 2 inspect_plant "${auth_token}" "${active_org}" "${baseline_facility_code}"
   printf '%s\n' "${inspect_json}" | jq
   retry_capture 20 2 trigger_backup
@@ -1096,8 +1097,8 @@ main() {
     echo "[skip] learner-voter partition scenario disabled; set CERTD_CHAOS_INCLUDE_LEARNER_PARTITION=1 to include it"
   fi
   scenario_learner_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
-  scenario_trailbase_cache_ttl "${auth_token}" "${active_org}" "${baseline_facility_code}"
-  auth_token="${TRAILBASE_RECOVERED_AUTH_TOKEN}"
+  scenario_trailbase_cache_ttl recovered_auth_token "${auth_token}" "${active_org}" "${baseline_facility_code}"
+  auth_token="${recovered_auth_token}"
   if [[ "${CERTD_CHAOS_INCLUDE_MINIO}" == "1" ]]; then
     scenario_minio_restart "${auth_token}" "${active_org}" "${baseline_facility_code}"
   else
