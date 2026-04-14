@@ -114,6 +114,7 @@ func loadOrCreateSessionSecret() ([]byte, error) {
 			return nil, err
 		}
 		_ = os.Remove(legacySecretPath)
+		_ = os.Remove(filepath.Dir(legacySecretPath))
 		return secret, nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
