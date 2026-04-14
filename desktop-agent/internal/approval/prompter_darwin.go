@@ -209,6 +209,18 @@ var restoreApprovalApplicationPolicy = func(previousPolicy int64) {
 var approvalAppPolicyMu sync.Mutex
 var approvalAppPolicyDepth int
 var approvalAppPreviousPolicy int64
+var approvalModalSlot = make(chan struct{}, 1)
+
+var acquireApprovalModal = func(ctx context.Context) (func(), error) {
+	select {
+	case approvalModalSlot <- struct{}{}:
+		return func() {
+			<-approvalModalSlot
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 var prepareApprovalModalApplication = func() func() {
 	approvalAppPolicyMu.Lock()
@@ -297,6 +309,11 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	if err := ctx.Err(); err != nil {
 		return httpapi.ApprovalDecision{}, err
 	}
+	releaseModal, err := acquireApprovalModal(ctx)
+	if err != nil {
+		return httpapi.ApprovalDecision{}, err
+	}
+	defer releaseModal()
 
 	joinedLabels := make([]string, 0, len(prompt.Certificates))
 	defaultIndex := 0
