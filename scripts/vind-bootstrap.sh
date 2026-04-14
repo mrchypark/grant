@@ -70,6 +70,21 @@ k3d_node_names() {
   docker ps --format '{{.Names}}' | grep -E "^k3d-${CLUSTER_NAME}-(server|agent)-" || true
 }
 
+k3d_nodes_have_image() {
+  local nodes="$1"
+  local refs_file="$2"
+  local node=""
+
+  for node in ${nodes}; do
+    if ! docker exec "${node}" ctr -n k8s.io images ls -q \
+      | grep -F -x -f "${refs_file}" >/dev/null 2>&1; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
 import_image_with_ctr_k3d() {
   local image="$1"
   local tar_file
@@ -132,8 +147,7 @@ ensure_runtime_image() {
       exit 1
     fi
 
-    if docker exec "$(printf '%s\n' "${nodes}" | head -n1)" ctr -n k8s.io images ls -q \
-      | grep -F -x -f "${refs_file}" >/dev/null 2>&1; then
+    if k3d_nodes_have_image "${nodes}" "${refs_file}"; then
       echo "[vind] image already present in runtime: ${image}"
       rm -f "${refs_file}"
       return 0
@@ -143,8 +157,7 @@ ensure_runtime_image() {
     if ! k3d image import "${image}" -c "${CLUSTER_NAME}" >/dev/null 2>&1; then
       import_image_with_ctr_k3d "${image}"
     fi
-    docker exec "$(printf '%s\n' "${nodes}" | head -n1)" ctr -n k8s.io images ls -q \
-      | grep -F -x -f "${refs_file}" >/dev/null 2>&1 || {
+    k3d_nodes_have_image "${nodes}" "${refs_file}" || {
       rm -f "${refs_file}"
       echo "failed to import image into k3d runtime: ${image}" >&2
       exit 1

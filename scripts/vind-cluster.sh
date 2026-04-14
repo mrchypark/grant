@@ -142,8 +142,11 @@ current_driver() {
 delete_cluster() {
   if vcluster_cluster_exists; then
     use_driver
-    vcluster delete "${CLUSTER_NAME}" >/dev/null
-  elif k3d_cluster_exists; then
+    vcluster delete "${CLUSTER_NAME}" >/dev/null 2>&1 || true
+  fi
+  docker rm -f "$(cluster_container_name)" >/dev/null 2>&1 || true
+  docker network rm "vcluster.${CLUSTER_NAME}" >/dev/null 2>&1 || true
+  if k3d_cluster_exists; then
     k3d cluster delete "${CLUSTER_NAME}" >/dev/null
   fi
 }
@@ -202,6 +205,8 @@ EOF
       exit 1
     }
     echo "[vind] vcluster docker driver failed; using opt-in k3d fallback" >&2
+    docker rm -f "$(cluster_container_name)" >/dev/null 2>&1 || true
+    docker network rm "vcluster.${CLUSTER_NAME}" >/dev/null 2>&1 || true
     k3d cluster create "${CLUSTER_NAME}" --wait >/dev/null
     return 0
   fi
