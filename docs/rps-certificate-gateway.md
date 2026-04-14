@@ -72,7 +72,7 @@ export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
   - `%LOCALAPPDATA%\\NPKI`
   - `%APPDATA%\\NPKI`
 
-macOS desktop agent는 항상 메뉴바(tray) 앱으로 실행된다. tray 없는 headless macOS 실행 모드는 더 이상 지원하지 않는다.
+macOS와 Windows desktop agent 모두 tray 앱으로 상주 실행된다 (macOS 메뉴바, Windows 시스템 트레이). tray 없는 headless 실행 모드는 더 이상 지원하지 않는다. 표시 문자열은 [`internal/localization`](../desktop-agent/internal/localization/) 의 `ko`/`en` 카피를 사용한다. 트레이 아이콘은 [`desktop-agent/assets/`](../desktop-agent/assets/) 패키지의 `tray-icon.png`(macOS)/`tray-icon.ico`(Windows) 로 각 플랫폼별로 번들한다. Windows 빌드는 `-H=windowsgui` 링커 플래그로 콘솔 없이 실행되며 로컬에서는 `make build`, CI는 [`.github/workflows/desktop-agent.yml`](../.github/workflows/desktop-agent.yml) 의 ubuntu/macos/windows 매트릭스에서 자동 빌드한다.
 
 USB에 인증서가 있을 때는 USB 루트를 직접 지정하면 된다.
 
