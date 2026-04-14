@@ -1435,7 +1435,7 @@ impl Database {
     async fn find_organization_party_id(&self, organization_id: &str) -> Result<Option<String>> {
         let rows: Vec<OrganizationRow> = self
             .query_default_rows(
-                "SELECT o.id, opl.party_id, o.name, o.active
+                "SELECT o.id, opl.party_id, o.business_no, o.name, o.inactivated_at
                  FROM organizations o
                  LEFT JOIN organization_party_links opl
                    ON opl.organization_id = o.id

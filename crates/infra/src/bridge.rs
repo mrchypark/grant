@@ -941,8 +941,8 @@ fn bundle_from_certificate(bundle: &CertificateBundle) -> NpkiBundle {
     NpkiBundle {
         sign_cert_der: bundle.sign_cert_der.clone(),
         sign_pri_key: bundle.sign_pri_key.clone(),
-        km_cert_der: bundle.km_cert_der.clone(),
-        km_pri_key: bundle.km_pri_key.clone(),
+        km_cert_der: bundle.km_cert_der.clone().unwrap_or_default(),
+        km_pri_key: bundle.km_pri_key.clone().unwrap_or_default(),
     }
 }
 

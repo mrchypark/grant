@@ -223,7 +223,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	case req.Challenge == "":
 		writeError(w, http.StatusBadRequest, "challenge must not be empty")
 		return
-	case strings.TrimSpace(req.Password) == "":
+	case strings.TrimSpace(req.Password) == "" && !(req.Password == "" && strings.HasPrefix(req.CertificateID, "pkcs12:")):
 		writeError(w, http.StatusBadRequest, "password must not be empty")
 		return
 	}

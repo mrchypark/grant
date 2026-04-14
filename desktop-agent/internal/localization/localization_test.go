@@ -40,4 +40,13 @@ func TestStringsForLanguage(t *testing.T) {
 	if en.ApprovalTitle != "REPass Approval Request" {
 		t.Fatalf("english approval title = %q", en.ApprovalTitle)
 	}
+	if ko.LocalCertificateSource != "로컬" {
+		t.Fatalf("korean local source label = %q", ko.LocalCertificateSource)
+	}
+	if ko.RemovableCertificateSource != "이동식디스크" {
+		t.Fatalf("korean removable source label = %q", ko.RemovableCertificateSource)
+	}
+	if en.PKCS12CertificateSource != "PKCS#12" {
+		t.Fatalf("english pkcs12 source label = %q", en.PKCS12CertificateSource)
+	}
 }

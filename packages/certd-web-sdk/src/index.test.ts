@@ -113,6 +113,58 @@ test("assertAvailable() checks agent health", async () => {
   }
 });
 
+test("raw.agent.listCertificates() preserves extended certificate metadata", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        sessionToken: "agent-session-1",
+        expiresAt: "2026-04-09T00:05:00Z",
+      }, 201),
+    () =>
+      jsonResponse({
+        items: [
+          {
+            id: "pkcs12:/Volumes/Lexar/protected.p12",
+            commonName: "Protected PKCS12 Certificate",
+            businessNo: "2768603291",
+            notAfter: "2027-04-09T00:00:00Z",
+            sourceKind: "pkcs12",
+            storageKind: "pkcs12",
+            displayPath: "protected.p12",
+            issuerName: "Test Issuer",
+            hasKmMaterial: false,
+          },
+        ],
+      }),
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    const result = await sdk.raw.agent.listCertificates();
+
+    assert.equal(mock.calls.length, 2);
+    assert.equal(String(mock.calls[0].input), "http://127.0.0.1:8765/sessions/open");
+    assert.equal(String(mock.calls[1].input), "http://127.0.0.1:8765/certificates");
+    assert.deepEqual(result.items[0], {
+      id: "pkcs12:/Volumes/Lexar/protected.p12",
+      commonName: "Protected PKCS12 Certificate",
+      businessNo: "2768603291",
+      notAfter: "2027-04-09T00:00:00Z",
+      sourceKind: "pkcs12",
+      storageKind: "pkcs12",
+      displayPath: "protected.p12",
+      issuerName: "Test Issuer",
+      hasKmMaterial: false,
+    });
+  } finally {
+    mock.restore();
+  }
+});
+
 test("runEphemeral() checks agent health then delegates approval and execution to the local agent", async () => {
   const mock = installFetchMock([
     () => textResponse("ok"),

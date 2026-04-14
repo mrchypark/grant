@@ -43,7 +43,7 @@ fn signer_loads_certificate_and_builds_payloads() {
     assert!(signed.contains("BEGIN PKCS7"));
 
     let enveloped = signer
-        .envelop_pkcs7_pem(&bundle.km_cert_der, b"2768603291")
+        .envelop_pkcs7_pem(bundle.km_cert_der.as_slice(), b"2768603291")
         .expect("envelop business number");
     assert!(enveloped.contains("BEGIN PKCS7"));
 }
@@ -56,8 +56,8 @@ fn dek_encrypted_bundle_round_trips_after_kms_wrap_and_unwrap() {
         common_name: "Test Certificate".to_owned(),
         sign_cert_der: vec![1, 2, 3],
         sign_pri_key: vec![4, 5, 6],
-        km_cert_der: vec![7, 8, 9],
-        km_pri_key: vec![10, 11, 12],
+        km_cert_der: Some(vec![7, 8, 9]),
+        km_pri_key: Some(vec![10, 11, 12]),
     };
     let kms = EnvKmsProvider::from_config(&KmsConfig {
         active_key_id: "local-dev-v1".to_owned(),
@@ -78,5 +78,40 @@ fn dek_encrypted_bundle_round_trips_after_kms_wrap_and_unwrap() {
     assert_eq!(decrypted.password, "original-password");
     assert_eq!(decrypted.common_name, "Test Certificate");
     assert_eq!(decrypted.sign_cert_der, vec![1, 2, 3]);
-    assert_eq!(decrypted.km_pri_key, vec![10, 11, 12]);
+    assert_eq!(decrypted.km_cert_der, Some(vec![7, 8, 9]));
+    assert_eq!(decrypted.km_pri_key, Some(vec![10, 11, 12]));
+}
+
+#[test]
+fn dek_encrypted_bundle_round_trips_without_km_material() {
+    let bundle = CertificateBundle {
+        business_no: "2768603291".to_owned(),
+        password: "original-password".to_owned(),
+        common_name: "Test Certificate".to_owned(),
+        sign_cert_der: vec![1, 2, 3],
+        sign_pri_key: vec![4, 5, 6],
+        km_cert_der: None,
+        km_pri_key: None,
+    };
+    let kms = EnvKmsProvider::from_config(&KmsConfig {
+        active_key_id: "local-dev-v1".to_owned(),
+        master_keys: vec![("local-dev-v1".to_owned(), b"master-key-material".to_vec())],
+    })
+    .expect("kms provider");
+
+    let dek = generate_data_encryption_key();
+    let encrypted = encrypt_bundle_with_key(&dek, &bundle).expect("encrypt bundle with dek");
+    let wrapped = kms.wrap(&dek).expect("wrap dek");
+    let unwrapped = kms
+        .unwrap(kms.active_key_id(), &wrapped)
+        .expect("unwrap dek");
+    let decrypted =
+        decrypt_bundle_with_key(&unwrapped, &encrypted).expect("decrypt bundle with dek");
+
+    assert_eq!(decrypted.business_no, "2768603291");
+    assert_eq!(decrypted.password, "original-password");
+    assert_eq!(decrypted.common_name, "Test Certificate");
+    assert_eq!(decrypted.sign_cert_der, vec![1, 2, 3]);
+    assert_eq!(decrypted.km_cert_der, None);
+    assert_eq!(decrypted.km_pri_key, None);
 }

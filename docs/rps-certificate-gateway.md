@@ -42,7 +42,7 @@ export CERTD_KMS_MASTER_KEYS=local-dev-v1:BASE64_KEY_MATERIAL,local-dev-v2:BASE6
 Desktop agent는 인증서 탐색 루트를 환경변수로 덮어쓸 수 있다.
 
 ```bash
-export DESKTOP_AGENT_NPKI_DIRS="$HOME/NPKI:$HOME/Documents/NPKI"
+export DESKTOP_AGENT_NPKI_DIRS="$HOME/NPKI:$HOME/GPKI:$HOME/Documents/NPKI:$HOME/Documents/GPKI"
 ```
 
 loopback agent는 허용 origin과 local session secret도 환경변수로 제어할 수 있다.
@@ -64,23 +64,30 @@ export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
 
 - macOS 기본 탐색 경로
   - `~/NPKI`
+  - `~/GPKI`
   - `~/Documents/NPKI`
+  - `~/Documents/GPKI`
   - `~/Library/Preferences/NPKI`
+  - `~/Library/Preferences/GPKI`
 - Windows 기본 탐색 경로
   - `%USERPROFILE%\\NPKI`
+  - `%USERPROFILE%\\GPKI`
   - `%USERPROFILE%\\Documents\\NPKI`
+  - `%USERPROFILE%\\Documents\\GPKI`
   - `%LOCALAPPDATA%\\NPKI`
+  - `%LOCALAPPDATA%\\GPKI`
   - `%APPDATA%\\NPKI`
+  - `%APPDATA%\\GPKI`
 
 macOS desktop agent는 항상 메뉴바(tray) 앱으로 실행된다. tray 없는 headless macOS 실행 모드는 더 이상 지원하지 않는다.
 
 USB에 인증서가 있을 때는 USB 루트를 직접 지정하면 된다.
 
 ```bash
-export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI"
+export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI:/Volumes/Lexar/GPKI"
 ```
 
-agent는 지정된 루트 아래를 재귀적으로 훑어서 아래 4개 파일이 같은 디렉터리에 있는 곳을 인증서 bundle로 취급한다.
+agent는 지정된 루트 아래를 재귀적으로 훑어서 아래 4개 파일이 같은 디렉터리에 있는 곳을 인증서 bundle로 취급한다. `NPKI`와 `GPKI`는 같은 bundle source로 다뤄지고, 목록과 서명 요청의 `certificateId`는 `bundle:` 접두사를 가진 source-aware id를 사용한다.
 
 ```text
 signCert.der
@@ -104,6 +111,23 @@ kmPri.key
 /Volumes/Lexar/NPKI/yessign/USER/cn=<subject>/...
 /Volumes/Lexar/NPKI/crosscert/USER/cn=<subject>/...
 ```
+
+`GET /certificates`의 bundle metadata는 다음 필드를 포함한다.
+
+- `id`
+  - `bundle:/absolute/path/to/cert-dir` 또는 `pkcs12:/absolute/path/to/file.p12` 형태
+- `sourceKind`
+  - `bundle` 또는 `pkcs12`
+- `storageKind`
+  - `npki`, `gpki`, `pkcs12`, 또는 커스텀 bundle root/alias에서는 `unknown`
+- `displayPath`
+  - 사용자에게 보이는 축약 경로. API/docs/tests에서는 플랫폼과 무관하게 `NPKI/yessign/...`처럼 forward-slash 스타일로 표시한다.
+- `issuerName`
+  - 인증서 발급자 표시명
+- `hasKmMaterial`
+  - bundle에 KM 파일이 포함되어 있는지 여부
+
+macOS native approval modal은 목록 라벨에서 `로컬 NPKI`, `이동식디스크 GPKI`, `이동식디스크 PKCS#12`처럼 소스와 저장 매체를 함께 보여주고, 마지막에 `displayPath`를 붙여 같은 CN이 여러 개여도 구분되도록 한다.
 
 macOS에서 removable volume이 `Operation not permitted`로 보이면, Codex/Terminal 앱에 Files and Folders 또는 Full Disk Access 권한이 없어서 USB 내부를 읽지 못하는 상태일 수 있다.
 
@@ -250,10 +274,26 @@ ok
 {
   "items": [
     {
-      "id": "cert-1",
+      "id": "bundle:/Volumes/Lexar/NPKI/yessign/USER/cn=test",
       "commonName": "Test Certificate",
       "businessNo": "2768603291",
-      "notAfter": "2027-04-09T00:00:00Z"
+      "notAfter": "2027-04-09T00:00:00Z",
+      "sourceKind": "bundle",
+      "storageKind": "npki",
+      "displayPath": "NPKI/yessign/USER/cn=test",
+      "issuerName": "Test Certificate",
+      "hasKmMaterial": true
+    },
+    {
+      "id": "pkcs12:/Volumes/Lexar/protected.p12",
+      "commonName": "Protected PKCS12 Certificate",
+      "businessNo": "2768603291",
+      "notAfter": "2027-04-09T00:00:00Z",
+      "sourceKind": "pkcs12",
+      "storageKind": "pkcs12",
+      "displayPath": "protected.p12",
+      "issuerName": "Test Certificate",
+      "hasKmMaterial": false
     }
   ]
 }
@@ -267,7 +307,7 @@ ok
 
 ```json
 {
-  "certificateId": "cert-1",
+  "certificateId": "bundle:/Volumes/Lexar/NPKI/yessign/USER/cn=test",
   "challenge": "cert-gateway:...",
   "password": "secret-password"
 }
@@ -279,9 +319,10 @@ ok
 - `/sessions/open`으로 짧은 local session token 발급
 - `/certificates`, `/sign`는 session 없으면 거절
 - 제품형 high-level SDK는 `/approve-ephemeral-run`, `/approve-stored-registration` 사용
-- 실제 NPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
+- 실제 NPKI/GPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
+- `.p12`/`.pfx` PKCS#12 파일도 탐색, 목록, 서명, stored registration/ephemeral execution까지 지원
 - macOS에서는 기본적으로 메뉴바(tray) 앱으로 실행되고 `Open Example Page`, `Quit certd Agent` 메뉴 제공
-- native approval modal은 현재 macOS AppKit(`NSAlert + certificate picker + secure password field`) 구현, Windows는 후속 구현 대상
+- native approval modal은 현재 macOS AppKit(`NSAlert + certificate picker + secure password field`) 구현이며, 인증서 목록에 source/storage/path 메타데이터를 함께 보여준다. Windows는 후속 구현 대상
 
 ## JS SDK 사용 예시
 
@@ -323,6 +364,7 @@ SDK가 내부적으로 수행하는 순서는 다음과 같다.
 2. local agent `/sessions/open`으로 local session 확보
 3. local agent `approve-*` endpoint 호출
 4. agent가 native approval modal로 인증서 선택과 비밀번호 입력 처리
+   - 예: `로컬 NPKI | NPKI/yessign/...`, `이동식디스크 PKCS#12 | protected.p12`
 5. agent가 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
 
 ## 로컬 검증
@@ -339,7 +381,7 @@ USB 인증서를 직접 읽도록 agent 실행:
 
 ```bash
 export DESKTOP_AGENT_ADDR=127.0.0.1:8765
-export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI"
+export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI:/Volumes/Lexar/GPKI"
 export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
 ./bin/desktop-agent
 ```

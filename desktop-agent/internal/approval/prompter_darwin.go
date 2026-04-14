@@ -166,12 +166,14 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unsafe"
 
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
 	"github.com/cypark/account/desktop-agent/internal/localization"
+	"github.com/cypark/account/desktop-agent/internal/npki"
 )
 
 type Prompter struct{}
@@ -315,14 +317,11 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	}
 	defer releaseModal()
 
+	copy := localization.ForLanguage(localization.SystemLanguage())
 	joinedLabels := make([]string, 0, len(prompt.Certificates))
 	defaultIndex := 0
 	for i, cert := range prompt.Certificates {
-		label := cert.CommonName
-		if strings.TrimSpace(label) == "" {
-			label = cert.ID
-		}
-		joinedLabels = append(joinedLabels, label)
+		joinedLabels = append(joinedLabels, certificateOptionLabel(cert, copy))
 		if cert.BusinessNo == prompt.BusinessNo && cert.BusinessNo != "" {
 			defaultIndex = i
 		}
@@ -335,7 +334,6 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	}
 	resultCh := make(chan modalResult, 1)
 	go func() {
-		copy := localization.ForLanguage(localization.SystemLanguage())
 		businessNo := prompt.BusinessNo
 		if strings.TrimSpace(businessNo) == "" {
 			businessNo = "-"
@@ -393,4 +391,85 @@ func parseSelectedIndex(value string, max int) (int, error) {
 		return 0, fmt.Errorf("selected certificate index %d out of range", selected)
 	}
 	return selected, nil
+}
+
+func certificateOptionLabel(cert npki.CertificateMetadata, copy localization.Strings) string {
+	name := strings.TrimSpace(cert.CommonName)
+	displayPath := certificateDisplayPath(cert)
+	nameFromDisplayPath := false
+	if name == "" {
+		name = displayPath
+		nameFromDisplayPath = name != ""
+	}
+	if name == "" {
+		name = copy.UnknownCertificateName
+	}
+
+	parts := []string{name}
+	if source := certificateSourceSummary(cert, copy); source != "" {
+		parts = append(parts, source)
+	}
+	if displayPath != "" && !nameFromDisplayPath {
+		parts = append(parts, displayPath)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func certificateSourceSummary(cert npki.CertificateMetadata, copy localization.Strings) string {
+	location := copy.LocalCertificateSource
+	if certificateOnRemovableMedia(cert.ID) {
+		location = copy.RemovableCertificateSource
+	}
+	source := certificateSourceName(cert, copy)
+	if source == "" {
+		return location
+	}
+	return strings.TrimSpace(location + " " + source)
+}
+
+func certificateSourceName(cert npki.CertificateMetadata, copy localization.Strings) string {
+	switch cert.StorageKind {
+	case npki.CertificateStorageKindNPKI:
+		return copy.NPKICertificateSource
+	case npki.CertificateStorageKindGPKI:
+		return copy.GPKICertificateSource
+	case npki.CertificateStorageKindPKCS12:
+		return copy.PKCS12CertificateSource
+	}
+
+	switch cert.SourceKind {
+	case npki.CertificateSourceKindPKCS12:
+		return copy.PKCS12CertificateSource
+	case npki.CertificateSourceKindBundle:
+		return copy.BundleCertificateSource
+	default:
+		return ""
+	}
+}
+
+func certificateDisplayPath(cert npki.CertificateMetadata) string {
+	if path := strings.TrimSpace(cert.DisplayPath); path != "" {
+		return path
+	}
+	path := certificatePathFromID(cert.ID)
+	if path == "" {
+		return strings.TrimSpace(cert.ID)
+	}
+	return filepath.Base(path)
+}
+
+func certificateOnRemovableMedia(certificateID string) bool {
+	path := strings.ToLower(certificatePathFromID(certificateID))
+	return strings.HasPrefix(path, "/volumes/")
+}
+
+func certificatePathFromID(certificateID string) string {
+	switch {
+	case strings.HasPrefix(certificateID, "bundle:"):
+		return strings.TrimPrefix(certificateID, "bundle:")
+	case strings.HasPrefix(certificateID, "pkcs12:"):
+		return strings.TrimPrefix(certificateID, "pkcs12:")
+	default:
+		return certificateID
+	}
 }
