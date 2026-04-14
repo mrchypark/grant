@@ -42,11 +42,12 @@ var (
 var defaultDiscoverRoots = discoverDefaultRoots
 
 type ServiceConfig struct {
-	Roots         []string
-	AutoDiscover  bool
-	RootsTTL      time.Duration
-	DiscoverRoots func() []string
-	Now           func() time.Time
+	Roots                []string
+	AutoDiscover         bool
+	RootsTTL             time.Duration
+	InitialDiscoveryWait time.Duration
+	DiscoverRoots        func() []string
+	Now                  func() time.Time
 }
 
 type CertificateMetadata struct {
@@ -83,6 +84,7 @@ type Service struct {
 	roots []string
 
 	rootsTTL      time.Duration
+	initialWait   time.Duration
 	discoverRoots func() []string
 	now           func() time.Time
 
@@ -94,7 +96,8 @@ type Service struct {
 	refreshDone  chan struct{}
 }
 
-const defaultDiscoveredRootsTTL = 5 * time.Second
+const defaultDiscoveredRootsTTL = 60 * time.Second
+const defaultInitialDiscoveryWait = 250 * time.Millisecond
 
 func NewService(config ServiceConfig) *Service {
 	service := &Service{
@@ -108,6 +111,10 @@ func NewService(config ServiceConfig) *Service {
 		service.rootsTTL = config.RootsTTL
 		if service.rootsTTL <= 0 {
 			service.rootsTTL = defaultDiscoveredRootsTTL
+		}
+		service.initialWait = config.InitialDiscoveryWait
+		if service.initialWait <= 0 {
+			service.initialWait = defaultInitialDiscoveryWait
 		}
 		service.discoverRoots = config.DiscoverRoots
 		if service.discoverRoots == nil {
@@ -328,15 +335,12 @@ func (s *Service) cachedDiscoveredRoots() []string {
 	}
 
 	staleRoots := append([]string(nil), s.cachedRoots...)
+	hadCached := s.rootsCached
 	if s.refreshing {
 		done := s.refreshDone
 		s.mu.Unlock()
-		if !s.rootsCached && done != nil {
-			<-done
-			s.mu.Lock()
-			roots := append([]string(nil), s.cachedRoots...)
-			s.mu.Unlock()
-			return roots
+		if !hadCached && done != nil {
+			return s.waitForDiscoveredRoots(done, staleRoots)
 		}
 		return staleRoots
 	}
@@ -345,16 +349,28 @@ func (s *Service) cachedDiscoveredRoots() []string {
 	done := s.refreshDone
 	s.mu.Unlock()
 
-	if !s.rootsCached {
-		s.refreshDiscoveredRoots(done)
-		s.mu.Lock()
-		roots := append([]string(nil), s.cachedRoots...)
-		s.mu.Unlock()
-		return roots
+	if !hadCached {
+		go s.refreshDiscoveredRoots(done)
+		return s.waitForDiscoveredRoots(done, staleRoots)
 	}
 
 	go s.refreshDiscoveredRoots()
 	return staleRoots
+}
+
+func (s *Service) waitForDiscoveredRoots(done <-chan struct{}, fallback []string) []string {
+	timer := time.NewTimer(s.initialWait)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		s.mu.Lock()
+		roots := append([]string(nil), s.cachedRoots...)
+		s.mu.Unlock()
+		return roots
+	case <-timer.C:
+		return fallback
+	}
 }
 
 func (s *Service) refreshDiscoveredRoots(done ...chan struct{}) {

@@ -242,6 +242,12 @@ func TestDiscoverDefaultRootsForDarwinIncludesMountedNPKIRoots(t *testing.T) {
 	t.Fatalf("discoverDefaultRootsFor() = %#v, want mounted root %q included", got, want)
 }
 
+func TestDefaultDiscoveredRootsTTLIsLongEnough(t *testing.T) {
+	if defaultDiscoveredRootsTTL < 30*time.Second {
+		t.Fatalf("defaultDiscoveredRootsTTL = %s, want at least 30s", defaultDiscoveredRootsTTL)
+	}
+}
+
 func TestServiceRefreshesAutoDiscoveredRootsAfterTTL(t *testing.T) {
 	firstRoot := t.TempDir()
 	secondRoot := t.TempDir()
@@ -288,6 +294,54 @@ func TestServiceRefreshesAutoDiscoveredRootsAfterTTL(t *testing.T) {
 
 	now = now.Add(6 * time.Second)
 	waitForCertificateIDs(t, service, []string{second.path})
+}
+
+func TestServiceReturnsStaticRootsWhenColdDiscoveryExceedsInitialWait(t *testing.T) {
+	staticRoot := t.TempDir()
+	mountedRoot := t.TempDir()
+	staticCert := writeFixtureBundle(t, staticRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Static Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{61, 62, 63, 64},
+	})
+	mountedCert := writeFixtureBundle(t, mountedRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Mounted Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{65, 66, 67, 68},
+	})
+
+	releaseRefresh := make(chan struct{})
+	service := NewService(ServiceConfig{
+		Roots:                []string{staticRoot},
+		AutoDiscover:         true,
+		RootsTTL:             5 * time.Second,
+		InitialDiscoveryWait: 20 * time.Millisecond,
+		DiscoverRoots: func() []string {
+			<-releaseRefresh
+			return []string{mountedRoot}
+		},
+	})
+
+	start := time.Now()
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("initial ListCertificates() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("initial ListCertificates() took %s, want bounded wait", elapsed)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path}) {
+		t.Fatalf("initial certificate IDs = %#v, want static roots only %#v", ids, []string{staticCert.path})
+	}
+
+	close(releaseRefresh)
+	waitForCertificateIDs(t, service, []string{staticCert.path, mountedCert.path})
 }
 
 func TestServiceReturnsStaleRootsWhileRefreshRunsInBackground(t *testing.T) {
