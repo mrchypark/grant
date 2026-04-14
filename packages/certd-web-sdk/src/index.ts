@@ -19,7 +19,7 @@ export type CertdWebSdkOptions = {
 };
 
 export type SignAndRunInput = {
-  businessNo: string;
+  businessNo?: string;
   facilityCode?: string;
   startMonth?: string;
   endMonth?: string;
@@ -27,7 +27,7 @@ export type SignAndRunInput = {
 };
 
 export type RegisterStoredInput = {
-  businessNo: string;
+  businessNo?: string;
 };
 
 export type RunStoredInput = {
@@ -138,10 +138,13 @@ function approvalRequestFrom(
   const request: AgentApprovalRequest = {
     gatewayBaseUrl: resolveAgentGatewayBaseUrl(gateway.options.baseUrl),
     organizationId,
-    businessNo: trimRequired("businessNo", input.businessNo),
     bearerToken: gateway.options.bearerToken,
     activeOrganizationId: gateway.options.activeOrganizationId,
   };
+  const businessNo = trimOptional(input.businessNo);
+  if (businessNo) {
+    request.businessNo = businessNo;
+  }
   if ("facilityCode" in input) {
     const facilityCode = trimOptional(input.facilityCode);
     const startMonth = trimOptional(input.startMonth);
@@ -176,14 +179,6 @@ function resolveAgentGatewayBaseUrl(baseUrl: string): string {
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
-}
-
-function trimRequired(field: string, value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    throw new Error(`${field} is required`);
-  }
-  return trimmed;
 }
 
 function trimOptional(value: string | undefined): string | undefined {

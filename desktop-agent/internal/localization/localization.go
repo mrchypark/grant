@@ -5,7 +5,7 @@ import "strings"
 type Language string
 
 const (
-	Korean Language = "ko"
+	Korean  Language = "ko"
 	English Language = "en"
 )
 
@@ -31,7 +31,12 @@ func languageFromTag(tag string) Language {
 	if normalized == "" {
 		return Korean
 	}
-	if strings.HasPrefix(normalized, "ko") {
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	primary := normalized
+	if idx := strings.Index(primary, "-"); idx >= 0 {
+		primary = primary[:idx]
+	}
+	if primary == "ko" {
 		return Korean
 	}
 	return English

@@ -384,6 +384,55 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	}
 }
 
+func TestServerApproveEphemeralRunAllowsMissingBusinessNumberWhenCertificateProvidesIt(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-cert-business-no",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	npkiSvc := &stubNPKIService{
+		certificates: []npki.CertificateMetadata{{
+			ID:         "cert-1",
+			CommonName: "Test Certificate",
+			BusinessNo: "2768603291",
+			NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	handler := newTestHandler(
+		npkiSvc,
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      "secret-password",
+		}},
+		gateway,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"http://gateway.local",
+		"organizationId":"org-1"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if npkiSvc.lastSignReq.BusinessNo != "" {
+		t.Fatalf("sign businessNo = %q, want empty when request omits it", npkiSvc.lastSignReq.BusinessNo)
+	}
+	if gateway.lastEphemeral.BusinessNo != "" {
+		t.Fatalf("gateway businessNo = %q, want empty when request omits it", gateway.lastEphemeral.BusinessNo)
+	}
+	if gateway.lastEphemeral.Bundle.BusinessNo != "2768603291" {
+		t.Fatalf("bundle businessNo = %q, want 2768603291 from certificate metadata", gateway.lastEphemeral.Bundle.BusinessNo)
+	}
+}
+
 func TestServerApproveStoredRegistration(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{

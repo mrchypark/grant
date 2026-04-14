@@ -11,10 +11,10 @@ package approval
 #include <stdlib.h>
 #include <string.h>
 
-static volatile int certd_should_cancel_modal = 0;
-static NSAlert *certd_current_alert = nil;
+static volatile int repass_should_cancel_modal = 0;
+static NSAlert *repass_current_alert = nil;
 
-static NSArray<NSString *> *certd_split_labels(const char *joined) {
+static NSArray<NSString *> *repass_split_labels(const char *joined) {
 	if (joined == NULL || joined[0] == '\0') {
 		return @[];
 	}
@@ -22,21 +22,21 @@ static NSArray<NSString *> *certd_split_labels(const char *joined) {
 	return [source componentsSeparatedByString:@"\x1f"];
 }
 
-static void certd_reset_approval_modal_cancellation(void) {
-	certd_should_cancel_modal = 0;
+static void repass_reset_approval_modal_cancellation(void) {
+	repass_should_cancel_modal = 0;
 }
 
-static void certd_request_cancel_approval_modal(void) {
-	certd_should_cancel_modal = 1;
+static void repass_request_cancel_approval_modal(void) {
+	repass_should_cancel_modal = 1;
 	dispatch_async(dispatch_get_main_queue(), ^{
-		if (certd_current_alert != nil) {
+		if (repass_current_alert != nil) {
 			[NSApp abortModal];
-			[[certd_current_alert window] orderOut:nil];
+			[[repass_current_alert window] orderOut:nil];
 		}
 	});
 }
 
-static void certd_activate_approval_app(void) {
+static void repass_activate_approval_app(void) {
 	void (^activate)(void) = ^{
 		[NSApplication sharedApplication];
 		[NSApp activateIgnoringOtherApps:YES];
@@ -48,7 +48,42 @@ static void certd_activate_approval_app(void) {
 	}
 }
 
-static char *certd_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex, const char *title, const char *infoFormat, const char *approveLabel, const char *cancelLabel, const char *certificateLabel, const char *passwordLabel, const char *passwordPlaceholder) {
+static long repass_prepare_approval_app(void) {
+	__block long previousPolicy = (long)NSApplicationActivationPolicyAccessory;
+
+	void (^prepare)(void) = ^{
+		[NSApplication sharedApplication];
+		previousPolicy = (long)[NSApp activationPolicy];
+		if ((NSApplicationActivationPolicy)previousPolicy != NSApplicationActivationPolicyRegular) {
+			[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		}
+		[NSApp unhide:nil];
+		[NSApp activateIgnoringOtherApps:YES];
+	};
+	if ([NSThread isMainThread]) {
+		prepare();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), prepare);
+	}
+	return previousPolicy;
+}
+
+static void repass_restore_approval_app(long previousPolicy) {
+	void (^restore)(void) = ^{
+		[NSApplication sharedApplication];
+		NSApplicationActivationPolicy policy = (NSApplicationActivationPolicy)previousPolicy;
+		if ([NSApp activationPolicy] != policy) {
+			[NSApp setActivationPolicy:policy];
+		}
+	};
+	if ([NSThread isMainThread]) {
+		restore();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), restore);
+	}
+}
+
+static char *repass_show_approval_modal(const char *origin, const char *organization, const char *businessNo, const char *action, const char *labelsJoined, int defaultIndex, const char *title, const char *infoFormat, const char *approveLabel, const char *cancelLabel, const char *certificateLabel, const char *passwordLabel, const char *passwordPlaceholder) {
 	__block char *result = NULL;
 	__block int didCancel = 0;
 
@@ -56,7 +91,7 @@ static char *certd_show_approval_modal(const char *origin, const char *organizat
 		@autoreleasepool {
 			[NSApplication sharedApplication];
 
-			NSArray<NSString *> *labels = certd_split_labels(labelsJoined);
+			NSArray<NSString *> *labels = repass_split_labels(labelsJoined);
 			if ([labels count] == 0) {
 				return;
 			}
@@ -94,14 +129,14 @@ static char *certd_show_approval_modal(const char *origin, const char *organizat
 
 			[alert setAccessoryView:accessory];
 			[[alert window] setInitialFirstResponder:passwordField];
-			if (certd_should_cancel_modal) {
+			if (repass_should_cancel_modal) {
 				didCancel = 1;
 				return;
 			}
 
-			certd_current_alert = alert;
+			repass_current_alert = alert;
 			NSInteger response = [alert runModal];
-			certd_current_alert = nil;
+			repass_current_alert = nil;
 			if (response != NSAlertFirstButtonReturn) {
 				didCancel = 1;
 				return;
@@ -132,6 +167,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
@@ -151,15 +187,49 @@ type approvalModalInput struct {
 }
 
 var resetApprovalModalCancellation = func() {
-	C.certd_reset_approval_modal_cancellation()
+	C.repass_reset_approval_modal_cancellation()
 }
 
 var requestApprovalModalCancellation = func() {
-	C.certd_request_cancel_approval_modal()
+	C.repass_request_cancel_approval_modal()
 }
 
 var activateApprovalModalApplication = func() {
-	C.certd_activate_approval_app()
+	C.repass_activate_approval_app()
+}
+
+var prepareApprovalApplicationPolicy = func() int64 {
+	return int64(C.repass_prepare_approval_app())
+}
+
+var restoreApprovalApplicationPolicy = func(previousPolicy int64) {
+	C.repass_restore_approval_app(C.long(previousPolicy))
+}
+
+var approvalAppPolicyMu sync.Mutex
+var approvalAppPolicyDepth int
+var approvalAppPreviousPolicy int64
+
+var prepareApprovalModalApplication = func() func() {
+	approvalAppPolicyMu.Lock()
+	if approvalAppPolicyDepth == 0 {
+		approvalAppPreviousPolicy = prepareApprovalApplicationPolicy()
+	} else {
+		activateApprovalModalApplication()
+	}
+	approvalAppPolicyDepth++
+	approvalAppPolicyMu.Unlock()
+
+	return func() {
+		approvalAppPolicyMu.Lock()
+		if approvalAppPolicyDepth > 0 {
+			approvalAppPolicyDepth--
+			if approvalAppPolicyDepth == 0 {
+				restoreApprovalApplicationPolicy(approvalAppPreviousPolicy)
+			}
+		}
+		approvalAppPolicyMu.Unlock()
+	}
 }
 
 var runApprovalModal = func(input approvalModalInput) (string, bool) {
@@ -188,7 +258,7 @@ var runApprovalModal = func(input approvalModalInput) (string, bool) {
 	defer C.free(unsafe.Pointer(passwordLabel))
 	defer C.free(unsafe.Pointer(passwordPlaceholder))
 
-	raw := C.certd_show_approval_modal(
+	raw := C.repass_show_approval_modal(
 		origin,
 		organization,
 		businessNo,
@@ -211,7 +281,8 @@ var runApprovalModal = func(input approvalModalInput) (string, bool) {
 }
 
 var showApprovalModal = func(input approvalModalInput) (string, bool) {
-	activateApprovalModalApplication()
+	restore := prepareApprovalModalApplication()
+	defer restore()
 	return runApprovalModal(input)
 }
 
@@ -248,10 +319,14 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	resultCh := make(chan modalResult, 1)
 	go func() {
 		copy := localization.ForLanguage(localization.SystemLanguage())
+		businessNo := prompt.BusinessNo
+		if strings.TrimSpace(businessNo) == "" {
+			businessNo = "-"
+		}
 		packed, approved := showApprovalModal(approvalModalInput{
 			Origin:         prompt.Origin,
 			OrganizationID: prompt.OrganizationID,
-			BusinessNo:     prompt.BusinessNo,
+			BusinessNo:     businessNo,
 			Action:         prompt.Action,
 			Labels:         joinedLabels,
 			DefaultIndex:   defaultIndex,

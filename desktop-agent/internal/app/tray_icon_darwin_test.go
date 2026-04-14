@@ -15,8 +15,14 @@ func TestTrayIconBytes(t *testing.T) {
 	}
 
 	wantPrefix := []byte{0x89, 'P', 'N', 'G'}
+	if len(templateBytes) < len(wantPrefix) {
+		t.Fatal("template tray icon bytes are too short")
+	}
 	if got := templateBytes[:4]; string(got) != string(wantPrefix) {
 		t.Fatalf("template tray icon prefix = %v, want %v", got, wantPrefix)
+	}
+	if len(regularBytes) < len(wantPrefix) {
+		t.Fatal("regular tray icon bytes are too short")
 	}
 	if got := regularBytes[:4]; string(got) != string(wantPrefix) {
 		t.Fatalf("regular tray icon prefix = %v, want %v", got, wantPrefix)

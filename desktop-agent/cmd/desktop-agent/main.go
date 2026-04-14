@@ -113,6 +113,7 @@ func loadOrCreateSessionSecret() ([]byte, error) {
 		if err := os.WriteFile(secretPath, secret, 0o600); err != nil {
 			return nil, err
 		}
+		_ = os.Remove(legacySecretPath)
 		return secret, nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err

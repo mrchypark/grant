@@ -2180,7 +2180,7 @@ fn select_organization_business_no<'a>(
     requested_business_no: Option<&'a str>,
     linked_business_no: Option<&'a str>,
 ) -> Result<&'a str> {
-    if let Some(business_no) = requested_business_no {
+    if let Some(business_no) = requested_business_no.filter(|value| !value.trim().is_empty()) {
         return Ok(business_no);
     }
     if let Some(business_no) = linked_business_no {
@@ -2218,6 +2218,14 @@ mod tests {
     fn linked_business_number_is_used_when_request_omits_it() {
         let selected = select_organization_business_no("ops-seoul", None, Some("2768603291"))
             .expect("selected business number");
+        assert_eq!(selected, "2768603291");
+    }
+
+    #[test]
+    fn blank_requested_business_number_falls_back_to_linked_business_number() {
+        let selected =
+            select_organization_business_no("ops-seoul", Some("   "), Some("2768603291"))
+                .expect("selected business number");
         assert_eq!(selected, "2768603291");
     }
 

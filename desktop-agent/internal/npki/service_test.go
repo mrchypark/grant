@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,6 +222,425 @@ func TestSplitRootListPreservesWindowsDrivePaths(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("splitRootList() = %#v, want %#v", got, want)
 	}
+}
+
+func TestDiscoverDefaultRootsForDarwinIncludesMountedNPKIRoots(t *testing.T) {
+	home := t.TempDir()
+	volumesRoot := t.TempDir()
+	volumeNPKI := filepath.Join(volumesRoot, "Lexar", "NPKI")
+	if err := os.MkdirAll(volumeNPKI, 0o755); err != nil {
+		t.Fatalf("mkdir mounted npki root: %v", err)
+	}
+
+	got := discoverDefaultRootsFor(context.Background(), "darwin", home, volumesRoot)
+	want := filepath.Clean(volumeNPKI)
+
+	for _, root := range got {
+		if root == want {
+			return
+		}
+	}
+	t.Fatalf("discoverDefaultRootsFor() = %#v, want mounted root %q included", got, want)
+}
+
+func TestDefaultDiscoveredRootsTTLIsLongEnough(t *testing.T) {
+	if defaultDiscoveredRootsTTL < 30*time.Second {
+		t.Fatalf("defaultDiscoveredRootsTTL = %s, want at least 30s", defaultDiscoveredRootsTTL)
+	}
+}
+
+func TestServiceRefreshDiscoveredRootsClosesOwnedDoneChannel(t *testing.T) {
+	service := NewService(ServiceConfig{
+		AutoDiscover: true,
+		DiscoverRoots: func(context.Context) []string {
+			return nil
+		},
+	})
+
+	done := make(chan struct{})
+	service.mu.Lock()
+	service.refreshing = true
+	service.refreshDone = done
+	service.mu.Unlock()
+
+	service.refreshDiscoveredRoots()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("refreshDone was not closed")
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.refreshing {
+		t.Fatal("refreshing = true, want false")
+	}
+	if service.refreshDone != nil {
+		t.Fatalf("refreshDone = %v, want nil", service.refreshDone)
+	}
+	if !service.rootsCached {
+		t.Fatal("rootsCached = false, want true")
+	}
+}
+
+func TestServiceRefreshesAutoDiscoveredRootsAfterTTL(t *testing.T) {
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	first := writeFixtureBundle(t, firstRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "First Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{29, 30, 31, 32},
+	})
+	second := writeFixtureBundle(t, secondRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Second Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{33, 34, 35, 36},
+	})
+
+	now := time.Date(2026, 4, 14, 15, 0, 0, 0, time.UTC)
+	discoveredRoots := []string{firstRoot}
+	service := NewService(ServiceConfig{
+		AutoDiscover: true,
+		RootsTTL:     5 * time.Second,
+		Now: func() time.Time {
+			return now
+		},
+		DiscoverRoots: func(context.Context) []string {
+			return append([]string(nil), discoveredRoots...)
+		},
+	})
+
+	waitForCertificateIDs(t, service, []string{first.path})
+
+	discoveredRoots = []string{secondRoot}
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("cached ListCertificates() error = %v", err)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{first.path}) {
+		t.Fatalf("cached certificate IDs = %#v, want %#v before TTL expiry", ids, []string{first.path})
+	}
+
+	now = now.Add(6 * time.Second)
+	waitForCertificateIDs(t, service, []string{second.path})
+}
+
+func TestServiceReturnsStaticRootsWhenColdDiscoveryExceedsInitialWait(t *testing.T) {
+	staticRoot := t.TempDir()
+	mountedRoot := t.TempDir()
+	staticCert := writeFixtureBundle(t, staticRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Static Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{61, 62, 63, 64},
+	})
+	mountedCert := writeFixtureBundle(t, mountedRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Mounted Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{65, 66, 67, 68},
+	})
+
+	releaseRefresh := make(chan struct{})
+	service := NewService(ServiceConfig{
+		Roots:                []string{staticRoot},
+		AutoDiscover:         true,
+		RootsTTL:             5 * time.Second,
+		InitialDiscoveryWait: 20 * time.Millisecond,
+		DiscoverRoots: func(context.Context) []string {
+			<-releaseRefresh
+			return []string{mountedRoot}
+		},
+	})
+
+	start := time.Now()
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("initial ListCertificates() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("initial ListCertificates() took %s, want bounded wait", elapsed)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path}) {
+		t.Fatalf("initial certificate IDs = %#v, want static roots only %#v", ids, []string{staticCert.path})
+	}
+
+	close(releaseRefresh)
+	waitForCertificateIDs(t, service, []string{staticCert.path, mountedCert.path})
+}
+
+func TestServiceReturnsStaleRootsWhileRefreshRunsInBackground(t *testing.T) {
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	first := writeFixtureBundle(t, firstRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "First Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{37, 38, 39, 40},
+	})
+	second := writeFixtureBundle(t, secondRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Second Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{41, 42, 43, 44},
+	})
+
+	now := time.Date(2026, 4, 14, 15, 5, 0, 0, time.UTC)
+	discoveredRoots := []string{firstRoot}
+	service := NewService(ServiceConfig{
+		AutoDiscover: true,
+		RootsTTL:     5 * time.Second,
+		Now: func() time.Time {
+			return now
+		},
+		DiscoverRoots: func(context.Context) []string {
+			return append([]string(nil), discoveredRoots...)
+		},
+	})
+
+	waitForCertificateIDs(t, service, []string{first.path})
+
+	now = now.Add(6 * time.Second)
+	refreshStarted := make(chan struct{}, 1)
+	releaseRefresh := make(chan struct{})
+	service.discoverRoots = func(context.Context) []string {
+		refreshStarted <- struct{}{}
+		<-releaseRefresh
+		return []string{secondRoot}
+	}
+
+	done := make(chan []string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		got, err := service.ListCertificates(context.Background())
+		if err != nil {
+			errCh <- err
+			return
+		}
+		done <- certificateIDs(got)
+	}()
+
+	select {
+	case ids := <-done:
+		if !reflect.DeepEqual(ids, []string{first.path}) {
+			t.Fatalf("certificate IDs during refresh = %#v, want stale cache %#v", ids, []string{first.path})
+		}
+	case err := <-errCh:
+		t.Fatalf("ListCertificates() during refresh error = %v", err)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ListCertificates() blocked on root refresh")
+	}
+
+	select {
+	case <-refreshStarted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("background refresh did not start")
+	}
+	close(releaseRefresh)
+
+	waitForCertificateIDs(t, service, []string{second.path})
+}
+
+func TestServiceMergesStaticRootsWithAsyncDiscoveredRoots(t *testing.T) {
+	staticRoot := t.TempDir()
+	mountedRoot := t.TempDir()
+	staticCert := writeFixtureBundle(t, staticRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Static Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{45, 46, 47, 48},
+	})
+	mountedCert := writeFixtureBundle(t, mountedRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Mounted Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{49, 50, 51, 52},
+	})
+
+	service := NewService(ServiceConfig{
+		Roots:        []string{staticRoot},
+		AutoDiscover: true,
+		RootsTTL:     5 * time.Second,
+		DiscoverRoots: func(context.Context) []string {
+			return []string{mountedRoot}
+		},
+	})
+
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("initial ListCertificates() error = %v", err)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path, mountedCert.path}) {
+		t.Fatalf("initial certificate IDs = %#v, want both static and mounted roots %#v", ids, []string{staticCert.path, mountedCert.path})
+	}
+	waitForCertificateIDs(t, service, []string{staticCert.path, mountedCert.path})
+}
+
+func TestServiceRetriesDiscoveryAfterTimeout(t *testing.T) {
+	staticRoot := t.TempDir()
+	mountedRoot := t.TempDir()
+	staticCert := writeFixtureBundle(t, staticRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Static Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{69, 70, 71, 72},
+	})
+	mountedCert := writeFixtureBundle(t, mountedRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Mounted Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{73, 74, 75, 76},
+	})
+
+	var calls atomic.Int32
+	service := NewService(ServiceConfig{
+		Roots:                []string{staticRoot},
+		AutoDiscover:         true,
+		RootsTTL:             5 * time.Second,
+		InitialDiscoveryWait: 20 * time.Millisecond,
+		DiscoveryTimeout:     30 * time.Millisecond,
+		DiscoverRoots: func(ctx context.Context) []string {
+			if calls.Add(1) == 1 {
+				<-ctx.Done()
+				return []string{mountedRoot}
+			}
+			return []string{mountedRoot}
+		},
+	})
+
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("initial ListCertificates() error = %v", err)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path}) {
+		t.Fatalf("initial certificate IDs = %#v, want static roots only %#v", ids, []string{staticCert.path})
+	}
+
+	waitForRefreshIdle(t, service)
+	if gotCalls := calls.Load(); gotCalls != 1 {
+		t.Fatalf("discoverRoots call count = %d, want 1 after timed-out refresh", gotCalls)
+	}
+
+	waitForCertificateIDs(t, service, []string{staticCert.path, mountedCert.path})
+	if gotCalls := calls.Load(); gotCalls < 2 {
+		t.Fatalf("discoverRoots call count = %d, want retry after timeout", gotCalls)
+	}
+}
+
+func TestServiceAutoDiscoverUsesDefaultRootsEvenWithStaticRoots(t *testing.T) {
+	staticRoot := t.TempDir()
+	mountedRoot := t.TempDir()
+	staticCert := writeFixtureBundle(t, staticRoot, fixtureOptions{
+		dirName:    "cert-1",
+		password:   "secret-password",
+		commonName: "Static Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{53, 54, 55, 56},
+	})
+	mountedCert := writeFixtureBundle(t, mountedRoot, fixtureOptions{
+		dirName:    "cert-2",
+		password:   "secret-password",
+		commonName: "Mounted Certificate",
+		businessNo: "276-86-03291",
+		validUntil: time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		vidRandom:  []byte{57, 58, 59, 60},
+	})
+
+	originalDefaultDiscoverRoots := defaultDiscoverRoots
+	defer func() {
+		defaultDiscoverRoots = originalDefaultDiscoverRoots
+	}()
+	defaultDiscoverRoots = func(context.Context) []string {
+		return []string{mountedRoot}
+	}
+
+	service := NewService(ServiceConfig{
+		Roots:        []string{staticRoot},
+		AutoDiscover: true,
+	})
+
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("ListCertificates() error = %v", err)
+	}
+	if ids := certificateIDs(got); !reflect.DeepEqual(ids, []string{staticCert.path, mountedCert.path}) {
+		t.Fatalf("certificate IDs = %#v, want %#v", ids, []string{staticCert.path, mountedCert.path})
+	}
+}
+
+func waitForRefreshIdle(t *testing.T, service *Service) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		service.mu.Lock()
+		refreshing := service.refreshing
+		service.mu.Unlock()
+		if !refreshing {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	t.Fatalf("service refresh remained active: refreshing=%v", service.refreshing)
+}
+
+func waitForCertificateIDs(t *testing.T, service *Service, want []string) {
+	t.Helper()
+	slices.Sort(want)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := service.ListCertificates(context.Background())
+		if err != nil {
+			t.Fatalf("ListCertificates() error = %v", err)
+		}
+		if ids := certificateIDs(got); reflect.DeepEqual(ids, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got, err := service.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("final ListCertificates() error = %v", err)
+	}
+	t.Fatalf("certificate IDs = %#v, want %#v", certificateIDs(got), want)
+}
+
+func certificateIDs(items []CertificateMetadata) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 type fixtureOptions struct {
