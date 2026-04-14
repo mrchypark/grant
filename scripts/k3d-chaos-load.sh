@@ -112,9 +112,11 @@ validate_trailbase_health() {
 voter_pf_pid=""
 learner_pf_pid=""
 trailbase_pf_pid=""
-WORKLOAD_VOTER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_VOTER_LOCAL_PORT}" "voter")"
-WORKLOAD_LEARNER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_LEARNER_LOCAL_PORT}" "learner")"
-WORKLOAD_TRAILBASE_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_TRAILBASE_LOCAL_PORT}" "trailbase")"
+if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" == "1" ]]; then
+  WORKLOAD_VOTER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_VOTER_LOCAL_PORT}" "voter")"
+  WORKLOAD_LEARNER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_LEARNER_LOCAL_PORT}" "learner")"
+  WORKLOAD_TRAILBASE_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_TRAILBASE_LOCAL_PORT}" "trailbase")"
+fi
 voter_pf_log="$(mktemp)"
 learner_pf_log="$(mktemp)"
 trailbase_pf_log="$(mktemp)"

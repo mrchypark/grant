@@ -110,6 +110,7 @@ require_contains "scripts/k3d-chaos-load.sh" 'http://127.0.0.1:${WORKLOAD_TRAILB
 require_contains "scripts/k3d-chaos-load.sh" 'reserve_local_port()'
 require_contains "scripts/k3d-chaos-load.sh" 'validate_certd_health()'
 require_contains "scripts/k3d-chaos-load.sh" 'lsof -nP -iTCP:'
+require_contains "scripts/k3d-chaos-load.sh" 'if [[ "${WORKLOAD_MANAGE_PORT_FORWARD}" == "1" ]]; then'
 require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_VOTER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_VOTER_LOCAL_PORT}" "voter")"'
 require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_LEARNER_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_LEARNER_LOCAL_PORT}" "learner")"'
 require_contains "scripts/k3d-chaos-load.sh" 'WORKLOAD_TRAILBASE_LOCAL_PORT="$(reserve_local_port "${WORKLOAD_TRAILBASE_LOCAL_PORT}" "trailbase")"'
