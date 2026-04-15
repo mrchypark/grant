@@ -164,6 +164,7 @@ static char *repass_show_approval_modal(const char *origin, const char *organiza
 import "C"
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"unsafe"
@@ -217,7 +218,7 @@ func init() {
 	activateApprovalModalApplication = func() {
 		C.repass_activate_approval_app()
 	}
-	runApprovalModal = func(input approvalModalInput) (string, bool) {
+	runApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		origin := C.CString(input.Origin)
 		organization := C.CString(input.OrganizationID)
 		businessNo := C.CString(input.BusinessNo)
@@ -259,14 +260,27 @@ func init() {
 			passwordPlaceholder,
 		)
 		if raw == nil {
-			return "", false
+			return approvalModalOutput{}
 		}
 		defer C.free(unsafe.Pointer(raw))
-		return C.GoString(raw), true
+		packed := C.GoString(raw)
+		parts := strings.SplitN(packed, "\x1f", 2)
+		if len(parts) != 2 {
+			return approvalModalOutput{Err: fmt.Errorf("invalid approval modal response")}
+		}
+		selectedIndex, err := parseSelectedIndex(parts[0], len(input.Labels))
+		if err != nil {
+			return approvalModalOutput{Err: err}
+		}
+		return approvalModalOutput{
+			SelectedIndex: selectedIndex,
+			Password:      parts[1],
+			Approved:      true,
+		}
 	}
 	// darwin은 모달 표시 전에 NSApp activation policy를 잠시 Regular로 올려야 해서
 	// 기본 showApprovalModal(= runApprovalModal 호출)을 prepare/restore로 감싼다.
-	showApprovalModal = func(input approvalModalInput) (string, bool) {
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		restore := prepareApprovalModalApplication()
 		defer restore()
 		return runApprovalModal(input)

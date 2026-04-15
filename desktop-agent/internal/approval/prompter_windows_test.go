@@ -33,10 +33,10 @@ func TestPromptApprovalCancelsModalWhenContextIsDone(t *testing.T) {
 	release := make(chan struct{})
 	canceled := make(chan struct{}, 1)
 
-	showApprovalModal = func(input approvalModalInput) (string, bool) {
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		close(started)
 		<-release
-		return "", false
+		return approvalModalOutput{}
 	}
 	resetApprovalModalCancellation = func() {}
 	requestApprovalModalCancellation = func() {
@@ -84,9 +84,9 @@ func TestPromptApprovalDeliversLocalizedCopyToModal(t *testing.T) {
 	}()
 
 	var received approvalModalInput
-	runApprovalModal = func(input approvalModalInput) (string, bool) {
+	runApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		received = input
-		return "0\x1fsecret", true
+		return approvalModalOutput{SelectedIndex: 0, Password: "secret", Approved: true}
 	}
 
 	_, err := NewPrompter().PromptApproval(context.Background(), httpapi.ApprovalPrompt{
@@ -131,11 +131,10 @@ func TestShowWin32ModalActivatesAppBeforeOpeningDialog(t *testing.T) {
 	}
 	showDialogBoxIndirectParam = func(template []byte) {
 		events = append(events, "dialog")
-		currentPacked = "0\x1fsecret"
-		currentOK = true
+		currentResult = approvalModalOutput{SelectedIndex: 0, Password: "secret", Approved: true}
 	}
 
-	packed, ok := showWin32Modal(approvalModalInput{
+	result := showWin32Modal(approvalModalInput{
 		Origin:         "http://127.0.0.1:4173",
 		OrganizationID: "org-1",
 		BusinessNo:     "2768603291",
@@ -144,11 +143,11 @@ func TestShowWin32ModalActivatesAppBeforeOpeningDialog(t *testing.T) {
 		DefaultIndex:   0,
 		Copy:           localization.ForLanguage(localization.English),
 	})
-	if !ok {
-		t.Fatal("showWin32Modal returned ok=false, want true")
+	if !result.Approved {
+		t.Fatal("showWin32Modal returned Approved=false, want true")
 	}
-	if packed != "0\x1fsecret" {
-		t.Fatalf("packed = %q, want 0\\x1fsecret", packed)
+	if result.Password != "secret" || result.SelectedIndex != 0 {
+		t.Fatalf("result = %#v, want selected index 0 with password secret", result)
 	}
 	if len(events) != 2 || events[0] != "activate" || events[1] != "dialog" {
 		t.Fatalf("events = %#v, want [activate dialog]", events)

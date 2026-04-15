@@ -34,6 +34,43 @@ func TestDiscoverWindowsDriveNPKIRootsRespectsContextCancel(t *testing.T) {
 	}
 }
 
+func TestDiscoverWindowsDriveNPKIRootsUsesFileAttributes(t *testing.T) {
+	originalMask := getLogicalDrivesMask
+	originalDriveType := getDriveType
+	originalGetFileAttributes := getFileAttributes
+	defer func() {
+		getLogicalDrivesMask = originalMask
+		getDriveType = originalDriveType
+		getFileAttributes = originalGetFileAttributes
+	}()
+
+	getLogicalDrivesMask = func() uint32 {
+		return (1 << 2) | (1 << 3)
+	}
+	getDriveType = func(driveRoot string) uint32 {
+		if driveRoot == `C:\` || driveRoot == `D:\` {
+			return driveFixed
+		}
+		return 0
+	}
+	getFileAttributes = func(path string) (uint32, error) {
+		switch path {
+		case filepath.Join(`C:\`, "NPKI"):
+			return fileAttributeDirectory, nil
+		case filepath.Join(`D:\`, "NPKI"):
+			return invalidFileAttributes, os.ErrNotExist
+		default:
+			return invalidFileAttributes, os.ErrNotExist
+		}
+	}
+
+	got := discoverWindowsDriveNPKIRoots(context.Background())
+	want := []string{filepath.Join(`C:\`, "NPKI")}
+	if !containsFold(got, want[0]) || len(got) != 1 {
+		t.Fatalf("discoverWindowsDriveNPKIRoots() = %v, want %v", got, want)
+	}
+}
+
 func containsFold(haystack []string, needle string) bool {
 	for _, h := range haystack {
 		if strings.EqualFold(h, needle) {

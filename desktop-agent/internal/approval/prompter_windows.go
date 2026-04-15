@@ -105,8 +105,7 @@ var (
 var (
 	win32ModalMu    sync.Mutex
 	currentInput    approvalModalInput
-	currentPacked   string
-	currentOK       bool
+	currentResult   approvalModalOutput
 	headingFont     uintptr
 	cancelMu        sync.Mutex
 	currentHWND     uintptr
@@ -166,18 +165,17 @@ func init() {
 	runApprovalModal = showWin32Modal
 }
 
-func showWin32Modal(input approvalModalInput) (string, bool) {
+func showWin32Modal(input approvalModalInput) approvalModalOutput {
 	win32ModalMu.Lock()
 	defer win32ModalMu.Unlock()
 
 	template, err := buildDialogTemplate(input)
 	if err != nil {
-		return "", false
+		return approvalModalOutput{Err: err}
 	}
 
 	currentInput = input
-	currentPacked = ""
-	currentOK = false
+	currentResult = approvalModalOutput{}
 
 	activateApprovalModalApplication()
 	showDialogBoxIndirectParam(template)
@@ -186,12 +184,9 @@ func showWin32Modal(input approvalModalInput) (string, bool) {
 	currentHWND = 0
 	cancelMu.Unlock()
 
-	if !currentOK {
-		return "", false
-	}
-	packed := currentPacked
-	currentPacked = ""
-	return packed, true
+	result := currentResult
+	currentResult = approvalModalOutput{}
+	return result
 }
 
 func dialogProc(hwnd, msg, wparam, _ uintptr) uintptr {
@@ -221,12 +216,15 @@ func dialogProc(hwnd, msg, wparam, _ uintptr) uintptr {
 			selRet, _, _ := procSendDlgItemMessageW.Call(hwnd, uintptr(idcCombo), cbGetCurSel, 0, 0)
 			sel := int32(selRet)
 			password := readDlgItemText(hwnd, uintptr(idcPassword))
-			currentPacked = fmt.Sprintf("%d\x1f%s", sel, password)
-			currentOK = true
+			currentResult = approvalModalOutput{
+				SelectedIndex: int(sel),
+				Password:      password,
+				Approved:      true,
+			}
 			procEndDialog.Call(hwnd, uintptr(idOK))
 			return 1
 		case idCancel:
-			currentOK = false
+			currentResult = approvalModalOutput{}
 			procEndDialog.Call(hwnd, uintptr(idCancel))
 			return 1
 		}

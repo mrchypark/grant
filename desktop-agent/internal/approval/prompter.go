@@ -23,6 +23,13 @@ type approvalModalInput struct {
 	Copy           localization.Strings
 }
 
+type approvalModalOutput struct {
+	SelectedIndex int
+	Password      string
+	Approved      bool
+	Err           error
+}
+
 var approvalModalSlot = make(chan struct{}, 1)
 
 var acquireApprovalModal = func(ctx context.Context) (func(), error) {
@@ -41,12 +48,12 @@ var (
 	resetApprovalModalCancellation   func()
 	requestApprovalModalCancellation func()
 	activateApprovalModalApplication func()
-	runApprovalModal                 func(approvalModalInput) (string, bool)
+	runApprovalModal                 func(approvalModalInput) approvalModalOutput
 )
 
 // 기본 showApprovalModal은 runApprovalModal 단일 호출. 플랫폼 init()은 필요 시
 // 추가 준비/복원 단계(macOS activation policy 등)를 감싸 덮어쓸 수 있다.
-var showApprovalModal = func(input approvalModalInput) (string, bool) {
+var showApprovalModal = func(input approvalModalInput) approvalModalOutput {
 	return runApprovalModal(input)
 }
 
@@ -81,18 +88,14 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	}
 
 	resetApprovalModalCancellation()
-	type modalResult struct {
-		packed   string
-		approved bool
-	}
-	resultCh := make(chan modalResult, 1)
+	resultCh := make(chan approvalModalOutput, 1)
 	go func() {
 		copy := localization.ForLanguage(localization.SystemLanguage())
 		businessNo := prompt.BusinessNo
 		if strings.TrimSpace(businessNo) == "" {
 			businessNo = "-"
 		}
-		packed, approved := showApprovalModal(approvalModalInput{
+		result := showApprovalModal(approvalModalInput{
 			Origin:         prompt.Origin,
 			OrganizationID: prompt.OrganizationID,
 			BusinessNo:     businessNo,
@@ -101,38 +104,36 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 			DefaultIndex:   defaultIndex,
 			Copy:           copy,
 		})
-		resultCh <- modalResult{packed: packed, approved: approved}
+		resultCh <- result
 	}()
 
-	var result modalResult
+	var result approvalModalOutput
 	select {
 	case <-ctx.Done():
 		requestApprovalModalCancellation()
-		go func() { <-resultCh }()
+		result = <-resultCh
+		if result.Err != nil {
+			return httpapi.ApprovalDecision{}, result.Err
+		}
 		return httpapi.ApprovalDecision{}, ctx.Err()
 	case result = <-resultCh:
 	}
-	if !result.approved {
+	if result.Err != nil {
+		return httpapi.ApprovalDecision{}, result.Err
+	}
+	if !result.Approved {
 		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
 	}
-
-	packed := result.packed
-	parts := strings.SplitN(packed, "\x1f", 2)
-	if len(parts) != 2 {
-		return httpapi.ApprovalDecision{}, fmt.Errorf("invalid approval modal response")
+	if result.SelectedIndex < 0 || result.SelectedIndex >= len(prompt.Certificates) {
+		return httpapi.ApprovalDecision{}, fmt.Errorf("selected certificate index %d out of range", result.SelectedIndex)
 	}
-	selectedIndex, err := parseSelectedIndex(parts[0], len(prompt.Certificates))
-	if err != nil {
-		return httpapi.ApprovalDecision{}, err
-	}
-	password := parts[1]
-	if strings.TrimSpace(password) == "" {
+	if result.Password == "" {
 		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
 	}
 
 	return httpapi.ApprovalDecision{
-		CertificateID: prompt.Certificates[selectedIndex].ID,
-		Password:      password,
+		CertificateID: prompt.Certificates[result.SelectedIndex].ID,
+		Password:      result.Password,
 	}, nil
 }
 

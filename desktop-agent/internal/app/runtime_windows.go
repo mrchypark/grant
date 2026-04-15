@@ -58,7 +58,7 @@ func run(addr string, handler http.Handler, _ RunOptions) error {
 			for {
 				select {
 				case <-openItem.ClickedCh:
-					_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", "http://127.0.0.1:4173/").Start()
+					_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", examplePageURL()).Start()
 				case <-quitItem.ClickedCh:
 					once.Do(func() {
 						close(quitCh)

@@ -34,10 +34,10 @@ func TestPromptApprovalCancelsModalWhenContextIsDone(t *testing.T) {
 	release := make(chan struct{})
 	canceled := make(chan struct{}, 1)
 
-	showApprovalModal = func(input approvalModalInput) (string, bool) {
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		close(started)
 		<-release
-		return "", false
+		return approvalModalOutput{}
 	}
 	resetApprovalModalCancellation = func() {}
 	requestApprovalModalCancellation = func() {
@@ -93,9 +93,9 @@ func TestPromptApprovalActivatesAppBeforeShowingModal(t *testing.T) {
 			events = append(events, "restore")
 		}
 	}
-	runApprovalModal = func(input approvalModalInput) (string, bool) {
+	runApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		events = append(events, "show")
-		return "0\x1fsecret-password", true
+		return approvalModalOutput{SelectedIndex: 0, Password: "secret-password", Approved: true}
 	}
 
 	decision, err := NewPrompter().PromptApproval(context.Background(), httpapi.ApprovalPrompt{
@@ -190,18 +190,18 @@ func TestPromptApprovalSerializesConcurrentModals(t *testing.T) {
 	secondStarted := make(chan struct{}, 1)
 	var calls atomic.Int32
 
-	showApprovalModal = func(input approvalModalInput) (string, bool) {
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		switch calls.Add(1) {
 		case 1:
 			close(firstStarted)
 			<-firstRelease
-			return "0\x1ffirst-password", true
+			return approvalModalOutput{SelectedIndex: 0, Password: "first-password", Approved: true}
 		case 2:
 			secondStarted <- struct{}{}
-			return "0\x1fsecond-password", true
+			return approvalModalOutput{SelectedIndex: 0, Password: "second-password", Approved: true}
 		default:
 			t.Fatalf("showApprovalModal called more than twice")
-			return "", false
+			return approvalModalOutput{}
 		}
 	}
 
@@ -276,18 +276,18 @@ func TestPromptApprovalCancelWhileWaitingDoesNotCancelActiveModal(t *testing.T) 
 	firstStarted := make(chan struct{})
 	firstRelease := make(chan struct{})
 	var calls atomic.Int32
-	showApprovalModal = func(input approvalModalInput) (string, bool) {
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		switch calls.Add(1) {
 		case 1:
 			close(firstStarted)
 			<-firstRelease
-			return "0\x1fsecret-password", true
+			return approvalModalOutput{SelectedIndex: 0, Password: "secret-password", Approved: true}
 		case 2:
 			t.Fatal("waiting prompt reached showApprovalModal before the active modal completed")
-			return "", false
+			return approvalModalOutput{}
 		default:
 			t.Fatalf("showApprovalModal called more than twice")
-			return "", false
+			return approvalModalOutput{}
 		}
 	}
 
