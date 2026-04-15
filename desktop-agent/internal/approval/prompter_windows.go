@@ -84,6 +84,7 @@ var (
 	procSendDlgItemMessageW      = user32.NewProc("SendDlgItemMessageW")
 	procSendMessageW             = user32.NewProc("SendMessageW")
 	procGetDlgItemTextW          = user32.NewProc("GetDlgItemTextW")
+	procGetWindowTextLengthW     = user32.NewProc("GetWindowTextLengthW")
 	procGetDlgItem               = user32.NewProc("GetDlgItem")
 	procSetFocus                 = user32.NewProc("SetFocus")
 	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
@@ -113,6 +114,34 @@ var (
 )
 
 var dialogProcCallback = syscall.NewCallback(dialogProc)
+
+var showDialogBoxIndirectParam = func(template []byte) {
+	procDialogBoxIndirectParamW.Call(
+		0,
+		uintptr(unsafe.Pointer(&template[0])),
+		0,
+		dialogProcCallback,
+		0,
+	)
+}
+
+var getDialogItemHandle = func(hwnd, id uintptr) uintptr {
+	ret, _, _ := procGetDlgItem.Call(hwnd, id)
+	return ret
+}
+
+var getWindowTextLength = func(hwnd uintptr) int {
+	ret, _, _ := procGetWindowTextLengthW.Call(hwnd)
+	return int(ret)
+}
+
+var getDialogItemText = func(hwnd, id uintptr, buf []uint16) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	ret, _, _ := procGetDlgItemTextW.Call(hwnd, id, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return int(ret)
+}
 
 func init() {
 	resetApprovalModalCancellation = func() {
@@ -150,13 +179,8 @@ func showWin32Modal(input approvalModalInput) (string, bool) {
 	currentPacked = ""
 	currentOK = false
 
-	procDialogBoxIndirectParamW.Call(
-		0,
-		uintptr(unsafe.Pointer(&template[0])),
-		0,
-		dialogProcCallback,
-		0,
-	)
+	activateApprovalModalApplication()
+	showDialogBoxIndirectParam(template)
 
 	cancelMu.Lock()
 	currentHWND = 0
@@ -290,8 +314,16 @@ func raiseForeground(hwnd uintptr) {
 }
 
 func readDlgItemText(hwnd, id uintptr) string {
-	buf := make([]uint16, 512)
-	n, _, _ := procGetDlgItemTextW.Call(hwnd, id, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	item := getDialogItemHandle(hwnd, id)
+	if item == 0 {
+		return ""
+	}
+	bufLen := getWindowTextLength(item) + 1
+	if bufLen < 2 {
+		bufLen = 2
+	}
+	buf := make([]uint16, bufLen)
+	n := getDialogItemText(hwnd, id, buf)
 	return syscall.UTF16ToString(buf[:n])
 }
 

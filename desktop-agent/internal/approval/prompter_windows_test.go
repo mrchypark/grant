@@ -5,8 +5,10 @@ package approval
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/cypark/account/desktop-agent/internal/httpapi"
 	"github.com/cypark/account/desktop-agent/internal/localization"
@@ -112,5 +114,71 @@ func TestPromptApprovalDeliversLocalizedCopyToModal(t *testing.T) {
 	en := localization.ForLanguage(localization.English)
 	if received.Copy.ApprovalTitle != ko.ApprovalTitle && received.Copy.ApprovalTitle != en.ApprovalTitle {
 		t.Fatalf("unexpected approval title %q", received.Copy.ApprovalTitle)
+	}
+}
+
+func TestShowWin32ModalActivatesAppBeforeOpeningDialog(t *testing.T) {
+	originalActivate := activateApprovalModalApplication
+	originalShowDialog := showDialogBoxIndirectParam
+	defer func() {
+		activateApprovalModalApplication = originalActivate
+		showDialogBoxIndirectParam = originalShowDialog
+	}()
+
+	events := make([]string, 0, 2)
+	activateApprovalModalApplication = func() {
+		events = append(events, "activate")
+	}
+	showDialogBoxIndirectParam = func(template []byte) {
+		events = append(events, "dialog")
+		currentPacked = "0\x1fsecret"
+		currentOK = true
+	}
+
+	packed, ok := showWin32Modal(approvalModalInput{
+		Origin:         "http://127.0.0.1:4173",
+		OrganizationID: "org-1",
+		BusinessNo:     "2768603291",
+		Action:         "ephemeral",
+		Labels:         []string{"Test Certificate"},
+		DefaultIndex:   0,
+		Copy:           localization.ForLanguage(localization.English),
+	})
+	if !ok {
+		t.Fatal("showWin32Modal returned ok=false, want true")
+	}
+	if packed != "0\x1fsecret" {
+		t.Fatalf("packed = %q, want 0\\x1fsecret", packed)
+	}
+	if len(events) != 2 || events[0] != "activate" || events[1] != "dialog" {
+		t.Fatalf("events = %#v, want [activate dialog]", events)
+	}
+}
+
+func TestReadDlgItemTextUsesDynamicBufferLength(t *testing.T) {
+	originalGetDialogItemHandle := getDialogItemHandle
+	originalGetWindowTextLength := getWindowTextLength
+	originalGetDialogItemText := getDialogItemText
+	defer func() {
+		getDialogItemHandle = originalGetDialogItemHandle
+		getWindowTextLength = originalGetWindowTextLength
+		getDialogItemText = originalGetDialogItemText
+	}()
+
+	password := strings.Repeat("p", 600)
+	getDialogItemHandle = func(hwnd, id uintptr) uintptr {
+		return 1
+	}
+	getWindowTextLength = func(hwnd uintptr) int {
+		return len(password)
+	}
+	getDialogItemText = func(hwnd, id uintptr, buf []uint16) int {
+		copy(buf, utf16.Encode([]rune(password)))
+		return len(password)
+	}
+
+	got := readDlgItemText(1, uintptr(idcPassword))
+	if got != password {
+		t.Fatalf("readDlgItemText() len=%d, want %d", len(got), len(password))
 	}
 }
