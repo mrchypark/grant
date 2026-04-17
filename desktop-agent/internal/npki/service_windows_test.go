@@ -4,7 +4,6 @@ package npki
 
 import (
 	"context"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,12 +38,12 @@ func TestDiscoverWindowsDriveNPKIRootsUsesFileAttributes(t *testing.T) {
 	originalMask := getLogicalDrivesMask
 	originalDriveType := getDriveType
 	originalGetFileAttributes := getFileAttributes
-	originalReadDriveDir := readWindowsDriveDir
+	originalFindWindowsFiles := findWindowsFiles
 	defer func() {
 		getLogicalDrivesMask = originalMask
 		getDriveType = originalDriveType
 		getFileAttributes = originalGetFileAttributes
-		readWindowsDriveDir = originalReadDriveDir
+		findWindowsFiles = originalFindWindowsFiles
 	}()
 
 	getLogicalDrivesMask = func() uint32 {
@@ -70,8 +69,8 @@ func TestDiscoverWindowsDriveNPKIRootsUsesFileAttributes(t *testing.T) {
 			return invalidFileAttributes, os.ErrNotExist
 		}
 	}
-	readWindowsDriveDir = func(string) ([]os.DirEntry, error) {
-		return nil, os.ErrNotExist
+	findWindowsFiles = func(string) []string {
+		return nil
 	}
 
 	got := discoverWindowsDriveNPKIRoots(context.Background())
@@ -85,12 +84,12 @@ func TestDiscoverWindowsDriveNPKIRootsFindsDriveRootPKCS12Files(t *testing.T) {
 	originalMask := getLogicalDrivesMask
 	originalDriveType := getDriveType
 	originalGetFileAttributes := getFileAttributes
-	originalReadDriveDir := readWindowsDriveDir
+	originalFindWindowsFiles := findWindowsFiles
 	defer func() {
 		getLogicalDrivesMask = originalMask
 		getDriveType = originalDriveType
 		getFileAttributes = originalGetFileAttributes
-		readWindowsDriveDir = originalReadDriveDir
+		findWindowsFiles = originalFindWindowsFiles
 	}()
 
 	getLogicalDrivesMask = func() uint32 {
@@ -105,14 +104,11 @@ func TestDiscoverWindowsDriveNPKIRootsFindsDriveRootPKCS12Files(t *testing.T) {
 	getFileAttributes = func(string) (uint32, error) {
 		return invalidFileAttributes, os.ErrNotExist
 	}
-	readWindowsDriveDir = func(path string) ([]os.DirEntry, error) {
-		if path != `C:\` {
-			return nil, os.ErrNotExist
+	findWindowsFiles = func(pattern string) []string {
+		if pattern == filepath.Join(`C:\`, "*.p12") {
+			return []string{filepath.Join(`C:\`, "protected.p12")}
 		}
-		return []os.DirEntry{
-			testDirEntry{name: "protected.p12"},
-			testDirEntry{name: "notes.txt"},
-		}, nil
+		return nil
 	}
 
 	got := discoverWindowsDriveNPKIRoots(context.Background())
@@ -122,15 +118,26 @@ func TestDiscoverWindowsDriveNPKIRootsFindsDriveRootPKCS12Files(t *testing.T) {
 	}
 }
 
-type testDirEntry struct {
-	name string
-	dir  bool
-}
+func TestWindowsPathIsOnRemovableMediaUsesDriveType(t *testing.T) {
+	originalDriveType := getDriveType
+	defer func() {
+		getDriveType = originalDriveType
+	}()
 
-func (e testDirEntry) Name() string               { return e.name }
-func (e testDirEntry) IsDir() bool                { return e.dir }
-func (e testDirEntry) Type() fs.FileMode          { return 0 }
-func (e testDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
+	getDriveType = func(driveRoot string) uint32 {
+		if driveRoot == `E:\` {
+			return driveRemovable
+		}
+		return driveFixed
+	}
+
+	if !windowsPathIsOnRemovableMedia(`E:\NPKI\cert`) {
+		t.Fatal("expected removable drive to be recognized")
+	}
+	if windowsPathIsOnRemovableMedia(`C:\NPKI\cert`) {
+		t.Fatal("expected fixed drive to be treated as local")
+	}
+}
 
 func containsFold(haystack []string, needle string) bool {
 	for _, h := range haystack {

@@ -129,8 +129,17 @@ func approvalPromptFixtureForTest(certificateID string) httpapi.ApprovalPrompt {
 }
 
 func TestCertificateOnRemovableMediaDoesNotTreatFixedWindowsPathsAsRemovable(t *testing.T) {
-	if certificateOnRemovableMedia(`bundle:C:\Users\tester\NPKI\cert`) {
+	if certificateOnRemovableMedia(npki.CertificateMetadata{ID: `bundle:C:\Users\tester\NPKI\cert`}) {
 		t.Fatal("expected fixed Windows path to be treated as local storage")
+	}
+}
+
+func TestCertificateOnRemovableMediaUsesMetadataWhenPresent(t *testing.T) {
+	if !certificateOnRemovableMedia(npki.CertificateMetadata{
+		ID:        `bundle:E:\NPKI\cert`,
+		Removable: true,
+	}) {
+		t.Fatal("expected removable metadata to win over path heuristics")
 	}
 }
 

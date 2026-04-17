@@ -5,7 +5,6 @@ package npki
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"syscall"
 	"unsafe"
@@ -18,6 +17,7 @@ var (
 	procGetLogicalDrives   = npkiKernel32.NewProc("GetLogicalDrives")
 	procGetDriveTypeW      = npkiKernel32.NewProc("GetDriveTypeW")
 	procGetFileAttributesW = npkiKernel32.NewProc("GetFileAttributesW")
+	procSetThreadErrorMode = npkiKernel32.NewProc("SetThreadErrorMode")
 )
 
 const (
@@ -57,7 +57,7 @@ var getFileAttributes = func(path string) (uint32, error) {
 	return attrs, nil
 }
 
-var readWindowsDriveDir = os.ReadDir
+var findWindowsFiles = windowsFindMatches
 
 // discoverWindowsDriveNPKIRoots returns concrete Windows certificate roots:
 // <drive>:\NPKI, <drive>:\GPKI, and any root-level .p12/.pfx files. Returning
@@ -97,18 +97,86 @@ func discoverWindowsDriveNPKIRoots(ctx context.Context) []string {
 }
 
 func driveRootPKCS12Files(driveRoot string) []string {
-	entries, err := readWindowsDriveDir(driveRoot)
-	if err != nil {
-		return nil
-	}
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if isPKCS12FileName(entry.Name()) {
-			paths = append(paths, filepath.Join(driveRoot, entry.Name()))
+	paths := make([]string, 0, 2)
+	seen := make(map[string]struct{})
+	for _, pattern := range []string{filepath.Join(driveRoot, "*.p12"), filepath.Join(driveRoot, "*.pfx")} {
+		for _, path := range findWindowsFiles(pattern) {
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
 		}
 	}
 	return paths
+}
+
+func windowsPathIsOnRemovableMedia(path string) bool {
+	driveRoot, ok := windowsDriveRoot(path)
+	if !ok {
+		return false
+	}
+	return getDriveType(driveRoot) == driveRemovable
+}
+
+func windowsDriveRoot(path string) (string, bool) {
+	volume := filepath.VolumeName(filepath.Clean(path))
+	if len(volume) != 2 || volume[1] != ':' {
+		return "", false
+	}
+	return volume + `\`, true
+}
+
+func windowsFindMatches(pattern string) []string {
+	var previousMode uint32
+	restoreMode := false
+	if procSetThreadErrorMode.Find() == nil {
+		r1, _, _ := procSetThreadErrorMode.Call(
+			uintptr(windows.SEM_FAILCRITICALERRORS|windows.SEM_NOOPENFILEERRORBOX),
+			uintptr(unsafe.Pointer(&previousMode)),
+		)
+		restoreMode = r1 != 0
+	}
+	if restoreMode {
+		defer procSetThreadErrorMode.Call(uintptr(previousMode), uintptr(unsafe.Pointer(&previousMode)))
+	}
+
+	patternPtr, err := windows.UTF16PtrFromString(pattern)
+	if err != nil {
+		return nil
+	}
+
+	var data windows.Win32finddata
+	handle, err := windows.FindFirstFile(patternPtr, &data)
+	if err != nil {
+		if errorsIsAny(err, windows.ERROR_FILE_NOT_FOUND, windows.ERROR_PATH_NOT_FOUND, windows.ERROR_NOT_READY, windows.ERROR_NO_MORE_FILES) {
+			return nil
+		}
+		return nil
+	}
+	defer windows.FindClose(handle)
+
+	matches := make([]string, 0, 2)
+	for {
+		name := windows.UTF16ToString(data.FileName[:])
+		if name != "" && name != "." && name != ".." && data.FileAttributes&fileAttributeDirectory == 0 {
+			matches = append(matches, filepath.Join(filepath.Dir(pattern), name))
+		}
+		if err := windows.FindNextFile(handle, &data); err != nil {
+			if errorsIsAny(err, windows.ERROR_NO_MORE_FILES, windows.ERROR_FILE_NOT_FOUND) {
+				break
+			}
+			break
+		}
+	}
+	return matches
+}
+
+func errorsIsAny(err error, targets ...error) bool {
+	for _, target := range targets {
+		if err == target {
+			return true
+		}
+	}
+	return false
 }

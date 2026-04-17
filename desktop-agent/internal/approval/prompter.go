@@ -175,7 +175,7 @@ func certificateOptionLabel(cert npki.CertificateMetadata, copy localization.Str
 
 func certificateSourceSummary(cert npki.CertificateMetadata, copy localization.Strings) string {
 	location := copy.LocalCertificateSource
-	if certificateOnRemovableMedia(cert.ID) {
+	if certificateOnRemovableMedia(cert) {
 		location = copy.RemovableCertificateSource
 	}
 	source := certificateSourceName(cert, copy)
@@ -216,8 +216,11 @@ func certificateDisplayPath(cert npki.CertificateMetadata) string {
 	return filepath.Base(path)
 }
 
-func certificateOnRemovableMedia(certificateID string) bool {
-	path := strings.ToLower(certificatePathFromID(certificateID))
+func certificateOnRemovableMedia(cert npki.CertificateMetadata) bool {
+	if cert.Removable {
+		return true
+	}
+	path := strings.ToLower(certificatePathFromID(cert.ID))
 	return strings.HasPrefix(path, "/volumes/")
 }
 

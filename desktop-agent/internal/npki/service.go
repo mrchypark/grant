@@ -64,6 +64,7 @@ type CertificateMetadata struct {
 	DisplayPath   string                 `json:"displayPath"`
 	IssuerName    string                 `json:"issuerName"`
 	HasKmMaterial bool                   `json:"hasKmMaterial"`
+	Removable     bool                   `json:"removable"`
 }
 
 type CertificateSourceKind string
@@ -290,11 +291,12 @@ type pkcs12Files struct {
 }
 
 type bundleEntry struct {
-	id      string
-	kind    CertificateSourceKind
-	path    string
-	storage CertificateStorageKind
-	aliases []string
+	id        string
+	kind      CertificateSourceKind
+	path      string
+	storage   CertificateStorageKind
+	removable bool
+	aliases   []string
 }
 
 func loadBundle(dir string) (bundleFiles, CertificateMetadata, error) {
@@ -358,6 +360,7 @@ func metadataFromCertificate(bundle bundleEntry, signCertDER []byte) (Certificat
 		DisplayPath:   bundleDisplayPath(bundle.path),
 		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
 		HasKmMaterial: true,
+		Removable:     bundle.removable,
 	}, nil
 }
 
@@ -380,6 +383,7 @@ func metadataFromPKCS12(bundle bundleEntry) (CertificateMetadata, error) {
 		DisplayPath:   bundleDisplayPath(bundle.path),
 		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
 		HasKmMaterial: false,
+		Removable:     bundle.removable,
 	}, nil
 }
 
@@ -394,6 +398,7 @@ func fallbackPKCS12Metadata(bundle bundleEntry) CertificateMetadata {
 		DisplayPath:   bundleDisplayPath(bundle.path),
 		IssuerName:    "",
 		HasKmMaterial: false,
+		Removable:     bundle.removable,
 	}
 }
 
@@ -680,11 +685,12 @@ func newBundleEntry(dir string) bundleEntry {
 		aliases = append(aliases, alias)
 	}
 	return bundleEntry{
-		id:      string(CertificateSourceKindBundle) + ":" + cleanDir,
-		kind:    CertificateSourceKindBundle,
-		path:    cleanDir,
-		storage: storage,
-		aliases: aliases,
+		id:        string(CertificateSourceKindBundle) + ":" + cleanDir,
+		kind:      CertificateSourceKindBundle,
+		path:      cleanDir,
+		storage:   storage,
+		removable: pathIsOnRemovableMedia(cleanDir),
+		aliases:   aliases,
 	}
 }
 
@@ -695,11 +701,12 @@ func newPKCS12Entry(path string) bundleEntry {
 		aliases = append(aliases, alias)
 	}
 	return bundleEntry{
-		id:      string(CertificateSourceKindPKCS12) + ":" + cleanPath,
-		kind:    CertificateSourceKindPKCS12,
-		path:    cleanPath,
-		storage: CertificateStorageKindPKCS12,
-		aliases: aliases,
+		id:        string(CertificateSourceKindPKCS12) + ":" + cleanPath,
+		kind:      CertificateSourceKindPKCS12,
+		path:      cleanPath,
+		storage:   CertificateStorageKindPKCS12,
+		removable: pathIsOnRemovableMedia(cleanPath),
+		aliases:   aliases,
 	}
 }
 
@@ -751,6 +758,14 @@ func splitPathParts(path string) []string {
 		parts = append(parts, part)
 	}
 	return parts
+}
+
+func pathIsOnRemovableMedia(path string) bool {
+	cleanPath := strings.ToLower(filepath.Clean(path))
+	if strings.HasPrefix(cleanPath, "/volumes/") {
+		return true
+	}
+	return windowsPathIsOnRemovableMedia(path)
 }
 
 func normalizeRoots(roots []string) []string {

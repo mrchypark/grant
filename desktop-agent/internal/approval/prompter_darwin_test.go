@@ -356,6 +356,7 @@ func TestCertificateOptionLabelIncludesSourceMetadata(t *testing.T) {
 		SourceKind:  npki.CertificateSourceKindPKCS12,
 		StorageKind: npki.CertificateStorageKindPKCS12,
 		DisplayPath: "protected.p12",
+		Removable:   true,
 	}, copy)
 	if removableLabel != "이동식 인증서 | 이동식디스크 PKCS#12 | protected.p12" {
 		t.Fatalf("removable label = %q", removableLabel)
