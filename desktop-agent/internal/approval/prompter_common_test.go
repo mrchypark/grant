@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/httpapi"
+	"desktop-agent/internal/npki"
 )
 
 func TestPromptApprovalWaitsForCanceledModalToExitBeforeReleasingSlot(t *testing.T) {

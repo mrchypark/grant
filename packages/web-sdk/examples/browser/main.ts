@@ -1,4 +1,4 @@
-import { CertdWebSdk } from "../../src/index.ts";
+import { WebSdk } from "../../src/index.ts";
 
 type CertificateItem = {
   id: string;
@@ -64,7 +64,7 @@ async function runStored() {
 }
 
 function createSdk() {
-  return new CertdWebSdk({
+  return new WebSdk({
     gatewayBaseUrl: gatewayBaseUrl.value,
     agentBaseUrl: agentBaseUrl.value,
     bearerToken: optional(bearerToken.value),

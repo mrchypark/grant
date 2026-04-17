@@ -1,4 +1,4 @@
-module github.com/cypark/account/desktop-agent
+module desktop-agent
 
 go 1.26
 

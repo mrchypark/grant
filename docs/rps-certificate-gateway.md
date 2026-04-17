@@ -21,7 +21,7 @@
   - loopback HTTP server
   - `/healthz`, `/sessions/open`, `/certificates`, `/sign`
   - `/approve-ephemeral-run`, `/approve-stored-registration`
-- `packages/certd-web-sdk`
+- `packages/web-sdk`
   - 고수준 제품 API + 저수준 raw client
 
 ## KMS 환경변수
@@ -322,7 +322,7 @@ ok
 - 제품형 high-level SDK는 `/approve-ephemeral-run`, `/approve-stored-registration` 사용
 - 실제 NPKI/GPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
 - `.p12`/`.pfx` PKCS#12 파일도 탐색, 목록, 서명, stored registration/ephemeral execution까지 지원
-- macOS에서는 기본적으로 메뉴바(tray) 앱으로 실행되고 `Open Example Page`, `Quit certd Agent` 메뉴 제공
+- macOS에서는 기본적으로 메뉴바(tray) 앱으로 실행되고 `Open Example Page`, `Quit desktop agent` 메뉴 제공
 - native approval modal
   - macOS: AppKit `NSAlert` + `NSPopUpButton`(인증서 선택) + `NSSecureTextField`(비밀번호) + `NSAlertStyleWarning`
     - 인증서 목록 라벨에 source/storage/path 메타데이터를 함께 보여준다
@@ -334,9 +334,9 @@ ok
 ## JS SDK 사용 예시
 
 ```ts
-import { CertdWebSdk } from "@certd/web-sdk";
+import { WebSdk } from "@conalog/web-sdk";
 
-const sdk = new CertdWebSdk({
+const sdk = new WebSdk({
   gatewayBaseUrl: "https://certd.example.com",
   agentBaseUrl: "http://127.0.0.1:8765",
 });
@@ -407,7 +407,7 @@ curl http://127.0.0.1:8765/certificates \
 JS 예시 페이지 실행:
 
 ```bash
-cd packages/certd-web-sdk
+cd packages/web-sdk
 npm install
 npm run example
 ```

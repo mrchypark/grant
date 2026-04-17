@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/app"
-	"github.com/cypark/account/desktop-agent/internal/approval"
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/app"
+	"desktop-agent/internal/approval"
+	"desktop-agent/internal/httpapi"
+	"desktop-agent/internal/npki"
 )
 
 func main() {
