@@ -95,7 +95,7 @@ func TestPromptApprovalActivatesAppBeforeShowingModal(t *testing.T) {
 	}
 	runApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		events = append(events, "show")
-		return approvalModalOutput{SelectedIndex: 0, Password: "secret-password", Approved: true}
+		return approvalModalOutput{SelectedIndex: 0, Password: []byte("secret-password"), Approved: true}
 	}
 
 	decision, err := NewPrompter().PromptApproval(context.Background(), httpapi.ApprovalPrompt{
@@ -115,7 +115,7 @@ func TestPromptApprovalActivatesAppBeforeShowingModal(t *testing.T) {
 	if decision.CertificateID != "cert-1" {
 		t.Fatalf("certificateID = %q, want cert-1", decision.CertificateID)
 	}
-	if decision.Password != "secret-password" {
+	if string(decision.Password) != "secret-password" {
 		t.Fatalf("password = %q, want secret-password", decision.Password)
 	}
 	if len(events) != 3 || events[0] != "prepare" || events[1] != "show" || events[2] != "restore" {
@@ -195,10 +195,10 @@ func TestPromptApprovalSerializesConcurrentModals(t *testing.T) {
 		case 1:
 			close(firstStarted)
 			<-firstRelease
-			return approvalModalOutput{SelectedIndex: 0, Password: "first-password", Approved: true}
+			return approvalModalOutput{SelectedIndex: 0, Password: []byte("first-password"), Approved: true}
 		case 2:
 			secondStarted <- struct{}{}
-			return approvalModalOutput{SelectedIndex: 0, Password: "second-password", Approved: true}
+			return approvalModalOutput{SelectedIndex: 0, Password: []byte("second-password"), Approved: true}
 		default:
 			t.Fatalf("showApprovalModal called more than twice")
 			return approvalModalOutput{}
@@ -281,7 +281,7 @@ func TestPromptApprovalCancelWhileWaitingDoesNotCancelActiveModal(t *testing.T) 
 		case 1:
 			close(firstStarted)
 			<-firstRelease
-			return approvalModalOutput{SelectedIndex: 0, Password: "secret-password", Approved: true}
+			return approvalModalOutput{SelectedIndex: 0, Password: []byte("secret-password"), Approved: true}
 		case 2:
 			t.Fatal("waiting prompt reached showApprovalModal before the active modal completed")
 			return approvalModalOutput{}

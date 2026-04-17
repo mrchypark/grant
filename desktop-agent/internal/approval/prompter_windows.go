@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -55,6 +56,7 @@ const (
 	cbAddString uintptr = 0x0143
 	cbSetCurSel uintptr = 0x014E
 	cbGetCurSel uintptr = 0x0147
+	cbErr       int32   = -1
 
 	fwBold uint32 = 700
 
@@ -142,6 +144,11 @@ var getDialogItemText = func(hwnd, id uintptr, buf []uint16) int {
 	return int(ret)
 }
 
+var getComboSelection = func(hwnd uintptr) int32 {
+	ret, _, _ := procSendDlgItemMessageW.Call(hwnd, uintptr(idcCombo), cbGetCurSel, 0, 0)
+	return int32(ret)
+}
+
 func init() {
 	resetApprovalModalCancellation = func() {
 		cancelMu.Lock()
@@ -213,9 +220,13 @@ func dialogProc(hwnd, msg, wparam, _ uintptr) uintptr {
 	case wmCommand:
 		switch int(wparam & 0xFFFF) {
 		case idOK:
-			selRet, _, _ := procSendDlgItemMessageW.Call(hwnd, uintptr(idcCombo), cbGetCurSel, 0, 0)
-			sel := int32(selRet)
-			password := readDlgItemText(hwnd, uintptr(idcPassword))
+			sel := getComboSelection(hwnd)
+			if sel == cbErr {
+				currentResult = approvalModalOutput{Err: fmt.Errorf("no certificate selected")}
+				procEndDialog.Call(hwnd, uintptr(idCancel))
+				return 1
+			}
+			password := readDlgItemTextBytes(hwnd, uintptr(idcPassword))
 			currentResult = approvalModalOutput{
 				SelectedIndex: int(sel),
 				Password:      password,
@@ -311,18 +322,25 @@ func raiseForeground(hwnd uintptr) {
 	procAttachThreadInput.Call(curThread, fgThread, 0)
 }
 
-func readDlgItemText(hwnd, id uintptr) string {
+func readDlgItemTextBytes(hwnd, id uintptr) []byte {
 	item := getDialogItemHandle(hwnd, id)
 	if item == 0 {
-		return ""
+		return nil
 	}
 	bufLen := getWindowTextLength(item) + 1
 	if bufLen < 2 {
 		bufLen = 2
 	}
 	buf := make([]uint16, bufLen)
+	defer clear(buf)
 	n := getDialogItemText(hwnd, id, buf)
-	return syscall.UTF16ToString(buf[:n])
+	runes := utf16.Decode(buf[:n])
+	password := make([]byte, 0, len(runes))
+	for _, r := range runes {
+		password = utf8.AppendRune(password, r)
+	}
+	clear(runes)
+	return password
 }
 
 type ctrlSpec struct {

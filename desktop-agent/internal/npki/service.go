@@ -71,6 +71,7 @@ type SignRequest struct {
 	CertificateID string `json:"certificateId"`
 	Challenge     string `json:"challenge"`
 	Password      string `json:"password"`
+	PasswordBytes []byte `json:"-"`
 	BusinessNo    string `json:"businessNo,omitempty"`
 }
 
@@ -181,15 +182,20 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 	if err != nil {
 		return SignResult{}, err
 	}
+	password := append([]byte(nil), req.PasswordBytes...)
+	if len(password) == 0 {
+		password = []byte(req.Password)
+	}
+	defer zeroBytes(password)
 
 	bundle, metadata, err := loadBundle(bundleDir)
 	if err != nil {
 		return SignResult{}, err
 	}
-	if err := validatePassword(bundle.signPriKey, req.Password); err != nil {
+	if err := validatePassword(bundle.signPriKey, password); err != nil {
 		return SignResult{}, err
 	}
-	challengeSignatureBase64, err := signChallenge(bundle.signPriKey, req.Password, req.Challenge)
+	challengeSignatureBase64, err := signChallenge(bundle.signPriKey, password, req.Challenge)
 	if err != nil {
 		return SignResult{}, err
 	}
@@ -682,18 +688,16 @@ type plainPrivateKey struct {
 	Extra      asn1.RawValue `asn1:"optional"`
 }
 
-func withDecryptedSignerKey(signPriKey []byte, password string, fn func(*rsa.PrivateKey) error) error {
+func withDecryptedSignerKey(signPriKey []byte, password []byte, fn func(*rsa.PrivateKey) error) error {
 	encrypted, err := parseEncryptedPrivateKey(signPriKey)
 	if err != nil {
 		return err
 	}
-	passwordBytes := []byte(password)
-	defer zeroBytes(passwordBytes)
 	key, iv, err := deriveDecryptionKey(
 		encrypted.Meta.Algorithm,
 		encrypted.Meta.Params.Salt,
 		encrypted.Meta.Params.Iteration,
-		passwordBytes,
+		password,
 	)
 	if err != nil {
 		return err
@@ -718,13 +722,13 @@ func withDecryptedSignerKey(signPriKey []byte, password string, fn func(*rsa.Pri
 	return fn(privateKey)
 }
 
-func validatePassword(signPriKey []byte, password string) error {
+func validatePassword(signPriKey []byte, password []byte) error {
 	return withDecryptedSignerKey(signPriKey, password, func(*rsa.PrivateKey) error {
 		return nil
 	})
 }
 
-func signChallenge(signPriKey []byte, password string, challenge string) (string, error) {
+func signChallenge(signPriKey []byte, password []byte, challenge string) (string, error) {
 	var encoded string
 	err := withDecryptedSignerKey(signPriKey, password, func(privateKey *rsa.PrivateKey) error {
 		digest := sha256.Sum256([]byte(challenge))

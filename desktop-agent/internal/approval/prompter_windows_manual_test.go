@@ -13,7 +13,7 @@ import (
 // CI에서는 돌지 않는다.
 func TestManualDialog(t *testing.T) {
 	copy := localization.ForLanguage(localization.SystemLanguage())
-	packed, ok := runApprovalModal(approvalModalInput{
+	result := runApprovalModal(approvalModalInput{
 		Origin:         "http://127.0.0.1:4173",
 		OrganizationID: "org-test",
 		BusinessNo:     "1234567890",
@@ -22,5 +22,5 @@ func TestManualDialog(t *testing.T) {
 		DefaultIndex:   0,
 		Copy:           copy,
 	})
-	t.Logf("packed=%q ok=%v", packed, ok)
+	t.Logf("selected=%d approved=%v password_len=%d err=%v", result.SelectedIndex, result.Approved, len(result.Password), result.Err)
 }

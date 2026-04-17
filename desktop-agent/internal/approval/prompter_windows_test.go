@@ -86,7 +86,7 @@ func TestPromptApprovalDeliversLocalizedCopyToModal(t *testing.T) {
 	var received approvalModalInput
 	runApprovalModal = func(input approvalModalInput) approvalModalOutput {
 		received = input
-		return approvalModalOutput{SelectedIndex: 0, Password: "secret", Approved: true}
+		return approvalModalOutput{SelectedIndex: 0, Password: []byte("secret"), Approved: true}
 	}
 
 	_, err := NewPrompter().PromptApproval(context.Background(), httpapi.ApprovalPrompt{
@@ -131,7 +131,7 @@ func TestShowWin32ModalActivatesAppBeforeOpeningDialog(t *testing.T) {
 	}
 	showDialogBoxIndirectParam = func(template []byte) {
 		events = append(events, "dialog")
-		currentResult = approvalModalOutput{SelectedIndex: 0, Password: "secret", Approved: true}
+		currentResult = approvalModalOutput{SelectedIndex: 0, Password: []byte("secret"), Approved: true}
 	}
 
 	result := showWin32Modal(approvalModalInput{
@@ -146,7 +146,7 @@ func TestShowWin32ModalActivatesAppBeforeOpeningDialog(t *testing.T) {
 	if !result.Approved {
 		t.Fatal("showWin32Modal returned Approved=false, want true")
 	}
-	if result.Password != "secret" || result.SelectedIndex != 0 {
+	if string(result.Password) != "secret" || result.SelectedIndex != 0 {
 		t.Fatalf("result = %#v, want selected index 0 with password secret", result)
 	}
 	if len(events) != 2 || events[0] != "activate" || events[1] != "dialog" {
@@ -158,10 +158,12 @@ func TestReadDlgItemTextUsesDynamicBufferLength(t *testing.T) {
 	originalGetDialogItemHandle := getDialogItemHandle
 	originalGetWindowTextLength := getWindowTextLength
 	originalGetDialogItemText := getDialogItemText
+	originalGetComboSelection := getComboSelection
 	defer func() {
 		getDialogItemHandle = originalGetDialogItemHandle
 		getWindowTextLength = originalGetWindowTextLength
 		getDialogItemText = originalGetDialogItemText
+		getComboSelection = originalGetComboSelection
 	}()
 
 	password := strings.Repeat("p", 600)
@@ -176,8 +178,40 @@ func TestReadDlgItemTextUsesDynamicBufferLength(t *testing.T) {
 		return len(password)
 	}
 
-	got := readDlgItemText(1, uintptr(idcPassword))
-	if got != password {
+	got := readDlgItemTextBytes(1, uintptr(idcPassword))
+	if string(got) != password {
 		t.Fatalf("readDlgItemText() len=%d, want %d", len(got), len(password))
+	}
+}
+
+func TestShowWin32ModalRejectsMissingSelection(t *testing.T) {
+	originalActivate := activateApprovalModalApplication
+	originalShowDialog := showDialogBoxIndirectParam
+	originalGetComboSelection := getComboSelection
+	defer func() {
+		activateApprovalModalApplication = originalActivate
+		showDialogBoxIndirectParam = originalShowDialog
+		getComboSelection = originalGetComboSelection
+	}()
+
+	activateApprovalModalApplication = func() {}
+	getComboSelection = func(hwnd uintptr) int32 {
+		return cbErr
+	}
+	showDialogBoxIndirectParam = func(template []byte) {
+		dialogProc(1, uintptr(wmCommand), uintptr(idOK), 0)
+	}
+
+	result := showWin32Modal(approvalModalInput{
+		Origin:         "http://127.0.0.1:4173",
+		OrganizationID: "org-1",
+		BusinessNo:     "2768603291",
+		Action:         "ephemeral",
+		Labels:         []string{"Test Certificate"},
+		DefaultIndex:   0,
+		Copy:           localization.ForLanguage(localization.English),
+	})
+	if result.Err == nil {
+		t.Fatal("expected missing selection error")
 	}
 }

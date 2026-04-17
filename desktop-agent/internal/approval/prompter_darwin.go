@@ -274,7 +274,7 @@ func init() {
 		}
 		return approvalModalOutput{
 			SelectedIndex: selectedIndex,
-			Password:      parts[1],
+			Password:      []byte(parts[1]),
 			Approved:      true,
 		}
 	}

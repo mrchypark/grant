@@ -25,7 +25,7 @@ type approvalModalInput struct {
 
 type approvalModalOutput struct {
 	SelectedIndex int
-	Password      string
+	Password      []byte
 	Approved      bool
 	Err           error
 }
@@ -127,13 +127,13 @@ func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPr
 	if result.SelectedIndex < 0 || result.SelectedIndex >= len(prompt.Certificates) {
 		return httpapi.ApprovalDecision{}, fmt.Errorf("selected certificate index %d out of range", result.SelectedIndex)
 	}
-	if result.Password == "" {
+	if len(result.Password) == 0 {
 		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
 	}
 
 	return httpapi.ApprovalDecision{
 		CertificateID: prompt.Certificates[result.SelectedIndex].ID,
-		Password:      result.Password,
+		Password:      append([]byte(nil), result.Password...),
 	}, nil
 }
 

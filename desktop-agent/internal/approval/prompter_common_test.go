@@ -40,7 +40,7 @@ func TestPromptApprovalWaitsForCanceledModalToExitBeforeReleasingSlot(t *testing
 			return approvalModalOutput{}
 		case 2:
 			secondStarted <- struct{}{}
-			return approvalModalOutput{SelectedIndex: 0, Password: "secret", Approved: true}
+			return approvalModalOutput{SelectedIndex: 0, Password: []byte("secret"), Approved: true}
 		default:
 			t.Fatalf("showApprovalModal called more than twice")
 			return approvalModalOutput{}
