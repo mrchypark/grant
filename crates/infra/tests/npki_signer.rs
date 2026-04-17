@@ -26,8 +26,8 @@ fn load_bundle_from_directory_reads_all_files() {
 
     assert!(!bundle.sign_cert_der.is_empty());
     assert!(!bundle.sign_pri_key.is_empty());
-    assert!(!bundle.km_cert_der.is_empty());
-    assert!(!bundle.km_pri_key.is_empty());
+    assert!(!bundle.km_cert_der.as_deref().unwrap_or_default().is_empty());
+    assert!(!bundle.km_pri_key.as_deref().unwrap_or_default().is_empty());
 }
 
 #[test]
@@ -50,7 +50,10 @@ fn signer_loads_certificate_and_builds_payloads() {
     assert!(signed.contains("BEGIN PKCS7"));
 
     let enveloped = signer
-        .envelop_pkcs7_pem(bundle.km_cert_der.as_slice(), b"2768603291")
+        .envelop_pkcs7_pem(
+            bundle.km_cert_der.as_deref().expect("km cert der present"),
+            b"2768603291",
+        )
         .expect("envelop business number");
     assert!(enveloped.contains("BEGIN PKCS7"));
 }
@@ -132,8 +135,8 @@ fn signer_accepts_direct_pkcs8_private_keys_without_vid_random() {
             sign_pri_key: private_key
                 .private_key_to_pkcs8()
                 .expect("private key pkcs8"),
-            km_cert_der: Vec::new(),
-            km_pri_key: Vec::new(),
+            km_cert_der: None,
+            km_pri_key: None,
         },
         "unused-password",
     )
@@ -157,8 +160,8 @@ fn signer_rejects_unsupported_direct_private_key_algorithms() {
             sign_pri_key: private_key
                 .private_key_to_pkcs8()
                 .expect("private key pkcs8"),
-            km_cert_der: Vec::new(),
-            km_pri_key: Vec::new(),
+            km_cert_der: None,
+            km_pri_key: None,
         },
         "unused-password",
     ) {

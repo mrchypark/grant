@@ -1187,13 +1187,10 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         "kmPriKeyBase64",
         body.km_pri_key_base64.as_deref(),
     )?;
-    match (km_cert_der.is_some(), km_pri_key.is_some()) {
-        (true, true) | (false, false) => {}
-        _ => {
-            return Err(ApiError::bad_request(anyhow!(
-                "kmCertDerBase64 and kmPriKeyBase64 must both be provided or both omitted"
-            )));
-        }
+    if km_cert_der.is_some() != km_pri_key.is_some() {
+        return Err(ApiError::bad_request(anyhow!(
+            "kmCertDerBase64 and kmPriKeyBase64 must both be provided or both omitted"
+        )));
     }
 
     Ok(CertificateBundle {
