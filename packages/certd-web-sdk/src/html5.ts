@@ -46,33 +46,35 @@ export function configureHtml5CertificateInput(
 }
 
 export function findHtml5CertificateFiles(files: Iterable<File>): Html5CertificateSelection {
-  const indexed = new Map<string, File>();
+  const buckets = new Map<string, Map<string, File>>();
 
   for (const file of files) {
     const fileName = sourceFileName(file);
-    if (indexed.has(fileName)) {
-      throw new Error(`duplicate certificate file selected: ${fileName}`);
+    if (!isRequiredCertificateBasename(fileName)) {
+      continue;
     }
-    indexed.set(fileName, file);
+
+    const bucketKey = bundleDirectoryKey(file);
+    const bucket = buckets.get(bucketKey) ?? new Map<string, File>();
+    if (bucket.has(fileName)) {
+      throw new Error(`duplicate certificate file selected: ${displayFileName(file)}`);
+    }
+    bucket.set(fileName, file);
+    buckets.set(bucketKey, bucket);
   }
 
-  const matched = {} as Record<Html5CertificateFileKey, File>;
-  const fileNames = {} as Record<Html5CertificateFileKey, string>;
+  const completeBucket = Array.from(buckets.entries())
+    .filter(([, bucket]) => hasCompleteBundle(bucket))
+    .sort(([left], [right]) => left.localeCompare(right))[0]?.[1];
 
-  for (const key of html5CertificateFileKeys()) {
-    const requiredFileName = REQUIRED_CERTIFICATE_FILES[key];
-    const file = indexed.get(requiredFileName);
-    if (!file) {
-      throw new Error(`missing certificate file: ${requiredFileName}`);
-    }
-    matched[key] = file;
-    fileNames[key] = displayFileName(file);
+  if (!completeBucket) {
+    const missing = html5CertificateFileKeys()
+      .map((key) => REQUIRED_CERTIFICATE_FILES[key])
+      .find((requiredFileName) => !Array.from(buckets.values()).some((bucket) => bucket.has(requiredFileName)));
+    throw new Error(`missing certificate file: ${missing ?? "signCert.der"}`);
   }
 
-  return {
-    files: matched,
-    fileNames,
-  };
+  return selectionFromBucket(completeBucket);
 }
 
 export async function prepareHtml5CertificateBundle(
@@ -117,6 +119,40 @@ export async function readHtml5CertificateBytes(selection: Html5CertificateSelec
 
 function html5CertificateFileKeys(): Html5CertificateFileKey[] {
   return Object.keys(REQUIRED_CERTIFICATE_FILES) as Html5CertificateFileKey[];
+}
+
+function selectionFromBucket(bucket: Map<string, File>): Html5CertificateSelection {
+  const matched = {} as Record<Html5CertificateFileKey, File>;
+  const fileNames = {} as Record<Html5CertificateFileKey, string>;
+
+  for (const key of html5CertificateFileKeys()) {
+    const requiredFileName = REQUIRED_CERTIFICATE_FILES[key];
+    const file = bucket.get(requiredFileName);
+    if (!file) {
+      throw new Error(`missing certificate file: ${requiredFileName}`);
+    }
+    matched[key] = file;
+    fileNames[key] = displayFileName(file);
+  }
+
+  return { files: matched, fileNames };
+}
+
+function hasCompleteBundle(bucket: Map<string, File>): boolean {
+  return html5CertificateFileKeys().every((key) => bucket.has(REQUIRED_CERTIFICATE_FILES[key]));
+}
+
+function isRequiredCertificateBasename(fileName: string): boolean {
+  return html5CertificateFileKeys().some((key) => REQUIRED_CERTIFICATE_FILES[key] === fileName);
+}
+
+function bundleDirectoryKey(file: File): string {
+  const fullName = displayFileName(file);
+  const lastSlash = Math.max(fullName.lastIndexOf("/"), fullName.lastIndexOf("\\"));
+  if (lastSlash < 0) {
+    return "";
+  }
+  return fullName.slice(0, lastSlash);
 }
 
 function trimRequired(value: string, fieldName: string): string {

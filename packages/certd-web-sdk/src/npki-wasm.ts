@@ -56,12 +56,18 @@ let assetUrls: NpkiWasmAssetUrls = {};
 let runtimeReady: Promise<void> | null = null;
 let apiReady: Promise<NpkiWasmApi> | null = null;
 let wasmRunPromise: Promise<void> | null = null;
+const runtimeScriptLoads = new Map<string, Promise<void>>();
 
 export function configureNpkiWasmAssets(urls: NpkiWasmAssetUrls): void {
   assetUrls = {
     wasmUrl: urls.wasmUrl ?? assetUrls.wasmUrl,
     wasmExecUrl: urls.wasmExecUrl ?? assetUrls.wasmExecUrl,
   };
+  if (!globalThis.CertdWebSdkNpkiWasm) {
+    runtimeReady = null;
+    apiReady = null;
+    wasmRunPromise = null;
+  }
 }
 
 export async function inspectCertificateWithWasm(
@@ -93,11 +99,16 @@ export async function prepareChallengeProofWithWasm(input: {
   password: string;
   challengePayload: string;
 }): Promise<WasmChallengeProof> {
-  return callNpkiWasm<WasmChallengeProof>("prepareChallengeProof", {
-    ...encodeBundleInput(input),
-    password: input.password,
-    challengePayload: input.challengePayload,
-  });
+  const passwordBytes = encodePassword(input.password);
+  try {
+    return callNpkiWasm<WasmChallengeProof>("prepareChallengeProof", {
+      ...encodeBundleInput(input),
+      passwordBase64: bytesToBase64(passwordBytes),
+      challengePayload: input.challengePayload,
+    });
+  } finally {
+    passwordBytes.fill(0);
+  }
 }
 
 export async function signChallengeWithWasm(
@@ -105,12 +116,17 @@ export async function signChallengeWithWasm(
   password: string,
   challengePayload: string,
 ): Promise<string> {
-  const result = await callNpkiWasm<{ challengeSignatureBase64: string }>("signChallengeOnly", {
-    signPriKeyBase64: bytesToBase64(signPriKey),
-    password,
-    challengePayload,
-  });
-  return result.challengeSignatureBase64;
+  const passwordBytes = encodePassword(password);
+  try {
+    const result = await callNpkiWasm<{ challengeSignatureBase64: string }>("signChallengeOnly", {
+      signPriKeyBase64: bytesToBase64(signPriKey),
+      passwordBase64: bytesToBase64(passwordBytes),
+      challengePayload,
+    });
+    return result.challengeSignatureBase64;
+  } finally {
+    passwordBytes.fill(0);
+  }
 }
 
 async function callNpkiWasm<T>(method: keyof NpkiWasmApi, payload: object): Promise<T> {
@@ -138,7 +154,12 @@ async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
     wasmRunPromise = go.run(result.instance);
     await waitForApi();
     return globalThis.CertdWebSdkNpkiWasm!;
-  })();
+  })().catch((error) => {
+    apiReady = null;
+    wasmRunPromise = null;
+    delete globalThis.CertdWebSdkNpkiWasm;
+    throw error;
+  });
 
   return apiReady;
 }
@@ -152,12 +173,15 @@ async function ensureGoRuntime(): Promise<void> {
   }
 
   runtimeReady = (async () => {
-    const runtimeSource = await readText(resolveAssetUrl("wasmExecUrl", DEFAULT_WASM_EXEC_FILE));
-    globalThis.eval(`${runtimeSource}\n//# sourceURL=certd-web-sdk-wasm_exec.js`);
+    const runtimeUrl = resolveAssetUrl("wasmExecUrl", DEFAULT_WASM_EXEC_FILE);
+    await loadGoRuntimeScript(runtimeUrl);
     if (!globalThis.Go) {
       throw new Error("failed to initialize Go wasm runtime");
     }
-  })();
+  })().catch((error) => {
+    runtimeReady = null;
+    throw error;
+  });
 
   return runtimeReady;
 }
@@ -237,9 +261,69 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
+function encodePassword(password: string): Uint8Array {
+  return new TextEncoder().encode(password);
+}
+
+async function loadGoRuntimeScript(url: URL): Promise<void> {
+  if (typeof document !== "undefined") {
+    await loadBrowserScript(url);
+    return;
+  }
+
+  const source = await readText(url);
+  const { Script } = await loadNodeVm();
+  new Script(source, { filename: url.toString() }).runInThisContext();
+}
+
+function loadBrowserScript(url: URL): Promise<void> {
+  const key = url.toString();
+  const existing = runtimeScriptLoads.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const promise = new Promise<void>((resolve, reject) => {
+    const found = document.querySelector<HTMLScriptElement>(`script[data-certd-wasm-runtime="${key}"]`);
+    if (found) {
+      if (globalThis.Go) {
+        resolve();
+        return;
+      }
+      found.addEventListener("load", () => resolve(), { once: true });
+      found.addEventListener("error", () => reject(new Error(`failed to load ${key}`)), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.async = true;
+    script.dataset.certdWasmRuntime = key;
+    script.src = key;
+    script.addEventListener("load", () => resolve(), { once: true });
+    script.addEventListener("error", () => reject(new Error(`failed to load ${key}`)), { once: true });
+    document.head.append(script);
+  }).catch((error) => {
+    runtimeScriptLoads.delete(key);
+    document
+      .querySelectorAll<HTMLScriptElement>(`script[data-certd-wasm-runtime="${key}"]`)
+      .forEach((script) => script.remove());
+    throw error;
+  });
+
+  runtimeScriptLoads.set(key, promise);
+  return promise;
+}
+
 async function loadNodeFsPromises() {
   const dynamicImport = new Function("specifier", "return import(specifier);") as (
     specifier: string,
   ) => Promise<typeof import("node:fs/promises")>;
   return dynamicImport("node:fs/promises");
+}
+
+async function loadNodeVm() {
+  const dynamicImport = new Function("specifier", "return import(specifier);") as (
+    specifier: string,
+  ) => Promise<typeof import("node:vm")>;
+  return dynamicImport("node:vm");
 }

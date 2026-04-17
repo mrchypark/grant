@@ -35,20 +35,15 @@ func PrepareBrowserBundle(input BrowserBundleInput) (ProofBundle, error) {
 
 	if businessNo == "" || commonName == "" {
 		metadata, err := InspectCertificate(input.SignCertDER)
-		if err != nil {
-			if businessNo != "" || commonName != "" {
-				// If the caller already supplied the missing metadata, keep compatibility
-				// with loose browser fixtures that only need bundling/signing.
-			} else {
-				return ProofBundle{}, err
-			}
-		} else {
+		if err == nil {
 			if businessNo == "" {
 				businessNo = metadata.BusinessNo
 			}
 			if commonName == "" {
 				commonName = metadata.CommonName
 			}
+		} else if businessNo == "" && commonName == "" {
+			return ProofBundle{}, err
 		}
 	}
 

@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   CertdWebSdk,
+  configureNpkiWasmAssets,
   configureHtml5CertificateInput,
   findHtml5CertificateFiles,
   prepareHtml5CertificateBundle,
@@ -479,6 +480,71 @@ test("findHtml5CertificateFiles() rejects missing files", () => {
       ]),
     /missing certificate file: kmPri\.key/i,
   );
+});
+
+test("findHtml5CertificateFiles() selects a complete bundle from a multi-certificate directory", () => {
+  const selection = findHtml5CertificateFiles([
+    fileWithPath("NPKI/yessign/USER/cn=beta/signCert.der", "beta-sign-cert"),
+    fileWithPath("NPKI/yessign/USER/cn=alpha/signCert.der", "alpha-sign-cert"),
+    fileWithPath("NPKI/yessign/USER/cn=beta/signPri.key", "beta-sign-key"),
+    fileWithPath("NPKI/yessign/USER/cn=alpha/signPri.key", "alpha-sign-key"),
+    fileWithPath("NPKI/yessign/USER/cn=beta/kmCert.der", "beta-km-cert"),
+    fileWithPath("NPKI/yessign/USER/cn=alpha/kmCert.der", "alpha-km-cert"),
+    fileWithPath("NPKI/yessign/USER/cn=beta/kmPri.key", "beta-km-key"),
+    fileWithPath("NPKI/yessign/USER/cn=alpha/kmPri.key", "alpha-km-key"),
+  ]);
+
+  assert.equal(selection.fileNames.signCertDer, "NPKI/yessign/USER/cn=alpha/signCert.der");
+  assert.equal(selection.fileNames.kmPriKey, "NPKI/yessign/USER/cn=alpha/kmPri.key");
+});
+
+test("prepareHtml5CertificateBundle() recovers after a transient wasm asset load failure", async () => {
+  try {
+    configureNpkiWasmAssets({
+      wasmExecUrl: new URL("./missing-wasm-exec.js", import.meta.url),
+      wasmUrl: new URL("./generated/npki_signer.wasm", import.meta.url),
+    });
+
+    await assert.rejects(
+      () =>
+        prepareHtml5CertificateBundle(
+          [
+            fileWithPath("signCert.der", "SC"),
+            fileWithPath("signPri.key", "SK"),
+            fileWithPath("kmCert.der", "KC"),
+            fileWithPath("kmPri.key", "KK"),
+          ],
+          {
+            businessNo: "2768603291",
+            commonName: "Transient Failure Certificate",
+            password: "secret-password",
+          },
+        ),
+      /ENOENT|failed to load/i,
+    );
+  } finally {
+    configureNpkiWasmAssets({
+      wasmExecUrl: new URL("./generated/wasm_exec.js", import.meta.url),
+      wasmUrl: new URL("./generated/npki_signer.wasm", import.meta.url),
+    });
+  }
+
+  const prepared = await prepareHtml5CertificateBundle(
+    [
+      fileWithPath("signCert.der", "SC"),
+      fileWithPath("signPri.key", "SK"),
+      fileWithPath("kmCert.der", "KC"),
+      fileWithPath("kmPri.key", "KK"),
+    ],
+    {
+      businessNo: "2768603291",
+      commonName: "Recovered Certificate",
+      password: "secret-password",
+    },
+  );
+
+  assert.equal(prepared.bundle.commonName, "Recovered Certificate");
+  assert.equal(prepared.bundle.businessNo, "2768603291");
 });
 
 test("prepareHtml5CertificateBundle() trims inputs and base64-encodes the selected files", async () => {

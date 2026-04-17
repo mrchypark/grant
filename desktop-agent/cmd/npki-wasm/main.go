@@ -22,7 +22,7 @@ type prepareBundleRequest struct {
 
 type prepareChallengeProofRequest struct {
 	prepareBundleRequest
-	Password         string `json:"password"`
+	PasswordBase64   string `json:"passwordBase64"`
 	ChallengePayload string `json:"challengePayload"`
 }
 
@@ -37,7 +37,7 @@ type inspectCertificateResponse struct {
 
 type signChallengeOnlyRequest struct {
 	SignPriKeyBase64 string `json:"signPriKeyBase64"`
-	Password         string `json:"password"`
+	PasswordBase64   string `json:"passwordBase64"`
 	ChallengePayload string `json:"challengePayload"`
 }
 
@@ -58,8 +58,8 @@ func main() {
 
 func wrap(fn func(string) (string, error)) js.Func {
 	return js.FuncOf(func(this js.Value, args []js.Value) any {
-		if len(args) != 1 {
-			return responseObject("", fmt.Errorf("expected exactly one JSON argument"))
+		if len(args) != 1 || args[0].Type() != js.TypeString {
+			return responseObject("", fmt.Errorf("expected exactly one JSON string argument"))
 		}
 		return responseObject(fn(args[0].String()))
 	})
@@ -127,10 +127,15 @@ func handlePrepareChallengeProof(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	password, err := decodePasswordBase64(request.PasswordBase64)
+	if err != nil {
+		return "", fmt.Errorf("decode password: %w", err)
+	}
+	defer zeroBytes(password)
 
 	proof, err := npki.PrepareBrowserChallengeProof(npki.BrowserChallengeProofInput{
 		BrowserBundleInput: input,
-		Password:           []byte(request.Password),
+		Password:           password,
 		Challenge:          request.ChallengePayload,
 	})
 	if err != nil {
@@ -150,8 +155,13 @@ func handleSignChallengeOnly(raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode signPri.key: %w", err)
 	}
+	password, err := decodePasswordBase64(request.PasswordBase64)
+	if err != nil {
+		return "", fmt.Errorf("decode password: %w", err)
+	}
+	defer zeroBytes(password)
 
-	signature, err := npki.SignChallengeForBrowser(signPriKey, []byte(request.Password), request.ChallengePayload)
+	signature, err := npki.SignChallengeForBrowser(signPriKey, password, request.ChallengePayload)
 	if err != nil {
 		return "", err
 	}
@@ -193,10 +203,18 @@ func decodeBase64(value string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(value)
 }
 
+func decodePasswordBase64(value string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(value)
+}
+
 func marshal(value any) (string, error) {
 	bytes, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}
 	return string(bytes), nil
+}
+
+func zeroBytes(buf []byte) {
+	clear(buf)
 }
