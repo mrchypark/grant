@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/npki"
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 

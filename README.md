@@ -23,7 +23,7 @@
   - 별도 TrailBase auth bridge 서비스
 - `desktop-agent`
   - macOS/Windows loopback desktop agent
-- `packages/certd-web-sdk`
+- `packages/web-sdk`
   - 브라우저용 certificate gateway SDK
 - `scripts/`
   - `vind` 기반 로컬 검증, bootstrap, chaos, backup/restore 보조 스크립트

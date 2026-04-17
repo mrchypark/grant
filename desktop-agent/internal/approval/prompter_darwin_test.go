@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/localization"
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/httpapi"
+	"desktop-agent/internal/localization"
+	"desktop-agent/internal/npki"
 )
 
 func TestPromptApprovalCancelsModalWhenContextIsDone(t *testing.T) {

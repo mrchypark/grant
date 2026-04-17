@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
+	"desktop-agent/internal/httpapi"
 )
 
 type Prompter struct{}

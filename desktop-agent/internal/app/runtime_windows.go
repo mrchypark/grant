@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/localization"
+	"desktop-agent/internal/localization"
 	"github.com/getlantern/systray"
 )
 

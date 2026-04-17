@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/localization"
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/httpapi"
+	"desktop-agent/internal/localization"
+	"desktop-agent/internal/npki"
 )
 
 type Prompter struct{}

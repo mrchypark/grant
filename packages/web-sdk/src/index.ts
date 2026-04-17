@@ -11,7 +11,7 @@ import {
   type SyncRun,
 } from "./client.ts";
 
-export type CertdWebSdkOptions = {
+export type WebSdkOptions = {
   gatewayBaseUrl: string;
   agentBaseUrl: string;
   bearerToken?: string;
@@ -42,13 +42,13 @@ export type AgentCapabilities = {
   };
 };
 
-export class CertdWebSdk {
+export class WebSdk {
   readonly raw: {
     gateway: GatewayClient;
     agent: DesktopAgentClient;
   };
 
-  constructor(options: CertdWebSdkOptions) {
+  constructor(options: WebSdkOptions) {
     const gateway = new GatewayClient({
       baseUrl: trimTrailingSlash(options.gatewayBaseUrl),
       bearerToken: options.bearerToken,

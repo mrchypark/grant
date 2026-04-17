@@ -267,11 +267,11 @@ git commit -m "feat: scaffold desktop certificate agent"
 ### Task 7: Create the browser JS SDK skeleton
 
 **Files:**
-- Create: `packages/certd-web-sdk/package.json`
-- Create: `packages/certd-web-sdk/src/index.ts`
-- Create: `packages/certd-web-sdk/src/client.ts`
-- Create: `packages/certd-web-sdk/src/agent.ts`
-- Create: `packages/certd-web-sdk/src/index.test.ts`
+- Create: `packages/web-sdk/package.json`
+- Create: `packages/web-sdk/src/index.ts`
+- Create: `packages/web-sdk/src/client.ts`
+- Create: `packages/web-sdk/src/agent.ts`
+- Create: `packages/web-sdk/src/index.test.ts`
 
 **Step 1: Write the failing test**
 
@@ -284,7 +284,7 @@ Add SDK tests for:
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd packages/certd-web-sdk && npm test`
+Run: `cd packages/web-sdk && npm test`
 Expected: FAIL because the SDK package does not exist yet.
 
 **Step 3: Write minimal implementation**
@@ -297,13 +297,13 @@ Expected: FAIL because the SDK package does not exist yet.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd packages/certd-web-sdk && npm test`
+Run: `cd packages/web-sdk && npm test`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add packages/certd-web-sdk/package.json packages/certd-web-sdk/src/index.ts packages/certd-web-sdk/src/client.ts packages/certd-web-sdk/src/agent.ts packages/certd-web-sdk/src/index.test.ts
+git add packages/web-sdk/package.json packages/web-sdk/src/index.ts packages/web-sdk/src/client.ts packages/web-sdk/src/agent.ts packages/web-sdk/src/index.test.ts
 git commit -m "feat: scaffold certificate gateway web sdk"
 ```
 
@@ -368,7 +368,7 @@ git commit -m "docs: add certificate gateway e2e guide"
 - `cargo test -p infra authorization_integration -- --nocapture`
 - `cargo test -p api cert_gateway -- --nocapture`
 - `cd desktop-agent && go test ./...`
-- `cd packages/certd-web-sdk && npm test`
+- `cd packages/web-sdk && npm test`
 
 ## Risks to watch during implementation
 

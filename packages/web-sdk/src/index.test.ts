@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { CertdWebSdk } from "./index.ts";
+import { WebSdk } from "./index.ts";
 
 type FetchCall = {
   input: RequestInfo | URL;
@@ -74,7 +74,7 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -99,7 +99,7 @@ test("assertAvailable() checks agent health", async () => {
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -139,7 +139,7 @@ test("raw.agent.listCertificates() preserves extended certificate metadata", asy
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -187,7 +187,7 @@ test("runEphemeral() checks agent health then delegates approval and execution t
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -232,7 +232,7 @@ test("runEphemeral() forwards optional sync scope to the local agent", async () 
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -282,7 +282,7 @@ test("runEphemeral() resolves a relative gateway base URL before sending it to t
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "/gateway",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -318,7 +318,7 @@ test("registerStored() delegates approval and registration to the local agent", 
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -356,7 +356,7 @@ test("runEphemeral() allows omitting businessNo so the server can use the linked
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -401,7 +401,7 @@ test("runEphemeral() reopens the local agent session after a 401 response", asyn
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -446,7 +446,7 @@ test("runStored() issues a crawl task token and starts the stored crawl", async 
   ]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });
@@ -474,7 +474,7 @@ test("runEphemeral() rejects when the local agent health check fails", async () 
   const mock = installFetchMock([() => textResponse("down", 503)]);
 
   try {
-    const sdk = new CertdWebSdk({
+    const sdk = new WebSdk({
       gatewayBaseUrl: "http://gateway.local",
       agentBaseUrl: "http://127.0.0.1:8765",
     });

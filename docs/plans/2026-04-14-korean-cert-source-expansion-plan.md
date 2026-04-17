@@ -113,7 +113,7 @@ Expected: PASS
 ### Task 4: Relax gateway contracts for optional KM material
 
 **Files:**
-- Modify: `packages/certd-web-sdk/src/agent.ts`
+- Modify: `packages/web-sdk/src/agent.ts`
 - Modify: `crates/api/src/lib.rs`
 - Modify: `crates/infra/src/crypto.rs`
 - Modify: `crates/infra/src/service.rs`
@@ -153,10 +153,10 @@ Expected: PASS
 **Files:**
 - Modify: `desktop-agent/internal/approval/prompter_darwin.go`
 - Modify: `desktop-agent/internal/localization/localization.go`
-- Modify: `packages/certd-web-sdk/examples/browser/main.ts`
+- Modify: `packages/web-sdk/examples/browser/main.ts`
 - Modify: `docs/rps-certificate-gateway.md`
 - Test: `desktop-agent/internal/approval/prompter_darwin_test.go`
-- Test: `packages/certd-web-sdk/src/index.test.ts`
+- Test: `packages/web-sdk/src/index.test.ts`
 
 **Step 1: Write the failing test**
 
@@ -166,7 +166,7 @@ Expected: PASS
 **Step 2: Run test to verify it fails**
 
 Run: `go test ./desktop-agent/internal/approval -run Test`
-Run: `pnpm --filter certd-web-sdk test`
+Run: `pnpm --filter @conalog/web-sdk test`
 Expected: FAIL because approval and example output do not know about source metadata.
 
 **Step 3: Write minimal implementation**
@@ -178,7 +178,7 @@ Expected: FAIL because approval and example output do not know about source meta
 **Step 4: Run test to verify it passes**
 
 Run: `go test ./desktop-agent/internal/approval -run Test`
-Run: `pnpm --filter certd-web-sdk test`
+Run: `pnpm --filter @conalog/web-sdk test`
 Expected: PASS
 
 **Step 5: Review gate**
@@ -197,7 +197,7 @@ Expected: PASS
 Run: `go test ./desktop-agent/internal/npki ./desktop-agent/internal/httpapi ./desktop-agent/internal/approval`
 Run: `cargo test -p infra authorization_integration`
 Run: `cargo test -p api cert_gateway`
-Run: `pnpm --filter certd-web-sdk test`
+Run: `pnpm --filter @conalog/web-sdk test`
 
 **Step 2: Run broader regression where feasible**
 
