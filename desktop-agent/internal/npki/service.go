@@ -71,6 +71,7 @@ type SignRequest struct {
 	CertificateID string `json:"certificateId"`
 	Challenge     string `json:"challenge"`
 	Password      string `json:"password"`
+	PasswordBytes []byte `json:"-"`
 	BusinessNo    string `json:"businessNo,omitempty"`
 }
 
@@ -144,11 +145,17 @@ func DefaultConfig() ServiceConfig {
 	roots := defaultLocalRootsFor(runtime.GOOS, home)
 	return ServiceConfig{
 		Roots:            roots,
-		AutoDiscover:     runtime.GOOS == "darwin",
+		AutoDiscover:     runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		RootsTTL:         defaultDiscoveredRootsTTL,
 		DiscoveryTimeout: defaultDiscoveryTimeout,
 		DiscoverRoots: func(ctx context.Context) []string {
-			return discoverMountedNPKIRoots(ctx, "/Volumes")
+			switch runtime.GOOS {
+			case "darwin":
+				return discoverMountedNPKIRoots(ctx, "/Volumes")
+			case "windows":
+				return discoverWindowsDriveNPKIRoots(ctx)
+			}
+			return nil
 		},
 	}
 }
@@ -175,15 +182,20 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 	if err != nil {
 		return SignResult{}, err
 	}
+	password := append([]byte(nil), req.PasswordBytes...)
+	if len(password) == 0 {
+		password = []byte(req.Password)
+	}
+	defer zeroBytes(password)
 
 	bundle, metadata, err := loadBundle(bundleDir)
 	if err != nil {
 		return SignResult{}, err
 	}
-	if err := validatePassword(bundle.signPriKey, req.Password); err != nil {
+	if err := validatePassword(bundle.signPriKey, password); err != nil {
 		return SignResult{}, err
 	}
-	challengeSignatureBase64, err := signChallenge(bundle.signPriKey, req.Password, req.Challenge)
+	challengeSignatureBase64, err := signChallenge(bundle.signPriKey, password, req.Challenge)
 	if err != nil {
 		return SignResult{}, err
 	}
@@ -557,14 +569,23 @@ func discoverDefaultRootsFor(ctx context.Context, goos string, home string, volu
 func defaultLocalRootsFor(goos string, home string) []string {
 	switch goos {
 	case "windows":
-		localAppData := os.Getenv("LOCALAPPDATA")
-		appData := os.Getenv("APPDATA")
-		return []string{
-			filepath.Join(home, "NPKI"),
-			filepath.Join(home, "Documents", "NPKI"),
-			filepath.Join(localAppData, "NPKI"),
-			filepath.Join(appData, "NPKI"),
+		// 한국 공동인증서가 실제로 배포되는 위치:
+		//   - %USERPROFILE%\AppData\LocalLow\NPKI  (브라우저/낮은 무결성 플러그인)
+		//   - %ProgramFiles%\NPKI                  (64bit 기관 설치기)
+		//   - %ProgramFiles(x86)%\NPKI             (32bit 에뮬레이션 설치기)
+		// <드라이브>:\NPKI 은 AutoDiscover 경로(discoverWindowsDriveNPKIRoots)에서
+		// 현재 mount된 고정/이동식 드라이브만 GetLogicalDrives + GetDriveType 으로
+		// 훑어 추가한다.
+		roots := []string{
+			filepath.Join(home, "AppData", "LocalLow", "NPKI"),
 		}
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			roots = append(roots, filepath.Join(pf, "NPKI"))
+		}
+		if pfx86 := os.Getenv("ProgramFiles(x86)"); pfx86 != "" {
+			roots = append(roots, filepath.Join(pfx86, "NPKI"))
+		}
+		return roots
 	case "darwin":
 		return []string{
 			filepath.Join(home, "NPKI"),
@@ -667,18 +688,16 @@ type plainPrivateKey struct {
 	Extra      asn1.RawValue `asn1:"optional"`
 }
 
-func withDecryptedSignerKey(signPriKey []byte, password string, fn func(*rsa.PrivateKey) error) error {
+func withDecryptedSignerKey(signPriKey []byte, password []byte, fn func(*rsa.PrivateKey) error) error {
 	encrypted, err := parseEncryptedPrivateKey(signPriKey)
 	if err != nil {
 		return err
 	}
-	passwordBytes := []byte(password)
-	defer zeroBytes(passwordBytes)
 	key, iv, err := deriveDecryptionKey(
 		encrypted.Meta.Algorithm,
 		encrypted.Meta.Params.Salt,
 		encrypted.Meta.Params.Iteration,
-		passwordBytes,
+		password,
 	)
 	if err != nil {
 		return err
@@ -703,13 +722,13 @@ func withDecryptedSignerKey(signPriKey []byte, password string, fn func(*rsa.Pri
 	return fn(privateKey)
 }
 
-func validatePassword(signPriKey []byte, password string) error {
+func validatePassword(signPriKey []byte, password []byte) error {
 	return withDecryptedSignerKey(signPriKey, password, func(*rsa.PrivateKey) error {
 		return nil
 	})
 }
 
-func signChallenge(signPriKey []byte, password string, challenge string) (string, error) {
+func signChallenge(signPriKey []byte, password []byte, challenge string) (string, error) {
 	var encoded string
 	err := withDecryptedSignerKey(signPriKey, password, func(privateKey *rsa.PrivateKey) error {
 		digest := sha256.Sum256([]byte(challenge))

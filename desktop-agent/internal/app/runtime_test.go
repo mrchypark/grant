@@ -19,3 +19,15 @@ func TestNewHTTPServerSetsReadHeaderTimeout(t *testing.T) {
 		t.Fatalf("IdleTimeout = %s, want %s", server.IdleTimeout, 60*time.Second)
 	}
 }
+
+func TestExamplePageURLDefaultsAndCanBeOverridden(t *testing.T) {
+	t.Setenv("DESKTOP_AGENT_EXAMPLE_URL", "")
+	if got := examplePageURL(); got != defaultExamplePageURL {
+		t.Fatalf("examplePageURL() = %q, want %q", got, defaultExamplePageURL)
+	}
+
+	t.Setenv("DESKTOP_AGENT_EXAMPLE_URL", "http://localhost:9999/demo")
+	if got := examplePageURL(); got != "http://localhost:9999/demo" {
+		t.Fatalf("examplePageURL() override = %q, want %q", got, "http://localhost:9999/demo")
+	}
+}
