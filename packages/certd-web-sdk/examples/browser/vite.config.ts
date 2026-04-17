@@ -2,6 +2,14 @@ import { defineConfig } from "vite";
 import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      input: {
+        index: fileURLToPath(new URL("./index.html", import.meta.url)),
+        script: fileURLToPath(new URL("./script.html", import.meta.url)),
+      },
+    },
+  },
   root: fileURLToPath(new URL("./", import.meta.url)),
   server: {
     host: "127.0.0.1",

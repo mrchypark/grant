@@ -3,7 +3,13 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { CertdWebSdk } from "./index.ts";
+import {
+  CertdWebSdk,
+  configureHtml5CertificateInput,
+  findHtml5CertificateFiles,
+  prepareHtml5CertificateBundle,
+  prepareHtml5ChallengeProof,
+} from "./index.ts";
 
 type FetchCall = {
   input: RequestInfo | URL;
@@ -450,3 +456,195 @@ test("browser example defaults the agent base URL to the loopback desktop agent"
     /<input id="agentBaseUrl" value="http:\/\/127\.0\.0\.1:8765" \/>/,
   );
 });
+
+test("findHtml5CertificateFiles() matches the required certificate bundle files by basename", () => {
+  const selection = findHtml5CertificateFiles([
+    fileWithPath("NPKI/yessign/USER/cn=test/signCert.der", "sign-cert"),
+    fileWithPath("NPKI/yessign/USER/cn=test/signPri.key", "sign-key"),
+    fileWithPath("NPKI/yessign/USER/cn=test/kmCert.der", "km-cert"),
+    fileWithPath("NPKI/yessign/USER/cn=test/kmPri.key", "km-key"),
+  ]);
+
+  assert.equal(selection.fileNames.signCertDer, "NPKI/yessign/USER/cn=test/signCert.der");
+  assert.equal(selection.files.kmPriKey.name, "kmPri.key");
+});
+
+test("findHtml5CertificateFiles() rejects missing files", () => {
+  assert.throws(
+    () =>
+      findHtml5CertificateFiles([
+        fileWithPath("signCert.der", "sign-cert"),
+        fileWithPath("signPri.key", "sign-key"),
+        fileWithPath("kmCert.der", "km-cert"),
+      ]),
+    /missing certificate file: kmPri\.key/i,
+  );
+});
+
+test("prepareHtml5CertificateBundle() trims inputs and base64-encodes the selected files", async () => {
+  const prepared = await prepareHtml5CertificateBundle(
+    [
+      fileWithPath("signCert.der", "SC"),
+      fileWithPath("signPri.key", "SK"),
+      fileWithPath("kmCert.der", "KC"),
+      fileWithPath("kmPri.key", "KK"),
+    ],
+    {
+      businessNo: " 2768603291 ",
+      commonName: " Test Certificate ",
+      password: " secret-password ",
+    },
+  );
+
+  assert.deepEqual(prepared.selection.fileNames, {
+    signCertDer: "signCert.der",
+    signPriKey: "signPri.key",
+    kmCertDer: "kmCert.der",
+    kmPriKey: "kmPri.key",
+  });
+  assert.deepEqual(prepared.bundle, {
+    businessNo: "2768603291",
+    commonName: "Test Certificate",
+    password: "secret-password",
+    signCertDerBase64: "U0M=",
+    signPriKeyBase64: "U0s=",
+    kmCertDerBase64: "S0M=",
+    kmPriKeyBase64: "S0s=",
+  });
+});
+
+test("configureHtml5CertificateInput() configures a directory-capable picker", () => {
+  const input = createInputMock();
+  configureHtml5CertificateInput(input as never, { mode: "directory" });
+
+  assert.equal(input.type, "file");
+  assert.equal(input.multiple, true);
+  assert.equal(input.accept, ".der,.key,application/octet-stream");
+  assert.equal(input.attributes.get("webkitdirectory"), "");
+  assert.equal(input.attributes.get("directory"), "");
+});
+
+test("prepareHtml5ChallengeProof() decrypts signPri.key and signs the gateway challenge", async () => {
+  const proof = await prepareHtml5ChallengeProof(
+    "cert-gateway:test",
+    [
+      fileWithBytes("signCert.der", Uint8Array.of(1, 2, 3)),
+      fileWithBytes("signPri.key", base64Bytes(FIXTURE_SIGN_PRI_BASE64)),
+      fileWithBytes("kmCert.der", Uint8Array.of(4, 5, 6)),
+      fileWithBytes("kmPri.key", Uint8Array.of(7, 8, 9)),
+    ],
+    {
+      commonName: "Fixture Certificate",
+      password: "test-password",
+    },
+  );
+
+  assert.equal(proof.bundle.commonName, "Fixture Certificate");
+  assert.equal(proof.bundle.businessNo, "");
+  assert.equal(proof.challengeSignatureBase64, FIXTURE_SIGNATURE_BASE64);
+});
+
+test("runEphemeralWithBrowserCertificate() creates a challenge and executes the gateway flow without the agent", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        challengeId: "browser-challenge-1",
+        mode: "ephemeral",
+        nonce: "nonce-browser-1",
+        payload: "cert-gateway:test",
+        expiresAt: "2026-04-20T00:00:00Z",
+      }, 201),
+    ({ init }) => {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.challengeSignatureBase64, FIXTURE_SIGNATURE_BASE64);
+      assert.equal(body.bundle.commonName, "Fixture Certificate");
+      assert.equal(body.bundle.businessNo, "");
+      return jsonResponse({
+        id: "browser-sync-1",
+        organizationId: "org-1",
+        plantId: "FAC-101",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 777,
+      }, 202);
+    },
+  ]);
+
+  try {
+    const sdk = new CertdWebSdk({
+      gatewayBaseUrl: "http://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+      activeOrganizationId: "org-1",
+    });
+
+    const run = await sdk.runEphemeralWithBrowserCertificate("org-1", {
+      certificateFiles: [
+        fileWithBytes("signCert.der", Uint8Array.of(1, 2, 3)),
+        fileWithBytes("signPri.key", base64Bytes(FIXTURE_SIGN_PRI_BASE64)),
+        fileWithBytes("kmCert.der", Uint8Array.of(4, 5, 6)),
+        fileWithBytes("kmPri.key", Uint8Array.of(7, 8, 9)),
+      ],
+      commonName: "Fixture Certificate",
+      password: "test-password",
+      facilityCode: " FAC-101 ",
+      mode: "full",
+    });
+
+    assert.equal(run.id, "browser-sync-1");
+    assert.equal(mock.calls.length, 2);
+    assert.equal(
+      String(mock.calls[0].input),
+      "http://gateway.local/api/v1/organizations/org-1/cert-gateway/challenges",
+    );
+    assert.equal(
+      String(mock.calls[1].input),
+      "http://gateway.local/api/v1/organizations/org-1/cert-gateway/ephemeral-executions",
+    );
+  } finally {
+    mock.restore();
+  }
+});
+
+function fileWithPath(path: string, contents: string): File {
+  const file = new File([contents], path.split(/[\\/]/).pop() ?? path);
+  Object.defineProperty(file, "webkitRelativePath", {
+    configurable: true,
+    value: path,
+  });
+  return file;
+}
+
+function fileWithBytes(path: string, contents: Uint8Array): File {
+  const file = new File([contents], path.split(/[\\/]/).pop() ?? path);
+  Object.defineProperty(file, "webkitRelativePath", {
+    configurable: true,
+    value: path,
+  });
+  return file;
+}
+
+function base64Bytes(value: string): Uint8Array {
+  return new Uint8Array(Buffer.from(value, "base64"));
+}
+
+function createInputMock() {
+  const attributes = new Map<string, string>();
+
+  return {
+    accept: "",
+    attributes,
+    multiple: false,
+    removeAttribute(name: string) {
+      attributes.delete(name);
+    },
+    setAttribute(name: string, value: string) {
+      attributes.set(name, value);
+    },
+    type: "",
+  };
+}
+
+const FIXTURE_SIGN_PRI_BASE64 = "MIICoDAaBggqgxqMmkQBBDAOBAgxMjM0NTY3OAICCAAEggKApebdP5DRURHQ361TvwbGbJOTWJ/zh8se0cpWIUGLjzqMV1/Uo946hDBmDcs18AonVhsQ7n/7wdhZLWu17KhwXMsXGty82Qkq6l/mA5nrjyEz5kdTULcxEoVnovi9/GIvhetbwzF8TChyrtm/dhvy5sRVPZG6zMRM90fCmA7+9YnDKy+HKoy/T7oHu6beXf1UC3eZ70kMEes/UPcrvNPNESW9vFxOzG0JW861a46yzOlg8xcvnBS3WSxWsSzF5OZ7r8lVCntod5z/4+i9oGdBzTw13BVXW1Zc0ZILxr9soCdeC83Fov8qCTuyvRq3rLKTr0QXpc7AaS1PaAwATrrERCAxbjmSS+jDUgvmaXkNZ9XCMRztNF0qh/+YH4fV4byi291vJh8WTM8ITirONhCBSKgnSQOkacR3F8gh2ECySj4jp4R2JZTUPF9ksAWw2poVlaLEHDiCh/mq6wKQeW44oUGjZ/DoEAhqe0KgFsP6+us1HtW8/NQ2htrDhGWRwvmW5bUUdwSODTqHzitoHkfBDuc8/KkWPBHsxks6r8HOeqn867FC69mDcRvKsyD8W+RbX0wfSOd7JDv3dxWB4o68wsEOWMp60GVUz4MvsED1W5ZB4LAfxXY9K6pl0qjPwmXJ8eEWeCgcs45H7De904tPMU1WBZaNyabPECpd2u14oawP/xgrQGg5egrOpWsYWsfpIWQD+D5aAJo40ztZ64asZOjsDir1TKX/KfTHYfkGr52ue3rkJRJWFKieQUxw9izIp+AHjzQJBI7wHEYvvJfsHpRU6nNcoX2mC82jtPh5V4hAiPMbEgS/jig5Fp4fc+UzCV4DrcnLQfPm7OnDv1PgRQ==";
+const FIXTURE_SIGNATURE_BASE64 = "DaFD/3vONkiwCP9n9kU7Ezi6J//L+K4TEsJaxlb5NTY4vn7jjLegmNtL9UeGDOiShmCbmZ7xGYreDVOdy/juQQXezrvZ45D043LYCeAm9woEu6zL6+nGbN1IXuHzapd2s5TN1aYjZPS5BvFYlMa5NmTzueJaXvv99pS7ye5VFXY=";

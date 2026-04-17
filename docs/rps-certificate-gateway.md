@@ -322,6 +322,60 @@ const run = await sdk.runStored("org-1", {
 });
 ```
 
+### HTML5 파일 찾기 도구
+
+브라우저가 로컬 인증서 저장소를 직접 읽을 수 없는 환경에서는 사용자가 NPKI 폴더나 4개 파일을 직접 선택해야 한다.
+
+```ts
+import {
+  configureHtml5CertificateInput,
+  prepareHtml5CertificateBundle,
+} from "@certd/web-sdk";
+
+const input = document.getElementById("cert-files") as HTMLInputElement;
+configureHtml5CertificateInput(input, { mode: "directory" });
+
+const prepared = await prepareHtml5CertificateBundle(input.files ?? [], {
+  businessNo: "2768603291",
+  commonName: "사업자 범용 인증서",
+  password: "secret-password",
+});
+
+console.log(prepared.bundle.signCertDerBase64);
+```
+
+브라우저 안에서 `signPri.key` 복호화와 challenge 서명까지 끝내려면, desktop agent와 같은 Go NPKI 로직을 WebAssembly로 감싼 고수준 API를 사용할 수 있다.
+
+```ts
+const run = await sdk.runEphemeralWithBrowserCertificate("org-1", {
+  certificateFiles: input.files ?? [],
+  password: "secret-password",
+  facilityCode: "FAC-001",
+  mode: "full",
+});
+```
+
+이 흐름은 사용자가 파일을 직접 고른 뒤 브라우저가 Go/WASM signer를 로드하고 다음을 수행한다.
+
+1. gateway challenge 생성
+2. `signPri.key`를 비밀번호로 복호화
+3. challenge payload를 `SHA256withRSA`로 서명
+4. gateway `ephemeral-executions` 또는 `stored-certificates` endpoint 호출
+
+브라우저 보안 제약 때문에 OS 인증서 저장소 자동 탐색은 여전히 불가능하고, 파일 선택은 사용자가 직접 해야 한다.
+
+배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다.
+
+```html
+<script src="/dist/browser/certd-web-sdk.global.js"></script>
+<script>
+  CertdWebSdkBrowser.configureHtml5CertificateInput(
+    document.getElementById("cert-files"),
+    { mode: "directory" },
+  );
+</script>
+```
+
 SDK가 내부적으로 수행하는 순서는 다음과 같다.
 
 1. local agent `/healthz` 확인
@@ -329,6 +383,8 @@ SDK가 내부적으로 수행하는 순서는 다음과 같다.
 3. local agent `approve-*` endpoint 호출
 4. agent가 native approval modal로 인증서 선택과 비밀번호 입력 처리
 5. agent가 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
+
+브라우저 단독 흐름은 위 agent 단계를 생략하고, 선택된 인증서 파일만으로 challenge 서명과 gateway 호출을 수행한다.
 
 ## 로컬 검증
 

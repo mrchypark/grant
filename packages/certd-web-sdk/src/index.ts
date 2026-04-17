@@ -6,10 +6,27 @@ import {
   GatewayClient,
   type Challenge,
   type CreateChallengeInput,
+  type ProofBundle,
   type StoredCertificate,
   type SyncMode,
   type SyncRun,
 } from "./client.ts";
+import {
+  configureHtml5CertificateInput,
+  findHtml5CertificateFiles,
+  prepareHtml5CertificateBundle,
+  type Html5CertificateBundleInput,
+  type Html5CertificateFileKey,
+  type Html5CertificateInputMode,
+  type Html5CertificateSelection,
+  type PreparedHtml5CertificateBundle,
+} from "./html5.ts";
+import {
+  prepareHtml5ChallengeProof,
+  signChallengeWithProofBundle,
+  type PreparedHtml5ChallengeProof,
+} from "./npki-browser.ts";
+import { configureNpkiWasmAssets } from "./npki-wasm.ts";
 
 export type CertdWebSdkOptions = {
   gatewayBaseUrl: string;
@@ -32,6 +49,21 @@ export type RegisterStoredInput = {
 
 export type RunStoredInput = {
   certificateId: string;
+};
+
+export type BrowserCertificateInput = {
+  certificateFiles: Iterable<File>;
+  password: string;
+  businessNo?: string;
+  commonName?: string;
+  challengeTtlSeconds?: number;
+};
+
+export type BrowserEphemeralRunInput = BrowserCertificateInput & {
+  facilityCode?: string;
+  startMonth?: string;
+  endMonth?: string;
+  mode?: SyncMode;
 };
 
 export type AgentCapabilities = {
@@ -128,6 +160,53 @@ export class CertdWebSdk {
   async registerStoredCertificate(organizationId: string, input: RegisterStoredInput): Promise<StoredCertificate> {
     return this.registerStored(organizationId, input);
   }
+
+  async runEphemeralWithBrowserCertificate(
+    organizationId: string,
+    input: BrowserEphemeralRunInput,
+  ): Promise<SyncRun> {
+    const challenge = await this.createChallenge(organizationId, {
+      mode: "ephemeral",
+      facilityCode: trimOptional(input.facilityCode),
+      ttlSeconds: input.challengeTtlSeconds,
+    });
+    const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
+      businessNo: input.businessNo,
+      commonName: input.commonName,
+      password: input.password,
+    });
+    return this.raw.gateway.executeEphemeralExecution(organizationId, {
+      challengeId: challenge.challengeId,
+      challengePayload: challenge.payload,
+      challengeSignatureBase64: proof.challengeSignatureBase64,
+      bundle: proof.bundle,
+      facilityCode: trimOptional(input.facilityCode),
+      startMonth: trimOptional(input.startMonth),
+      endMonth: trimOptional(input.endMonth),
+      mode: trimOptional(input.mode),
+    });
+  }
+
+  async registerStoredWithBrowserCertificate(
+    organizationId: string,
+    input: BrowserCertificateInput,
+  ): Promise<StoredCertificate> {
+    const challenge = await this.createChallenge(organizationId, {
+      mode: "stored",
+      ttlSeconds: input.challengeTtlSeconds,
+    });
+    const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
+      businessNo: input.businessNo,
+      commonName: input.commonName,
+      password: input.password,
+    });
+    return this.raw.gateway.registerStoredCertificate(organizationId, {
+      challengeId: challenge.challengeId,
+      challengePayload: challenge.payload,
+      challengeSignatureBase64: proof.challengeSignatureBase64,
+      bundle: proof.bundle,
+    });
+  }
 }
 
 function approvalRequestFrom(
@@ -188,20 +267,38 @@ function trimOptional(value: string | undefined): string | undefined {
 
 export type {
   AgentCapabilities,
+  BrowserCertificateInput,
+  BrowserEphemeralRunInput,
   Challenge,
   CreateChallengeInput,
+  ProofBundle,
   StoredCertificate,
   SyncRun,
 };
 
 export { DesktopAgentClient, GatewayClient };
+export {
+  configureNpkiWasmAssets,
+  configureHtml5CertificateInput,
+  findHtml5CertificateFiles,
+  prepareHtml5CertificateBundle,
+  prepareHtml5ChallengeProof,
+  signChallengeWithProofBundle,
+};
 export type { AgentApprovalRequest, AgentSession } from "./agent.ts";
 export type {
   CrawlTaskToken,
   ChallengeMode,
   ExecuteEphemeralExecutionInput,
   IssueCrawlTaskTokenInput,
-  ProofBundle,
   RegisterStoredCertificateInput,
   SyncMode,
 } from "./client.ts";
+export type {
+  Html5CertificateBundleInput,
+  Html5CertificateFileKey,
+  Html5CertificateInputMode,
+  Html5CertificateSelection,
+  PreparedHtml5ChallengeProof,
+  PreparedHtml5CertificateBundle,
+};
