@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto"
 	"crypto/cipher"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -391,6 +394,17 @@ func TestPKCS12SignSignsChallengeAndLeavesKmFieldsEmpty(t *testing.T) {
 	if result.Bundle.CommonName != "Protected PKCS12 Certificate" {
 		t.Fatalf("commonName = %q, want Protected PKCS12 Certificate", result.Bundle.CommonName)
 	}
+	signPriKeyDER, err := base64.StdEncoding.DecodeString(result.Bundle.SignPriKeyBase64)
+	if err != nil {
+		t.Fatalf("decode sign private key: %v", err)
+	}
+	pkcs8Key, err := x509.ParsePKCS8PrivateKey(signPriKeyDER)
+	if err != nil {
+		t.Fatalf("parse sign private key as PKCS#8: %v", err)
+	}
+	if _, ok := pkcs8Key.(*rsa.PrivateKey); !ok {
+		t.Fatalf("parsed PKCS#8 key type = %T, want *rsa.PrivateKey", pkcs8Key)
+	}
 
 	signCertDER, err := base64.StdEncoding.DecodeString(result.Bundle.SignCertDerBase64)
 	if err != nil {
@@ -429,6 +443,32 @@ func TestPKCS12SignRejectsWrongPassword(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidPassword) {
 		t.Fatalf("Sign() error = %v, want ErrInvalidPassword", err)
+	}
+}
+
+func TestSupportedPKCS12SignerRejectsUnsupportedAlgorithms(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate rsa key: %v", err)
+	}
+	if _, err := supportedPKCS12Signer(rsaKey); err != nil {
+		t.Fatalf("supportedPKCS12Signer(rsa) error = %v", err)
+	}
+
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ecdsa key: %v", err)
+	}
+	if _, err := supportedPKCS12Signer(ecdsaKey); err != nil {
+		t.Fatalf("supportedPKCS12Signer(ecdsa) error = %v", err)
+	}
+
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 key: %v", err)
+	}
+	if _, err := supportedPKCS12Signer(ed25519Key); err == nil {
+		t.Fatal("supportedPKCS12Signer(ed25519) error = nil, want unsupported key error")
 	}
 }
 

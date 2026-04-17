@@ -5,7 +5,7 @@ use openssl::{
     hash::MessageDigest,
     nid::Nid,
     pkcs7::{Pkcs7, Pkcs7Flags},
-    pkey::{PKey, Private},
+    pkey::{Id, PKey, Private},
     provider::Provider,
     rsa::Rsa,
     sign::Verifier,
@@ -56,22 +56,13 @@ impl NpkiSigner {
         ensure_openssl_legacy_provider()?;
         let certificate =
             X509::from_der(&bundle.sign_cert_der).context("parse signCert.der as X509")?;
-
-        let encrypted = parse_encrypted_private_key(&bundle.sign_pri_key)?;
-        let (key, iv) = derive_npki_decryption_key(
-            &encrypted.algorithm,
-            &encrypted.salt,
-            encrypted.iteration,
-            password.as_bytes(),
-        )?;
-        let plain_der = seed_cbc_decrypt(&key, &iv, &encrypted.cipher_text)?;
-        let private_key = parse_private_key(&plain_der)?;
-        let vid_random = extract_vid_random(&plain_der)?;
+        let (private_key, vid_random_b64) =
+            load_signing_key(&bundle.sign_pri_key, password).context("load signing key")?;
 
         Ok(Self {
             certificate,
             private_key,
-            vid_random_b64: STANDARD.encode(vid_random),
+            vid_random_b64,
         })
     }
 
@@ -227,6 +218,25 @@ fn parse_encrypted_private_key(der: &[u8]) -> Result<EncryptedPrivateKey> {
     })
 }
 
+fn load_signing_key(sign_pri_key: &[u8], password: &str) -> Result<(PKey<Private>, String)> {
+    if let Ok(encrypted) = parse_encrypted_private_key(sign_pri_key) {
+        let (key, iv) = derive_npki_decryption_key(
+            &encrypted.algorithm,
+            &encrypted.salt,
+            encrypted.iteration,
+            password.as_bytes(),
+        )?;
+        let plain_der = seed_cbc_decrypt(&key, &iv, &encrypted.cipher_text)?;
+        let private_key = parse_private_key(&plain_der)?;
+        let vid_random = extract_vid_random(&plain_der)?;
+        return Ok((private_key, STANDARD.encode(vid_random)));
+    }
+
+    let private_key =
+        parse_direct_private_key(sign_pri_key).context("parse direct private key DER")?;
+    Ok((private_key, String::new()))
+}
+
 fn parse_private_key(plain_der: &[u8]) -> Result<PKey<Private>> {
     let blocks = from_der(plain_der).context("parse decrypted signPri.key ASN.1")?;
     let sequence = expect_single_sequence(&blocks, "plain private key")?;
@@ -236,6 +246,19 @@ fn parse_private_key(plain_der: &[u8]) -> Result<PKey<Private>> {
     let private_key_der = expect_octet_string(&sequence[2], "plain private key octet")?;
     let rsa = Rsa::private_key_from_der(&private_key_der).context("parse PKCS#1 private key")?;
     PKey::from_rsa(rsa).context("wrap RSA private key")
+}
+
+fn parse_direct_private_key(der: &[u8]) -> Result<PKey<Private>> {
+    let private_key = PKey::private_key_from_der(der)
+        .or_else(|_| {
+            let rsa = Rsa::private_key_from_der(der)?;
+            PKey::from_rsa(rsa)
+        })
+        .context("parse direct private key as PKCS#8/PKCS#1 DER")?;
+    match private_key.id() {
+        Id::RSA | Id::EC => Ok(private_key),
+        other => bail!("unsupported direct private key algorithm: {other:?}"),
+    }
 }
 
 fn extract_vid_random(plain_der: &[u8]) -> Result<Vec<u8>> {

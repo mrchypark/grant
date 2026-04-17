@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/cipher"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -272,7 +273,7 @@ type bundleFiles struct {
 type pkcs12Files struct {
 	signCertDER    []byte
 	signPriKeyDER  []byte
-	signPrivateKey *rsa.PrivateKey
+	signPrivateKey crypto.Signer
 }
 
 type bundleEntry struct {
@@ -1018,15 +1019,30 @@ func loadPKCS12Source(path string, password string) (pkcs12Files, *x509.Certific
 	if privateKey == nil {
 		return pkcs12Files{}, nil, nil, fmt.Errorf("decode pkcs12: private key missing")
 	}
-	rsaPrivateKey, ok := privateKey.(*rsa.PrivateKey)
-	if !ok {
-		return pkcs12Files{}, nil, nil, fmt.Errorf("decode pkcs12: unsupported private key type %T", privateKey)
+	signer, err := supportedPKCS12Signer(privateKey)
+	if err != nil {
+		return pkcs12Files{}, nil, nil, err
+	}
+	signPriKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return pkcs12Files{}, nil, nil, fmt.Errorf("marshal pkcs12 private key as PKCS#8: %w", err)
 	}
 	return pkcs12Files{
 		signCertDER:    append([]byte(nil), cert.Raw...),
-		signPriKeyDER:  x509.MarshalPKCS1PrivateKey(rsaPrivateKey),
-		signPrivateKey: rsaPrivateKey,
+		signPriKeyDER:  signPriKeyDER,
+		signPrivateKey: signer,
 	}, cert, chain, nil
+}
+
+func supportedPKCS12Signer(privateKey any) (crypto.Signer, error) {
+	switch key := privateKey.(type) {
+	case *rsa.PrivateKey:
+		return key, nil
+	case *ecdsa.PrivateKey:
+		return key, nil
+	default:
+		return nil, fmt.Errorf("decode pkcs12: unsupported private key type %T", privateKey)
+	}
 }
 
 func loadPKCS12(path string, password string) (pkcs12Files, CertificateMetadata, error) {
@@ -1048,9 +1064,9 @@ func loadPKCS12(path string, password string) (pkcs12Files, CertificateMetadata,
 	return files, metadata, nil
 }
 
-func signChallengePKCS12(privateKey *rsa.PrivateKey, challenge string) (string, error) {
+func signChallengePKCS12(privateKey crypto.Signer, challenge string) (string, error) {
 	digest := sha256.Sum256([]byte(challenge))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	signature, err := privateKey.Sign(rand.Reader, digest[:], crypto.SHA256)
 	if err != nil {
 		return "", fmt.Errorf("sign challenge: %w", err)
 	}
