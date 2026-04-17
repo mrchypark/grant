@@ -59,6 +59,10 @@ func newHTTPStatusError(status int, message string) error {
 	return &httpStatusError{status: status, message: message}
 }
 
+func zeroBytes(buf []byte) {
+	clear(buf)
+}
+
 type ApprovalPrompt struct {
 	Origin         string
 	Action         string
@@ -69,7 +73,7 @@ type ApprovalPrompt struct {
 
 type ApprovalDecision struct {
 	CertificateID string
-	Password      string
+	Password      []byte
 }
 
 type ApprovalActionRequest struct {
@@ -345,10 +349,11 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
+	defer zeroBytes(decision.Password)
 	signResult, err := s.npki.Sign(r.Context(), npki.SignRequest{
 		CertificateID: decision.CertificateID,
 		Challenge:     challenge.Payload,
-		Password:      decision.Password,
+		PasswordBytes: decision.Password,
 		BusinessNo:    req.BusinessNo,
 	})
 	if err != nil {
@@ -357,11 +362,12 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 
 	switch action {
 	case "ephemeral":
+		gatewayPassword := string(decision.Password)
 		body, err := s.gateway.RunEphemeral(r.Context(), GatewayEphemeralRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
 			BusinessNo:               req.BusinessNo,
-			Password:                 decision.Password,
+			Password:                 gatewayPassword,
 			BearerToken:              req.BearerToken,
 			ActiveOrganizationID:     req.ActiveOrganizationID,
 			ChallengeID:              challenge.ChallengeID,
@@ -375,11 +381,12 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		})
 		return body, http.StatusAccepted, err
 	case "stored":
+		gatewayPassword := string(decision.Password)
 		body, err := s.gateway.RegisterStored(r.Context(), GatewayStoredRegistrationRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
 			BusinessNo:               req.BusinessNo,
-			Password:                 decision.Password,
+			Password:                 gatewayPassword,
 			BearerToken:              req.BearerToken,
 			ActiveOrganizationID:     req.ActiveOrganizationID,
 			ChallengeID:              challenge.ChallengeID,

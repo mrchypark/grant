@@ -164,42 +164,14 @@ static char *repass_show_approval_modal(const char *origin, const char *organiza
 import "C"
 
 import (
-	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"unsafe"
-
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/localization"
-	"github.com/cypark/account/desktop-agent/internal/npki"
 )
 
-type Prompter struct{}
-
-type approvalModalInput struct {
-	Origin         string
-	OrganizationID string
-	BusinessNo     string
-	Action         string
-	Labels         []string
-	DefaultIndex   int
-	Copy           localization.Strings
-}
-
-var resetApprovalModalCancellation = func() {
-	C.repass_reset_approval_modal_cancellation()
-}
-
-var requestApprovalModalCancellation = func() {
-	C.repass_request_cancel_approval_modal()
-}
-
-var activateApprovalModalApplication = func() {
-	C.repass_activate_approval_app()
-}
-
+// darwin 전용 NSApp activation policy 스테이트. 모달이 중첩 진입할 때 최상위
+// 진입에서만 policy를 복원하도록 depth를 센다.
 var prepareApprovalApplicationPolicy = func() int64 {
 	return int64(C.repass_prepare_approval_app())
 }
@@ -208,21 +180,11 @@ var restoreApprovalApplicationPolicy = func(previousPolicy int64) {
 	C.repass_restore_approval_app(C.long(previousPolicy))
 }
 
-var approvalAppPolicyMu sync.Mutex
-var approvalAppPolicyDepth int
-var approvalAppPreviousPolicy int64
-var approvalModalSlot = make(chan struct{}, 1)
-
-var acquireApprovalModal = func(ctx context.Context) (func(), error) {
-	select {
-	case approvalModalSlot <- struct{}{}:
-		return func() {
-			<-approvalModalSlot
-		}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
+var (
+	approvalAppPolicyMu       sync.Mutex
+	approvalAppPolicyDepth    int
+	approvalAppPreviousPolicy int64
+)
 
 var prepareApprovalModalApplication = func() func() {
 	approvalAppPolicyMu.Lock()
@@ -246,230 +208,81 @@ var prepareApprovalModalApplication = func() func() {
 	}
 }
 
-var runApprovalModal = func(input approvalModalInput) (string, bool) {
-	origin := C.CString(input.Origin)
-	organization := C.CString(input.OrganizationID)
-	businessNo := C.CString(input.BusinessNo)
-	action := C.CString(input.Action)
-	labels := C.CString(strings.Join(input.Labels, "\x1f"))
-	title := C.CString(input.Copy.ApprovalTitle)
-	infoFormat := C.CString(input.Copy.ApprovalInfoFormat)
-	approveLabel := C.CString(input.Copy.Approve)
-	cancelLabel := C.CString(input.Copy.Cancel)
-	certificateLabel := C.CString(input.Copy.CertificateLabel)
-	passwordLabel := C.CString(input.Copy.PasswordLabel)
-	passwordPlaceholder := C.CString(input.Copy.PasswordPlaceholder)
-	defer C.free(unsafe.Pointer(origin))
-	defer C.free(unsafe.Pointer(organization))
-	defer C.free(unsafe.Pointer(businessNo))
-	defer C.free(unsafe.Pointer(action))
-	defer C.free(unsafe.Pointer(labels))
-	defer C.free(unsafe.Pointer(title))
-	defer C.free(unsafe.Pointer(infoFormat))
-	defer C.free(unsafe.Pointer(approveLabel))
-	defer C.free(unsafe.Pointer(cancelLabel))
-	defer C.free(unsafe.Pointer(certificateLabel))
-	defer C.free(unsafe.Pointer(passwordLabel))
-	defer C.free(unsafe.Pointer(passwordPlaceholder))
-
-	raw := C.repass_show_approval_modal(
-		origin,
-		organization,
-		businessNo,
-		action,
-		labels,
-		C.int(input.DefaultIndex),
-		title,
-		infoFormat,
-		approveLabel,
-		cancelLabel,
-		certificateLabel,
-		passwordLabel,
-		passwordPlaceholder,
-	)
-	if raw == nil {
-		return "", false
+func init() {
+	resetApprovalModalCancellation = func() {
+		C.repass_reset_approval_modal_cancellation()
 	}
-	defer C.free(unsafe.Pointer(raw))
-	return C.GoString(raw), true
-}
-
-var showApprovalModal = func(input approvalModalInput) (string, bool) {
-	restore := prepareApprovalModalApplication()
-	defer restore()
-	return runApprovalModal(input)
-}
-
-func NewPrompter() *Prompter {
-	return &Prompter{}
-}
-
-func (p *Prompter) PromptApproval(ctx context.Context, prompt httpapi.ApprovalPrompt) (httpapi.ApprovalDecision, error) {
-	if len(prompt.Certificates) == 0 {
-		return httpapi.ApprovalDecision{}, fmt.Errorf("no certificates available for approval")
+	requestApprovalModalCancellation = func() {
+		C.repass_request_cancel_approval_modal()
 	}
-	if err := ctx.Err(); err != nil {
-		return httpapi.ApprovalDecision{}, err
+	activateApprovalModalApplication = func() {
+		C.repass_activate_approval_app()
 	}
-	releaseModal, err := acquireApprovalModal(ctx)
-	if err != nil {
-		return httpapi.ApprovalDecision{}, err
-	}
-	defer releaseModal()
+	runApprovalModal = func(input approvalModalInput) approvalModalOutput {
+		origin := C.CString(input.Origin)
+		organization := C.CString(input.OrganizationID)
+		businessNo := C.CString(input.BusinessNo)
+		action := C.CString(input.Action)
+		labels := C.CString(strings.Join(input.Labels, "\x1f"))
+		title := C.CString(input.Copy.ApprovalTitle)
+		infoFormat := C.CString(input.Copy.ApprovalInfoFormat)
+		approveLabel := C.CString(input.Copy.Approve)
+		cancelLabel := C.CString(input.Copy.Cancel)
+		certificateLabel := C.CString(input.Copy.CertificateLabel)
+		passwordLabel := C.CString(input.Copy.PasswordLabel)
+		passwordPlaceholder := C.CString(input.Copy.PasswordPlaceholder)
+		defer C.free(unsafe.Pointer(origin))
+		defer C.free(unsafe.Pointer(organization))
+		defer C.free(unsafe.Pointer(businessNo))
+		defer C.free(unsafe.Pointer(action))
+		defer C.free(unsafe.Pointer(labels))
+		defer C.free(unsafe.Pointer(title))
+		defer C.free(unsafe.Pointer(infoFormat))
+		defer C.free(unsafe.Pointer(approveLabel))
+		defer C.free(unsafe.Pointer(cancelLabel))
+		defer C.free(unsafe.Pointer(certificateLabel))
+		defer C.free(unsafe.Pointer(passwordLabel))
+		defer C.free(unsafe.Pointer(passwordPlaceholder))
 
-	copy := localization.ForLanguage(localization.SystemLanguage())
-	joinedLabels := make([]string, 0, len(prompt.Certificates))
-	defaultIndex := 0
-	for i, cert := range prompt.Certificates {
-		joinedLabels = append(joinedLabels, certificateOptionLabel(cert, copy))
-		if cert.BusinessNo == prompt.BusinessNo && cert.BusinessNo != "" {
-			defaultIndex = i
+		raw := C.repass_show_approval_modal(
+			origin,
+			organization,
+			businessNo,
+			action,
+			labels,
+			C.int(input.DefaultIndex),
+			title,
+			infoFormat,
+			approveLabel,
+			cancelLabel,
+			certificateLabel,
+			passwordLabel,
+			passwordPlaceholder,
+		)
+		if raw == nil {
+			return approvalModalOutput{}
+		}
+		defer C.free(unsafe.Pointer(raw))
+		packed := C.GoString(raw)
+		parts := strings.SplitN(packed, "\x1f", 2)
+		if len(parts) != 2 {
+			return approvalModalOutput{Err: fmt.Errorf("invalid approval modal response")}
+		}
+		selectedIndex, err := parseSelectedIndex(parts[0], len(input.Labels))
+		if err != nil {
+			return approvalModalOutput{Err: err}
+		}
+		return approvalModalOutput{
+			SelectedIndex: selectedIndex,
+			Password:      []byte(parts[1]),
+			Approved:      true,
 		}
 	}
-
-	resetApprovalModalCancellation()
-	type modalResult struct {
-		packed   string
-		approved bool
-	}
-	resultCh := make(chan modalResult, 1)
-	go func() {
-		businessNo := prompt.BusinessNo
-		if strings.TrimSpace(businessNo) == "" {
-			businessNo = "-"
-		}
-		packed, approved := showApprovalModal(approvalModalInput{
-			Origin:         prompt.Origin,
-			OrganizationID: prompt.OrganizationID,
-			BusinessNo:     businessNo,
-			Action:         prompt.Action,
-			Labels:         joinedLabels,
-			DefaultIndex:   defaultIndex,
-			Copy:           copy,
-		})
-		resultCh <- modalResult{packed: packed, approved: approved}
-	}()
-
-	var result modalResult
-	select {
-	case <-ctx.Done():
-		requestApprovalModalCancellation()
-		go func() { <-resultCh }()
-		return httpapi.ApprovalDecision{}, ctx.Err()
-	case result = <-resultCh:
-	}
-	if !result.approved {
-		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
-	}
-
-	packed := result.packed
-	parts := strings.SplitN(packed, "\x1f", 2)
-	if len(parts) != 2 {
-		return httpapi.ApprovalDecision{}, fmt.Errorf("invalid approval modal response")
-	}
-	selectedIndex, err := parseSelectedIndex(parts[0], len(prompt.Certificates))
-	if err != nil {
-		return httpapi.ApprovalDecision{}, err
-	}
-	password := parts[1]
-	if strings.TrimSpace(password) == "" {
-		return httpapi.ApprovalDecision{}, httpapi.ErrApprovalRejected
-	}
-
-	return httpapi.ApprovalDecision{
-		CertificateID: prompt.Certificates[selectedIndex].ID,
-		Password:      password,
-	}, nil
-}
-
-func parseSelectedIndex(value string, max int) (int, error) {
-	var selected int
-	if _, err := fmt.Sscanf(value, "%d", &selected); err != nil {
-		return 0, fmt.Errorf("parse selected certificate index: %w", err)
-	}
-	if selected < 0 || selected >= max {
-		return 0, fmt.Errorf("selected certificate index %d out of range", selected)
-	}
-	return selected, nil
-}
-
-func certificateOptionLabel(cert npki.CertificateMetadata, copy localization.Strings) string {
-	name := strings.TrimSpace(cert.CommonName)
-	displayPath := certificateDisplayPath(cert)
-	nameFromDisplayPath := false
-	if name == "" {
-		name = displayPath
-		nameFromDisplayPath = name != ""
-	}
-	if name == "" {
-		name = copy.UnknownCertificateName
-	}
-
-	parts := []string{name}
-	if source := certificateSourceSummary(cert, copy); source != "" {
-		parts = append(parts, source)
-	}
-	if displayPath != "" && !nameFromDisplayPath {
-		parts = append(parts, displayPath)
-	}
-	return strings.Join(parts, " | ")
-}
-
-func certificateSourceSummary(cert npki.CertificateMetadata, copy localization.Strings) string {
-	location := copy.LocalCertificateSource
-	if certificateOnRemovableMedia(cert.ID) {
-		location = copy.RemovableCertificateSource
-	}
-	source := certificateSourceName(cert, copy)
-	if source == "" {
-		return location
-	}
-	return strings.TrimSpace(location + " " + source)
-}
-
-func certificateSourceName(cert npki.CertificateMetadata, copy localization.Strings) string {
-	switch cert.StorageKind {
-	case npki.CertificateStorageKindNPKI:
-		return copy.NPKICertificateSource
-	case npki.CertificateStorageKindGPKI:
-		return copy.GPKICertificateSource
-	case npki.CertificateStorageKindPKCS12:
-		return copy.PKCS12CertificateSource
-	}
-
-	switch cert.SourceKind {
-	case npki.CertificateSourceKindPKCS12:
-		return copy.PKCS12CertificateSource
-	case npki.CertificateSourceKindBundle:
-		return copy.BundleCertificateSource
-	default:
-		return ""
-	}
-}
-
-func certificateDisplayPath(cert npki.CertificateMetadata) string {
-	if path := strings.TrimSpace(cert.DisplayPath); path != "" {
-		return path
-	}
-	path := certificatePathFromID(cert.ID)
-	if path == "" {
-		return strings.TrimSpace(cert.ID)
-	}
-	return filepath.Base(path)
-}
-
-func certificateOnRemovableMedia(certificateID string) bool {
-	path := strings.ToLower(certificatePathFromID(certificateID))
-	return strings.HasPrefix(path, "/volumes/")
-}
-
-func certificatePathFromID(certificateID string) string {
-	switch {
-	case strings.HasPrefix(certificateID, "bundle:"):
-		return strings.TrimPrefix(certificateID, "bundle:")
-	case strings.HasPrefix(certificateID, "pkcs12:"):
-		return strings.TrimPrefix(certificateID, "pkcs12:")
-	default:
-		return certificateID
+	// darwin은 모달 표시 전에 NSApp activation policy를 잠시 Regular로 올려야 해서
+	// 기본 showApprovalModal(= runApprovalModal 호출)을 prepare/restore로 감싼다.
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
+		restore := prepareApprovalModalApplication()
+		defer restore()
+		return runApprovalModal(input)
 	}
 }

@@ -42,6 +42,7 @@ func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateM
 }
 
 func (s *stubNPKIService) Sign(_ context.Context, req npki.SignRequest) (npki.SignResult, error) {
+	req.PasswordBytes = append([]byte(nil), req.PasswordBytes...)
 	s.lastSignReq = req
 	return npki.SignResult{
 		CertificateID:            "cert-1",
@@ -501,7 +502,7 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 		npkiSvc,
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		gateway,
 	)
@@ -536,6 +537,9 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	}
 	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
 		t.Fatalf("challenge = %q", npkiSvc.lastSignReq.Challenge)
+	}
+	if string(npkiSvc.lastSignReq.PasswordBytes) != "secret-password" {
+		t.Fatalf("passwordBytes = %q, want secret-password", npkiSvc.lastSignReq.PasswordBytes)
 	}
 	if gateway.lastEphemeral.Password != "secret-password" {
 		t.Fatalf("password = %q, want secret-password", gateway.lastEphemeral.Password)
@@ -585,7 +589,7 @@ func TestServerApproveEphemeralRunAllowsMissingBusinessNumberWhenCertificateProv
 		npkiSvc,
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		gateway,
 	)
@@ -634,7 +638,7 @@ func TestServerApproveStoredRegistration(t *testing.T) {
 		npkiSvc,
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		gateway,
 	)
@@ -686,7 +690,7 @@ func TestServerRejectsGatewayBaseURLMismatch(t *testing.T) {
 		},
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		&stubGateway{},
 	)
@@ -718,7 +722,7 @@ func TestServerRejectsOversizedApprovalBody(t *testing.T) {
 		&stubNPKIService{},
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		&stubGateway{},
 	)
@@ -746,7 +750,7 @@ func TestServerApproveEphemeralRunRejectsInvalidJSON(t *testing.T) {
 		&stubNPKIService{},
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		&stubGateway{},
 	)
@@ -769,7 +773,7 @@ func TestServerApproveEphemeralRunRequiresSession(t *testing.T) {
 		&stubNPKIService{},
 		stubApprover{decision: ApprovalDecision{
 			CertificateID: "cert-1",
-			Password:      "secret-password",
+			Password:      []byte("secret-password"),
 		}},
 		&stubGateway{},
 	)

@@ -28,4 +28,8 @@ node_modules/
 
 # Local example/build artifacts
 /desktop-agent/bin/
+/desktop-agent/dist/
+/desktop-agent/desktop-agent
+/desktop-agent/desktop-agent.exe
+/desktop-agent.exe
 /packages/certd-web-sdk/examples/browser/dist/
