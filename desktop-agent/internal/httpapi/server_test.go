@@ -355,11 +355,16 @@ func TestServerReturnsBundleOnPKCS12Sign(t *testing.T) {
 	)
 	sessionToken := openSession(t, handler)
 
-	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
-		"challenge":"challenge-1",
-		"certificateId":"`+httpPKCS12CertificateID(fixture.path)+`",
-		"password":"secret-password"
-	}`))
+	body, err := json.Marshal(map[string]string{
+		"challenge":     "challenge-1",
+		"certificateId": httpPKCS12CertificateID(fixture.path),
+		"password":      "secret-password",
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://127.0.0.1:4173")
 	req.Header.Set("X-Agent-Session", sessionToken)
