@@ -5,6 +5,11 @@ type CertificateItem = {
   commonName: string;
   businessNo: string;
   notAfter: string;
+  sourceKind?: string;
+  storageKind?: string;
+  displayPath?: string;
+  issuerName?: string;
+  hasKmMaterial?: boolean;
 };
 
 const gatewayBaseUrl = element<HTMLInputElement>("gatewayBaseUrl");
@@ -92,6 +97,10 @@ function renderCertificates(items: CertificateItem[]) {
     card.innerHTML = `
       <strong>${escapeHtml(item.commonName || "(commonName 없음)")}</strong>
       <div>businessNo: ${escapeHtml(item.businessNo || "-")}</div>
+      <div>source: ${escapeHtml(formatCertificateSource(item))}</div>
+      <div>path: ${escapeHtml(item.displayPath || item.id)}</div>
+      <div>issuer: ${escapeHtml(item.issuerName || "-")}</div>
+      <div>KM material: ${item.hasKmMaterial ? "있음" : "없음"}</div>
       <div>notAfter: ${escapeHtml(item.notAfter)}</div>
       <div style="margin-top:6px; word-break:break-all; color:#6b7280;">${escapeHtml(item.id)}</div>
     `;
@@ -112,6 +121,19 @@ function appendLog(message: string) {
 function optional(value: string) {
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
+}
+
+function formatCertificateSource(item: CertificateItem) {
+  if (item.storageKind === "npki") {
+    return "NPKI";
+  }
+  if (item.storageKind === "gpki") {
+    return "GPKI";
+  }
+  if (item.storageKind === "pkcs12" || item.sourceKind === "pkcs12") {
+    return "PKCS#12";
+  }
+  return item.sourceKind || "unknown";
 }
 
 function element<T extends HTMLElement>(id: string): T {

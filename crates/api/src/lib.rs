@@ -261,8 +261,8 @@ struct ProofBundleRequest {
     common_name: String,
     sign_cert_der_base64: String,
     sign_pri_key_base64: String,
-    km_cert_der_base64: String,
-    km_pri_key_base64: String,
+    km_cert_der_base64: Option<String>,
+    km_pri_key_base64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1179,14 +1179,28 @@ fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
 }
 
 fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
+    let km_cert_der = decode_optional_base64_field(
+        "kmCertDerBase64",
+        body.km_cert_der_base64.as_deref(),
+    )?;
+    let km_pri_key = decode_optional_base64_field(
+        "kmPriKeyBase64",
+        body.km_pri_key_base64.as_deref(),
+    )?;
+    if km_cert_der.is_some() != km_pri_key.is_some() {
+        return Err(ApiError::bad_request(anyhow!(
+            "kmCertDerBase64 and kmPriKeyBase64 must both be provided or both omitted"
+        )));
+    }
+
     Ok(CertificateBundle {
         business_no: body.business_no,
         password: body.password,
         common_name: body.common_name,
         sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
         sign_pri_key: decode_base64_field("signPriKeyBase64", &body.sign_pri_key_base64)?,
-        km_cert_der: decode_base64_field("kmCertDerBase64", &body.km_cert_der_base64)?,
-        km_pri_key: decode_base64_field("kmPriKeyBase64", &body.km_pri_key_base64)?,
+        km_cert_der,
+        km_pri_key,
     })
 }
 
@@ -1194,6 +1208,20 @@ fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u
     base64::engine::general_purpose::STANDARD
         .decode(value.trim())
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
+}
+
+fn decode_optional_base64_field(
+    field_name: &'static str,
+    value: Option<&str>,
+) -> ApiResult<Option<Vec<u8>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    decode_base64_field(field_name, value).map(Some)
 }
 
 fn map_certificate(cert: StoredCertificate, organization_id: &str) -> CertificateResponse {

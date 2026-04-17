@@ -9,3 +9,7 @@ import "context"
 func discoverWindowsDriveNPKIRoots(context.Context) []string {
 	return nil
 }
+
+func windowsPathIsOnRemovableMedia(string) bool {
+	return false
+}
