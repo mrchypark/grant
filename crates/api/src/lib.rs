@@ -257,8 +257,8 @@ struct CertGatewayChallengeResponse {
 #[serde(rename_all = "camelCase")]
 struct ProofBundleRequest {
     business_no: String,
-    password: String,
     common_name: String,
+    password: String,
     sign_cert_der_base64: String,
     sign_pri_key_base64: String,
     km_cert_der_base64: String,

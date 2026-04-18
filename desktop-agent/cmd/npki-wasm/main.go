@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"syscall/js"
@@ -11,34 +10,9 @@ import (
 	"github.com/cypark/account/desktop-agent/internal/npki"
 )
 
-type prepareBundleRequest struct {
-	SignCertDerBase64 string `json:"signCertDerBase64"`
-	SignPriKeyBase64  string `json:"signPriKeyBase64"`
-	KMCertDerBase64   string `json:"kmCertDerBase64"`
-	KMPriKeyBase64    string `json:"kmPriKeyBase64"`
-	BusinessNo        string `json:"businessNo"`
-	CommonName        string `json:"commonName"`
-}
-
-type prepareChallengeProofRequest struct {
-	prepareBundleRequest
-	PasswordBase64   string `json:"passwordBase64"`
-	ChallengePayload string `json:"challengePayload"`
-}
-
-type inspectCertificateRequest struct {
-	SignCertDerBase64 string `json:"signCertDerBase64"`
-}
-
 type inspectCertificateResponse struct {
 	CommonName string `json:"commonName"`
 	BusinessNo string `json:"businessNo"`
-}
-
-type signChallengeOnlyRequest struct {
-	SignPriKeyBase64 string `json:"signPriKeyBase64"`
-	PasswordBase64   string `json:"passwordBase64"`
-	ChallengePayload string `json:"challengePayload"`
 }
 
 type signChallengeOnlyResponse struct {
@@ -51,17 +25,22 @@ func main() {
 	api.Set("prepareBundle", wrap(handlePrepareBundle))
 	api.Set("prepareChallengeProof", wrap(handlePrepareChallengeProof))
 	api.Set("signChallengeOnly", wrap(handleSignChallengeOnly))
-	js.Global().Set("CertdWebSdkNpkiWasm", api)
+	js.Global().Set(resolveExportName(), api)
 
 	select {}
 }
 
-func wrap(fn func(string) (string, error)) js.Func {
+func resolveExportName() string {
+	name := js.Global().Get("__CERTD_WEB_SDK_NPKI_WASM_EXPORT_NAME__")
+	if name.Type() == js.TypeString && name.String() != "" {
+		return name.String()
+	}
+	return "CertdWebSdkNpkiWasm"
+}
+
+func wrap(fn func([]js.Value) (string, error)) js.Func {
 	return js.FuncOf(func(this js.Value, args []js.Value) any {
-		if len(args) != 1 || args[0].Type() != js.TypeString {
-			return responseObject("", fmt.Errorf("expected exactly one JSON string argument"))
-		}
-		return responseObject(fn(args[0].String()))
+		return responseObject(fn(args))
 	})
 }
 
@@ -77,15 +56,12 @@ func responseObject(result string, err error) js.Value {
 	return obj
 }
 
-func handleInspectCertificate(raw string) (string, error) {
-	var request inspectCertificateRequest
-	if err := json.Unmarshal([]byte(raw), &request); err != nil {
-		return "", fmt.Errorf("parse inspectCertificate request: %w", err)
-	}
-	signCertDER, err := decodeBase64(request.SignCertDerBase64)
+func handleInspectCertificate(args []js.Value) (string, error) {
+	signCertDER, err := byteArg(args, 0, "signCert.der")
 	if err != nil {
-		return "", fmt.Errorf("decode signCert.der: %w", err)
+		return "", err
 	}
+	defer zeroBytes(signCertDER)
 
 	metadata, err := npki.InspectCertificate(signCertDER)
 	if err != nil {
@@ -98,16 +74,12 @@ func handleInspectCertificate(raw string) (string, error) {
 	})
 }
 
-func handlePrepareBundle(raw string) (string, error) {
-	var request prepareBundleRequest
-	if err := json.Unmarshal([]byte(raw), &request); err != nil {
-		return "", fmt.Errorf("parse prepareBundle request: %w", err)
-	}
-
-	input, err := decodeBundleInput(request)
+func handlePrepareBundle(args []js.Value) (string, error) {
+	input, err := decodeBundleInput(args)
 	if err != nil {
 		return "", err
 	}
+	defer zeroBrowserBundleInput(input)
 
 	bundle, err := npki.PrepareBrowserBundle(input)
 	if err != nil {
@@ -117,26 +89,26 @@ func handlePrepareBundle(raw string) (string, error) {
 	return marshal(bundle)
 }
 
-func handlePrepareChallengeProof(raw string) (string, error) {
-	var request prepareChallengeProofRequest
-	if err := json.Unmarshal([]byte(raw), &request); err != nil {
-		return "", fmt.Errorf("parse prepareChallengeProof request: %w", err)
-	}
-
-	input, err := decodeBundleInput(request.prepareBundleRequest)
+func handlePrepareChallengeProof(args []js.Value) (string, error) {
+	input, err := decodeBundleInput(args)
 	if err != nil {
 		return "", err
 	}
-	password, err := decodePasswordBase64(request.PasswordBase64)
+	defer zeroBrowserBundleInput(input)
+	password, err := byteArg(args, 6, "password")
 	if err != nil {
-		return "", fmt.Errorf("decode password: %w", err)
+		return "", err
 	}
 	defer zeroBytes(password)
+	challengePayload, err := stringArg(args, 7, "challengePayload")
+	if err != nil {
+		return "", err
+	}
 
 	proof, err := npki.PrepareBrowserChallengeProof(npki.BrowserChallengeProofInput{
 		BrowserBundleInput: input,
 		Password:           password,
-		Challenge:          request.ChallengePayload,
+		Challenge:          challengePayload,
 	})
 	if err != nil {
 		return "", err
@@ -145,23 +117,23 @@ func handlePrepareChallengeProof(raw string) (string, error) {
 	return marshal(proof)
 }
 
-func handleSignChallengeOnly(raw string) (string, error) {
-	var request signChallengeOnlyRequest
-	if err := json.Unmarshal([]byte(raw), &request); err != nil {
-		return "", fmt.Errorf("parse signChallengeOnly request: %w", err)
-	}
-
-	signPriKey, err := decodeBase64(request.SignPriKeyBase64)
+func handleSignChallengeOnly(args []js.Value) (string, error) {
+	signPriKey, err := byteArg(args, 0, "signPri.key")
 	if err != nil {
-		return "", fmt.Errorf("decode signPri.key: %w", err)
+		return "", err
 	}
-	password, err := decodePasswordBase64(request.PasswordBase64)
+	defer zeroBytes(signPriKey)
+	password, err := byteArg(args, 1, "password")
 	if err != nil {
-		return "", fmt.Errorf("decode password: %w", err)
+		return "", err
 	}
 	defer zeroBytes(password)
+	challengePayload, err := stringArg(args, 2, "challengePayload")
+	if err != nil {
+		return "", err
+	}
 
-	signature, err := npki.SignChallengeForBrowser(signPriKey, password, request.ChallengePayload)
+	signature, err := npki.SignChallengeForBrowser(signPriKey, password, challengePayload)
 	if err != nil {
 		return "", err
 	}
@@ -171,22 +143,44 @@ func handleSignChallengeOnly(raw string) (string, error) {
 	})
 }
 
-func decodeBundleInput(request prepareBundleRequest) (npki.BrowserBundleInput, error) {
-	signCertDER, err := decodeBase64(request.SignCertDerBase64)
+func decodeBundleInput(args []js.Value) (npki.BrowserBundleInput, error) {
+	signCertDER, err := byteArg(args, 0, "signCert.der")
 	if err != nil {
-		return npki.BrowserBundleInput{}, fmt.Errorf("decode signCert.der: %w", err)
+		return npki.BrowserBundleInput{}, err
 	}
-	signPriKey, err := decodeBase64(request.SignPriKeyBase64)
+	signPriKey, err := byteArg(args, 1, "signPri.key")
 	if err != nil {
-		return npki.BrowserBundleInput{}, fmt.Errorf("decode signPri.key: %w", err)
+		zeroBytes(signCertDER)
+		return npki.BrowserBundleInput{}, err
 	}
-	kmCertDER, err := decodeBase64(request.KMCertDerBase64)
+	kmCertDER, err := byteArg(args, 2, "kmCert.der")
 	if err != nil {
-		return npki.BrowserBundleInput{}, fmt.Errorf("decode kmCert.der: %w", err)
+		zeroBytes(signCertDER)
+		zeroBytes(signPriKey)
+		return npki.BrowserBundleInput{}, err
 	}
-	kmPriKey, err := decodeBase64(request.KMPriKeyBase64)
+	kmPriKey, err := byteArg(args, 3, "kmPri.key")
 	if err != nil {
-		return npki.BrowserBundleInput{}, fmt.Errorf("decode kmPri.key: %w", err)
+		zeroBytes(signCertDER)
+		zeroBytes(signPriKey)
+		zeroBytes(kmCertDER)
+		return npki.BrowserBundleInput{}, err
+	}
+	businessNo, err := stringArg(args, 4, "businessNo")
+	if err != nil {
+		zeroBytes(signCertDER)
+		zeroBytes(signPriKey)
+		zeroBytes(kmCertDER)
+		zeroBytes(kmPriKey)
+		return npki.BrowserBundleInput{}, err
+	}
+	commonName, err := stringArg(args, 5, "commonName")
+	if err != nil {
+		zeroBytes(signCertDER)
+		zeroBytes(signPriKey)
+		zeroBytes(kmCertDER)
+		zeroBytes(kmPriKey)
+		return npki.BrowserBundleInput{}, err
 	}
 
 	return npki.BrowserBundleInput{
@@ -194,17 +188,39 @@ func decodeBundleInput(request prepareBundleRequest) (npki.BrowserBundleInput, e
 		SignPriKey:  signPriKey,
 		KMCertDER:   kmCertDER,
 		KMPriKey:    kmPriKey,
-		BusinessNo:  request.BusinessNo,
-		CommonName:  request.CommonName,
+		BusinessNo:  businessNo,
+		CommonName:  commonName,
 	}, nil
 }
 
-func decodeBase64(value string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(value)
+func byteArg(args []js.Value, index int, label string) ([]byte, error) {
+	if len(args) <= index {
+		return nil, fmt.Errorf("missing %s argument", label)
+	}
+	value := args[index]
+	if value.Type() != js.TypeObject {
+		return nil, fmt.Errorf("%s must be Uint8Array", label)
+	}
+	byteLength := value.Get("byteLength")
+	if byteLength.Type() != js.TypeNumber {
+		return nil, fmt.Errorf("%s must be Uint8Array", label)
+	}
+	buf := make([]byte, byteLength.Int())
+	if copied := js.CopyBytesToGo(buf, value); copied != len(buf) {
+		zeroBytes(buf)
+		return nil, fmt.Errorf("copy %s bytes: expected %d, got %d", label, len(buf), copied)
+	}
+	return buf, nil
 }
 
-func decodePasswordBase64(value string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(value)
+func stringArg(args []js.Value, index int, label string) (string, error) {
+	if len(args) <= index {
+		return "", fmt.Errorf("missing %s argument", label)
+	}
+	if args[index].Type() != js.TypeString {
+		return "", fmt.Errorf("%s must be string", label)
+	}
+	return args[index].String(), nil
 }
 
 func marshal(value any) (string, error) {
@@ -217,4 +233,11 @@ func marshal(value any) (string, error) {
 
 func zeroBytes(buf []byte) {
 	clear(buf)
+}
+
+func zeroBrowserBundleInput(input npki.BrowserBundleInput) {
+	zeroBytes(input.SignCertDER)
+	zeroBytes(input.SignPriKey)
+	zeroBytes(input.KMCertDER)
+	zeroBytes(input.KMPriKey)
 }

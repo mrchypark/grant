@@ -1,5 +1,5 @@
-import type { ProofBundle } from "./client.ts";
-import { base64ToBytes } from "./base64.ts";
+import type { BrowserCertificateIdentity, EscrowProofBundle } from "./client.ts";
+import { base64ToBytes, bytesToBase64 } from "./base64.ts";
 import type {
   Html5CertificateBundleInput,
   PreparedHtml5CertificateBundle,
@@ -10,12 +10,19 @@ import {
   readHtml5CertificateBytes,
 } from "./html5.ts";
 import {
+  inspectCertificateWithWasm,
   prepareChallengeProofWithWasm,
   signChallengeWithWasm,
 } from "./npki-wasm.ts";
 
 export type PreparedHtml5ChallengeProof = PreparedHtml5CertificateBundle & {
   challengeSignatureBase64: string;
+};
+
+export type PreparedHtml5SignedChallengeProof = {
+  certificate: BrowserCertificateIdentity;
+  challengeSignatureBase64: string;
+  selection: PreparedHtml5CertificateBundle["selection"];
 };
 
 export async function prepareHtml5ChallengeProof(
@@ -40,8 +47,33 @@ export async function prepareHtml5ChallengeProof(
   };
 }
 
+export async function prepareHtml5SignedChallengeProof(
+  challengePayload: string,
+  files: Iterable<File>,
+  input: Html5CertificateBundleInput,
+): Promise<PreparedHtml5SignedChallengeProof> {
+  const selection = findHtml5CertificateFiles(files);
+  const bytes = await readHtml5CertificateBytes(selection);
+  const metadata = await inspectCertificateWithWasm(bytes.signCertDer);
+  const challengeSignatureBase64 = await signChallengeWithWasm(
+    bytes.signPriKey,
+    input.password.trim(),
+    challengePayload,
+  );
+
+  return {
+    selection,
+    certificate: {
+      businessNo: metadata.businessNo || input.businessNo?.trim() || "",
+      commonName: metadata.commonName || input.commonName?.trim() || "",
+      signCertDerBase64: bytesToBase64(bytes.signCertDer),
+    },
+    challengeSignatureBase64,
+  };
+}
+
 export async function signChallengeWithProofBundle(
-  bundle: ProofBundle,
+  bundle: EscrowProofBundle,
   challengePayload: string,
 ): Promise<string> {
   const proof = await prepareChallengeProofWithWasm({

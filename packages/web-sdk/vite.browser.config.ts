@@ -8,7 +8,7 @@ export default defineConfig({
       entry: fileURLToPath(new URL("./src/browser-global.ts", import.meta.url)),
       fileName: () => "certd-web-sdk.global.js",
       formats: ["iife"],
-      name: "CertdWebSdkBrowser",
+      name: "WebSdkBrowser",
     },
     outDir: fileURLToPath(new URL("./dist/browser", import.meta.url)),
   },

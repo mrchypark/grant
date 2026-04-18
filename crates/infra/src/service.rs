@@ -14,7 +14,7 @@ use crate::{
         StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
-    npki::verify_challenge_signature,
+    npki::{validate_certificate_bundle, verify_challenge_signature},
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
@@ -464,6 +464,7 @@ impl AppService {
         input: RegisterCertificateFromProofInput,
     ) -> Result<StoredCertificate> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        validate_certificate_bundle(&input.bundle)?;
         self.consume_valid_challenge(
             &input.challenge_id,
             &input.challenge_payload,
@@ -506,6 +507,7 @@ impl AppService {
         input: ExecuteEphemeralCrawlInput,
     ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        validate_certificate_bundle(&input.bundle)?;
         self.consume_valid_challenge(
             &input.challenge_id,
             &input.challenge_payload,
@@ -516,7 +518,7 @@ impl AppService {
         )
         .await?;
         let business_no = self
-            .resolve_organization_business_no(&organization_id, Some(&input.bundle.business_no))
+            .resolve_organization_business_no(&organization_id, None)
             .await?;
 
         self.run_sync_with_bundle(
@@ -704,10 +706,7 @@ impl AppService {
 
         if let Some(certificate) = certificate {
             let business_no = self
-                .resolve_organization_business_no(
-                    &consumed.organization_id,
-                    certificate.business_no.as_deref(),
-                )
+                .resolve_organization_business_no(&consumed.organization_id, None)
                 .await?;
             let kms = EnvKmsProvider::from_config(&self.cfg.kms)?;
             let dek = kms.unwrap(&certificate.kms_key_id, &certificate.wrapped_dek)?;
@@ -1750,8 +1749,9 @@ impl AppService {
         organization_id: &str,
         mut bundle: CertificateBundle,
     ) -> Result<StoredCertificate> {
+        validate_certificate_bundle(&bundle)?;
         let business_no = self
-            .resolve_organization_business_no(organization_id, Some(&bundle.business_no))
+            .resolve_organization_business_no(organization_id, None)
             .await?;
         let common_name = extract_common_name(&bundle.sign_cert_der)?;
         bundle.business_no = business_no.clone();

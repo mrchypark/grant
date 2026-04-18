@@ -30,21 +30,17 @@ func InspectCertificate(signCertDER []byte) (CertificateMetadata, error) {
 }
 
 func PrepareBrowserBundle(input BrowserBundleInput) (ProofBundle, error) {
-	businessNo := digitsOnly(input.BusinessNo)
-	commonName := strings.TrimSpace(input.CommonName)
-
-	if businessNo == "" || commonName == "" {
-		metadata, err := InspectCertificate(input.SignCertDER)
-		if err == nil {
-			if businessNo == "" {
-				businessNo = metadata.BusinessNo
-			}
-			if commonName == "" {
-				commonName = metadata.CommonName
-			}
-		} else if businessNo == "" && commonName == "" {
-			return ProofBundle{}, err
-		}
+	metadata, err := InspectCertificate(input.SignCertDER)
+	if err != nil {
+		return ProofBundle{}, err
+	}
+	businessNo := metadata.BusinessNo
+	if businessNo == "" {
+		businessNo = digitsOnly(input.BusinessNo)
+	}
+	commonName := metadata.CommonName
+	if commonName == "" {
+		commonName = strings.TrimSpace(input.CommonName)
 	}
 
 	return ProofBundle{

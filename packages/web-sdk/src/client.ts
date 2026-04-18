@@ -17,13 +17,21 @@ export type Challenge = {
   expiresAt: string;
 };
 
+export type BrowserCertificateIdentity = {
+  businessNo: string;
+  commonName: string;
+  signCertDerBase64: string;
+};
+
+export type ProofBundle = Omit<AgentProofBundle, "password">;
+
 export type CreateChallengeInput = {
   mode: ChallengeMode;
   facilityCode?: string;
   ttlSeconds?: number;
 };
 
-export type ProofBundle = AgentProofBundle & {
+export type EscrowProofBundle = ProofBundle & {
   password: string;
 };
 
@@ -54,7 +62,7 @@ export type ExecuteEphemeralExecutionInput = {
   challengeId: string;
   challengePayload: string;
   challengeSignatureBase64: string;
-  bundle: ProofBundle;
+  bundle: EscrowProofBundle;
   facilityCode?: string;
   startMonth?: string;
   endMonth?: string;
@@ -65,7 +73,7 @@ export type RegisterStoredCertificateInput = {
   challengeId: string;
   challengePayload: string;
   challengeSignatureBase64: string;
-  bundle: ProofBundle;
+  bundle: EscrowProofBundle;
 };
 
 export type IssueCrawlTaskTokenInput = {
@@ -119,7 +127,7 @@ export class GatewayClient {
   }
 
   async startCrawl(organizationId: string, crawlTaskToken: string): Promise<SyncRun> {
-    const response = await fetch(`${this.baseUrl}/api/v1/organizations/${organizationId}/crawls`, {
+    const response = await fetch(this.url(`/api/v1/organizations/${organizationId}/crawls`), {
       method: "POST",
       headers: {
         authorization: `Bearer ${crawlTaskToken}`,
@@ -132,7 +140,7 @@ export class GatewayClient {
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await fetch(this.url(path), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
@@ -144,7 +152,7 @@ export class GatewayClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await fetch(this.url(path), {
       headers: this.headers(),
     });
     if (!response.ok) {
@@ -155,6 +163,10 @@ export class GatewayClient {
 
   private get baseUrl(): string {
     return this.options.baseUrl;
+  }
+
+  private url(path: string): string {
+    return resolveSecureGatewayUrl(this.baseUrl, path).toString();
   }
 
   private headers(): HeadersInit {
@@ -169,4 +181,44 @@ export class GatewayClient {
     }
     return headers;
   }
+}
+
+function resolveSecureGatewayUrl(baseUrl: string, path: string): URL {
+  const base = /^https?:\/\//i.test(baseUrl)
+    ? new URL(ensureTrailingSlash(baseUrl))
+    : new URL(baseUrl, resolveBrowserOrigin());
+  const absolute = new URL(stripLeadingSlash(path), ensureTrailingSlash(base.toString()));
+  assertSecureRemoteUrl(absolute, "gateway");
+  return absolute;
+}
+
+function resolveBrowserOrigin(): string {
+  const origin = globalThis.location?.origin;
+  if (!origin) {
+    throw new Error("relative gatewayBaseUrl requires a browser origin");
+  }
+  return ensureTrailingSlash(origin);
+}
+
+function assertSecureRemoteUrl(url: URL, label: string): void {
+  if (url.protocol === "https:") {
+    return;
+  }
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) {
+    return;
+  }
+  throw new Error(`${label} URL must use https or loopback http: ${url.toString()}`);
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value : `${value}/`;
+}
+
+function stripLeadingSlash(value: string): string {
+  return value.replace(/^\/+/, "");
 }

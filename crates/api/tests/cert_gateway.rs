@@ -211,9 +211,9 @@ fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
     let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
     (
         json!({
-            "businessNo": "2768603291",
+            "businessNo": "1111111111",
             "password": "secret-password",
-            "commonName": "Test Certificate",
+            "commonName": "Spoofed Client Name",
             "signCertDerBase64": STANDARD.encode(cert_der),
             "signPriKeyBase64": "BAUG",
             "kmCertDerBase64": "BwgJ",
@@ -227,6 +227,8 @@ fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
     let mut name = X509NameBuilder::new().expect("x509 name");
     name.append_entry_by_text("CN", "Test Certificate")
         .expect("append cn");
+    name.append_entry_by_text("serialNumber", "2768603291")
+        .expect("append business number");
     let name = name.build();
 
     let mut builder = X509::builder().expect("x509 builder");
@@ -312,6 +314,8 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let register_json = json_body(register_response).await;
     assert_eq!(register_json["organizationId"], "bootstrap-user");
     assert_eq!(register_json["partyId"], "party-2768603291");
+    assert_eq!(register_json["commonName"], "Test Certificate");
+    assert_eq!(register_json["businessNo"], "2768603291");
     let certificate_id = register_json["id"]
         .as_str()
         .expect("certificate id")
@@ -335,6 +339,8 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(list_json.as_array().expect("list array").len(), 1);
     assert_eq!(list_json[0]["organizationId"], "bootstrap-user");
     assert_eq!(list_json[0]["partyId"], "party-2768603291");
+    assert_eq!(list_json[0]["commonName"], "Test Certificate");
+    assert_eq!(list_json[0]["businessNo"], "2768603291");
 
     let issue_response = app
         .clone()

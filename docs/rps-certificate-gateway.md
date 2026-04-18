@@ -21,7 +21,7 @@
   - loopback HTTP server
   - `/healthz`, `/sessions/open`, `/certificates`, `/sign`
   - `/approve-ephemeral-run`, `/approve-stored-registration`
-- `packages/certd-web-sdk`
+- `packages/web-sdk`
   - 고수준 제품 API + 저수준 raw client
 
 ## KMS 환경변수
@@ -291,9 +291,9 @@ ok
 ## JS SDK 사용 예시
 
 ```ts
-import { CertdWebSdk } from "@certd/web-sdk";
+import { WebSdk } from "@conalog/web-sdk";
 
-const sdk = new CertdWebSdk({
+const sdk = new WebSdk({
   gatewayBaseUrl: "https://certd.example.com",
   agentBaseUrl: "http://127.0.0.1:8765",
 });
@@ -330,7 +330,7 @@ const run = await sdk.runStored("org-1", {
 import {
   configureHtml5CertificateInput,
   prepareHtml5CertificateBundle,
-} from "@certd/web-sdk";
+} from "@conalog/web-sdk";
 
 const input = document.getElementById("cert-files") as HTMLInputElement;
 configureHtml5CertificateInput(input, { mode: "directory" });
@@ -344,39 +344,55 @@ const prepared = await prepareHtml5CertificateBundle(input.files ?? [], {
 console.log(prepared.bundle.signCertDerBase64);
 ```
 
-브라우저 안에서 `signPri.key` 복호화와 challenge 서명까지 끝내려면, desktop agent와 같은 Go NPKI 로직을 WebAssembly로 감싼 고수준 API를 사용할 수 있다.
+브라우저 안에서 `signPri.key` 복호화와 challenge 서명까지 끝내려면, desktop agent와 같은 Go NPKI 로직을 WebAssembly로 감싼 고수준 API를 사용할 수 있다. SDK는 이 경로를 두 가지 보안 모델로 나눠 제공한다.
 
 ```ts
-const run = await sdk.runEphemeralWithBrowserCertificate("org-1", {
+const proof = await sdk.createSignedChallengeProof("org-1", {
   certificateFiles: input.files ?? [],
   password: "secret-password",
+  mode: "ephemeral",
   facilityCode: "FAC-001",
-  mode: "full",
 });
 ```
 
-이 흐름은 사용자가 파일을 직접 고른 뒤 브라우저가 Go/WASM signer를 로드하고 다음을 수행한다.
+`createSignedChallengeProof()`는 사용자가 파일을 직접 고른 뒤 브라우저가 Go/WASM signer를 로드해서 다음을 수행한다.
 
 1. gateway challenge 생성
 2. `signPri.key`를 비밀번호로 복호화
 3. challenge payload를 `SHA256withRSA`로 서명
-4. gateway `ephemeral-executions` 또는 `stored-certificates` endpoint 호출
+4. `challengeId`, `challengePayload`, `challengeSignatureBase64`, `signCertDerBase64`만 caller에 반환
+
+이 경로는 개인키/비밀번호를 gateway로 보내지 않는다. 브라우저 전용 서명 proof를 직접 소비하는 backend가 있을 때 적합하다.
+
+gateway가 인증서 번들을 escrow 받아야 하는 경우에는 명시적 opt-in 메서드를 사용한다.
+
+```ts
+const run = await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
+  certificateFiles: input.files ?? [],
+  password: "secret-password",
+  facilityCode: "FAC-001",
+  mode: "full",
+  escrow: true,
+});
+```
+
+이 escrow 경로는 challenge 서명 뒤에 gateway `ephemeral-executions` 또는 `stored-certificates` endpoint로 인증서 번들과 비밀번호를 전송한다. 기본 메서드 `runEphemeralWithBrowserCertificate()` / `registerStoredWithBrowserCertificate()`는 `escrow: true` 없이는 실패하도록 막아 둔다.
 
 브라우저 보안 제약 때문에 OS 인증서 저장소 자동 탐색은 여전히 불가능하고, 파일 선택은 사용자가 직접 해야 한다.
 
-배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다.
+배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다. WASM asset은 same-origin `https:` 또는 loopback `http:`에서만 로드되고, gateway URL도 `https:` 또는 loopback `http:`만 허용한다.
 
 ```html
 <script src="/dist/browser/certd-web-sdk.global.js"></script>
 <script>
-  CertdWebSdkBrowser.configureHtml5CertificateInput(
+  window.WebSdkBrowser.configureHtml5CertificateInput(
     document.getElementById("cert-files"),
     { mode: "directory" },
   );
 </script>
 ```
 
-SDK가 내부적으로 수행하는 순서는 다음과 같다.
+desktop agent 경로에서 SDK가 내부적으로 수행하는 순서는 다음과 같다.
 
 1. local agent `/healthz` 확인
 2. local agent `/sessions/open`으로 local session 확보
@@ -384,7 +400,7 @@ SDK가 내부적으로 수행하는 순서는 다음과 같다.
 4. agent가 native approval modal로 인증서 선택과 비밀번호 입력 처리
 5. agent가 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
 
-브라우저 단독 흐름은 위 agent 단계를 생략하고, 선택된 인증서 파일만으로 challenge 서명과 gateway 호출을 수행한다.
+브라우저 단독 흐름은 위 agent 단계를 생략하고, 선택된 인증서 파일만으로 challenge 서명과 proof 반환 또는 escrow gateway 호출을 수행한다.
 
 ## 로컬 검증
 
@@ -419,7 +435,7 @@ curl http://127.0.0.1:8765/certificates \
 JS 예시 페이지 실행:
 
 ```bash
-cd packages/certd-web-sdk
+cd packages/web-sdk
 npm install
 npm run example
 ```

@@ -1,10 +1,10 @@
-import { bytesToBase64 } from "./base64.ts";
 import type { ProofBundle } from "./client.ts";
 
 const DEFAULT_WASM_FILE = "npki_signer.wasm";
 const DEFAULT_WASM_EXEC_FILE = "wasm_exec.js";
 const READY_POLL_INTERVAL_MS = 10;
 const READY_TIMEOUT_MS = 5_000;
+const EXPORT_NAME_KEY = "__CERTD_WEB_SDK_NPKI_WASM_EXPORT_NAME__";
 
 type WasmEnvelope = {
   ok?: boolean;
@@ -13,10 +13,30 @@ type WasmEnvelope = {
 };
 
 type NpkiWasmApi = {
-  inspectCertificate(inputJson: string): WasmEnvelope;
-  prepareBundle(inputJson: string): WasmEnvelope;
-  prepareChallengeProof(inputJson: string): WasmEnvelope;
-  signChallengeOnly(inputJson: string): WasmEnvelope;
+  inspectCertificate(signCertDer: Uint8Array): WasmEnvelope;
+  prepareBundle(
+    signCertDer: Uint8Array,
+    signPriKey: Uint8Array,
+    kmCertDer: Uint8Array,
+    kmPriKey: Uint8Array,
+    businessNo: string,
+    commonName: string,
+  ): WasmEnvelope;
+  prepareChallengeProof(
+    signCertDer: Uint8Array,
+    signPriKey: Uint8Array,
+    kmCertDer: Uint8Array,
+    kmPriKey: Uint8Array,
+    businessNo: string,
+    commonName: string,
+    password: Uint8Array,
+    challengePayload: string,
+  ): WasmEnvelope;
+  signChallengeOnly(
+    signPriKey: Uint8Array,
+    password: Uint8Array,
+    challengePayload: string,
+  ): WasmEnvelope;
 };
 
 type GoRuntime = {
@@ -40,22 +60,16 @@ export type WasmChallengeProof = {
 };
 
 declare global {
-  interface Window {
-    CertdWebSdkNpkiWasm?: NpkiWasmApi;
-    __CERTD_WEB_SDK_WASM_BASE_URL__?: string;
-  }
-
   var Go: undefined | {
     new (): GoRuntime;
   };
-
-  var CertdWebSdkNpkiWasm: undefined | NpkiWasmApi;
 }
 
 let assetUrls: NpkiWasmAssetUrls = {};
 let runtimeReady: Promise<void> | null = null;
 let apiReady: Promise<NpkiWasmApi> | null = null;
 let wasmRunPromise: Promise<void> | null = null;
+let wasmApi: NpkiWasmApi | null = null;
 const runtimeScriptLoads = new Map<string, Promise<void>>();
 
 export function configureNpkiWasmAssets(urls: NpkiWasmAssetUrls): void {
@@ -63,19 +77,18 @@ export function configureNpkiWasmAssets(urls: NpkiWasmAssetUrls): void {
     wasmUrl: urls.wasmUrl ?? assetUrls.wasmUrl,
     wasmExecUrl: urls.wasmExecUrl ?? assetUrls.wasmExecUrl,
   };
-  if (!globalThis.CertdWebSdkNpkiWasm) {
-    runtimeReady = null;
-    apiReady = null;
-    wasmRunPromise = null;
-  }
+  runtimeReady = null;
+  apiReady = null;
+  wasmRunPromise = null;
+  wasmApi = null;
 }
 
 export async function inspectCertificateWithWasm(
   signCertDer: Uint8Array,
 ): Promise<WasmCertificateMetadata> {
-  return callNpkiWasm<WasmCertificateMetadata>("inspectCertificate", {
-    signCertDerBase64: bytesToBase64(signCertDer),
-  });
+  return parseEnvelope<WasmCertificateMetadata>(
+    (await ensureNpkiWasmApi()).inspectCertificate(signCertDer),
+  );
 }
 
 export async function prepareBundleWithWasm(input: {
@@ -86,7 +99,16 @@ export async function prepareBundleWithWasm(input: {
   businessNo?: string;
   commonName?: string;
 }): Promise<ProofBundle> {
-  return callNpkiWasm<ProofBundle>("prepareBundle", encodeBundleInput(input));
+  return parseEnvelope<ProofBundle>(
+    (await ensureNpkiWasmApi()).prepareBundle(
+      input.signCertDer,
+      input.signPriKey,
+      input.kmCertDer,
+      input.kmPriKey,
+      trimOptional(input.businessNo),
+      trimOptional(input.commonName),
+    ),
+  );
 }
 
 export async function prepareChallengeProofWithWasm(input: {
@@ -101,11 +123,18 @@ export async function prepareChallengeProofWithWasm(input: {
 }): Promise<WasmChallengeProof> {
   const passwordBytes = encodePassword(input.password);
   try {
-    return callNpkiWasm<WasmChallengeProof>("prepareChallengeProof", {
-      ...encodeBundleInput(input),
-      passwordBase64: bytesToBase64(passwordBytes),
-      challengePayload: input.challengePayload,
-    });
+    return parseEnvelope<WasmChallengeProof>(
+      (await ensureNpkiWasmApi()).prepareChallengeProof(
+        input.signCertDer,
+        input.signPriKey,
+        input.kmCertDer,
+        input.kmPriKey,
+        trimOptional(input.businessNo),
+        trimOptional(input.commonName),
+        passwordBytes,
+        input.challengePayload,
+      ),
+    );
   } finally {
     passwordBytes.fill(0);
   }
@@ -118,20 +147,20 @@ export async function signChallengeWithWasm(
 ): Promise<string> {
   const passwordBytes = encodePassword(password);
   try {
-    const result = await callNpkiWasm<{ challengeSignatureBase64: string }>("signChallengeOnly", {
-      signPriKeyBase64: bytesToBase64(signPriKey),
-      passwordBase64: bytesToBase64(passwordBytes),
-      challengePayload,
-    });
+    const result = parseEnvelope<{ challengeSignatureBase64: string }>(
+      (await ensureNpkiWasmApi()).signChallengeOnly(
+        signPriKey,
+        passwordBytes,
+        challengePayload,
+      ),
+    );
     return result.challengeSignatureBase64;
   } finally {
     passwordBytes.fill(0);
   }
 }
 
-async function callNpkiWasm<T>(method: keyof NpkiWasmApi, payload: object): Promise<T> {
-  const api = await ensureNpkiWasmApi();
-  const response = api[method](JSON.stringify(payload));
+function parseEnvelope<T>(response: WasmEnvelope): T {
   if (!response?.ok || typeof response.result !== "string") {
     throw new Error(response?.error ?? "failed to invoke NPKI wasm runtime");
   }
@@ -139,8 +168,8 @@ async function callNpkiWasm<T>(method: keyof NpkiWasmApi, payload: object): Prom
 }
 
 async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
-  if (globalThis.CertdWebSdkNpkiWasm) {
-    return globalThis.CertdWebSdkNpkiWasm;
+  if (wasmApi) {
+    return wasmApi;
   }
   if (apiReady) {
     return apiReady;
@@ -148,16 +177,24 @@ async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
 
   apiReady = (async () => {
     await ensureGoRuntime();
-    const wasmBinary = await readBinary(resolveAssetUrl("wasmUrl", DEFAULT_WASM_FILE));
-    const go = new globalThis.Go!();
-    const result = await WebAssembly.instantiate(wasmBinary, go.importObject);
-    wasmRunPromise = go.run(result.instance);
-    await waitForApi();
-    return globalThis.CertdWebSdkNpkiWasm!;
+    const exportName = createWasmExportName();
+    (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY] = exportName;
+
+    try {
+      const wasmBinary = await readBinary(resolveAssetUrl("wasmUrl", DEFAULT_WASM_FILE));
+      const go = new globalThis.Go!();
+      const result = await WebAssembly.instantiate(wasmBinary, go.importObject);
+      wasmRunPromise = go.run(result.instance);
+      wasmApi = await waitForApi(exportName);
+      return wasmApi;
+    } finally {
+      delete (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY];
+      delete (globalThis as Record<string, unknown>)[exportName];
+    }
   })().catch((error) => {
     apiReady = null;
     wasmRunPromise = null;
-    delete globalThis.CertdWebSdkNpkiWasm;
+    wasmApi = null;
     throw error;
   });
 
@@ -186,9 +223,13 @@ async function ensureGoRuntime(): Promise<void> {
   return runtimeReady;
 }
 
-async function waitForApi(): Promise<void> {
+async function waitForApi(exportName: string): Promise<NpkiWasmApi> {
   const startedAt = Date.now();
-  while (!globalThis.CertdWebSdkNpkiWasm) {
+  while (true) {
+    const candidate = (globalThis as Record<string, unknown>)[exportName];
+    if (candidate && typeof candidate === "object") {
+      return candidate as NpkiWasmApi;
+    }
     if (Date.now() - startedAt > READY_TIMEOUT_MS) {
       throw new Error("timed out waiting for NPKI wasm runtime");
     }
@@ -196,38 +237,16 @@ async function waitForApi(): Promise<void> {
   }
 }
 
-function encodeBundleInput(input: {
-  signCertDer: Uint8Array;
-  signPriKey: Uint8Array;
-  kmCertDer: Uint8Array;
-  kmPriKey: Uint8Array;
-  businessNo?: string;
-  commonName?: string;
-}): Record<string, string> {
-  return {
-    signCertDerBase64: bytesToBase64(input.signCertDer),
-    signPriKeyBase64: bytesToBase64(input.signPriKey),
-    kmCertDerBase64: bytesToBase64(input.kmCertDer),
-    kmPriKeyBase64: bytesToBase64(input.kmPriKey),
-    businessNo: input.businessNo?.trim() ?? "",
-    commonName: input.commonName?.trim() ?? "",
-  };
-}
-
 function resolveAssetUrl(key: keyof NpkiWasmAssetUrls, fileName: string): URL {
   const configured = assetUrls[key];
-  if (configured) {
-    if (configured instanceof URL) {
-      return configured;
-    }
-    return new URL(configured, globalThis.location?.href ?? "file:///");
-  }
+  const url = configured
+    ? configured instanceof URL
+      ? configured
+      : new URL(configured, globalThis.location?.href ?? "file:///")
+    : new URL(`./generated/${fileName}`, import.meta.url);
 
-  if (typeof window !== "undefined" && window.__CERTD_WEB_SDK_WASM_BASE_URL__) {
-    return new URL(fileName, ensureTrailingSlash(window.__CERTD_WEB_SDK_WASM_BASE_URL__));
-  }
-
-  return new URL(`./generated/${fileName}`, import.meta.url);
+  assertSecureAssetUrl(url, key);
+  return url;
 }
 
 async function readBinary(url: URL): Promise<ArrayBuffer> {
@@ -257,12 +276,44 @@ async function readText(url: URL): Promise<string> {
   return response.text();
 }
 
+function assertSecureAssetUrl(url: URL, key: keyof NpkiWasmAssetUrls): void {
+  if (url.protocol === "file:") {
+    return;
+  }
+  if (url.protocol === "https:") {
+    if (typeof window !== "undefined" && url.origin !== window.location.origin) {
+      throw new Error(`${key} must be same-origin: ${url.toString()}`);
+    }
+    return;
+  }
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) {
+    return;
+  }
+  throw new Error(`${key} must use https or loopback http: ${url.toString()}`);
+}
+
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
 function encodePassword(password: string): Uint8Array {
   return new TextEncoder().encode(password);
+}
+
+function trimOptional(value: string | undefined): string {
+  return value?.trim() ?? "";
+}
+
+function createWasmExportName(): string {
+  if (globalThis.crypto?.randomUUID) {
+    return `__certdNpkiWasm_${globalThis.crypto.randomUUID()}`;
+  }
+  return `__certdNpkiWasm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
 async function loadGoRuntimeScript(url: URL): Promise<void> {

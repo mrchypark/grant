@@ -16,9 +16,9 @@ const selectionResult = element<HTMLDivElement>("selectionResult");
 const modeInputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[name="pickerMode"]'));
 
 element<HTMLButtonElement>("inspectButton").addEventListener("click", () => withAction(inspectSelection));
-element<HTMLButtonElement>("prepareButton").addEventListener("click", () => withAction(prepareBundle));
-element<HTMLButtonElement>("ephemeralButton").addEventListener("click", () => withAction(runEphemeral));
-element<HTMLButtonElement>("storedButton").addEventListener("click", () => withAction(registerStored));
+element<HTMLButtonElement>("signChallengeButton").addEventListener("click", () => withAction(signChallenge));
+element<HTMLButtonElement>("ephemeralEscrowButton").addEventListener("click", () => withAction(runEphemeral));
+element<HTMLButtonElement>("storedEscrowButton").addEventListener("click", () => withAction(registerStored));
 
 for (const input of modeInputs) {
   input.addEventListener("change", applyPickerMode);
@@ -28,9 +28,9 @@ applyPickerMode();
 appendLog("HTML5 browser signing example ready");
 
 function browserSdk(): BrowserSdk {
-  const globalSdk = window.CertdWebSdkBrowser;
+  const globalSdk = window.WebSdkBrowser ?? window.CertdWebSdkBrowser;
   if (!globalSdk) {
-    throw new Error("CertdWebSdkBrowser global is not available");
+    throw new Error("WebSdkBrowser global is not available");
   }
   return globalSdk;
 }
@@ -49,59 +49,64 @@ async function inspectSelection() {
   setStatus("파일 검증 완료");
 }
 
-async function prepareBundle() {
-  const prepared = await sdkModule.prepareHtml5CertificateBundle(selectedFiles(), {
+async function signChallenge() {
+  const sdk = createSdk();
+  const proof = await sdk.createSignedChallengeProof(organizationId.value, {
+    certificateFiles: selectedFiles(),
+    password: password.value,
     businessNo: businessNo.value,
     commonName: commonName.value,
-    password: password.value,
+    mode: "ephemeral",
+    facilityCode: optional(facilityCode.value),
   });
 
-  renderSelection(prepared.selection.fileNames);
   appendLog(
-    `bundle prepared -> ${JSON.stringify(
+    `browser-only proof -> ${JSON.stringify(
       {
-        businessNo: prepared.bundle.businessNo || "(server resolve)",
-        commonName: prepared.bundle.commonName || "(certificate parse fallback failed)",
-        signCertDerBase64: prepared.bundle.signCertDerBase64.length,
-        signPriKeyBase64: prepared.bundle.signPriKeyBase64.length,
-        kmCertDerBase64: prepared.bundle.kmCertDerBase64.length,
-        kmPriKeyBase64: prepared.bundle.kmPriKeyBase64.length,
+        challengeId: proof.challengeId,
+        mode: proof.mode,
+        businessNo: proof.certificate.businessNo,
+        commonName: proof.certificate.commonName,
+        signCertDerBase64: proof.certificate.signCertDerBase64.length,
+        challengeSignatureBase64: proof.challengeSignatureBase64.length,
       },
       null,
       2,
     )}`,
   );
-  setStatus("업로드용 번들 준비 완료");
+  setStatus("브라우저 전용 challenge 서명 완료");
 }
 
 async function runEphemeral() {
   const sdk = createSdk();
-  const run = await sdk.runEphemeralWithBrowserCertificate(organizationId.value, {
+  const run = await sdk.runEphemeralWithEscrowedBrowserCertificate(organizationId.value, {
     certificateFiles: selectedFiles(),
     password: password.value,
     businessNo: businessNo.value,
     commonName: commonName.value,
     facilityCode: optional(facilityCode.value),
     mode: syncMode.value === "delta" ? "delta" : "full",
+    escrow: true,
   });
-  appendLog(`ephemeral run -> ${JSON.stringify(run, null, 2)}`);
-  setStatus(`Ephemeral ${run.status}`);
+  appendLog(`ephemeral escrow run -> ${JSON.stringify(run, null, 2)}`);
+  setStatus(`Ephemeral escrow ${run.status}`);
 }
 
 async function registerStored() {
   const sdk = createSdk();
-  const certificate = await sdk.registerStoredWithBrowserCertificate(organizationId.value, {
+  const certificate = await sdk.registerStoredWithEscrowedBrowserCertificate(organizationId.value, {
     certificateFiles: selectedFiles(),
     password: password.value,
     businessNo: businessNo.value,
     commonName: commonName.value,
+    escrow: true,
   });
-  appendLog(`stored certificate -> ${JSON.stringify(certificate, null, 2)}`);
-  setStatus("Stored 등록 완료");
+  appendLog(`stored escrow certificate -> ${JSON.stringify(certificate, null, 2)}`);
+  setStatus("Stored escrow 등록 완료");
 }
 
 function createSdk() {
-  return new sdkModule.CertdWebSdk({
+  return new sdkModule.WebSdk({
     gatewayBaseUrl: gatewayBaseUrl.value,
     agentBaseUrl: "http://127.0.0.1:8765",
     bearerToken: optional(bearerToken.value),

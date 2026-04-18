@@ -24,7 +24,7 @@
   - 별도 TrailBase auth 서비스로 동작하며 `/api/certd/introspect`를 제공한다.
 - `desktop-agent`
   - 로컬 루프백 HTTP 서버로 인증서 탐색, 사용자 승인, challenge 서명을 담당한다.
-- `packages/certd-web-sdk`
+- `packages/web-sdk`
   - 브라우저에서 `stored`/`ephemeral` certificate gateway 흐름을 조합한다.
 
 ## 요청 흐름

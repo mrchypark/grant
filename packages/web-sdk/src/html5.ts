@@ -1,4 +1,4 @@
-import type { ProofBundle } from "./client.ts";
+import type { EscrowProofBundle } from "./client.ts";
 import { prepareBundleWithWasm } from "./npki-wasm.ts";
 
 const REQUIRED_CERTIFICATE_FILES = {
@@ -24,7 +24,7 @@ export type Html5CertificateBundleInput = {
 };
 
 export type PreparedHtml5CertificateBundle = {
-  bundle: ProofBundle;
+  bundle: EscrowProofBundle;
   selection: Html5CertificateSelection;
 };
 
@@ -65,16 +65,23 @@ export function findHtml5CertificateFiles(files: Iterable<File>): Html5Certifica
 
   const completeBucket = Array.from(buckets.entries())
     .filter(([, bucket]) => hasCompleteBundle(bucket))
-    .sort(([left], [right]) => left.localeCompare(right))[0]?.[1];
+    .sort(([left], [right]) => left.localeCompare(right));
 
-  if (!completeBucket) {
+  if (completeBucket.length === 0) {
     const missing = html5CertificateFileKeys()
       .map((key) => REQUIRED_CERTIFICATE_FILES[key])
       .find((requiredFileName) => !Array.from(buckets.values()).some((bucket) => bucket.has(requiredFileName)));
     throw new Error(`missing certificate file: ${missing ?? "signCert.der"}`);
   }
 
-  return selectionFromBucket(completeBucket);
+  if (completeBucket.length > 1) {
+    const candidates = completeBucket
+      .map(([key]) => key || "(current directory)")
+      .join(", ");
+    throw new Error(`multiple certificate bundles selected; choose one certificate directory: ${candidates}`);
+  }
+
+  return selectionFromBucket(completeBucket[0][1]);
 }
 
 export async function prepareHtml5CertificateBundle(
