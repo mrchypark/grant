@@ -181,9 +181,9 @@ async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
     (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY] = exportName;
 
     try {
-      const wasmBinary = await readBinary(resolveAssetUrl("wasmUrl", DEFAULT_WASM_FILE));
+      const wasmUrl = resolveAssetUrl("wasmUrl", DEFAULT_WASM_FILE);
       const go = new globalThis.Go!();
-      const result = await WebAssembly.instantiate(wasmBinary, go.importObject);
+      const result = await instantiateWasmModule(wasmUrl, go.importObject);
       wasmRunPromise = go.run(result.instance);
       wasmApi = await waitForApi(exportName);
       return wasmApi;
@@ -199,6 +199,30 @@ async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
   });
 
   return apiReady;
+}
+
+async function instantiateWasmModule(
+  wasmUrl: URL,
+  importObject: WebAssembly.Imports,
+): Promise<WebAssembly.WebAssemblyInstantiatedSource> {
+  if (wasmUrl.protocol !== "file:" && typeof WebAssembly.instantiateStreaming === "function") {
+    const response = await fetch(wasmUrl);
+    if (!response.ok) {
+      throw new Error(`failed to load ${wasmUrl.toString()}: ${response.status}`);
+    }
+    const fallbackResponse = response.clone();
+    try {
+      return await WebAssembly.instantiateStreaming(response, importObject);
+    } catch (error) {
+      const wasmBinary = await fallbackResponse.arrayBuffer();
+      return WebAssembly.instantiate(wasmBinary, importObject).catch(() => {
+        throw error;
+      });
+    }
+  }
+
+  const wasmBinary = await readBinary(wasmUrl);
+  return WebAssembly.instantiate(wasmBinary, importObject);
 }
 
 async function ensureGoRuntime(): Promise<void> {

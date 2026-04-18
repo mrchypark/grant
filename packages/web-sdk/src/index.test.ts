@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { base64ToBytes, bytesToBase64 } from "./base64.ts";
 import {
   WebSdk,
   configureHtml5CertificateInput,
@@ -98,6 +99,14 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
   } finally {
     mock.restore();
   }
+});
+
+test("bytesToBase64() round-trips arbitrary bytes", () => {
+  const input = new Uint8Array([0, 1, 2, 127, 128, 129, 254, 255]);
+  const encoded = bytesToBase64(input);
+  const decoded = base64ToBytes(encoded);
+
+  assert.deepEqual(Array.from(decoded), Array.from(input));
 });
 
 test("createChallenge() allows IPv6 loopback gateway URLs over http", async () => {
