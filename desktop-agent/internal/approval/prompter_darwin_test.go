@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/httpapi"
+	"desktop-agent/internal/localization"
+	"desktop-agent/internal/npki"
 )
 
 func TestPromptApprovalCancelsModalWhenContextIsDone(t *testing.T) {
@@ -332,6 +333,43 @@ func TestPromptApprovalCancelWhileWaitingDoesNotCancelActiveModal(t *testing.T) 
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("first PromptApproval did not finish")
+	}
+}
+
+func TestCertificateOptionLabelIncludesSourceMetadata(t *testing.T) {
+	copy := localization.ForLanguage(localization.Korean)
+
+	localLabel := certificateOptionLabel(npki.CertificateMetadata{
+		ID:          "bundle:/Users/test/NPKI/yessign/USER/cn=test",
+		CommonName:  "로컬 인증서",
+		SourceKind:  npki.CertificateSourceKindBundle,
+		StorageKind: npki.CertificateStorageKindNPKI,
+		DisplayPath: "NPKI/yessign/USER/cn=test",
+	}, copy)
+	if localLabel != "로컬 인증서 | 로컬 NPKI | NPKI/yessign/USER/cn=test" {
+		t.Fatalf("local label = %q", localLabel)
+	}
+
+	removableLabel := certificateOptionLabel(npki.CertificateMetadata{
+		ID:          "pkcs12:/Volumes/Lexar/protected.p12",
+		CommonName:  "이동식 인증서",
+		SourceKind:  npki.CertificateSourceKindPKCS12,
+		StorageKind: npki.CertificateStorageKindPKCS12,
+		DisplayPath: "protected.p12",
+		Removable:   true,
+	}, copy)
+	if removableLabel != "이동식 인증서 | 이동식디스크 PKCS#12 | protected.p12" {
+		t.Fatalf("removable label = %q", removableLabel)
+	}
+
+	unnamedLabel := certificateOptionLabel(npki.CertificateMetadata{
+		ID:          "pkcs12:/Users/test/unnamed.p12",
+		SourceKind:  npki.CertificateSourceKindPKCS12,
+		StorageKind: npki.CertificateStorageKindPKCS12,
+		DisplayPath: "unnamed.p12",
+	}, copy)
+	if unnamedLabel != "unnamed.p12 | 로컬 PKCS#12" {
+		t.Fatalf("unnamed label = %q", unnamedLabel)
 	}
 }
 

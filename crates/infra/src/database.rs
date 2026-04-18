@@ -250,6 +250,11 @@ struct RoleOrgRow {
 }
 
 #[derive(Debug, Clone)]
+struct PartyIDRow {
+    party_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct OrganizationRow {
     id: String,
     party_id: Option<String>,
@@ -1433,9 +1438,9 @@ impl Database {
     }
 
     async fn find_organization_party_id(&self, organization_id: &str) -> Result<Option<String>> {
-        let rows: Vec<OrganizationRow> = self
+        let rows: Vec<PartyIDRow> = self
             .query_default_rows(
-                "SELECT o.id, opl.party_id, o.name, o.active
+                "SELECT opl.party_id
                  FROM organizations o
                  LEFT JOIN organization_party_links opl
                    ON opl.organization_id = o.id
@@ -4888,6 +4893,14 @@ impl From<&mut Row<'_>> for RoleOrgRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             organization_id: row.get("organization_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for PartyIDRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            party_id: row.get("party_id"),
         }
     }
 }

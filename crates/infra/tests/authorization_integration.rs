@@ -178,16 +178,25 @@ async fn build_service() -> (AppService, Database, TempDir, TempDir) {
     let (runtime, db_dir) = test_runtime().await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
     let cfg = test_config(artifacts_dir.path());
+    let bootstrap_user_id = cfg.security.bootstrap_user_id.clone();
+    let bootstrap_user_name = cfg.security.bootstrap_user_name.clone();
     let db = Database::new(
         runtime.clone(),
-        cfg.security.bootstrap_user_id.clone(),
-        cfg.security.bootstrap_user_name.clone(),
+        bootstrap_user_id.clone(),
+        bootstrap_user_name.clone(),
     );
     let artifacts = ArtifactStore::new(&cfg.artifacts)
         .await
         .expect("artifact store");
     let service = AppService::new_with_collector(cfg, db.clone(), artifacts, mock_collect_snapshot);
     service.initialize().await.expect("initialize service");
+    db.upsert_organization_identity(
+        &bootstrap_user_id,
+        Some("2768603291"),
+        &bootstrap_user_name,
+    )
+    .await
+    .expect("seed bootstrap organization identity");
     (service, db, db_dir, artifacts_dir)
 }
 
@@ -254,8 +263,8 @@ fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, Str
             common_name: "Test Certificate".to_owned(),
             sign_cert_der: cert_der,
             sign_pri_key: vec![4, 5, 6],
-            km_cert_der: vec![7, 8, 9],
-            km_pri_key: vec![10, 11, 12],
+            km_cert_der: Some(vec![7, 8, 9]),
+            km_pri_key: Some(vec![10, 11, 12]),
         },
         challenge_signature_base64,
     )
@@ -945,8 +954,8 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: expired_cert_der,
                 sign_pri_key: vec![4, 5, 6],
-                km_cert_der: vec![7, 8, 9],
-                km_pri_key: vec![10, 11, 12],
+                km_cert_der: Some(vec![7, 8, 9]),
+                km_pri_key: Some(vec![10, 11, 12]),
             },
         })
         .await
@@ -979,13 +988,140 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: valid_cert_der,
                 sign_pri_key: vec![4, 5, 6],
-                km_cert_der: vec![7, 8, 9],
-                km_pri_key: vec![10, 11, 12],
+                km_cert_der: Some(vec![7, 8, 9]),
+                km_pri_key: Some(vec![10, 11, 12]),
             },
         })
         .await
         .expect("register certificate");
     assert_eq!(stored_cert.common_name, "CN From Certificate");
+}
+
+#[tokio::test]
+async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-010".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let stored_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate stored rsa key")).expect("wrap key");
+    let stored_cert_der = create_sign_cert_der_for_common_name(&stored_key, "Stored Certificate");
+    let stored_signature = sign_challenge(&stored_key, &stored.payload);
+    let stored_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id.clone(),
+            challenge_payload: stored.payload.clone(),
+            challenge_signature_base64: stored_signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: stored_cert_der,
+                sign_pri_key: vec![4, 5, 6],
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+        })
+        .await
+        .expect("register certificate without km");
+    assert_eq!(stored_cert.common_name, "Stored Certificate");
+
+    let ephemeral = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-011".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create ephemeral challenge");
+    let ephemeral_key = PKey::from_rsa(Rsa::generate(2048).expect("generate ephemeral rsa key"))
+        .expect("wrap key");
+    let ephemeral_cert_der =
+        create_sign_cert_der_for_common_name(&ephemeral_key, "Ephemeral Certificate");
+    let ephemeral_signature = sign_challenge(&ephemeral_key, &ephemeral.payload);
+    let run = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: ephemeral.id.clone(),
+            challenge_payload: ephemeral.payload.clone(),
+            challenge_signature_base64: ephemeral_signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: ephemeral_cert_der,
+                sign_pri_key: vec![4, 5, 6],
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+            facility_code: Some("FAC-011".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("execute ephemeral crawl without km");
+    assert_eq!(run.status, "completed");
+    assert_eq!(run.plant_id.as_deref(), Some("FAC-011"));
+}
+
+#[tokio::test]
+async fn certificate_gateway_links_unlinked_organization_by_business_no_on_save() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+    db.upsert_organization_with_owner("pending-org", "Pending Org", None, "Pending Org")
+        .await
+        .expect("seed unlinked organization");
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "pending-org".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-012".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der_for_common_name(&key, "Pending Org Certificate");
+    let signature = sign_challenge(&key, &challenge.payload);
+
+    let stored_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "pending-org".to_owned(),
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
+            challenge_signature_base64: signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: cert_der,
+                sign_pri_key: vec![4, 5, 6],
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+        })
+        .await
+        .expect("register certificate with business-no fallback");
+    assert_eq!(stored_cert.party_id, "party-2768603291");
+
+    let organization = db
+        .get_organization("pending-org")
+        .await
+        .expect("load linked organization");
+    assert_eq!(organization.party_id.as_deref(), Some("party-2768603291"));
 }
 
 #[tokio::test]

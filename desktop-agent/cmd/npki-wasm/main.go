@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"syscall/js"
 
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/npki"
 )
 
 type inspectCertificateResponse struct {

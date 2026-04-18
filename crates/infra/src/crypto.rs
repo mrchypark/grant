@@ -18,8 +18,10 @@ pub struct CertificateBundle {
     pub common_name: String,
     pub sign_cert_der: Vec<u8>,
     pub sign_pri_key: Vec<u8>,
-    pub km_cert_der: Vec<u8>,
-    pub km_pri_key: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub km_cert_der: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub km_pri_key: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

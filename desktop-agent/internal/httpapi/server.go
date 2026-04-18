@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/npki"
 )
 
 type npkiService interface {
@@ -228,6 +228,9 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "challenge must not be empty")
 		return
 	case strings.TrimSpace(req.Password) == "":
+		if req.Password == "" && strings.HasPrefix(req.CertificateID, "pkcs12:") {
+			break
+		}
 		writeError(w, http.StatusBadRequest, "password must not be empty")
 		return
 	}

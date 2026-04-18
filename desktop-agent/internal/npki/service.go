@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/cipher"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -19,13 +20,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	seedcipher "github.com/deatil/go-cryptobin/cipher/seed"
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 var (
@@ -41,6 +43,7 @@ var (
 )
 
 var defaultDiscoverRoots = discoverDefaultRoots
+var readDir = os.ReadDir
 
 type ServiceConfig struct {
 	Roots                []string
@@ -53,11 +56,33 @@ type ServiceConfig struct {
 }
 
 type CertificateMetadata struct {
-	ID         string    `json:"id"`
-	CommonName string    `json:"commonName"`
-	BusinessNo string    `json:"businessNo"`
-	NotAfter   time.Time `json:"notAfter"`
+	ID            string                 `json:"id"`
+	CommonName    string                 `json:"commonName"`
+	BusinessNo    string                 `json:"businessNo"`
+	NotAfter      time.Time              `json:"notAfter"`
+	SourceKind    CertificateSourceKind  `json:"sourceKind"`
+	StorageKind   CertificateStorageKind `json:"storageKind"`
+	DisplayPath   string                 `json:"displayPath"`
+	IssuerName    string                 `json:"issuerName"`
+	HasKmMaterial bool                   `json:"hasKmMaterial"`
+	Removable     bool                   `json:"removable"`
 }
+
+type CertificateSourceKind string
+
+const (
+	CertificateSourceKindBundle CertificateSourceKind = "bundle"
+	CertificateSourceKindPKCS12 CertificateSourceKind = "pkcs12"
+)
+
+type CertificateStorageKind string
+
+const (
+	CertificateStorageKindUnknown CertificateStorageKind = "unknown"
+	CertificateStorageKindNPKI    CertificateStorageKind = "npki"
+	CertificateStorageKindGPKI    CertificateStorageKind = "gpki"
+	CertificateStorageKindPKCS12  CertificateStorageKind = "pkcs12"
+)
 
 type ProofBundle struct {
 	BusinessNo        string `json:"businessNo"`
@@ -152,11 +177,12 @@ func DefaultConfig() ServiceConfig {
 		DiscoverRoots: func(ctx context.Context) []string {
 			switch runtime.GOOS {
 			case "darwin":
-				return discoverMountedNPKIRoots(ctx, "/Volumes")
+				return discoverMountedCertificateRoots(ctx, "/Volumes")
 			case "windows":
 				return discoverWindowsDriveNPKIRoots(ctx)
+			default:
+				return nil
 			}
-			return nil
 		},
 	}
 }
@@ -168,8 +194,8 @@ func (s *Service) ListCertificates(context.Context) ([]CertificateMetadata, erro
 	}
 
 	items := make([]CertificateMetadata, 0, len(bundles))
-	for _, bundleDir := range bundles {
-		metadata, err := readMetadata(bundleDir)
+	for _, bundle := range bundles {
+		metadata, err := readMetadata(bundle)
 		if err != nil {
 			continue
 		}
@@ -179,7 +205,7 @@ func (s *Service) ListCertificates(context.Context) ([]CertificateMetadata, erro
 }
 
 func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
-	bundleDir, err := s.resolveBundleDir(req.CertificateID)
+	bundle, err := s.resolveBundle(req.CertificateID)
 	if err != nil {
 		return SignResult{}, err
 	}
@@ -189,36 +215,67 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 	}
 	defer zeroBytes(password)
 
-	bundle, metadata, err := loadBundle(bundleDir)
-	if err != nil {
-		return SignResult{}, err
-	}
-	if err := validatePassword(bundle.signPriKey, password); err != nil {
-		return SignResult{}, err
-	}
-	challengeSignatureBase64, err := signChallenge(bundle.signPriKey, password, req.Challenge)
-	if err != nil {
-		return SignResult{}, err
-	}
+	switch bundle.kind {
+	case CertificateSourceKindBundle:
+		files, metadata, err := loadBundle(bundle.path)
+		if err != nil {
+			return SignResult{}, err
+		}
+		if err := validatePassword(files.signPriKey, password); err != nil {
+			return SignResult{}, err
+		}
+		challengeSignatureBase64, err := signChallenge(files.signPriKey, password, req.Challenge)
+		if err != nil {
+			return SignResult{}, err
+		}
 
-	businessNo := metadata.BusinessNo
-	if businessNo == "" {
-		businessNo = digitsOnly(req.BusinessNo)
-	}
+		businessNo := metadata.BusinessNo
+		if businessNo == "" {
+			businessNo = digitsOnly(req.BusinessNo)
+		}
 
-	return SignResult{
-		CertificateID:            bundleDir,
-		Challenge:                req.Challenge,
-		ChallengeSignatureBase64: challengeSignatureBase64,
-		Bundle: ProofBundle{
-			BusinessNo:        businessNo,
-			CommonName:        metadata.CommonName,
-			SignCertDerBase64: base64.StdEncoding.EncodeToString(bundle.signCertDER),
-			SignPriKeyBase64:  base64.StdEncoding.EncodeToString(bundle.signPriKey),
-			KMCertDerBase64:   base64.StdEncoding.EncodeToString(bundle.kmCertDER),
-			KMPriKeyBase64:    base64.StdEncoding.EncodeToString(bundle.kmPriKey),
-		},
-	}, nil
+		return SignResult{
+			CertificateID:            bundle.id,
+			Challenge:                req.Challenge,
+			ChallengeSignatureBase64: challengeSignatureBase64,
+			Bundle: ProofBundle{
+				BusinessNo:        businessNo,
+				CommonName:        metadata.CommonName,
+				SignCertDerBase64: base64.StdEncoding.EncodeToString(files.signCertDER),
+				SignPriKeyBase64:  base64.StdEncoding.EncodeToString(files.signPriKey),
+				KMCertDerBase64:   base64.StdEncoding.EncodeToString(files.kmCertDER),
+				KMPriKeyBase64:    base64.StdEncoding.EncodeToString(files.kmPriKey),
+			},
+		}, nil
+	case CertificateSourceKindPKCS12:
+		files, metadata, err := loadPKCS12(bundle.path, string(password))
+		if err != nil {
+			return SignResult{}, err
+		}
+		challengeSignatureBase64, err := signChallengePKCS12(files.signPrivateKey, req.Challenge)
+		if err != nil {
+			return SignResult{}, err
+		}
+
+		businessNo := metadata.BusinessNo
+		if businessNo == "" {
+			businessNo = digitsOnly(req.BusinessNo)
+		}
+
+		return SignResult{
+			CertificateID:            bundle.id,
+			Challenge:                req.Challenge,
+			ChallengeSignatureBase64: challengeSignatureBase64,
+			Bundle: ProofBundle{
+				BusinessNo:        businessNo,
+				CommonName:        metadata.CommonName,
+				SignCertDerBase64: base64.StdEncoding.EncodeToString(files.signCertDER),
+				SignPriKeyBase64:  base64.StdEncoding.EncodeToString(files.signPriKeyDER),
+			},
+		}, nil
+	default:
+		return SignResult{}, ErrCertificateNotFound
+	}
 }
 
 type bundleFiles struct {
@@ -226,6 +283,21 @@ type bundleFiles struct {
 	signPriKey  []byte
 	kmCertDER   []byte
 	kmPriKey    []byte
+}
+
+type pkcs12Files struct {
+	signCertDER    []byte
+	signPriKeyDER  []byte
+	signPrivateKey crypto.Signer
+}
+
+type bundleEntry struct {
+	id        string
+	kind      CertificateSourceKind
+	path      string
+	storage   CertificateStorageKind
+	removable bool
+	aliases   []string
 }
 
 func loadBundle(dir string) (bundleFiles, CertificateMetadata, error) {
@@ -246,7 +318,7 @@ func loadBundle(dir string) (bundleFiles, CertificateMetadata, error) {
 		return bundleFiles{}, CertificateMetadata{}, err
 	}
 
-	metadata, err := metadataFromCertificate(dir, signCertDER)
+	metadata, err := metadataFromCertificate(newBundleEntry(dir), signCertDER)
 	if err != nil {
 		return bundleFiles{}, CertificateMetadata{}, err
 	}
@@ -258,26 +330,77 @@ func loadBundle(dir string) (bundleFiles, CertificateMetadata, error) {
 	}, metadata, nil
 }
 
-func readMetadata(dir string) (CertificateMetadata, error) {
-	signCertDER, err := os.ReadFile(filepath.Join(dir, "signCert.der"))
-	if err != nil {
-		return CertificateMetadata{}, err
+func readMetadata(bundle bundleEntry) (CertificateMetadata, error) {
+	switch bundle.kind {
+	case CertificateSourceKindBundle:
+		signCertDER, err := os.ReadFile(filepath.Join(bundle.path, "signCert.der"))
+		if err != nil {
+			return CertificateMetadata{}, err
+		}
+		return metadataFromCertificate(bundle, signCertDER)
+	case CertificateSourceKindPKCS12:
+		return metadataFromPKCS12(bundle)
+	default:
+		return CertificateMetadata{}, ErrCertificateNotFound
 	}
-	return metadataFromCertificate(dir, signCertDER)
 }
 
-func metadataFromCertificate(dir string, signCertDER []byte) (CertificateMetadata, error) {
+func metadataFromCertificate(bundle bundleEntry, signCertDER []byte) (CertificateMetadata, error) {
 	cert, err := x509.ParseCertificate(signCertDER)
 	if err != nil {
 		return CertificateMetadata{}, fmt.Errorf("parse signCert.der: %w", err)
 	}
 
 	return CertificateMetadata{
-		ID:         dir,
-		CommonName: strings.TrimSpace(cert.Subject.CommonName),
-		BusinessNo: extractBusinessNo(cert),
-		NotAfter:   cert.NotAfter.UTC(),
+		ID:            bundle.id,
+		CommonName:    strings.TrimSpace(cert.Subject.CommonName),
+		BusinessNo:    extractBusinessNo(cert),
+		NotAfter:      cert.NotAfter.UTC(),
+		SourceKind:    CertificateSourceKindBundle,
+		StorageKind:   bundle.storage,
+		DisplayPath:   bundleDisplayPath(bundle.path),
+		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
+		HasKmMaterial: true,
+		Removable:     bundle.removable,
 	}, nil
+}
+
+func metadataFromPKCS12(bundle bundleEntry) (CertificateMetadata, error) {
+	files, cert, _, err := loadPKCS12Source(bundle.path, "")
+	if err != nil {
+		if errors.Is(err, ErrInvalidPassword) {
+			return fallbackPKCS12Metadata(bundle), nil
+		}
+		return CertificateMetadata{}, err
+	}
+	_ = files
+	return CertificateMetadata{
+		ID:            bundle.id,
+		CommonName:    strings.TrimSpace(cert.Subject.CommonName),
+		BusinessNo:    extractBusinessNo(cert),
+		NotAfter:      cert.NotAfter.UTC(),
+		SourceKind:    CertificateSourceKindPKCS12,
+		StorageKind:   CertificateStorageKindPKCS12,
+		DisplayPath:   bundleDisplayPath(bundle.path),
+		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
+		HasKmMaterial: false,
+		Removable:     bundle.removable,
+	}, nil
+}
+
+func fallbackPKCS12Metadata(bundle bundleEntry) CertificateMetadata {
+	return CertificateMetadata{
+		ID:            bundle.id,
+		CommonName:    fallbackPKCS12Label(bundle.path),
+		BusinessNo:    "",
+		NotAfter:      time.Time{},
+		SourceKind:    CertificateSourceKindPKCS12,
+		StorageKind:   CertificateStorageKindPKCS12,
+		DisplayPath:   bundleDisplayPath(bundle.path),
+		IssuerName:    "",
+		HasKmMaterial: false,
+		Removable:     bundle.removable,
+	}
 }
 
 func extractBusinessNo(cert *x509.Certificate) string {
@@ -306,25 +429,33 @@ func normalizeBusinessNoValue(value any) string {
 	return ""
 }
 
-func (s *Service) resolveBundleDir(id string) (string, error) {
+func (s *Service) resolveBundle(id string) (bundleEntry, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", ErrCertificateNotFound
+		return bundleEntry{}, ErrCertificateNotFound
 	}
 	bundles, err := s.discoverBundles()
 	if err != nil {
-		return "", err
+		return bundleEntry{}, err
 	}
-	for _, bundleDir := range bundles {
-		if bundleDir == id {
-			return bundleDir, nil
+	for _, bundle := range bundles {
+		if bundle.id == id || bundle.path == id {
+			return bundle, nil
+		}
+		for _, alias := range bundle.aliases {
+			if alias == id {
+				return bundle, nil
+			}
+		}
+		if canonicalID, _ := canonicalizeBundlePath(id); canonicalID == bundle.path {
+			return bundle, nil
 		}
 	}
-	return "", ErrCertificateNotFound
+	return bundleEntry{}, ErrCertificateNotFound
 }
 
-func (s *Service) discoverBundles() ([]string, error) {
-	dirs := make([]string, 0)
+func (s *Service) discoverBundles() ([]bundleEntry, error) {
+	dirs := make([]bundleEntry, 0)
 	walked := make(map[string]struct{})
 	seenBundles := make(map[string]struct{})
 
@@ -334,7 +465,9 @@ func (s *Service) discoverBundles() ([]string, error) {
 		}
 	}
 
-	slices.Sort(dirs)
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].id < dirs[j].id
+	})
 	return dirs, nil
 }
 
@@ -452,9 +585,19 @@ func (s *Service) runDiscoveredRoots(ctx context.Context) ([]string, bool) {
 	}
 }
 
-func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, seenBundles map[string]struct{}) error {
+func walkBundleRoot(root string, dirs *[]bundleEntry, walked map[string]struct{}, seenBundles map[string]struct{}) error {
 	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
+	if err != nil {
+		return nil
+	}
+	if !info.IsDir() {
+		if isPKCS12FileName(root) {
+			entry := newPKCS12Entry(root)
+			if _, ok := seenBundles[entry.path]; !ok {
+				seenBundles[entry.path] = struct{}{}
+				*dirs = append(*dirs, entry)
+			}
+		}
 		return nil
 	}
 	walkKey := root
@@ -478,12 +621,19 @@ func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, see
 			}
 			info, err := os.Stat(resolved)
 			if err != nil || !info.IsDir() {
+				if err == nil && isPKCS12FileName(resolved) {
+					entry := newPKCS12Entry(path)
+					if _, ok := seenBundles[entry.path]; !ok {
+						seenBundles[entry.path] = struct{}{}
+						*dirs = append(*dirs, entry)
+					}
+				}
 				return nil
 			}
 			if isBundleDirectory(resolved) {
 				if _, ok := seenBundles[resolved]; !ok {
 					seenBundles[resolved] = struct{}{}
-					*dirs = append(*dirs, path)
+					*dirs = append(*dirs, newBundleEntry(path))
 				}
 				return filepath.SkipDir
 			}
@@ -493,6 +643,13 @@ func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, see
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
+			if isPKCS12FileName(path) {
+				entry := newPKCS12Entry(path)
+				if _, ok := seenBundles[entry.path]; !ok {
+					seenBundles[entry.path] = struct{}{}
+					*dirs = append(*dirs, entry)
+				}
+			}
 			return nil
 		}
 		if isBundleDirectory(path) {
@@ -502,7 +659,7 @@ func walkBundleRoot(root string, dirs *[]string, walked map[string]struct{}, see
 			}
 			if _, ok := seenBundles[bundleKey]; !ok {
 				seenBundles[bundleKey] = struct{}{}
-				*dirs = append(*dirs, path)
+				*dirs = append(*dirs, newBundleEntry(path))
 			}
 			return filepath.SkipDir
 		}
@@ -519,6 +676,97 @@ func isBundleDirectory(path string) bool {
 		}
 	}
 	return true
+}
+
+func newBundleEntry(dir string) bundleEntry {
+	cleanDir, alias := canonicalizeBundlePath(dir)
+	storage := storageKindForBundleDir(cleanDir)
+	aliases := make([]string, 0, 1)
+	if alias != "" {
+		aliases = append(aliases, alias)
+	}
+	return bundleEntry{
+		id:        string(CertificateSourceKindBundle) + ":" + cleanDir,
+		kind:      CertificateSourceKindBundle,
+		path:      cleanDir,
+		storage:   storage,
+		removable: pathIsOnRemovableMedia(cleanDir),
+		aliases:   aliases,
+	}
+}
+
+func newPKCS12Entry(path string) bundleEntry {
+	cleanPath, alias := canonicalizeBundlePath(path)
+	aliases := make([]string, 0, 1)
+	if alias != "" {
+		aliases = append(aliases, alias)
+	}
+	return bundleEntry{
+		id:        string(CertificateSourceKindPKCS12) + ":" + cleanPath,
+		kind:      CertificateSourceKindPKCS12,
+		path:      cleanPath,
+		storage:   CertificateStorageKindPKCS12,
+		removable: pathIsOnRemovableMedia(cleanPath),
+		aliases:   aliases,
+	}
+}
+
+func canonicalizeBundlePath(path string) (canonical string, alias string) {
+	cleanPath := filepath.Clean(path)
+	canonical = cleanPath
+	if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
+		canonical = filepath.Clean(resolved)
+	}
+	if canonical != cleanPath {
+		alias = cleanPath
+	}
+	return canonical, alias
+}
+
+func storageKindForBundleDir(dir string) CertificateStorageKind {
+	for _, part := range splitPathParts(filepath.Clean(dir)) {
+		switch strings.ToUpper(part) {
+		case "NPKI":
+			return CertificateStorageKindNPKI
+		case "GPKI":
+			return CertificateStorageKindGPKI
+		}
+	}
+	return CertificateStorageKindUnknown
+}
+
+func bundleDisplayPath(dir string) string {
+	cleanDir := filepath.Clean(dir)
+	parts := splitPathParts(cleanDir)
+	if len(parts) == 0 {
+		return filepath.Base(cleanDir)
+	}
+	for i, part := range parts {
+		switch strings.ToUpper(part) {
+		case "NPKI", "GPKI":
+			return strings.Join(parts[i:], "/")
+		}
+	}
+	return filepath.Base(cleanDir)
+}
+
+func splitPathParts(path string) []string {
+	parts := make([]string, 0)
+	for _, part := range strings.Split(filepath.Clean(path), string(os.PathSeparator)) {
+		if part == "" {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func pathIsOnRemovableMedia(path string) bool {
+	cleanPath := strings.ToLower(filepath.Clean(path))
+	if strings.HasPrefix(cleanPath, "/volumes/") {
+		return true
+	}
+	return windowsPathIsOnRemovableMedia(path)
 }
 
 func normalizeRoots(roots []string) []string {
@@ -561,8 +809,11 @@ func discoverDefaultRoots(ctx context.Context) []string {
 
 func discoverDefaultRootsFor(ctx context.Context, goos string, home string, volumesRoot string) []string {
 	roots := defaultLocalRootsFor(goos, home)
-	if goos == "darwin" {
-		roots = append(roots, discoverMountedNPKIRoots(ctx, volumesRoot)...)
+	switch goos {
+	case "darwin":
+		roots = append(roots, discoverMountedCertificateRoots(ctx, volumesRoot)...)
+	case "windows":
+		roots = append(roots, discoverWindowsDriveNPKIRoots(ctx)...)
 	}
 	return normalizeRoots(roots)
 }
@@ -570,38 +821,43 @@ func discoverDefaultRootsFor(ctx context.Context, goos string, home string, volu
 func defaultLocalRootsFor(goos string, home string) []string {
 	switch goos {
 	case "windows":
-		// 한국 공동인증서가 실제로 배포되는 위치:
-		//   - %USERPROFILE%\AppData\LocalLow\NPKI  (브라우저/낮은 무결성 플러그인)
-		//   - %ProgramFiles%\NPKI                  (64bit 기관 설치기)
-		//   - %ProgramFiles(x86)%\NPKI             (32bit 에뮬레이션 설치기)
-		// <드라이브>:\NPKI 은 AutoDiscover 경로(discoverWindowsDriveNPKIRoots)에서
-		// 현재 mount된 고정/이동식 드라이브만 GetLogicalDrives + GetDriveType 으로
-		// 훑어 추가한다.
 		roots := []string{
+			filepath.Join(home, "NPKI"),
+			filepath.Join(home, "GPKI"),
+			filepath.Join(home, "Documents", "NPKI"),
+			filepath.Join(home, "Documents", "GPKI"),
 			filepath.Join(home, "AppData", "LocalLow", "NPKI"),
+			filepath.Join(home, "AppData", "LocalLow", "GPKI"),
 		}
 		if pf := os.Getenv("ProgramFiles"); pf != "" {
 			roots = append(roots, filepath.Join(pf, "NPKI"))
+			roots = append(roots, filepath.Join(pf, "GPKI"))
 		}
 		if pfx86 := os.Getenv("ProgramFiles(x86)"); pfx86 != "" {
 			roots = append(roots, filepath.Join(pfx86, "NPKI"))
+			roots = append(roots, filepath.Join(pfx86, "GPKI"))
 		}
 		return roots
 	case "darwin":
 		return []string{
 			filepath.Join(home, "NPKI"),
+			filepath.Join(home, "GPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
+			filepath.Join(home, "Documents", "GPKI"),
 			filepath.Join(home, "Library", "Preferences", "NPKI"),
+			filepath.Join(home, "Library", "Preferences", "GPKI"),
 		}
 	default:
 		return []string{
 			filepath.Join(home, "NPKI"),
+			filepath.Join(home, "GPKI"),
 			filepath.Join(home, "Documents", "NPKI"),
+			filepath.Join(home, "Documents", "GPKI"),
 		}
 	}
 }
 
-func discoverMountedNPKIRoots(ctx context.Context, volumesRoot string) []string {
+func discoverMountedCertificateRoots(ctx context.Context, volumesRoot string) []string {
 	if strings.TrimSpace(volumesRoot) == "" {
 		return nil
 	}
@@ -619,15 +875,49 @@ func discoverMountedNPKIRoots(ctx context.Context, volumesRoot string) []string 
 		if err := ctx.Err(); err != nil {
 			return roots
 		}
-		if !entry.IsDir() {
+		mountRoot := filepath.Join(volumesRoot, entry.Name())
+		info, err := os.Stat(mountRoot)
+		if err != nil || !info.IsDir() {
 			continue
 		}
-		npkiRoot := filepath.Join(volumesRoot, entry.Name(), "NPKI")
-		if info, err := os.Stat(npkiRoot); err == nil && info.IsDir() {
-			roots = append(roots, npkiRoot)
+		if mountContainsCertificateSources(mountRoot) {
+			roots = append(roots, mountRoot)
 		}
 	}
 	return roots
+}
+
+func mountContainsCertificateSources(mountRoot string) bool {
+	for _, storageRootName := range []string{"NPKI", "GPKI"} {
+		childRoot := filepath.Join(mountRoot, storageRootName)
+		if info, err := os.Stat(childRoot); err == nil && info.IsDir() {
+			return true
+		}
+	}
+
+	entries, err := readDir(mountRoot)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if isPKCS12FileName(entry.Name()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPKCS12FileName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".p12", ".pfx":
+		return true
+	default:
+		return false
+	}
 }
 
 func splitRootList(value string) []string {
@@ -745,6 +1035,95 @@ func signChallenge(signPriKey []byte, password []byte, challenge string) (string
 		return "", err
 	}
 	return encoded, nil
+}
+
+func loadPKCS12Source(path string, password string) (pkcs12Files, *x509.Certificate, []*x509.Certificate, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return pkcs12Files{}, nil, nil, err
+	}
+	privateKey, cert, chain, err := pkcs12.DecodeChain(data, password)
+	if err != nil {
+		if errors.Is(err, pkcs12.ErrIncorrectPassword) {
+			return pkcs12Files{}, nil, nil, ErrInvalidPassword
+		}
+		return pkcs12Files{}, nil, nil, fmt.Errorf("decode pkcs12: %w", err)
+	}
+	if cert == nil {
+		return pkcs12Files{}, nil, nil, fmt.Errorf("decode pkcs12: certificate missing")
+	}
+	if privateKey == nil {
+		return pkcs12Files{}, nil, nil, fmt.Errorf("decode pkcs12: private key missing")
+	}
+	signer, err := supportedPKCS12Signer(privateKey)
+	if err != nil {
+		return pkcs12Files{}, nil, nil, err
+	}
+	signPriKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return pkcs12Files{}, nil, nil, fmt.Errorf("marshal pkcs12 private key as PKCS#8: %w", err)
+	}
+	return pkcs12Files{
+		signCertDER:    append([]byte(nil), cert.Raw...),
+		signPriKeyDER:  signPriKeyDER,
+		signPrivateKey: signer,
+	}, cert, chain, nil
+}
+
+func supportedPKCS12Signer(privateKey any) (crypto.Signer, error) {
+	switch key := privateKey.(type) {
+	case *rsa.PrivateKey:
+		return key, nil
+	case *ecdsa.PrivateKey:
+		return key, nil
+	default:
+		return nil, fmt.Errorf("decode pkcs12: unsupported private key type %T", privateKey)
+	}
+}
+
+func loadPKCS12(path string, password string) (pkcs12Files, CertificateMetadata, error) {
+	files, cert, _, err := loadPKCS12Source(path, password)
+	if err != nil {
+		return pkcs12Files{}, CertificateMetadata{}, err
+	}
+	metadata := CertificateMetadata{
+		ID:            string(CertificateSourceKindPKCS12) + ":" + canonicalPath(path),
+		CommonName:    strings.TrimSpace(cert.Subject.CommonName),
+		BusinessNo:    extractBusinessNo(cert),
+		NotAfter:      cert.NotAfter.UTC(),
+		SourceKind:    CertificateSourceKindPKCS12,
+		StorageKind:   CertificateStorageKindPKCS12,
+		DisplayPath:   bundleDisplayPath(path),
+		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
+		HasKmMaterial: false,
+	}
+	return files, metadata, nil
+}
+
+func signChallengePKCS12(privateKey crypto.Signer, challenge string) (string, error) {
+	digest := sha256.Sum256([]byte(challenge))
+	signature, err := privateKey.Sign(rand.Reader, digest[:], crypto.SHA256)
+	if err != nil {
+		return "", fmt.Errorf("sign challenge: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(signature), nil
+}
+
+func canonicalPath(path string) string {
+	canonical, _ := canonicalizeBundlePath(path)
+	return canonical
+}
+
+func fallbackPKCS12Label(path string) string {
+	base := filepath.Base(path)
+	if ext := filepath.Ext(base); ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	base = strings.TrimSpace(base)
+	if base == "" || base == "." || base == string(os.PathSeparator) {
+		return filepath.Base(path)
+	}
+	return base
 }
 
 func parseEncryptedPrivateKey(input []byte) (encryptedPrivateKey, error) {

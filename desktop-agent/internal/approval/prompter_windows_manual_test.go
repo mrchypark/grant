@@ -5,7 +5,7 @@ package approval
 import (
 	"testing"
 
-	"github.com/cypark/account/desktop-agent/internal/localization"
+	"desktop-agent/internal/localization"
 )
 
 // go test -tags manual -count=1 ./internal/approval -run TestManualDialog -v

@@ -24,6 +24,13 @@ type Strings struct {
 	CertificateLabel    string
 	PasswordLabel       string
 	PasswordPlaceholder string
+	LocalCertificateSource     string
+	RemovableCertificateSource string
+	NPKICertificateSource      string
+	GPKICertificateSource      string
+	PKCS12CertificateSource    string
+	BundleCertificateSource    string
+	UnknownCertificateName     string
 }
 
 func languageFromTag(tag string) Language {
@@ -60,6 +67,13 @@ func ForLanguage(language Language) Strings {
 			CertificateLabel:    "Certificate",
 			PasswordLabel:       "Password",
 			PasswordPlaceholder: "Certificate password",
+			LocalCertificateSource:     "Local",
+			RemovableCertificateSource: "Removable",
+			NPKICertificateSource:      "NPKI",
+			GPKICertificateSource:      "GPKI",
+			PKCS12CertificateSource:    "PKCS#12",
+			BundleCertificateSource:    "Bundle",
+			UnknownCertificateName:     "(Unnamed certificate)",
 		}
 	default:
 		return Strings{
@@ -77,6 +91,13 @@ func ForLanguage(language Language) Strings {
 			CertificateLabel:    "공동인증서",
 			PasswordLabel:       "비밀번호",
 			PasswordPlaceholder: "공동인증서 비밀번호",
+			LocalCertificateSource:     "로컬",
+			RemovableCertificateSource: "이동식디스크",
+			NPKICertificateSource:      "NPKI",
+			GPKICertificateSource:      "GPKI",
+			PKCS12CertificateSource:    "PKCS#12",
+			BundleCertificateSource:    "인증서 번들",
+			UnknownCertificateName:     "(이름 없음)",
 		}
 	}
 }

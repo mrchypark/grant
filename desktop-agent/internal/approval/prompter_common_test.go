@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cypark/account/desktop-agent/internal/httpapi"
-	"github.com/cypark/account/desktop-agent/internal/npki"
+	"desktop-agent/internal/httpapi"
+	"desktop-agent/internal/npki"
 )
 
 func TestPromptApprovalWaitsForCanceledModalToExitBeforeReleasingSlot(t *testing.T) {
@@ -125,5 +125,61 @@ func approvalPromptFixtureForTest(certificateID string) httpapi.ApprovalPrompt {
 			CommonName: "Test Certificate",
 			BusinessNo: "2768603291",
 		}},
+	}
+}
+
+func TestCertificateOnRemovableMediaDoesNotTreatFixedWindowsPathsAsRemovable(t *testing.T) {
+	if certificateOnRemovableMedia(npki.CertificateMetadata{ID: `bundle:C:\Users\tester\NPKI\cert`}) {
+		t.Fatal("expected fixed Windows path to be treated as local storage")
+	}
+}
+
+func TestCertificateOnRemovableMediaUsesMetadataWhenPresent(t *testing.T) {
+	if !certificateOnRemovableMedia(npki.CertificateMetadata{
+		ID:        `bundle:E:\NPKI\cert`,
+		Removable: true,
+	}) {
+		t.Fatal("expected removable metadata to win over path heuristics")
+	}
+}
+
+func TestPromptApprovalAllowsEmptyPasswordForPKCS12(t *testing.T) {
+	originalShow := showApprovalModal
+	originalRun := runApprovalModal
+	originalReset := resetApprovalModalCancellation
+	originalCancel := requestApprovalModalCancellation
+	defer func() {
+		showApprovalModal = originalShow
+		runApprovalModal = originalRun
+		resetApprovalModalCancellation = originalReset
+		requestApprovalModalCancellation = originalCancel
+	}()
+
+	resetApprovalModalCancellation = func() {}
+	requestApprovalModalCancellation = func() {}
+	showApprovalModal = func(input approvalModalInput) approvalModalOutput {
+		return approvalModalOutput{SelectedIndex: 0, Password: nil, Approved: true}
+	}
+
+	decision, err := NewPrompter().PromptApproval(context.Background(), httpapi.ApprovalPrompt{
+		Origin:         "http://127.0.0.1:4173",
+		Action:         "ephemeral",
+		OrganizationID: "org-1",
+		BusinessNo:     "2768603291",
+		Certificates: []npki.CertificateMetadata{{
+			ID:         "pkcs12:/Volumes/Lexar/protected.p12",
+			CommonName: "Test PKCS12",
+			BusinessNo: "2768603291",
+			SourceKind: npki.CertificateSourceKindPKCS12,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("PromptApproval returned err: %v", err)
+	}
+	if decision.CertificateID != "pkcs12:/Volumes/Lexar/protected.p12" {
+		t.Fatalf("certificateID = %q", decision.CertificateID)
+	}
+	if len(decision.Password) != 0 {
+		t.Fatalf("password = %q, want empty", decision.Password)
 	}
 }

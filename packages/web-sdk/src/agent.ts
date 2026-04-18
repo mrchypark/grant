@@ -3,8 +3,8 @@ export type AgentProofBundle = {
   commonName: string;
   signCertDerBase64: string;
   signPriKeyBase64: string;
-  kmCertDerBase64: string;
-  kmPriKeyBase64: string;
+  kmCertDerBase64?: string;
+  kmPriKeyBase64?: string;
   password?: string;
 };
 

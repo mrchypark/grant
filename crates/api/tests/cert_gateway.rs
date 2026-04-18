@@ -111,11 +111,14 @@ async fn build_app() -> (axum::Router, TempDir, TempDir) {
         .expect("artifact store");
     let service = Arc::new(AppService::new_with_collector(
         cfg,
-        db,
+        db.clone(),
         artifacts,
         mock_collect_snapshot,
     ));
     service.initialize().await.expect("initialize");
+    db.upsert_organization_identity("bootstrap-user", Some("2768603291"), "Bootstrap User")
+        .await
+        .expect("seed bootstrap organization identity");
     (api::build_router(service), db_dir, artifacts_dir)
 }
 
@@ -223,6 +226,36 @@ fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
     )
 }
 
+fn signed_proof_bundle_without_km(challenge_payload: &str) -> (Value, String) {
+    let (bundle, challenge_signature_base64) = signed_proof_bundle(challenge_payload);
+    let mut bundle = bundle.as_object().expect("bundle object").clone();
+    bundle.remove("kmCertDerBase64");
+    bundle.remove("kmPriKeyBase64");
+    (Value::Object(bundle), challenge_signature_base64)
+}
+
+fn signed_proof_bundle_with_empty_km(challenge_payload: &str) -> (Value, String) {
+    let (bundle, challenge_signature_base64) = signed_proof_bundle(challenge_payload);
+    let mut bundle = bundle.as_object().expect("bundle object").clone();
+    bundle.insert("kmCertDerBase64".to_owned(), Value::String(String::new()));
+    bundle.insert("kmPriKeyBase64".to_owned(), Value::String(String::new()));
+    (Value::Object(bundle), challenge_signature_base64)
+}
+
+fn signed_proof_bundle_with_asymmetric_km(
+    challenge_payload: &str,
+    keep_cert: bool,
+) -> (Value, String) {
+    let (bundle, challenge_signature_base64) = signed_proof_bundle(challenge_payload);
+    let mut bundle = bundle.as_object().expect("bundle object").clone();
+    if keep_cert {
+        bundle.remove("kmPriKeyBase64");
+    } else {
+        bundle.remove("kmCertDerBase64");
+    }
+    (Value::Object(bundle), challenge_signature_base64)
+}
+
 fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
     let mut name = X509NameBuilder::new().expect("x509 name");
     name.append_entry_by_text("CN", "Test Certificate")
@@ -310,8 +343,13 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         ))
         .await
         .expect("register response");
-    assert_eq!(register_response.status(), StatusCode::CREATED);
+    let register_status = register_response.status();
     let register_json = json_body(register_response).await;
+    assert_eq!(
+        register_status,
+        StatusCode::CREATED,
+        "register response body: {register_json}"
+    );
     assert_eq!(register_json["organizationId"], "bootstrap-user");
     assert_eq!(register_json["partyId"], "party-2768603291");
     assert_eq!(register_json["commonName"], "Test Certificate");
@@ -627,6 +665,112 @@ async fn stored_registration_requires_challenge_signature() {
         register_json["error"],
         "challengeSignatureBase64 must not be empty"
     );
+}
+
+#[tokio::test]
+async fn stored_registration_accepts_omitted_or_empty_km_material() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    for bundle_builder in [
+        signed_proof_bundle_without_km as fn(&str) -> (Value, String),
+        signed_proof_bundle_with_empty_km as fn(&str) -> (Value, String),
+    ] {
+        let challenge_response = app
+            .clone()
+            .oneshot(auth_request(
+                "POST",
+                "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+                "bootstrap-user",
+                "bootstrap-user",
+                json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            ))
+            .await
+            .expect("challenge response");
+        assert_eq!(challenge_response.status(), StatusCode::CREATED);
+        let challenge_json = json_body(challenge_response).await;
+
+        let (bundle, challenge_signature_base64) = bundle_builder(
+            challenge_json["payload"]
+                .as_str()
+                .expect("challenge payload"),
+        );
+        let register_response = app
+            .clone()
+            .oneshot(auth_request(
+                "POST",
+                "/api/v1/organizations/bootstrap-user/certificates",
+                "bootstrap-user",
+                "bootstrap-user",
+                json!({
+                    "challengeId": challenge_json["challengeId"],
+                    "challengePayload": challenge_json["payload"],
+                    "challengeSignatureBase64": challenge_signature_base64,
+                    "bundle": bundle
+                }),
+            ))
+            .await
+            .expect("register response");
+        let register_status = register_response.status();
+        let register_json = json_body(register_response).await;
+        assert_eq!(
+            register_status,
+            StatusCode::CREATED,
+            "register response body: {register_json}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stored_registration_rejects_asymmetric_km_material() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    for keep_cert in [true, false] {
+        let challenge_response = app
+            .clone()
+            .oneshot(auth_request(
+                "POST",
+                "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+                "bootstrap-user",
+                "bootstrap-user",
+                json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            ))
+            .await
+            .expect("challenge response");
+        assert_eq!(challenge_response.status(), StatusCode::CREATED);
+        let challenge_json = json_body(challenge_response).await;
+
+        let (bundle, challenge_signature_base64) = signed_proof_bundle_with_asymmetric_km(
+            challenge_json["payload"]
+                .as_str()
+                .expect("challenge payload"),
+            keep_cert,
+        );
+        let register_response = app
+            .clone()
+            .oneshot(auth_request(
+                "POST",
+                "/api/v1/organizations/bootstrap-user/certificates",
+                "bootstrap-user",
+                "bootstrap-user",
+                json!({
+                    "challengeId": challenge_json["challengeId"],
+                    "challengePayload": challenge_json["payload"],
+                    "challengeSignatureBase64": challenge_signature_base64,
+                    "bundle": bundle
+                }),
+            ))
+            .await
+            .expect("register response");
+        assert_eq!(register_response.status(), StatusCode::BAD_REQUEST);
+        let register_json = json_body(register_response).await;
+        assert!(
+            register_json["error"]
+                .as_str()
+                .expect("error string")
+                .contains("kmCertDerBase64 and kmPriKeyBase64"),
+            "register response body: {register_json}"
+        );
+    }
 }
 
 #[tokio::test]

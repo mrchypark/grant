@@ -26,7 +26,7 @@ type BrowserChallengeProof struct {
 }
 
 func InspectCertificate(signCertDER []byte) (CertificateMetadata, error) {
-	return metadataFromCertificate("", signCertDER)
+	return metadataFromCertificate(bundleEntry{}, signCertDER)
 }
 
 func PrepareBrowserBundle(input BrowserBundleInput) (ProofBundle, error) {

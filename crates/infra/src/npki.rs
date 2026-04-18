@@ -25,8 +25,8 @@ const OID_NPKI_SEED_CBC_WITH_SHA1: &[u64] = &[1, 2, 410, 200004, 1, 15];
 pub struct NpkiBundle {
     pub sign_cert_der: Vec<u8>,
     pub sign_pri_key: Vec<u8>,
-    pub km_cert_der: Vec<u8>,
-    pub km_pri_key: Vec<u8>,
+    pub km_cert_der: Option<Vec<u8>>,
+    pub km_pri_key: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -44,10 +44,14 @@ impl NpkiBundle {
                 .with_context(|| format!("read {}", path.join("signCert.der").display()))?,
             sign_pri_key: std::fs::read(path.join("signPri.key"))
                 .with_context(|| format!("read {}", path.join("signPri.key").display()))?,
-            km_cert_der: std::fs::read(path.join("kmCert.der"))
-                .with_context(|| format!("read {}", path.join("kmCert.der").display()))?,
-            km_pri_key: std::fs::read(path.join("kmPri.key"))
-                .with_context(|| format!("read {}", path.join("kmPri.key").display()))?,
+            km_cert_der: Some(
+                std::fs::read(path.join("kmCert.der"))
+                    .with_context(|| format!("read {}", path.join("kmCert.der").display()))?,
+            ),
+            km_pri_key: Some(
+                std::fs::read(path.join("kmPri.key"))
+                    .with_context(|| format!("read {}", path.join("kmPri.key").display()))?,
+            ),
         })
     }
 }
@@ -170,13 +174,17 @@ pub fn validate_certificate_bundle(bundle: &CertificateBundle) -> Result<()> {
         "signCert.der",
         "signPri.key",
     )?;
-    validate_key_pair(
-        &bundle.km_cert_der,
-        &bundle.km_pri_key,
-        &bundle.password,
-        "kmCert.der",
-        "kmPri.key",
-    )?;
+    match (&bundle.km_cert_der, &bundle.km_pri_key) {
+        (Some(km_cert_der), Some(km_pri_key)) => validate_key_pair(
+            km_cert_der,
+            km_pri_key,
+            &bundle.password,
+            "kmCert.der",
+            "kmPri.key",
+        )?,
+        (None, None) => {}
+        _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
+    }
     Ok(())
 }
 
@@ -343,7 +351,6 @@ fn validate_key_pair(
     }
     Ok(())
 }
-
 fn extract_vid_random(plain_der: &[u8]) -> Result<Vec<u8>> {
     let blocks = from_der(plain_der).context("parse plain private key for vidRandom")?;
     let sequence = expect_single_sequence(&blocks, "plain private key")?;

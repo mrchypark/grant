@@ -415,8 +415,8 @@ impl AppService {
             common_name: common_name.clone(),
             sign_cert_der,
             sign_pri_key,
-            km_cert_der,
-            km_pri_key,
+            km_cert_der: Some(km_cert_der),
+            km_pri_key: Some(km_pri_key),
         };
         self.store_certificate_bundle(&organization_id, bundle)
             .await
