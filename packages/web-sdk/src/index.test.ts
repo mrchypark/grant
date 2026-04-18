@@ -100,6 +100,38 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
   }
 });
 
+test("createChallenge() allows IPv6 loopback gateway URLs over http", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        challengeId: "challenge-ipv6",
+        mode: "stored",
+        nonce: "nonce-ipv6",
+        payload: "payload-ipv6",
+        expiresAt: "2026-04-09T00:00:00Z",
+      }, 201),
+  ]);
+
+  try {
+    const sdk = new WebSdk({
+      gatewayBaseUrl: "http://[::1]:4173",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    const challenge = await sdk.createChallenge("org-1", {
+      mode: "stored",
+    });
+
+    assert.equal(challenge.challengeId, "challenge-ipv6");
+    assert.equal(
+      String(mock.calls[0].input),
+      "http://[::1]:4173/api/v1/organizations/org-1/cert-gateway/challenges",
+    );
+  } finally {
+    mock.restore();
+  }
+});
+
 test("assertAvailable() checks agent health", async () => {
   const mock = installFetchMock([
     () => textResponse("ok"),

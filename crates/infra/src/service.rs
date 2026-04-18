@@ -7,7 +7,8 @@ use crate::{
     config::{AppConfig, ReadConsistency},
     crypto::{
         CertificateBundle, decode_base64, decrypt_bundle_with_key, encrypt_bundle_with_key,
-        extract_common_name, generate_data_encryption_key, normalize_business_no,
+        extract_business_no, extract_common_name, generate_data_encryption_key,
+        normalize_business_no,
     },
     database::{
         Database, DatabaseLookupError, PersistedDocument, PlantSummary, StoredCertificate,
@@ -400,25 +401,28 @@ impl AppService {
 
     pub async fn put_certificate(&self, input: PutCertificateInput) -> Result<StoredCertificate> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
-        let business_no = self
-            .resolve_organization_business_no(&organization_id, input.business_no.as_deref())
-            .await?;
         let sign_cert_der = decode_base64(&input.sign_cert_der_b64)?;
         let sign_pri_key = decode_base64(&input.sign_pri_key_b64)?;
         let km_cert_der = decode_base64(&input.km_cert_der_b64)?;
         let km_pri_key = decode_base64(&input.km_pri_key_b64)?;
-        let common_name = extract_common_name(&sign_cert_der)?;
-
-        let bundle = CertificateBundle {
-            business_no: business_no.clone(),
+        let mut bundle = CertificateBundle {
+            business_no: String::new(),
             password: input.password,
-            common_name: common_name.clone(),
+            common_name: String::new(),
             sign_cert_der,
             sign_pri_key,
             km_cert_der: Some(km_cert_der),
             km_pri_key: Some(km_pri_key),
         };
-        self.store_certificate_bundle(&organization_id, bundle)
+        let business_no = self
+            .validate_bundle_for_organization(
+                &organization_id,
+                input.business_no.as_deref(),
+                &bundle,
+            )
+            .await?;
+        bundle.business_no = business_no.clone();
+        self.store_certificate_bundle(&organization_id, business_no, bundle)
             .await
     }
 
@@ -464,7 +468,9 @@ impl AppService {
         input: RegisterCertificateFromProofInput,
     ) -> Result<StoredCertificate> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
-        validate_certificate_bundle(&input.bundle)?;
+        let business_no = self
+            .validate_bundle_for_organization(&organization_id, None, &input.bundle)
+            .await?;
         self.consume_valid_challenge(
             &input.challenge_id,
             &input.challenge_payload,
@@ -474,7 +480,7 @@ impl AppService {
             &organization_id,
         )
         .await?;
-        self.store_certificate_bundle(&organization_id, input.bundle)
+        self.store_certificate_bundle(&organization_id, business_no, input.bundle)
             .await
     }
 
@@ -507,7 +513,9 @@ impl AppService {
         input: ExecuteEphemeralCrawlInput,
     ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
-        validate_certificate_bundle(&input.bundle)?;
+        let business_no = self
+            .validate_bundle_for_organization(&organization_id, None, &input.bundle)
+            .await?;
         self.consume_valid_challenge(
             &input.challenge_id,
             &input.challenge_payload,
@@ -517,9 +525,6 @@ impl AppService {
             &organization_id,
         )
         .await?;
-        let business_no = self
-            .resolve_organization_business_no(&organization_id, None)
-            .await?;
 
         self.run_sync_with_bundle(
             &organization_id,
@@ -1744,15 +1749,30 @@ impl AppService {
         )?)
     }
 
+    async fn validate_bundle_for_organization(
+        &self,
+        organization_id: &str,
+        requested_business_no: Option<&str>,
+        bundle: &CertificateBundle,
+    ) -> Result<String> {
+        let business_no = self
+            .resolve_organization_business_no(organization_id, requested_business_no)
+            .await?;
+        if let Some(cert_business_no) = extract_business_no(&bundle.sign_cert_der)? {
+            if cert_business_no != business_no {
+                return Err(bad_request_error("certificate business number mismatch"));
+            }
+        }
+        validate_certificate_bundle(bundle)?;
+        Ok(business_no)
+    }
+
     async fn store_certificate_bundle(
         &self,
         organization_id: &str,
+        business_no: String,
         mut bundle: CertificateBundle,
     ) -> Result<StoredCertificate> {
-        validate_certificate_bundle(&bundle)?;
-        let business_no = self
-            .resolve_organization_business_no(organization_id, None)
-            .await?;
         let common_name = extract_common_name(&bundle.sign_cert_der)?;
         bundle.business_no = business_no.clone();
         bundle.common_name = common_name.clone();

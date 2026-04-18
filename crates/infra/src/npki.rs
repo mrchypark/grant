@@ -231,7 +231,12 @@ impl SensitiveBytes {
 
 impl Drop for SensitiveBytes {
     fn drop(&mut self) {
-        self.0.fill(0);
+        for byte in &mut self.0 {
+            // Use volatile writes so the compiler cannot elide clearing
+            // sensitive buffers that are about to be dropped.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -314,7 +319,7 @@ fn parse_direct_private_key(der: &[u8]) -> Result<PKey<Private>> {
 
 fn validate_key_pair(
     cert_der: &[u8],
-    encrypted_private_key: &[u8],
+    private_key_der: &[u8],
     password: &str,
     cert_name: &str,
     key_name: &str,
@@ -324,22 +329,23 @@ fn validate_key_pair(
     let certificate_public_key = certificate
         .public_key()
         .with_context(|| format!("extract public key from {cert_name}"))?;
-    let encrypted = parse_encrypted_private_key(encrypted_private_key)
-        .with_context(|| format!("parse {key_name}"))?;
-    let (key, iv) = derive_npki_decryption_key(
-        &encrypted.algorithm,
-        &encrypted.salt,
-        encrypted.iteration,
-        password.as_bytes(),
-    )?;
-    let key = SensitiveBytes::new(key);
-    let iv = SensitiveBytes::new(iv);
-    let plain_der = SensitiveBytes::new(
-        seed_cbc_decrypt(key.as_slice(), iv.as_slice(), &encrypted.cipher_text)
-            .with_context(|| format!("decrypt {key_name}"))?,
-    );
-    let private_key =
-        parse_private_key(plain_der.as_slice()).with_context(|| format!("parse {key_name}"))?;
+    let private_key = if let Ok(encrypted) = parse_encrypted_private_key(private_key_der) {
+        let (key, iv) = derive_npki_decryption_key(
+            &encrypted.algorithm,
+            &encrypted.salt,
+            encrypted.iteration,
+            password.as_bytes(),
+        )?;
+        let key = SensitiveBytes::new(key);
+        let iv = SensitiveBytes::new(iv);
+        let plain_der = SensitiveBytes::new(
+            seed_cbc_decrypt(key.as_slice(), iv.as_slice(), &encrypted.cipher_text)
+                .with_context(|| format!("decrypt {key_name}"))?,
+        );
+        parse_private_key(plain_der.as_slice()).with_context(|| format!("parse {key_name}"))?
+    } else {
+        parse_direct_private_key(private_key_der).with_context(|| format!("parse {key_name}"))?
+    };
     let private_public_key = private_key
         .public_key_to_der()
         .with_context(|| format!("extract public key from {key_name}"))?;
