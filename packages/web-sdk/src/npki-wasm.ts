@@ -400,9 +400,9 @@ function encodePassword(password: string): Uint8Array {
   return new TextEncoder().encode(password);
 }
 
-function zeroSecretBuffers(...buffers: Uint8Array[]): void {
+function zeroSecretBuffers(...buffers: Array<Uint8Array | null | undefined>): void {
   for (const buffer of buffers) {
-    buffer.fill(0);
+    buffer?.fill(0);
   }
 }
 
@@ -452,7 +452,9 @@ function loadBrowserScript(url: URL): Promise<void> {
       resolve();
     };
 
-    const found = document.querySelector<HTMLScriptElement>(`script[data-certd-wasm-runtime="${key}"]`);
+    const found = Array.from(document.scripts).find(
+      (script) => script.dataset.certdWasmRuntime === key,
+    ) as HTMLScriptElement | undefined;
     if (found) {
       if (globalThis.Go) {
         resolveLoad();
