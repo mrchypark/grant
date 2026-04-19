@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const goBin = process.env.GO ?? "go";
 const goToolchain = process.env.GOTOOLCHAIN ?? "auto";
 const garbleVersion = process.env.GARBLE_VERSION ?? "v0.16.0";
 const garbleEnabled =
@@ -16,18 +17,19 @@ const workspaceDir = resolve(packageDir, "..", "..");
 const desktopAgentDir = join(workspaceDir, "desktop-agent");
 const generatedDir = join(packageDir, "src", "generated");
 const wasmOutput = join(generatedDir, "npki_signer.wasm");
-const goroot = execFileSync("go", ["env", "GOROOT"], {
+const goroot = execFileSync(goBin, ["env", "GOROOT"], {
   cwd: desktopAgentDir,
+  env: { ...process.env, GOTOOLCHAIN: goToolchain },
   encoding: "utf8",
 }).trim();
 
 mkdirSync(generatedDir, { recursive: true });
 
-let buildCommand = "go";
+let buildCommand = goBin;
 let buildArgs = ["build"];
 
 if (garbleEnabled) {
-  const [hostGoos, hostGoarch] = execFileSync("go", ["env", "GOHOSTOS", "GOHOSTARCH"], {
+  const [hostGoos, hostGoarch] = execFileSync(goBin, ["env", "GOHOSTOS", "GOHOSTARCH"], {
     cwd: desktopAgentDir,
     env: { ...process.env, GOTOOLCHAIN: goToolchain },
     encoding: "utf8",
@@ -44,7 +46,7 @@ if (garbleEnabled) {
 
   if (!existsSync(garbleBin)) {
     mkdirSync(dirname(garbleBin), { recursive: true });
-    execFileSync("go", ["install", `mvdan.cc/garble@${garbleVersion}`], {
+    execFileSync(goBin, ["install", `mvdan.cc/garble@${garbleVersion}`], {
       cwd: desktopAgentDir,
       env: {
         ...process.env,
