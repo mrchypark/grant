@@ -16,16 +16,6 @@ const workspaceDir = resolve(packageDir, "..", "..");
 const desktopAgentDir = join(workspaceDir, "desktop-agent");
 const generatedDir = join(packageDir, "src", "generated");
 const wasmOutput = join(generatedDir, "npki_signer.wasm");
-const hostGoos = execFileSync("go", ["env", "GOHOSTOS"], {
-  cwd: desktopAgentDir,
-  encoding: "utf8",
-}).trim();
-const garbleBin = join(
-  desktopAgentDir,
-  ".bin",
-  garbleVersion,
-  hostGoos === "windows" ? "garble.exe" : "garble",
-);
 const goroot = execFileSync("go", ["env", "GOROOT"], {
   cwd: desktopAgentDir,
   encoding: "utf8",
@@ -33,23 +23,42 @@ const goroot = execFileSync("go", ["env", "GOROOT"], {
 
 mkdirSync(generatedDir, { recursive: true });
 
-if (garbleEnabled && !existsSync(garbleBin)) {
-  mkdirSync(dirname(garbleBin), { recursive: true });
-  execFileSync("go", ["install", `mvdan.cc/garble@${garbleVersion}`], {
-    cwd: desktopAgentDir,
-    env: {
-      ...process.env,
-      GOBIN: dirname(garbleBin),
-      GOTOOLCHAIN: goToolchain,
-      GOOS: "",
-      GOARCH: "",
-    },
-    stdio: "inherit",
-  });
-}
+let buildCommand = "go";
+let buildArgs = ["build"];
 
-const buildCommand = garbleEnabled ? garbleBin : "go";
-const buildArgs = garbleEnabled ? [...garbleFlags, "build"] : ["build"];
+if (garbleEnabled) {
+  const [hostGoos, hostGoarch] = execFileSync("go", ["env", "GOHOSTOS", "GOHOSTARCH"], {
+    cwd: desktopAgentDir,
+    encoding: "utf8",
+  })
+    .trim()
+    .split(/\s+/);
+  const garbleBin = join(
+    desktopAgentDir,
+    ".bin",
+    `${hostGoos}-${hostGoarch}`,
+    garbleVersion,
+    hostGoos === "windows" ? "garble.exe" : "garble",
+  );
+
+  if (!existsSync(garbleBin)) {
+    mkdirSync(dirname(garbleBin), { recursive: true });
+    execFileSync("go", ["install", `mvdan.cc/garble@${garbleVersion}`], {
+      cwd: desktopAgentDir,
+      env: {
+        ...process.env,
+        GOBIN: dirname(garbleBin),
+        GOTOOLCHAIN: goToolchain,
+        GOOS: "",
+        GOARCH: "",
+      },
+      stdio: "inherit",
+    });
+  }
+
+  buildCommand = garbleBin;
+  buildArgs = [...garbleFlags, "build"];
+}
 
 execFileSync(buildCommand, [...buildArgs, "-o", wasmOutput, "./cmd/npki-wasm"], {
   cwd: desktopAgentDir,

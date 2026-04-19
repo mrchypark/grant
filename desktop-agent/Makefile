@@ -2,13 +2,14 @@ GO      ?= go
 GOOS    ?= $(shell $(GO) env GOOS)
 GOARCH  ?= $(shell $(GO) env GOARCH)
 GOHOSTOS ?= $(shell $(GO) env GOHOSTOS)
+GOHOSTARCH ?= $(shell $(GO) env GOHOSTARCH)
 GOTOOLCHAIN ?= auto
 BIN_DIR := dist
 PKG     := ./cmd/desktop-agent
 GARBLE_VERSION ?= v0.16.0
 GARBLE_ENABLED ?= 1
 GARBLE_FLAGS ?= -literals
-GARBLE_BIN_DIR := $(CURDIR)/.bin/$(GARBLE_VERSION)
+GARBLE_BIN_DIR := $(CURDIR)/.bin/$(GOHOSTOS)-$(GOHOSTARCH)/$(GARBLE_VERSION)
 
 ifeq ($(GOHOSTOS),windows)
   GARBLE_BIN := $(GARBLE_BIN_DIR)/garble.exe
