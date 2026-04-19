@@ -80,7 +80,7 @@ export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
   - `%ProgramFiles(x86)%\\NPKI`, `%ProgramFiles(x86)%\\GPKI` (32bit 에뮬레이션 설치기)
   - Windows AutoDiscover는 현재 mount된 고정/이동식 드라이브를 `GetLogicalDrives` + `GetDriveType` 으로 훑어 `<드라이브>:\\NPKI`, `<드라이브>:\\GPKI`, 그리고 드라이브 루트의 `.p12/.pfx` 파일 경로를 직접 추가한다. CD-ROM/네트워크 드라이브는 hang 방지를 위해 제외한다.
 
-macOS와 Windows desktop agent 모두 tray 앱으로 상주 실행된다 (macOS 메뉴바, Windows 시스템 트레이). tray 없는 headless 실행 모드는 더 이상 지원하지 않는다. 표시 문자열은 [`internal/localization`](../desktop-agent/internal/localization/) 의 `ko`/`en` 카피를 사용한다. 트레이 아이콘은 [`desktop-agent/assets/`](../desktop-agent/assets/) 패키지의 `tray-icon.png`(macOS)/`tray-icon.ico`(Windows) 로 각 플랫폼별로 번들한다. Windows 빌드는 `-H=windowsgui` 링커 플래그로 콘솔 없이 실행되며 로컬에서는 `make build`, CI는 [`.github/workflows/desktop-agent.yml`](../.github/workflows/desktop-agent.yml) 의 ubuntu/macos/windows 매트릭스에서 자동 빌드한다.
+macOS와 Windows desktop agent 모두 tray 앱으로 상주 실행된다 (macOS 메뉴바, Windows 시스템 트레이). tray 없는 headless 실행 모드는 더 이상 지원하지 않는다. 표시 문자열은 [`internal/localization`](../desktop-agent/internal/localization/) 의 `ko`/`en` 카피를 사용한다. 트레이 아이콘은 [`desktop-agent/assets/`](../desktop-agent/assets/) 패키지의 `tray-icon.png`(macOS)/`tray-icon.ico`(Windows) 로 각 플랫폼별로 번들한다. Windows 빌드는 `-H=windowsgui` 링커 플래그로 콘솔 없이 실행되며 로컬과 CI 모두 host용 `mvdan.cc/garble@v0.16.0` 바이너리를 부트스트랩한 뒤 `-literals` 난독화를 적용하는 `make build` 경로를 사용한다. `garble` 최신 버전은 Go 1.26.2 이상이 필요하므로 빌드 시 `GOTOOLCHAIN=auto`를 기본 사용한다. panic/stack trace가 필요한 디버깅 세션은 `make build-plain` 또는 `GARBLE_ENABLED=0 make build`로 평문 빌드로 전환한다.
 
 USB에 인증서가 있을 때는 USB 루트를 직접 지정하면 된다.
 
@@ -423,7 +423,7 @@ const run = await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
 
 브라우저 보안 제약 때문에 OS 인증서 저장소 자동 탐색은 여전히 불가능하고, 파일 선택은 사용자가 직접 해야 한다.
 
-배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다. WASM asset은 same-origin `https:` 또는 loopback `http:`에서만 로드되고, gateway URL도 `https:` 또는 loopback `http:`만 허용한다. 즉 CDN이나 별도 static domain에서 `wasm_exec.js` / `npki_signer.wasm`만 cross-origin으로 서빙하는 구성은 기본 정책상 허용되지 않는다. 배포는 gateway 페이지와 같은 origin, 또는 로컬 loopback origin 기준으로 맞춰야 한다.
+배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다. `packages/web-sdk`의 `npm run build:wasm`은 host용 `mvdan.cc/garble@v0.16.0` 바이너리를 먼저 설치한 뒤 `garble -literals build`로 난독화된 wasm을 생성하고, 디버깅이 필요하면 `npm run build:wasm:plain` 또는 `GARBLE_ENABLED=0 npm run build:wasm`으로 평문 wasm을 만들 수 있다. 이 경로도 동일하게 `GOTOOLCHAIN=auto`를 기본 사용한다. WASM asset은 same-origin `https:` 또는 loopback `http:`에서만 로드되고, gateway URL도 `https:` 또는 loopback `http:`만 허용한다. 즉 CDN이나 별도 static domain에서 `wasm_exec.js` / `npki_signer.wasm`만 cross-origin으로 서빙하는 구성은 기본 정책상 허용되지 않는다. 배포는 gateway 페이지와 같은 origin, 또는 로컬 loopback origin 기준으로 맞춰야 한다.
 
 브라우저 signer helper는 `signPri.key`, `kmPri.key`, 비밀번호 바이트를 사용 후 메모리에서 즉시 zeroing한다. 같은 `Uint8Array`를 호출 뒤에 재사용하려면 caller가 별도 복사본을 만들어 넘겨야 한다. 비밀번호는 opaque secret으로 취급하므로 leading/trailing whitespace도 그대로 보존한다.
 
@@ -455,7 +455,7 @@ Go desktop agent 빌드:
 ```bash
 export PATH=/opt/homebrew/bin:$PATH
 cd desktop-agent
-go build -o ./bin/desktop-agent ./cmd/desktop-agent
+make build
 ```
 
 USB 인증서를 직접 읽도록 agent 실행:
@@ -464,7 +464,7 @@ USB 인증서를 직접 읽도록 agent 실행:
 export DESKTOP_AGENT_ADDR=127.0.0.1:8765
 export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI:/Volumes/Lexar/GPKI"
 export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
-./bin/desktop-agent
+./dist/desktop-agent-$(go env GOOS)-$(go env GOARCH)$(go env GOEXE)
 ```
 
 기본 확인:

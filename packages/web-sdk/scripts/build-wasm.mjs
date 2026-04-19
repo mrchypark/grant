@@ -3,23 +3,79 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const goBin = process.env.GO ?? "go";
+const goToolchain = process.env.GOTOOLCHAIN ?? "auto";
+// Keep this version in sync with desktop-agent/Makefile.
+const garbleVersion = process.env.GARBLE_VERSION ?? "v0.16.0";
+const garbleEnabled =
+  process.env.GARBLE_ENABLED !== "0" && !process.argv.includes("--plain");
+const garbleFlags = (process.env.GARBLE_FLAGS ?? "-literals")
+  .split(/\s+/)
+  .filter(Boolean);
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const packageDir = resolve(scriptDir, "..");
 const workspaceDir = resolve(packageDir, "..", "..");
 const desktopAgentDir = join(workspaceDir, "desktop-agent");
 const generatedDir = join(packageDir, "src", "generated");
 const wasmOutput = join(generatedDir, "npki_signer.wasm");
-const goroot = execFileSync("go", ["env", "GOROOT"], {
-  cwd: desktopAgentDir,
-  encoding: "utf8",
-}).trim();
+
+function readGoEnv(...keys) {
+  try {
+    return execFileSync(goBin, ["env", ...keys], {
+      cwd: desktopAgentDir,
+      env: { ...process.env, GOTOOLCHAIN: goToolchain },
+      encoding: "utf8",
+    }).trim();
+  } catch (error) {
+    throw new Error(`failed to read go env ${keys.join(" ")}`, { cause: error });
+  }
+}
+
+const goroot = readGoEnv("GOROOT");
+const goToolPath = `${join(goroot, "bin")}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`;
 
 mkdirSync(generatedDir, { recursive: true });
 
-execFileSync("go", ["build", "-o", wasmOutput, "./cmd/npki-wasm"], {
+let buildCommand = goBin;
+let buildArgs = ["build"];
+
+if (garbleEnabled) {
+  const [hostGoos, hostGoarch] = readGoEnv("GOHOSTOS", "GOHOSTARCH")
+    .split(/\r?\n/)
+    .map((value) => value.trim());
+  const garbleBin = join(
+    desktopAgentDir,
+    ".bin",
+    `${hostGoos}-${hostGoarch}`,
+    garbleVersion,
+    hostGoos === "windows" ? "garble.exe" : "garble",
+  );
+
+  if (!existsSync(garbleBin)) {
+    mkdirSync(dirname(garbleBin), { recursive: true });
+    execFileSync(goBin, ["install", `mvdan.cc/garble@${garbleVersion}`], {
+      cwd: desktopAgentDir,
+      env: {
+        ...process.env,
+        GOBIN: dirname(garbleBin),
+        GOTOOLCHAIN: goToolchain,
+        GOOS: "",
+        GOARCH: "",
+      },
+      stdio: "inherit",
+    });
+  }
+
+  buildCommand = garbleBin;
+  buildArgs = [...garbleFlags, "build"];
+}
+
+execFileSync(buildCommand, [...buildArgs, "-o", wasmOutput, "./cmd/npki-wasm"], {
   cwd: desktopAgentDir,
   env: {
     ...process.env,
+    GOTOOLCHAIN: goToolchain,
+    PATH: goToolPath,
     GOOS: "js",
     GOARCH: "wasm",
   },
