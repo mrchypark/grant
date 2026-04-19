@@ -36,13 +36,13 @@ export async function prepareHtml5ChallengeProof(
     ...bytes,
     businessNo: input.businessNo,
     commonName: input.commonName,
-    password: input.password.trim(),
+    password: input.password,
     challengePayload,
   });
 
   return {
     selection,
-    bundle: { ...proof.bundle, password: input.password.trim() },
+    bundle: { ...proof.bundle, password: input.password },
     challengeSignatureBase64: proof.challengeSignatureBase64,
   };
 }
@@ -57,7 +57,7 @@ export async function prepareHtml5SignedChallengeProof(
   const metadata = await inspectCertificateWithWasm(bytes.signCertDer);
   const challengeSignatureBase64 = await signChallengeWithWasm(
     bytes.signPriKey,
-    input.password.trim(),
+    input.password,
     challengePayload,
   );
 

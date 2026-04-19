@@ -5,6 +5,7 @@ const DEFAULT_WASM_EXEC_FILE = "wasm_exec.js";
 const READY_POLL_INTERVAL_MS = 10;
 const READY_TIMEOUT_MS = 5_000;
 const EXPORT_NAME_KEY = "__CERTD_WEB_SDK_NPKI_WASM_EXPORT_NAME__";
+const GLOBAL_INIT_LOCK_KEY = "__CERTD_WEB_SDK_NPKI_WASM_INIT_LOCK__";
 
 type WasmEnvelope = {
   ok?: boolean;
@@ -173,6 +174,28 @@ function parseEnvelope<T>(response: WasmEnvelope): T {
   return JSON.parse(response.result) as T;
 }
 
+async function withGlobalWasmInitLock<T>(fn: () => Promise<T>): Promise<T> {
+  const state = globalThis as Record<string, unknown>;
+  const previous = (state[GLOBAL_INIT_LOCK_KEY] as Promise<void> | undefined) ?? Promise.resolve();
+  let release: (() => void) | null = null;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  state[GLOBAL_INIT_LOCK_KEY] = previous.then(() => current);
+  await previous;
+  state[GLOBAL_INIT_LOCK_KEY] = current;
+
+  try {
+    return await fn();
+  } finally {
+    release?.();
+    if (state[GLOBAL_INIT_LOCK_KEY] === current) {
+      delete state[GLOBAL_INIT_LOCK_KEY];
+    }
+  }
+}
+
 async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
   if (wasmApi) {
     return wasmApi;
@@ -183,20 +206,22 @@ async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
 
   apiReady = (async () => {
     await ensureGoRuntime();
-    const exportName = createWasmExportName();
-    (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY] = exportName;
+    return withGlobalWasmInitLock(async () => {
+      const exportName = createWasmExportName();
+      (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY] = exportName;
 
-    try {
-      const wasmUrl = resolveAssetUrl("wasmUrl", DEFAULT_WASM_FILE);
-      const go = new globalThis.Go!();
-      const result = await instantiateWasmModule(wasmUrl, go.importObject);
-      wasmRunPromise = go.run(result.instance);
-      wasmApi = await waitForApi(exportName);
-      return wasmApi;
-    } finally {
-      delete (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY];
-      delete (globalThis as Record<string, unknown>)[exportName];
-    }
+      try {
+        const wasmUrl = resolveAssetUrl("wasmUrl", DEFAULT_WASM_FILE);
+        const go = new globalThis.Go!();
+        const result = await instantiateWasmModule(wasmUrl, go.importObject);
+        wasmRunPromise = go.run(result.instance);
+        wasmApi = await waitForApi(exportName);
+        return wasmApi;
+      } finally {
+        delete (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY];
+        delete (globalThis as Record<string, unknown>)[exportName];
+      }
+    });
   })().catch((error) => {
     apiReady = null;
     wasmRunPromise = null;

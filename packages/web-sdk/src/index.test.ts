@@ -669,7 +669,7 @@ test("prepareHtml5CertificateBundle() derives certificate identity from signCert
   });
   assert.equal(prepared.bundle.businessNo, "2768603291");
   assert.equal(prepared.bundle.commonName, "Fixture Certificate");
-  assert.equal(prepared.bundle.password, "secret-password");
+  assert.equal(prepared.bundle.password, " secret-password ");
   assert.equal(prepared.bundle.signCertDerBase64, FIXTURE_SIGN_CERT_DER_BASE64);
   assert.equal(prepared.bundle.signPriKeyBase64, "U0s=");
   assert.equal(prepared.bundle.kmCertDerBase64, "S0M=");
@@ -725,6 +725,27 @@ test("prepareHtml5ChallengeProof() decrypts signPri.key and signs the gateway ch
   assert.equal(proof.bundle.commonName, "Fixture Certificate");
   assert.equal(proof.bundle.businessNo, "2768603291");
   assert.equal(proof.challengeSignatureBase64, FIXTURE_SIGNATURE_BASE64);
+});
+
+test("prepareHtml5ChallengeProof() preserves password whitespace", async () => {
+  await assert.rejects(
+    () =>
+      prepareHtml5ChallengeProof(
+        "cert-gateway:test",
+        [
+          fileWithBytes("signCert.der", base64Bytes(FIXTURE_SIGN_CERT_DER_BASE64)),
+          fileWithBytes("signPri.key", base64Bytes(FIXTURE_SIGN_PRI_BASE64)),
+          fileWithBytes("kmCert.der", Uint8Array.of(4, 5, 6)),
+          fileWithBytes("kmPri.key", Uint8Array.of(7, 8, 9)),
+        ],
+        {
+          commonName: "Caller Provided Name",
+          businessNo: "1111111111",
+          password: " test-password ",
+        },
+      ),
+    /invalid certificate password|decrypt|parse signPri\.key|challenge/i,
+  );
 });
 
 test("prepareChallengeProofWithWasm() clears private key buffers after signing", async () => {
@@ -813,6 +834,46 @@ test("createSignedChallengeProof() signs in-browser without uploading escrow sec
     assert.equal(proof.certificate.commonName, "Fixture Certificate");
     assert.equal(proof.certificate.businessNo, "2768603291");
     assert.equal(proof.challengeSignatureBase64, FIXTURE_SIGNATURE_BASE64);
+    assert.equal(mock.calls.length, 1);
+  } finally {
+    mock.restore();
+  }
+});
+
+test("createSignedChallengeProof() preserves password whitespace", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        challengeId: "browser-challenge-proof-2",
+        mode: "ephemeral",
+        nonce: "nonce-browser-proof-2",
+        payload: "cert-gateway:test",
+        expiresAt: "2026-04-20T00:00:00Z",
+      }, 201),
+  ]);
+
+  try {
+    const sdk = new WebSdk({
+      gatewayBaseUrl: "https://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+      activeOrganizationId: "org-1",
+    });
+
+    await assert.rejects(
+      () =>
+        sdk.createSignedChallengeProof("org-1", {
+          certificateFiles: [
+            fileWithBytes("signCert.der", base64Bytes(FIXTURE_SIGN_CERT_DER_BASE64)),
+            fileWithBytes("signPri.key", base64Bytes(FIXTURE_SIGN_PRI_BASE64)),
+            fileWithBytes("kmCert.der", Uint8Array.of(4, 5, 6)),
+            fileWithBytes("kmPri.key", Uint8Array.of(7, 8, 9)),
+          ],
+          password: " test-password ",
+          mode: "ephemeral",
+          facilityCode: "FAC-101",
+        }),
+      /invalid certificate password|decrypt|parse signPri\.key|challenge/i,
+    );
     assert.equal(mock.calls.length, 1);
   } finally {
     mock.restore();

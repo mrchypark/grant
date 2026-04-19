@@ -89,7 +89,7 @@ export async function prepareHtml5CertificateBundle(
   input: Html5CertificateBundleInput,
 ): Promise<PreparedHtml5CertificateBundle> {
   const selection = findHtml5CertificateFiles(files);
-  const password = trimRequired(input.password, "password");
+  const password = requireNonEmpty(input.password, "password");
   const bytes = await readHtml5CertificateBytes(selection);
   const bundle = await prepareBundleWithWasm({
     ...bytes,
@@ -162,12 +162,11 @@ function bundleDirectoryKey(file: File): string {
   return fullName.slice(0, lastSlash);
 }
 
-function trimRequired(value: string, fieldName: string): string {
-  const trimmed = value.trim();
-  if (trimmed === "") {
+function requireNonEmpty(value: string, fieldName: string): string {
+  if (value === "") {
     throw new Error(`${fieldName} is required`);
   }
-  return trimmed;
+  return value;
 }
 
 function trimOptional(value: string | undefined): string | undefined {
