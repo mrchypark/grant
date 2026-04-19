@@ -1188,7 +1188,8 @@ func zeroBigInt(value *big.Int) {
 	for i := range words {
 		words[i] = 0
 	}
-	value.SetInt64(0)
+	value.SetBits(words[:0])
+	runtime.KeepAlive(words)
 	runtime.KeepAlive(value)
 }
 

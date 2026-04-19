@@ -25,6 +25,8 @@ func main() {
 	api.Set("prepareBundle", wrap(handlePrepareBundle))
 	api.Set("prepareChallengeProof", wrap(handlePrepareChallengeProof))
 	api.Set("signChallengeOnly", wrap(handleSignChallengeOnly))
+	// The export name is only used for the bootstrap handshake; callers keep the
+	// returned api object reference after startup and do not re-read it by name.
 	js.Global().Set(resolveExportName(), api)
 
 	select {}

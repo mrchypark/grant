@@ -220,6 +220,8 @@ async function ensureNpkiWasmApi(): Promise<NpkiWasmApi> {
         return wasmApi;
       } finally {
         delete (globalThis as Record<string, unknown>)[EXPORT_NAME_KEY];
+        // The Go bootstrap reads the export name once during startup; callers keep
+        // invoking methods through the resolved api object reference after that.
         delete (globalThis as Record<string, unknown>)[exportName];
       }
     });
@@ -281,10 +283,29 @@ async function ensureGoRuntime(): Promise<void> {
 
 async function waitForApi(exportName: string): Promise<NpkiWasmApi> {
   const startedAt = Date.now();
+  let runtimeExitError: Error | null = null;
+  let runtimeExited = false;
+
+  wasmRunPromise?.then(
+    () => {
+      runtimeExited = true;
+    },
+    (error: unknown) => {
+      runtimeExitError =
+        error instanceof Error ? error : new Error(`NPKI wasm runtime failed: ${String(error)}`);
+    },
+  );
+
   while (true) {
     const candidate = (globalThis as Record<string, unknown>)[exportName];
     if (candidate && typeof candidate === "object") {
       return candidate as NpkiWasmApi;
+    }
+    if (runtimeExitError) {
+      throw runtimeExitError;
+    }
+    if (runtimeExited) {
+      throw new Error("NPKI wasm runtime exited before API became ready");
     }
     if (Date.now() - startedAt > READY_TIMEOUT_MS) {
       throw new Error("timed out waiting for NPKI wasm runtime");
