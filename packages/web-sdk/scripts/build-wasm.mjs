@@ -41,6 +41,8 @@ if (garbleEnabled && !existsSync(garbleBin)) {
       ...process.env,
       GOBIN: dirname(garbleBin),
       GOTOOLCHAIN: goToolchain,
+      GOOS: "",
+      GOARCH: "",
     },
     stdio: "inherit",
   });

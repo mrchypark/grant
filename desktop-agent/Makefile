@@ -18,7 +18,7 @@ endif
 
 $(GARBLE_BIN):
 	@mkdir -p $(GARBLE_BIN_DIR)
-	GOTOOLCHAIN=$(GOTOOLCHAIN) GOBIN=$(GARBLE_BIN_DIR) $(GO) install mvdan.cc/garble@$(GARBLE_VERSION)
+	GOTOOLCHAIN=$(GOTOOLCHAIN) GOOS= GOARCH= GOBIN=$(GARBLE_BIN_DIR) $(GO) install mvdan.cc/garble@$(GARBLE_VERSION)
 
 ifeq ($(GOOS),windows)
   BIN     := $(BIN_DIR)/desktop-agent-$(GOOS)-$(GOARCH).exe
