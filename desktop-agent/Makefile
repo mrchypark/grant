@@ -1,8 +1,8 @@
 GO      ?= go
-GOOS    ?= $(shell $(GO) env GOOS)
-GOARCH  ?= $(shell $(GO) env GOARCH)
-GOHOSTOS ?= $(shell $(GO) env GOHOSTOS)
-GOHOSTARCH ?= $(shell $(GO) env GOHOSTARCH)
+GOOS    ?= $(shell "$(GO)" env GOOS)
+GOARCH  ?= $(shell "$(GO)" env GOARCH)
+GOHOSTOS ?= $(shell "$(GO)" env GOHOSTOS)
+GOHOSTARCH ?= $(shell "$(GO)" env GOHOSTARCH)
 GOTOOLCHAIN ?= auto
 BIN_DIR := dist
 PKG     := ./cmd/desktop-agent
@@ -19,7 +19,7 @@ endif
 
 $(GARBLE_BIN):
 	@mkdir -p "$(GARBLE_BIN_DIR)"
-	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS= GOARCH= GOBIN="$(GARBLE_BIN_DIR)" $(GO) install mvdan.cc/garble@$(GARBLE_VERSION)
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS= GOARCH= GOBIN="$(GARBLE_BIN_DIR)" "$(GO)" install mvdan.cc/garble@$(GARBLE_VERSION)
 
 ifeq ($(GOOS),windows)
   BIN     := $(BIN_DIR)/desktop-agent-$(GOOS)-$(GOARCH).exe
@@ -34,17 +34,17 @@ endif
 all: vet test build
 
 vet:
-	GOTOOLCHAIN=$(GOTOOLCHAIN) $(GO) vet ./...
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" "$(GO)" vet ./...
 
 test:
-	GOTOOLCHAIN=$(GOTOOLCHAIN) $(GO) test ./...
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" "$(GO)" test ./...
 
 build: $(if $(filter 1,$(GARBLE_ENABLED)),$(GARBLE_BIN))
 	@mkdir -p "$(BIN_DIR)"
 ifeq ($(GARBLE_ENABLED),1)
 	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GARBLE_BIN)" $(GARBLE_FLAGS) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 else
-	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GO)" build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 endif
 
 build-plain:

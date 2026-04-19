@@ -464,7 +464,7 @@ USB 인증서를 직접 읽도록 agent 실행:
 export DESKTOP_AGENT_ADDR=127.0.0.1:8765
 export DESKTOP_AGENT_NPKI_DIRS="/Volumes/Lexar/NPKI:/Volumes/Lexar/GPKI"
 export DESKTOP_AGENT_ALLOWED_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
-./dist/desktop-agent-$(go env GOOS)-$(go env GOARCH)
+./dist/desktop-agent-$(go env GOOS)-$(go env GOARCH)$(go env GOEXE)
 ```
 
 기본 확인:

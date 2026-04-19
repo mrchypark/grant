@@ -29,6 +29,7 @@ let buildArgs = ["build"];
 if (garbleEnabled) {
   const [hostGoos, hostGoarch] = execFileSync("go", ["env", "GOHOSTOS", "GOHOSTARCH"], {
     cwd: desktopAgentDir,
+    env: { ...process.env, GOTOOLCHAIN: goToolchain },
     encoding: "utf8",
   })
     .trim()
