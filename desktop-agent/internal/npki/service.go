@@ -1189,6 +1189,7 @@ func zeroBigInt(value *big.Int) {
 		words[i] = 0
 	}
 	value.SetInt64(0)
+	runtime.KeepAlive(value)
 }
 
 func decryptSEEDCBC(key []byte, iv []byte, cipherText []byte) ([]byte, error) {

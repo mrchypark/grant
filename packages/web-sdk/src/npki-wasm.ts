@@ -181,16 +181,16 @@ async function withGlobalWasmInitLock<T>(fn: () => Promise<T>): Promise<T> {
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
+  const next = previous.catch(() => {}).then(() => current);
 
-  state[GLOBAL_INIT_LOCK_KEY] = previous.then(() => current);
-  await previous;
-  state[GLOBAL_INIT_LOCK_KEY] = current;
+  state[GLOBAL_INIT_LOCK_KEY] = next;
+  await previous.catch(() => {});
 
   try {
     return await fn();
   } finally {
     release?.();
-    if (state[GLOBAL_INIT_LOCK_KEY] === current) {
+    if (state[GLOBAL_INIT_LOCK_KEY] === next) {
       delete state[GLOBAL_INIT_LOCK_KEY];
     }
   }
