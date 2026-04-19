@@ -4,6 +4,7 @@ const DEFAULT_WASM_FILE = "npki_signer.wasm";
 const DEFAULT_WASM_EXEC_FILE = "wasm_exec.js";
 const READY_POLL_INTERVAL_MS = 10;
 const READY_TIMEOUT_MS = 5_000;
+const ASSET_LOAD_TIMEOUT_MS = 15_000;
 const EXPORT_NAME_KEY = "__CERTD_WEB_SDK_NPKI_WASM_EXPORT_NAME__";
 const GLOBAL_INIT_LOCK_KEY = "__CERTD_WEB_SDK_NPKI_WASM_INIT_LOCK__";
 
@@ -237,7 +238,7 @@ async function instantiateWasmModule(
   importObject: WebAssembly.Imports,
 ): Promise<WebAssembly.WebAssemblyInstantiatedSource> {
   if (wasmUrl.protocol !== "file:" && typeof WebAssembly.instantiateStreaming === "function") {
-    const response = await fetch(wasmUrl);
+    const response = await fetchWithTimeout(wasmUrl);
     if (!response.ok) {
       throw new Error(`failed to load ${wasmUrl.toString()}: ${response.status}`);
     }
@@ -311,7 +312,7 @@ async function readBinary(url: URL): Promise<ArrayBuffer> {
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
   }
 
-  const response = await fetch(url);
+  const response = await fetchWithTimeout(url);
   if (!response.ok) {
     throw new Error(`failed to load ${url.toString()}: ${response.status}`);
   }
@@ -324,11 +325,29 @@ async function readText(url: URL): Promise<string> {
     return readFile(url, "utf8");
   }
 
-  const response = await fetch(url);
+  const response = await fetchWithTimeout(url);
   if (!response.ok) {
     throw new Error(`failed to load ${url.toString()}: ${response.status}`);
   }
   return response.text();
+}
+
+async function fetchWithTimeout(url: URL): Promise<Response> {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = globalThis.setTimeout(() => {
+    controller?.abort();
+  }, ASSET_LOAD_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, controller ? { signal: controller.signal } : undefined);
+  } catch (error) {
+    if (controller?.signal.aborted) {
+      throw new Error(`timed out loading ${url.toString()}`);
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
 }
 
 function assertSecureAssetUrl(url: URL, key: keyof NpkiWasmAssetUrls): void {
@@ -396,14 +415,33 @@ function loadBrowserScript(url: URL): Promise<void> {
   }
 
   const promise = new Promise<void>((resolve, reject) => {
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+    const clear = () => {
+      if (timeoutId !== null) {
+        globalThis.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+    const rejectLoad = (message: string) => {
+      clear();
+      reject(new Error(message));
+    };
+    const resolveLoad = () => {
+      clear();
+      resolve();
+    };
+
     const found = document.querySelector<HTMLScriptElement>(`script[data-certd-wasm-runtime="${key}"]`);
     if (found) {
       if (globalThis.Go) {
-        resolve();
+        resolveLoad();
         return;
       }
-      found.addEventListener("load", () => resolve(), { once: true });
-      found.addEventListener("error", () => reject(new Error(`failed to load ${key}`)), { once: true });
+      timeoutId = globalThis.setTimeout(() => {
+        rejectLoad(`timed out loading ${key}`);
+      }, ASSET_LOAD_TIMEOUT_MS);
+      found.addEventListener("load", () => resolveLoad(), { once: true });
+      found.addEventListener("error", () => rejectLoad(`failed to load ${key}`), { once: true });
       return;
     }
 
@@ -411,8 +449,11 @@ function loadBrowserScript(url: URL): Promise<void> {
     script.async = true;
     script.dataset.certdWasmRuntime = key;
     script.src = key;
-    script.addEventListener("load", () => resolve(), { once: true });
-    script.addEventListener("error", () => reject(new Error(`failed to load ${key}`)), { once: true });
+    timeoutId = globalThis.setTimeout(() => {
+      rejectLoad(`timed out loading ${key}`);
+    }, ASSET_LOAD_TIMEOUT_MS);
+    script.addEventListener("load", () => resolveLoad(), { once: true });
+    script.addEventListener("error", () => rejectLoad(`failed to load ${key}`), { once: true });
     document.head.append(script);
   }).catch((error) => {
     runtimeScriptLoads.delete(key);
