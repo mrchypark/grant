@@ -22,6 +22,7 @@ const goroot = execFileSync(goBin, ["env", "GOROOT"], {
   env: { ...process.env, GOTOOLCHAIN: goToolchain },
   encoding: "utf8",
 }).trim();
+const goToolPath = `${join(goroot, "bin")}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`;
 
 mkdirSync(generatedDir, { recursive: true });
 
@@ -68,6 +69,7 @@ execFileSync(buildCommand, [...buildArgs, "-o", wasmOutput, "./cmd/npki-wasm"], 
   env: {
     ...process.env,
     GOTOOLCHAIN: goToolchain,
+    PATH: goToolPath,
     GOOS: "js",
     GOARCH: "wasm",
   },
