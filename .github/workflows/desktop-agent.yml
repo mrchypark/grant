@@ -52,4 +52,11 @@ jobs:
         run: |
           set -e
           mkdir -p dist
-          go build -ldflags "-H=windowsgui" -o dist/ ./cmd/desktop-agent
+          GOHOSTOS="$(go env GOHOSTOS)"
+          GOHOSTARCH="$(go env GOHOSTARCH)"
+          GARBLE_VERSION="v0.16.0"
+          GARBLE_BIN_DIR="$PWD/.bin/${GOHOSTOS}-${GOHOSTARCH}/${GARBLE_VERSION}"
+          GARBLE_BIN="$GARBLE_BIN_DIR/garble.exe"
+          mkdir -p "$GARBLE_BIN_DIR"
+          GOTOOLCHAIN=auto GOOS= GOARCH= GOBIN="$GARBLE_BIN_DIR" go install mvdan.cc/garble@${GARBLE_VERSION}
+          GOTOOLCHAIN=auto GOOS="$(go env GOOS)" GOARCH="$(go env GOARCH)" "$GARBLE_BIN" -literals build -ldflags "-H=windowsgui" -o dist/ ./cmd/desktop-agent
