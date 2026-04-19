@@ -40,7 +40,9 @@ let buildCommand = goBin;
 let buildArgs = ["build"];
 
 if (garbleEnabled) {
-  const [hostGoos, hostGoarch] = readGoEnv("GOHOSTOS", "GOHOSTARCH").split(/\s+/);
+  const [hostGoos, hostGoarch] = readGoEnv("GOHOSTOS", "GOHOSTARCH")
+    .split(/\r?\n/)
+    .map((value) => value.trim());
   const garbleBin = join(
     desktopAgentDir,
     ".bin",
