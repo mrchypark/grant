@@ -346,13 +346,7 @@ fn validate_key_pair(
     } else {
         parse_direct_private_key(private_key_der).with_context(|| format!("parse {key_name}"))?
     };
-    let private_public_key = private_key
-        .public_key_to_der()
-        .with_context(|| format!("extract public key from {key_name}"))?;
-    let certificate_public_key = certificate_public_key
-        .public_key_to_der()
-        .with_context(|| format!("extract DER public key from {cert_name}"))?;
-    if private_public_key != certificate_public_key {
+    if !private_key.public_eq(&certificate_public_key) {
         bail!("{key_name} does not match {cert_name}");
     }
     Ok(())
