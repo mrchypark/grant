@@ -230,6 +230,7 @@ func marshal(value any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer zeroBytes(bytes)
 	return string(bytes), nil
 }
 
