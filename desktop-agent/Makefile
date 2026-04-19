@@ -43,6 +43,7 @@ test:
 build: $(if $(filter 1,$(GARBLE_ENABLED)),$(GARBLE_BIN))
 	@mkdir -p "$(BIN_DIR)"
 ifeq ($(GARBLE_ENABLED),1)
+	# This repo runs make recipes via sh/bash, so PATH remains ':'-delimited on Windows too.
 	GOTOOLCHAIN="$(GOTOOLCHAIN)" PATH="$(shell "$(GO)" env GOROOT)/bin:$$PATH" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GARBLE_BIN)" $(GARBLE_FLAGS) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 else
 	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GO)" build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)

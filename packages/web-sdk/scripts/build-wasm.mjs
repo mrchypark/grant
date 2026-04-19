@@ -18,11 +18,20 @@ const workspaceDir = resolve(packageDir, "..", "..");
 const desktopAgentDir = join(workspaceDir, "desktop-agent");
 const generatedDir = join(packageDir, "src", "generated");
 const wasmOutput = join(generatedDir, "npki_signer.wasm");
-const goroot = execFileSync(goBin, ["env", "GOROOT"], {
-  cwd: desktopAgentDir,
-  env: { ...process.env, GOTOOLCHAIN: goToolchain },
-  encoding: "utf8",
-}).trim();
+
+function readGoEnv(...keys) {
+  try {
+    return execFileSync(goBin, ["env", ...keys], {
+      cwd: desktopAgentDir,
+      env: { ...process.env, GOTOOLCHAIN: goToolchain },
+      encoding: "utf8",
+    }).trim();
+  } catch (error) {
+    throw new Error(`failed to read go env ${keys.join(" ")}`, { cause: error });
+  }
+}
+
+const goroot = readGoEnv("GOROOT");
 const goToolPath = `${join(goroot, "bin")}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`;
 
 mkdirSync(generatedDir, { recursive: true });
@@ -31,13 +40,7 @@ let buildCommand = goBin;
 let buildArgs = ["build"];
 
 if (garbleEnabled) {
-  const [hostGoos, hostGoarch] = execFileSync(goBin, ["env", "GOHOSTOS", "GOHOSTARCH"], {
-    cwd: desktopAgentDir,
-    env: { ...process.env, GOTOOLCHAIN: goToolchain },
-    encoding: "utf8",
-  })
-    .trim()
-    .split(/\s+/);
+  const [hostGoos, hostGoarch] = readGoEnv("GOHOSTOS", "GOHOSTARCH").split(/\s+/);
   const garbleBin = join(
     desktopAgentDir,
     ".bin",
