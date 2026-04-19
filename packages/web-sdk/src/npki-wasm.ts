@@ -99,16 +99,20 @@ export async function prepareBundleWithWasm(input: {
   businessNo?: string;
   commonName?: string;
 }): Promise<ProofBundle> {
-  return parseEnvelope<ProofBundle>(
-    (await ensureNpkiWasmApi()).prepareBundle(
-      input.signCertDer,
-      input.signPriKey,
-      input.kmCertDer,
-      input.kmPriKey,
-      trimOptional(input.businessNo),
-      trimOptional(input.commonName),
-    ),
-  );
+  try {
+    return parseEnvelope<ProofBundle>(
+      (await ensureNpkiWasmApi()).prepareBundle(
+        input.signCertDer,
+        input.signPriKey,
+        input.kmCertDer,
+        input.kmPriKey,
+        trimOptional(input.businessNo),
+        trimOptional(input.commonName),
+      ),
+    );
+  } finally {
+    zeroSecretBuffers(input.signPriKey, input.kmPriKey);
+  }
 }
 
 export async function prepareChallengeProofWithWasm(input: {
@@ -136,6 +140,7 @@ export async function prepareChallengeProofWithWasm(input: {
       ),
     );
   } finally {
+    zeroSecretBuffers(input.signPriKey, input.kmPriKey);
     passwordBytes.fill(0);
   }
 }
@@ -156,6 +161,7 @@ export async function signChallengeWithWasm(
     );
     return result.challengeSignatureBase64;
   } finally {
+    zeroSecretBuffers(signPriKey);
     passwordBytes.fill(0);
   }
 }
@@ -327,6 +333,12 @@ function isLoopbackHost(hostname: string): boolean {
 
 function encodePassword(password: string): Uint8Array {
   return new TextEncoder().encode(password);
+}
+
+function zeroSecretBuffers(...buffers: Uint8Array[]): void {
+  for (const buffer of buffers) {
+    buffer.fill(0);
+  }
 }
 
 function trimOptional(value: string | undefined): string {

@@ -11,7 +11,12 @@ import {
   prepareHtml5CertificateBundle,
   prepareHtml5ChallengeProof,
 } from "./index.ts";
-import { configureNpkiWasmAssets } from "./npki-wasm.ts";
+import {
+  configureNpkiWasmAssets,
+  prepareBundleWithWasm,
+  prepareChallengeProofWithWasm,
+  signChallengeWithWasm,
+} from "./npki-wasm.ts";
 
 type FetchCall = {
   input: RequestInfo | URL;
@@ -671,6 +676,25 @@ test("prepareHtml5CertificateBundle() derives certificate identity from signCert
   assert.equal(prepared.bundle.kmPriKeyBase64, "S0s=");
 });
 
+test("prepareBundleWithWasm() clears private key buffers after use", async () => {
+  const signPriKey = Uint8Array.of(0x53, 0x4b);
+  const kmPriKey = Uint8Array.of(0x4b, 0x4b);
+
+  const bundle = await prepareBundleWithWasm({
+    signCertDer: base64Bytes(FIXTURE_SIGN_CERT_DER_BASE64),
+    signPriKey,
+    kmCertDer: Uint8Array.of(0x4b, 0x43),
+    kmPriKey,
+    businessNo: "2768603291",
+    commonName: "Caller Provided Name",
+  });
+
+  assert.equal(bundle.signPriKeyBase64, "U0s=");
+  assert.equal(bundle.kmPriKeyBase64, "S0s=");
+  assert.deepEqual(Array.from(signPriKey), [0, 0]);
+  assert.deepEqual(Array.from(kmPriKey), [0, 0]);
+});
+
 test("configureHtml5CertificateInput() configures a directory-capable picker", () => {
   const input = createInputMock();
   configureHtml5CertificateInput(input as never, { mode: "directory" });
@@ -701,6 +725,39 @@ test("prepareHtml5ChallengeProof() decrypts signPri.key and signs the gateway ch
   assert.equal(proof.bundle.commonName, "Fixture Certificate");
   assert.equal(proof.bundle.businessNo, "2768603291");
   assert.equal(proof.challengeSignatureBase64, FIXTURE_SIGNATURE_BASE64);
+});
+
+test("prepareChallengeProofWithWasm() clears private key buffers after signing", async () => {
+  const signPriKey = base64Bytes(FIXTURE_SIGN_PRI_BASE64);
+  const kmPriKey = Uint8Array.of(7, 8, 9);
+
+  const proof = await prepareChallengeProofWithWasm({
+    signCertDer: base64Bytes(FIXTURE_SIGN_CERT_DER_BASE64),
+    signPriKey,
+    kmCertDer: Uint8Array.of(4, 5, 6),
+    kmPriKey,
+    businessNo: "1111111111",
+    commonName: "Caller Provided Name",
+    password: "test-password",
+    challengePayload: "cert-gateway:test",
+  });
+
+  assert.equal(proof.challengeSignatureBase64, FIXTURE_SIGNATURE_BASE64);
+  assert.ok(Array.from(signPriKey).every((value) => value === 0));
+  assert.deepEqual(Array.from(kmPriKey), [0, 0, 0]);
+});
+
+test("signChallengeWithWasm() clears the private key buffer after signing", async () => {
+  const signPriKey = base64Bytes(FIXTURE_SIGN_PRI_BASE64);
+
+  const signature = await signChallengeWithWasm(
+    signPriKey,
+    "test-password",
+    "cert-gateway:test",
+  );
+
+  assert.equal(signature, FIXTURE_SIGNATURE_BASE64);
+  assert.ok(Array.from(signPriKey).every((value) => value === 0));
 });
 
 test("runEphemeralWithBrowserCertificate() requires explicit escrow opt-in", async () => {

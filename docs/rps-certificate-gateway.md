@@ -423,7 +423,9 @@ const run = await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
 
 브라우저 보안 제약 때문에 OS 인증서 저장소 자동 탐색은 여전히 불가능하고, 파일 선택은 사용자가 직접 해야 한다.
 
-배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다. WASM asset은 same-origin `https:` 또는 loopback `http:`에서만 로드되고, gateway URL도 `https:` 또는 loopback `http:`만 허용한다.
+배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다. WASM asset은 same-origin `https:` 또는 loopback `http:`에서만 로드되고, gateway URL도 `https:` 또는 loopback `http:`만 허용한다. 즉 CDN이나 별도 static domain에서 `wasm_exec.js` / `npki_signer.wasm`만 cross-origin으로 서빙하는 구성은 기본 정책상 허용되지 않는다. 배포는 gateway 페이지와 같은 origin, 또는 로컬 loopback origin 기준으로 맞춰야 한다.
+
+브라우저 signer helper는 `signPri.key`, `kmPri.key`, 비밀번호 바이트를 사용 후 메모리에서 즉시 zeroing한다. 같은 `Uint8Array`를 호출 뒤에 재사용하려면 caller가 별도 복사본을 만들어 넘겨야 한다.
 
 ```html
 <script src="/dist/browser/certd-web-sdk.global.js"></script>
