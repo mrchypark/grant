@@ -13,8 +13,10 @@ GARBLE_BIN_DIR := $(CURDIR)/.bin/$(GOHOSTOS)-$(GOHOSTARCH)/$(GARBLE_VERSION)
 
 ifeq ($(GOHOSTOS),windows)
   GARBLE_BIN := $(GARBLE_BIN_DIR)/garble.exe
+  PATH_SEP := ;
 else
   GARBLE_BIN := $(GARBLE_BIN_DIR)/garble
+  PATH_SEP := :
 endif
 
 $(GARBLE_BIN):
@@ -42,7 +44,7 @@ test:
 build: $(if $(filter 1,$(GARBLE_ENABLED)),$(GARBLE_BIN))
 	@mkdir -p "$(BIN_DIR)"
 ifeq ($(GARBLE_ENABLED),1)
-	GOTOOLCHAIN="$(GOTOOLCHAIN)" PATH="$(shell "$(GO)" env GOROOT)/bin:$(PATH)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GARBLE_BIN)" $(GARBLE_FLAGS) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" PATH="$(shell "$(GO)" env GOROOT)/bin$(PATH_SEP)$(PATH)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GARBLE_BIN)" $(GARBLE_FLAGS) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 else
 	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GO)" build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 endif
