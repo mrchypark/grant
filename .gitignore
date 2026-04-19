@@ -28,7 +28,10 @@ node_modules/
 
 # Local example/build artifacts
 /desktop-agent/bin/
+/desktop-agent/build/
 /desktop-agent/dist/
+/desktop-agent/.bin/
+/packages/web-sdk/src/generated/
 /desktop-agent/desktop-agent
 /desktop-agent/desktop-agent.exe
 /desktop-agent.exe

@@ -43,12 +43,5 @@ jobs:
 
       # 네이티브 OS 바이너리만 빌드. darwin cgo(Cocoa) / windows PE 헤더 플래그 때문에
       # 크로스 빌드는 다루지 않고 각 러너가 자신의 타겟만 책임진다.
-      - name: go build
-        run: |
-          set -e
-          mkdir -p dist
-          LDFLAGS=""
-          if [ "$(go env GOOS)" = "windows" ]; then
-            LDFLAGS="-H=windowsgui"
-          fi
-          go build -ldflags "$LDFLAGS" -o dist/ ./cmd/desktop-agent
+      - name: make build
+        run: make build

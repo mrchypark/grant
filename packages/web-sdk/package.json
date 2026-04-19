@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build:wasm": "node ./scripts/build-wasm.mjs",
+    "build:wasm:plain": "node ./scripts/build-wasm.mjs --plain",
     "build:browser": "npm run build:wasm && vite build --config vite.browser.config.ts && node ./scripts/copy-wasm-assets.mjs ./dist/browser",
     "test": "npm run build:wasm && tsx --test src/index.test.ts",
     "example": "npm run build:wasm && vite --config examples/browser/vite.config.ts --host 127.0.0.1 --port 4173",
