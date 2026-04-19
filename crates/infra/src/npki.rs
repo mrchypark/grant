@@ -234,7 +234,7 @@ impl Drop for SensitiveBytes {
         for byte in &mut self.0 {
             // Use volatile writes so the compiler cannot elide clearing
             // sensitive buffers that are about to be dropped.
-            unsafe { std::ptr::write_volatile(byte, 0) };
+            unsafe { std::ptr::write_volatile(byte as *mut u8, 0) };
         }
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
