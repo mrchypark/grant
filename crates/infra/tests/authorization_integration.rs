@@ -1093,6 +1093,48 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
 }
 
 #[tokio::test]
+async fn certificate_gateway_accepts_certificate_without_subject_business_no() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate stored rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der_for_common_name(&key, "No Serial Number Certificate");
+    let signature = sign_challenge(&key, &stored.payload);
+
+    let stored_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id,
+            challenge_payload: stored.payload,
+            challenge_signature_base64: signature,
+            bundle: CertificateBundle {
+                business_no: "9999999999".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: cert_der,
+                sign_pri_key: direct_private_key_der(&key),
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+        })
+        .await
+        .expect("register certificate without subject business number");
+
+    assert_eq!(stored_cert.business_no.as_deref(), Some("2768603291"));
+    assert_eq!(stored_cert.common_name, "No Serial Number Certificate");
+}
+
+#[tokio::test]
 async fn certificate_gateway_rejects_stored_proof_when_certificate_business_no_mismatches() {
     let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
 

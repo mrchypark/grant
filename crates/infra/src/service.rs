@@ -1758,6 +1758,9 @@ impl AppService {
         let business_no = self
             .resolve_organization_business_no(organization_id, requested_business_no)
             .await?;
+        // Some supported certificates omit subject serialNumber entirely. In that case,
+        // the linked organization business number remains the source of truth and any
+        // client-supplied bundle business number is ignored.
         if let Some(cert_business_no) = extract_business_no(&bundle.sign_cert_der)? {
             if cert_business_no != business_no {
                 return Err(bad_request_error("certificate business number mismatch"));

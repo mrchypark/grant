@@ -1184,6 +1184,8 @@ func zeroBigInt(value *big.Int) {
 	if value == nil {
 		return
 	}
+	// Best-effort wipe: this relies on math/big's current Bits() representation
+	// exposing the backing words. The runtime may still hold copies elsewhere.
 	words := value.Bits()
 	for i := range words {
 		words[i] = 0
