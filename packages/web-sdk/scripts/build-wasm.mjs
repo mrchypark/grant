@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const goBin = process.env.GO ?? "go";
 const goToolchain = process.env.GOTOOLCHAIN ?? "auto";
+// Keep this version in sync with desktop-agent/Makefile.
 const garbleVersion = process.env.GARBLE_VERSION ?? "v0.16.0";
 const garbleEnabled =
   process.env.GARBLE_ENABLED !== "0" && !process.argv.includes("--plain");

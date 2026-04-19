@@ -6,6 +6,7 @@ GOHOSTARCH ?= $(shell "$(GO)" env GOHOSTARCH)
 GOTOOLCHAIN ?= auto
 BIN_DIR := dist
 PKG     := ./cmd/desktop-agent
+# Keep this version in sync with packages/web-sdk/scripts/build-wasm.mjs.
 GARBLE_VERSION ?= v0.16.0
 GARBLE_ENABLED ?= 1
 GARBLE_FLAGS ?= -literals
@@ -42,7 +43,7 @@ test:
 build: $(if $(filter 1,$(GARBLE_ENABLED)),$(GARBLE_BIN))
 	@mkdir -p "$(BIN_DIR)"
 ifeq ($(GARBLE_ENABLED),1)
-	GOTOOLCHAIN="$(GOTOOLCHAIN)" PATH="$(shell "$(GO)" env GOROOT)/bin:$(PATH)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GARBLE_BIN)" $(GARBLE_FLAGS) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" PATH="$(shell "$(GO)" env GOROOT)/bin:$$PATH" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GARBLE_BIN)" $(GARBLE_FLAGS) build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 else
 	GOTOOLCHAIN="$(GOTOOLCHAIN)" GOOS=$(GOOS) GOARCH=$(GOARCH) "$(GO)" build -ldflags "$(LDFLAGS)" -o "$(BIN)" $(PKG)
 endif
