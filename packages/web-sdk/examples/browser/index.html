@@ -40,6 +40,29 @@
         margin-bottom: 24px;
       }
 
+      .nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .nav a {
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        text-decoration: none;
+        color: var(--ink);
+        background: rgba(255,255,255,0.75);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .nav a.active {
+        color: white;
+        background: linear-gradient(135deg, var(--accent), #115e59);
+        border-color: transparent;
+      }
+
       .eyebrow {
         font-size: 13px;
         letter-spacing: 0.12em;
@@ -198,6 +221,10 @@
   <body>
     <div class="page">
       <section class="hero">
+        <div class="nav">
+          <a href="./index.html" class="active">Desktop Agent Flow</a>
+          <a href="./script.html">HTML5 Finder + Script</a>
+        </div>
         <span class="eyebrow">Certificate Gateway Example</span>
         <h1>공동인증서 기반 로컬 검증 페이지</h1>
         <p>

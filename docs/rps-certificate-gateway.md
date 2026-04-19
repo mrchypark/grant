@@ -365,7 +365,79 @@ const run = await sdk.runStored("org-1", {
 });
 ```
 
-SDK가 내부적으로 수행하는 순서는 다음과 같다.
+### HTML5 파일 찾기 도구
+
+브라우저가 로컬 인증서 저장소를 직접 읽을 수 없는 환경에서는 사용자가 NPKI 폴더나 4개 파일을 직접 선택해야 한다.
+
+```ts
+import {
+  configureHtml5CertificateInput,
+  prepareHtml5CertificateBundle,
+} from "@conalog/web-sdk";
+
+const input = document.getElementById("cert-files") as HTMLInputElement;
+configureHtml5CertificateInput(input, { mode: "directory" });
+
+const prepared = await prepareHtml5CertificateBundle(input.files ?? [], {
+  businessNo: "2768603291",
+  commonName: "사업자 범용 인증서",
+  password: "secret-password",
+});
+
+console.log(prepared.bundle.signCertDerBase64);
+```
+
+브라우저 안에서 `signPri.key` 복호화와 challenge 서명까지 끝내려면, desktop agent와 같은 Go NPKI 로직을 WebAssembly로 감싼 고수준 API를 사용할 수 있다. SDK는 이 경로를 두 가지 보안 모델로 나눠 제공한다.
+
+```ts
+const proof = await sdk.createSignedChallengeProof("org-1", {
+  certificateFiles: input.files ?? [],
+  password: "secret-password",
+  mode: "ephemeral",
+  facilityCode: "FAC-001",
+});
+```
+
+`createSignedChallengeProof()`는 사용자가 파일을 직접 고른 뒤 브라우저가 Go/WASM signer를 로드해서 다음을 수행한다.
+
+1. gateway challenge 생성
+2. `signPri.key`를 비밀번호로 복호화
+3. challenge payload를 `SHA256withRSA`로 서명
+4. `challengeId`, `challengePayload`, `challengeSignatureBase64`, `signCertDerBase64`만 caller에 반환
+
+이 경로는 개인키/비밀번호를 gateway로 보내지 않는다. 브라우저 전용 서명 proof를 직접 소비하는 backend가 있을 때 적합하다.
+
+gateway가 인증서 번들을 escrow 받아야 하는 경우에는 명시적 opt-in 메서드를 사용한다.
+
+```ts
+const run = await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
+  certificateFiles: input.files ?? [],
+  password: "secret-password",
+  facilityCode: "FAC-001",
+  mode: "full",
+  escrow: true,
+});
+```
+
+이 escrow 경로는 challenge 서명 뒤에 gateway `ephemeral-executions` 또는 `stored-certificates` endpoint로 인증서 번들과 비밀번호를 전송한다. 기본 메서드 `runEphemeralWithBrowserCertificate()` / `registerStoredWithBrowserCertificate()`는 `escrow: true` 없이는 실패하도록 막아 둔다.
+
+브라우저 보안 제약 때문에 OS 인증서 저장소 자동 탐색은 여전히 불가능하고, 파일 선택은 사용자가 직접 해야 한다.
+
+배포 시 browser global bundle과 함께 `npki_signer.wasm`, `wasm_exec.js`를 같은 디렉터리에 두면 된다. WASM asset은 same-origin `https:` 또는 loopback `http:`에서만 로드되고, gateway URL도 `https:` 또는 loopback `http:`만 허용한다. 즉 CDN이나 별도 static domain에서 `wasm_exec.js` / `npki_signer.wasm`만 cross-origin으로 서빙하는 구성은 기본 정책상 허용되지 않는다. 배포는 gateway 페이지와 같은 origin, 또는 로컬 loopback origin 기준으로 맞춰야 한다.
+
+브라우저 signer helper는 `signPri.key`, `kmPri.key`, 비밀번호 바이트를 사용 후 메모리에서 즉시 zeroing한다. 같은 `Uint8Array`를 호출 뒤에 재사용하려면 caller가 별도 복사본을 만들어 넘겨야 한다. 비밀번호는 opaque secret으로 취급하므로 leading/trailing whitespace도 그대로 보존한다.
+
+```html
+<script src="/dist/browser/certd-web-sdk.global.js"></script>
+<script>
+  window.WebSdkBrowser.configureHtml5CertificateInput(
+    document.getElementById("cert-files"),
+    { mode: "directory" },
+  );
+</script>
+```
+
+desktop agent 경로에서 SDK가 내부적으로 수행하는 순서는 다음과 같다.
 
 1. local agent `/healthz` 확인
 2. local agent `/sessions/open`으로 local session 확보
@@ -373,6 +445,8 @@ SDK가 내부적으로 수행하는 순서는 다음과 같다.
 4. agent가 native approval modal로 인증서 선택과 비밀번호 입력 처리
    - 예: `로컬 NPKI | NPKI/yessign/...`, `이동식디스크 PKCS#12 | protected.p12`
 5. agent가 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
+
+브라우저 단독 흐름은 위 agent 단계를 생략하고, 선택된 인증서 파일만으로 challenge 서명과 proof 반환 또는 escrow gateway 호출을 수행한다.
 
 ## 로컬 검증
 

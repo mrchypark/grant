@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::*;
 
+const OID_X509_SERIAL_NUMBER: &str = "2.5.4.5";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CertificateBundle {
@@ -55,6 +57,26 @@ pub fn extract_common_name(sign_cert_der: &[u8]) -> Result<String> {
         }
     }
     bail!("certificate common name not found")
+}
+
+pub fn extract_business_no(sign_cert_der: &[u8]) -> Result<Option<String>> {
+    let (_, cert) = X509Certificate::from_der(sign_cert_der)
+        .map_err(|err| anyhow!("parse signCert.der as X509 DER: {err}"))?;
+
+    for attr in cert.subject().iter_attributes() {
+        if attr.attr_type().to_id_string() != OID_X509_SERIAL_NUMBER {
+            continue;
+        }
+        let value = attr
+            .as_str()
+            .map_err(|err| anyhow!("decode certificate business number: {err}"))?;
+        let digits: String = value.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        if digits.len() == 10 {
+            return Ok(Some(digits));
+        }
+    }
+
+    Ok(None)
 }
 
 pub fn encrypt_bundle(master_key: &str, bundle: &CertificateBundle) -> Result<String> {

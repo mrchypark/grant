@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>certd Web SDK HTML5 Finder</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f4ee;
+        --panel: rgba(255, 255, 255, 0.92);
+        --ink: #172033;
+        --muted: #5d6b82;
+        --accent: #9a3412;
+        --accent-strong: #7c2d12;
+        --accent-soft: rgba(154, 52, 18, 0.1);
+        --line: rgba(23, 32, 51, 0.12);
+        --success: #0f766e;
+        --danger: #b91c1c;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: "SUIT Variable", "Pretendard Variable", "Apple SD Gothic Neo", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(154, 52, 18, 0.18), transparent 26%),
+          radial-gradient(circle at right 20%, rgba(15, 118, 110, 0.12), transparent 24%),
+          var(--bg);
+      }
+
+      .page {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 28px 20px 56px;
+      }
+
+      .hero {
+        display: grid;
+        gap: 14px;
+        margin-bottom: 26px;
+      }
+
+      .nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .nav a {
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        text-decoration: none;
+        color: var(--ink);
+        background: rgba(255, 255, 255, 0.75);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .nav a.active {
+        color: white;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        border-color: transparent;
+      }
+
+      .eyebrow {
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 800;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(30px, 4vw, 50px);
+        line-height: 1.02;
+      }
+
+      .hero p {
+        margin: 0;
+        max-width: 780px;
+        font-size: 16px;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1.05fr 0.95fr;
+        gap: 20px;
+      }
+
+      .card {
+        background: var(--panel);
+        backdrop-filter: blur(8px);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        padding: 22px;
+        box-shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
+      }
+
+      .card h2 {
+        margin: 0 0 16px;
+        font-size: 21px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 14px;
+      }
+
+      .grid.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .step {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.7);
+      }
+
+      .step-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+        font-weight: 800;
+      }
+
+      .step-no {
+        width: 28px;
+        height: 28px;
+        display: inline-grid;
+        place-items: center;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      label {
+        display: grid;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      input, textarea, button {
+        font: inherit;
+      }
+
+      input, textarea {
+        width: 100%;
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.9);
+      }
+
+      input[type="file"] {
+        padding: 12px;
+      }
+
+      .choice {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .choice label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.82);
+        font-weight: 700;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 18px;
+        cursor: pointer;
+        color: white;
+        font-weight: 800;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      }
+
+      button.secondary {
+        color: var(--ink);
+        background: white;
+        border: 1px solid var(--line);
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(15, 118, 110, 0.1);
+        color: var(--success);
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .status.error {
+        background: rgba(185, 28, 28, 0.08);
+        color: var(--danger);
+      }
+
+      .hint {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--muted);
+      }
+
+      .bullet-list {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .bullet-list li {
+        padding-left: 16px;
+        position: relative;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .bullet-list li::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--accent);
+        position: absolute;
+        left: 0;
+        top: 0.6em;
+      }
+
+      .result-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .result-item {
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        padding: 14px;
+        background: rgba(255, 255, 255, 0.78);
+      }
+
+      .result-item strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      code, pre {
+        font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+      }
+
+      pre {
+        margin: 0;
+        padding: 16px;
+        overflow: auto;
+        border-radius: 18px;
+        background: #111827;
+        color: #f9fafb;
+        line-height: 1.5;
+        font-size: 13px;
+      }
+
+      textarea {
+        min-height: 220px;
+        resize: vertical;
+        line-height: 1.5;
+      }
+
+      @media (max-width: 960px) {
+        .layout { grid-template-columns: 1fr; }
+        .grid.two { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <section class="hero">
+        <div class="nav">
+          <a href="./index.html">Desktop Agent Flow</a>
+          <a href="./script.html" class="active">HTML5 Finder + Script</a>
+        </div>
+        <span class="eyebrow">Script-Ready Browser SDK</span>
+        <h1>사용자가 직접 찾는 HTML5 인증서 선택 화면</h1>
+        <p>
+          국내 인증서 제품들이 공통으로 제공하는 저장매체 선택, 파일 찾기, 선택 결과 확인 흐름을 참고해 구성했습니다.
+          브라우저는 인증서 저장소를 직접 읽지 못하므로, 사용자가 폴더 또는 파일 4개를 직접 선택해야 합니다.
+          이 예제는 `브라우저 전용 challenge 서명`과 `비밀물 escrow 업로드`를 분리해서 보여줍니다.
+        </p>
+      </section>
+
+      <div class="layout">
+        <section class="card">
+          <h2>Finder Flow</h2>
+          <div class="stack">
+            <div class="step">
+              <div class="step-title"><span class="step-no">1</span>선택 방식</div>
+              <div class="choice">
+                <label><input type="radio" name="pickerMode" value="directory" checked /> 폴더째 선택</label>
+                <label><input type="radio" name="pickerMode" value="files" /> 파일 4개 선택</label>
+              </div>
+              <p class="hint">
+                기본값은 폴더 선택입니다. 브라우저 지원이 제한되면 파일 4개 선택으로 바로 전환할 수 있습니다.
+              </p>
+            </div>
+
+            <div class="step">
+              <div class="step-title"><span class="step-no">2</span>인증서 찾기</div>
+              <label>
+                NPKI 폴더 또는 인증서 파일
+                <input id="html5Files" type="file" />
+              </label>
+              <ul class="bullet-list">
+                <li>`signCert.der`, `signPri.key`, `kmCert.der`, `kmPri.key` 4개가 모두 있어야 합니다.</li>
+                <li>폴더 선택 시 하위 경로에서 파일명을 기준으로 자동 탐지합니다.</li>
+                <li>여러 인증서 디렉터리를 한 번에 고르면 거부합니다. 한 인증서 번들만 선택해야 합니다.</li>
+                <li>제품 UI에서 흔한 “파일 탐색 / 가져오기” 흐름에 맞춰 검증과 준비를 분리했습니다.</li>
+              </ul>
+            </div>
+
+            <div class="step">
+              <div class="step-title"><span class="step-no">3</span>인증서 정보</div>
+              <div class="grid two">
+                <label>
+                  Common Name
+                  <input id="commonName" placeholder="사업자 범용 인증서" />
+                </label>
+                <label>
+                  Business No
+                  <input id="businessNo" placeholder="2768603291" />
+                </label>
+              </div>
+              <label style="margin-top: 14px;">
+                인증서 비밀번호
+                <input id="password" type="password" placeholder="비밀번호" />
+              </label>
+            </div>
+
+            <div class="step">
+              <div class="step-title"><span class="step-no">4</span>Gateway 실행 설정</div>
+              <div class="grid two">
+                <label>
+                  Gateway Base URL
+                  <input id="gatewayBaseUrl" value="/gateway" />
+                </label>
+                <label>
+                  Organization ID
+                  <input id="organizationId" value="conalog-account" />
+                </label>
+                <label>
+                  Bearer Token
+                  <input id="bearerToken" placeholder="TrailBase login token" />
+                </label>
+                <label>
+                  Facility Code
+                  <input id="facilityCode" placeholder="비워 두면 서버 기본 경로" />
+                </label>
+                <label>
+                  Sync Mode
+                  <select id="syncMode">
+                    <option value="full">full</option>
+                    <option value="delta">delta</option>
+                  </select>
+                </label>
+              </div>
+              <p class="hint">
+                remote gateway는 `https:` 또는 loopback `http:`여야 하고, WASM runtime asset도 same-origin 또는 loopback
+                에서만 로드됩니다. 예제의 `/gateway`는 현재 origin 아래 경로로 유지됩니다.
+              </p>
+            </div>
+
+            <div class="actions">
+              <button id="inspectButton" class="secondary">선택 검증</button>
+              <button id="signChallengeButton" class="secondary">Challenge 서명만</button>
+              <button id="ephemeralEscrowButton">Ephemeral 실행 (Escrow)</button>
+              <button id="storedEscrowButton" class="secondary">Stored 등록 (Escrow)</button>
+            </div>
+            <div id="status" class="status">대기 중</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Result</h2>
+          <div id="selectionResult" class="result-list"></div>
+          <p class="hint" style="margin-top: 14px;">
+            `Challenge 서명만`은 challenge와 서명 proof만 반환하고 개인키/비밀번호를 업로드하지 않습니다.
+            `Ephemeral 실행 (Escrow)`과 `Stored 등록 (Escrow)`은 서명 후 인증서 번들과 비밀번호를 gateway로 전송합니다.
+          </p>
+          <textarea id="output" readonly></textarea>
+        </section>
+      </div>
+
+      <section class="card" style="margin-top: 20px;">
+        <h2>Script Include</h2>
+        <p class="hint">
+          실제 배포에서는 아래처럼 글로벌 번들과 같은 디렉터리에 `npki_signer.wasm`, `wasm_exec.js`를 두면 됩니다.
+          이 예제 페이지는 개발 서버에서 같은 사용감을 내기 위해 글로벌 shim을 먼저 로드합니다.
+        </p>
+        <pre><code>&lt;script src="/dist/browser/certd-web-sdk.global.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+  const sdk = new WebSdkBrowser.WebSdk({
+    gatewayBaseUrl: "/gateway",
+    agentBaseUrl: "http://127.0.0.1:8765"
+  });
+  const proof = await sdk.createSignedChallengeProof("org-1", {
+    certificateFiles: document.getElementById("html5Files").files,
+    password: "certificate-password",
+    mode: "ephemeral"
+  });
+&lt;/script&gt;</code></pre>
+      </section>
+    </div>
+
+    <script type="module" src="./sdk.global.ts"></script>
+    <script type="module" src="./script-main.ts"></script>
+  </body>
+</html>

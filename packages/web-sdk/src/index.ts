@@ -4,12 +4,32 @@ import {
 } from "./agent.ts";
 import {
   GatewayClient,
+  type BrowserCertificateIdentity,
   type Challenge,
   type CreateChallengeInput,
+  type ProofBundle,
+  type EscrowProofBundle,
   type StoredCertificate,
   type SyncMode,
   type SyncRun,
 } from "./client.ts";
+import {
+  configureHtml5CertificateInput,
+  findHtml5CertificateFiles,
+  prepareHtml5CertificateBundle,
+  type Html5CertificateBundleInput,
+  type Html5CertificateFileKey,
+  type Html5CertificateInputMode,
+  type Html5CertificateSelection,
+  type PreparedHtml5CertificateBundle,
+} from "./html5.ts";
+import {
+  prepareHtml5ChallengeProof,
+  prepareHtml5SignedChallengeProof,
+  signChallengeWithProofBundle,
+  type PreparedHtml5ChallengeProof,
+  type PreparedHtml5SignedChallengeProof,
+} from "./npki-browser.ts";
 
 export type WebSdkOptions = {
   gatewayBaseUrl: string;
@@ -32,6 +52,44 @@ export type RegisterStoredInput = {
 
 export type RunStoredInput = {
   certificateId: string;
+};
+
+export type BrowserCertificateInput = {
+  certificateFiles: Iterable<File>;
+  password: string;
+  businessNo?: string;
+  commonName?: string;
+  challengeTtlSeconds?: number;
+  escrow?: boolean;
+};
+
+export type BrowserEphemeralRunInput = BrowserCertificateInput & {
+  facilityCode?: string;
+  startMonth?: string;
+  endMonth?: string;
+  mode?: SyncMode;
+};
+
+export type BrowserEscrowCertificateInput = BrowserCertificateInput & {
+  escrow: true;
+};
+
+export type BrowserEscrowEphemeralRunInput = BrowserEphemeralRunInput & {
+  escrow: true;
+};
+
+export type BrowserChallengeProofInput = Omit<BrowserCertificateInput, "escrow"> & {
+  mode: "stored" | "ephemeral";
+  facilityCode?: string;
+};
+
+export type BrowserSignedChallengeProof = {
+  challengeId: string;
+  challengePayload: string;
+  challengeSignatureBase64: string;
+  certificate: BrowserCertificateIdentity;
+  expiresAt: string;
+  mode: "stored" | "ephemeral";
 };
 
 export type AgentCapabilities = {
@@ -128,6 +186,97 @@ export class WebSdk {
   async registerStoredCertificate(organizationId: string, input: RegisterStoredInput): Promise<StoredCertificate> {
     return this.registerStored(organizationId, input);
   }
+
+  /** @deprecated Use runEphemeralWithEscrowedBrowserCertificate(). */
+  async runEphemeralWithBrowserCertificate(
+    organizationId: string,
+    input: BrowserEphemeralRunInput,
+  ): Promise<SyncRun> {
+    // Deprecated alias kept for compatibility. Prefer the explicit escrow method.
+    assertExplicitEscrow(input, "runEphemeralWithEscrowedBrowserCertificate");
+    return this.runEphemeralWithEscrowedBrowserCertificate(organizationId, input);
+  }
+
+  async runEphemeralWithEscrowedBrowserCertificate(
+    organizationId: string,
+    input: BrowserEscrowEphemeralRunInput,
+  ): Promise<SyncRun> {
+    const challenge = await this.createChallenge(organizationId, {
+      mode: "ephemeral",
+      facilityCode: trimOptional(input.facilityCode),
+      ttlSeconds: input.challengeTtlSeconds,
+    });
+    const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
+      businessNo: input.businessNo,
+      commonName: input.commonName,
+      password: input.password,
+    });
+    return this.raw.gateway.executeEphemeralExecution(organizationId, {
+      challengeId: challenge.challengeId,
+      challengePayload: challenge.payload,
+      challengeSignatureBase64: proof.challengeSignatureBase64,
+      bundle: proof.bundle,
+      facilityCode: trimOptional(input.facilityCode),
+      startMonth: trimOptional(input.startMonth),
+      endMonth: trimOptional(input.endMonth),
+      mode: trimOptional(input.mode),
+    });
+  }
+
+  /** @deprecated Use registerStoredWithEscrowedBrowserCertificate(). */
+  async registerStoredWithBrowserCertificate(
+    organizationId: string,
+    input: BrowserCertificateInput,
+  ): Promise<StoredCertificate> {
+    // Deprecated alias kept for compatibility. Prefer the explicit escrow method.
+    assertExplicitEscrow(input, "registerStoredWithEscrowedBrowserCertificate");
+    return this.registerStoredWithEscrowedBrowserCertificate(organizationId, input);
+  }
+
+  async registerStoredWithEscrowedBrowserCertificate(
+    organizationId: string,
+    input: BrowserEscrowCertificateInput,
+  ): Promise<StoredCertificate> {
+    const challenge = await this.createChallenge(organizationId, {
+      mode: "stored",
+      ttlSeconds: input.challengeTtlSeconds,
+    });
+    const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
+      businessNo: input.businessNo,
+      commonName: input.commonName,
+      password: input.password,
+    });
+    return this.raw.gateway.registerStoredCertificate(organizationId, {
+      challengeId: challenge.challengeId,
+      challengePayload: challenge.payload,
+      challengeSignatureBase64: proof.challengeSignatureBase64,
+      bundle: proof.bundle,
+    });
+  }
+
+  async createSignedChallengeProof(
+    organizationId: string,
+    input: BrowserChallengeProofInput,
+  ): Promise<BrowserSignedChallengeProof> {
+    const challenge = await this.createChallenge(organizationId, {
+      mode: input.mode,
+      facilityCode: input.mode === "ephemeral" ? trimOptional(input.facilityCode) : undefined,
+      ttlSeconds: input.challengeTtlSeconds,
+    });
+    const proof = await prepareHtml5SignedChallengeProof(challenge.payload, input.certificateFiles, {
+      businessNo: input.businessNo,
+      commonName: input.commonName,
+      password: input.password,
+    });
+    return {
+      challengeId: challenge.challengeId,
+      challengePayload: challenge.payload,
+      challengeSignatureBase64: proof.challengeSignatureBase64,
+      certificate: proof.certificate,
+      expiresAt: challenge.expiresAt,
+      mode: input.mode,
+    };
+  }
 }
 
 function approvalRequestFrom(
@@ -186,22 +335,61 @@ function trimOptional(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function assertExplicitEscrow(
+  input: BrowserCertificateInput,
+  methodName: string,
+): asserts input is BrowserCertificateInput & { escrow: true } {
+  if (input.escrow === true) {
+    return;
+  }
+  throw new Error(
+    `Escrow upload is an explicit opt-in. Set escrow: true or use ${methodName}().`,
+  );
+}
+
 export type {
   AgentCapabilities,
+  BrowserCertificateInput,
+  BrowserChallengeProofInput,
+  BrowserEscrowCertificateInput,
+  BrowserEscrowEphemeralRunInput,
+  BrowserEphemeralRunInput,
+  BrowserSignedChallengeProof,
   Challenge,
   CreateChallengeInput,
+  ProofBundle,
+  EscrowProofBundle,
   StoredCertificate,
   SyncRun,
 };
 
 export { DesktopAgentClient, GatewayClient };
+export {
+  configureHtml5CertificateInput,
+  findHtml5CertificateFiles,
+  prepareHtml5CertificateBundle,
+  prepareHtml5ChallengeProof,
+  prepareHtml5SignedChallengeProof,
+  signChallengeWithProofBundle,
+};
 export type { AgentApprovalRequest, AgentSession } from "./agent.ts";
 export type {
   CrawlTaskToken,
   ChallengeMode,
   ExecuteEphemeralExecutionInput,
   IssueCrawlTaskTokenInput,
-  ProofBundle,
   RegisterStoredCertificateInput,
   SyncMode,
 } from "./client.ts";
+export type {
+  Html5CertificateBundleInput,
+  Html5CertificateFileKey,
+  Html5CertificateInputMode,
+  Html5CertificateSelection,
+  PreparedHtml5ChallengeProof,
+  PreparedHtml5SignedChallengeProof,
+  PreparedHtml5CertificateBundle,
+};
+
+export { WebSdk as CertdWebSdk };
+export type { WebSdkOptions as CertdWebSdkOptions };

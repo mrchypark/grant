@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "tsx --test src/index.test.ts",
-    "example": "vite --config examples/browser/vite.config.ts --host 127.0.0.1 --port 4173",
-    "example:build": "vite build --config examples/browser/vite.config.ts --outDir dist/example"
+    "build:wasm": "node ./scripts/build-wasm.mjs",
+    "build:browser": "npm run build:wasm && vite build --config vite.browser.config.ts && node ./scripts/copy-wasm-assets.mjs ./dist/browser",
+    "test": "npm run build:wasm && tsx --test src/index.test.ts",
+    "example": "npm run build:wasm && vite --config examples/browser/vite.config.ts --host 127.0.0.1 --port 4173",
+    "example:build": "npm run build:browser && vite build --config examples/browser/vite.config.ts --outDir dist/example"
   },
   "devDependencies": {
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vite": "^7.1.7"
-  }
+  },
+  "dependencies": {}
 }

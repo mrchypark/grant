@@ -190,13 +190,9 @@ async fn build_service() -> (AppService, Database, TempDir, TempDir) {
         .expect("artifact store");
     let service = AppService::new_with_collector(cfg, db.clone(), artifacts, mock_collect_snapshot);
     service.initialize().await.expect("initialize service");
-    db.upsert_organization_identity(
-        &bootstrap_user_id,
-        Some("2768603291"),
-        &bootstrap_user_name,
-    )
-    .await
-    .expect("seed bootstrap organization identity");
+    db.upsert_organization_identity(&bootstrap_user_id, Some("2768603291"), &bootstrap_user_name)
+        .await
+        .expect("seed bootstrap organization identity");
     (service, db, db_dir, artifacts_dir)
 }
 
@@ -255,6 +251,9 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
 fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, String) {
     let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
     let cert_der = create_sign_cert_der(&key);
+    let km_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate km rsa key")).expect("wrap km key");
+    let km_cert_der = create_sign_cert_der_for_common_name(&km_key, "KM Test Certificate");
     let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
     (
         CertificateBundle {
@@ -262,9 +261,9 @@ fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, Str
             password: "secret-password".to_owned(),
             common_name: "Test Certificate".to_owned(),
             sign_cert_der: cert_der,
-            sign_pri_key: vec![4, 5, 6],
-            km_cert_der: Some(vec![7, 8, 9]),
-            km_pri_key: Some(vec![10, 11, 12]),
+            sign_pri_key: direct_private_key_der(&key),
+            km_cert_der: Some(km_cert_der),
+            km_pri_key: Some(direct_private_key_der(&km_key)),
         },
         challenge_signature_base64,
     )
@@ -275,22 +274,35 @@ fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
 }
 
 fn create_sign_cert_der_for_common_name(key: &PKey<Private>, common_name: &str) -> Vec<u8> {
-    create_sign_cert_der_with_validity(key, common_name, 0, 365)
+    create_sign_cert_der_with_subject(key, common_name, None, 0, 365)
+}
+
+fn create_sign_cert_der_for_common_name_and_business_no(
+    key: &PKey<Private>,
+    common_name: &str,
+    business_no: &str,
+) -> Vec<u8> {
+    create_sign_cert_der_with_subject(key, common_name, Some(business_no), 0, 365)
 }
 
 fn create_expired_sign_cert_der(key: &PKey<Private>, common_name: &str) -> Vec<u8> {
-    create_sign_cert_der_with_validity(key, common_name, -365, -1)
+    create_sign_cert_der_with_subject(key, common_name, None, -365, -1)
 }
 
-fn create_sign_cert_der_with_validity(
+fn create_sign_cert_der_with_subject(
     key: &PKey<Private>,
     common_name: &str,
+    business_no: Option<&str>,
     not_before_days_from_now: i32,
     not_after_days_from_now: i32,
 ) -> Vec<u8> {
     let mut name = X509NameBuilder::new().expect("x509 name");
     name.append_entry_by_text("CN", common_name)
         .expect("append cn");
+    if let Some(business_no) = business_no {
+        name.append_entry_by_text("serialNumber", business_no)
+            .expect("append serial number");
+    }
     let name = name.build();
 
     let mut builder = X509::builder().expect("x509 builder");
@@ -332,6 +344,10 @@ fn create_sign_cert_der_with_validity(
         .sign(key, MessageDigest::sha256())
         .expect("sign cert");
     builder.build().to_der().expect("cert der")
+}
+
+fn direct_private_key_der(key: &PKey<Private>) -> Vec<u8> {
+    key.private_key_to_pkcs8().expect("private key pkcs8")
 }
 
 fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
@@ -953,9 +969,9 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
                 password: "secret-password".to_owned(),
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: expired_cert_der,
-                sign_pri_key: vec![4, 5, 6],
-                km_cert_der: Some(vec![7, 8, 9]),
-                km_pri_key: Some(vec![10, 11, 12]),
+                sign_pri_key: direct_private_key_der(&expired_key),
+                km_cert_der: None,
+                km_pri_key: None,
             },
         })
         .await
@@ -987,9 +1003,9 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
                 password: "secret-password".to_owned(),
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: valid_cert_der,
-                sign_pri_key: vec![4, 5, 6],
-                km_cert_der: Some(vec![7, 8, 9]),
-                km_pri_key: Some(vec![10, 11, 12]),
+                sign_pri_key: direct_private_key_der(&valid_key),
+                km_cert_der: None,
+                km_pri_key: None,
             },
         })
         .await
@@ -1026,7 +1042,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
                 password: "secret-password".to_owned(),
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: stored_cert_der,
-                sign_pri_key: vec![4, 5, 6],
+                sign_pri_key: direct_private_key_der(&stored_key),
                 km_cert_der: None,
                 km_pri_key: None,
             },
@@ -1045,8 +1061,8 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
         })
         .await
         .expect("create ephemeral challenge");
-    let ephemeral_key = PKey::from_rsa(Rsa::generate(2048).expect("generate ephemeral rsa key"))
-        .expect("wrap key");
+    let ephemeral_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate ephemeral rsa key")).expect("wrap key");
     let ephemeral_cert_der =
         create_sign_cert_der_for_common_name(&ephemeral_key, "Ephemeral Certificate");
     let ephemeral_signature = sign_challenge(&ephemeral_key, &ephemeral.payload);
@@ -1061,7 +1077,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
                 password: "secret-password".to_owned(),
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: ephemeral_cert_der,
-                sign_pri_key: vec![4, 5, 6],
+                sign_pri_key: direct_private_key_der(&ephemeral_key),
                 km_cert_der: None,
                 km_pri_key: None,
             },
@@ -1074,6 +1090,148 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
         .expect("execute ephemeral crawl without km");
     assert_eq!(run.status, "completed");
     assert_eq!(run.plant_id.as_deref(), Some("FAC-011"));
+}
+
+#[tokio::test]
+async fn certificate_gateway_accepts_certificate_without_subject_business_no() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate stored rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der_for_common_name(&key, "No Serial Number Certificate");
+    let signature = sign_challenge(&key, &stored.payload);
+
+    let stored_cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id,
+            challenge_payload: stored.payload,
+            challenge_signature_base64: signature,
+            bundle: CertificateBundle {
+                business_no: "9999999999".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: cert_der,
+                sign_pri_key: direct_private_key_der(&key),
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+        })
+        .await
+        .expect("register certificate without subject business number");
+
+    assert_eq!(stored_cert.business_no.as_deref(), Some("2768603291"));
+    assert_eq!(stored_cert.common_name, "No Serial Number Certificate");
+}
+
+#[tokio::test]
+async fn certificate_gateway_rejects_stored_proof_when_certificate_business_no_mismatches() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate stored rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der_for_common_name_and_business_no(
+        &key,
+        "Mismatched Stored Certificate",
+        "1234567890",
+    );
+    let signature = sign_challenge(&key, &stored.payload);
+
+    let err = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: stored.id,
+            challenge_payload: stored.payload,
+            challenge_signature_base64: signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: cert_der,
+                sign_pri_key: direct_private_key_der(&key),
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+        })
+        .await
+        .expect_err("mismatched business number should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("certificate business number mismatch")
+    );
+}
+
+#[tokio::test]
+async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_no_mismatches() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let ephemeral = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-013".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create ephemeral challenge");
+    let key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate ephemeral rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der_for_common_name_and_business_no(
+        &key,
+        "Mismatched Ephemeral Certificate",
+        "1234567890",
+    );
+    let signature = sign_challenge(&key, &ephemeral.payload);
+
+    let err = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: ephemeral.id,
+            challenge_payload: ephemeral.payload,
+            challenge_signature_base64: signature,
+            bundle: CertificateBundle {
+                business_no: "2768603291".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: cert_der,
+                sign_pri_key: direct_private_key_der(&key),
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+            facility_code: Some("FAC-013".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect_err("mismatched business number should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("certificate business number mismatch")
+    );
 }
 
 #[tokio::test]
@@ -1108,7 +1266,7 @@ async fn certificate_gateway_links_unlinked_organization_by_business_no_on_save(
                 password: "secret-password".to_owned(),
                 common_name: "Client Spoofed Name".to_owned(),
                 sign_cert_der: cert_der,
-                sign_pri_key: vec![4, 5, 6],
+                sign_pri_key: direct_private_key_der(&key),
                 km_cert_der: None,
                 km_pri_key: None,
             },

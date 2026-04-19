@@ -39,12 +39,36 @@ jobs:
 
       - name: Install kubectl
         run: |
-          curl -fsSL -o kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl_retry_args=(
+            --fail
+            --show-error
+            --silent
+            --location
+            --retry 5
+            --retry-delay 3
+            --retry-all-errors
+            --connect-timeout 20
+            --max-time 300
+          )
+          KUBECTL_VERSION="$(curl "${curl_retry_args[@]}" https://dl.k8s.io/release/stable.txt)"
+          curl "${curl_retry_args[@]}" -o kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/kubectl
 
       - name: Install vCluster CLI
         run: |
+          curl_retry_args=(
+            --fail
+            --show-error
+            --silent
+            --location
+            --retry 5
+            --retry-delay 3
+            --retry-all-errors
+            --connect-timeout 20
+            --max-time 300
+          )
           VCLUSTER_VERSION="0.33.1"
           ARCH="$(uname -m)"
           case "${ARCH}" in
@@ -55,7 +79,8 @@ jobs:
               exit 1
               ;;
           esac
-          curl -fsSL -o vcluster "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"
+          curl "${curl_retry_args[@]}" -o vcluster \
+            "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"
           chmod +x vcluster
           sudo mv vcluster /usr/local/bin/vcluster
 

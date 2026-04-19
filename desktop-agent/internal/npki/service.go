@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/big"
 	"log"
 	"os"
 	"path/filepath"
@@ -1009,6 +1010,7 @@ func withDecryptedSignerKey(signPriKey []byte, password []byte, fn func(*rsa.Pri
 	if err != nil {
 		return ErrInvalidPassword
 	}
+	defer zeroRSAPrivateKey(privateKey)
 	return fn(privateKey)
 }
 
@@ -1157,6 +1159,40 @@ func deriveDecryptionKey(algorithm asn1.ObjectIdentifier, salt []byte, iteration
 
 func zeroBytes(buf []byte) {
 	clear(buf)
+}
+
+func zeroRSAPrivateKey(privateKey *rsa.PrivateKey) {
+	if privateKey == nil {
+		return
+	}
+	zeroBigInt(privateKey.D)
+	zeroBigInt(privateKey.N)
+	for i := range privateKey.Primes {
+		zeroBigInt(privateKey.Primes[i])
+	}
+	zeroBigInt(privateKey.Precomputed.Dp)
+	zeroBigInt(privateKey.Precomputed.Dq)
+	zeroBigInt(privateKey.Precomputed.Qinv)
+	for i := range privateKey.Precomputed.CRTValues {
+		zeroBigInt(privateKey.Precomputed.CRTValues[i].Exp)
+		zeroBigInt(privateKey.Precomputed.CRTValues[i].Coeff)
+		zeroBigInt(privateKey.Precomputed.CRTValues[i].R)
+	}
+}
+
+func zeroBigInt(value *big.Int) {
+	if value == nil {
+		return
+	}
+	// Best-effort wipe: this relies on math/big's current Bits() representation
+	// exposing the backing words. The runtime may still hold copies elsewhere.
+	words := value.Bits()
+	for i := range words {
+		words[i] = 0
+	}
+	value.SetBits(words[:0])
+	runtime.KeepAlive(words)
+	runtime.KeepAlive(value)
 }
 
 func decryptSEEDCBC(key []byte, iv []byte, cipherText []byte) ([]byte, error) {

@@ -1,3 +1,4 @@
+use crate::crypto::CertificateBundle;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use openssl::{
@@ -165,6 +166,28 @@ pub fn verify_challenge_signature(
     Ok(())
 }
 
+pub fn validate_certificate_bundle(bundle: &CertificateBundle) -> Result<()> {
+    validate_key_pair(
+        &bundle.sign_cert_der,
+        &bundle.sign_pri_key,
+        &bundle.password,
+        "signCert.der",
+        "signPri.key",
+    )?;
+    match (&bundle.km_cert_der, &bundle.km_pri_key) {
+        (Some(km_cert_der), Some(km_pri_key)) => validate_key_pair(
+            km_cert_der,
+            km_pri_key,
+            &bundle.password,
+            "kmCert.der",
+            "kmPri.key",
+        )?,
+        (None, None) => {}
+        _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
+    }
+    Ok(())
+}
+
 fn parse_certificate(input: &[u8]) -> Result<X509> {
     X509::from_pem(input)
         .or_else(|_| X509::from_der(input))
@@ -192,6 +215,29 @@ struct EncryptedPrivateKey {
     salt: Vec<u8>,
     iteration: usize,
     cipher_text: Vec<u8>,
+}
+
+struct SensitiveBytes(Vec<u8>);
+
+impl SensitiveBytes {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for SensitiveBytes {
+    fn drop(&mut self) {
+        for byte in &mut self.0 {
+            // Use volatile writes so the compiler cannot elide clearing
+            // sensitive buffers that are about to be dropped.
+            unsafe { std::ptr::write_volatile(byte as *mut u8, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn parse_encrypted_private_key(der: &[u8]) -> Result<EncryptedPrivateKey> {
@@ -223,22 +269,14 @@ fn parse_encrypted_private_key(der: &[u8]) -> Result<EncryptedPrivateKey> {
 }
 
 fn load_signing_key(sign_pri_key: &[u8], password: &str) -> Result<(PKey<Private>, String)> {
-    if let Ok(encrypted) = parse_encrypted_private_key(sign_pri_key) {
-        let (key, iv) = derive_npki_decryption_key(
-            &encrypted.algorithm,
-            &encrypted.salt,
-            encrypted.iteration,
-            password.as_bytes(),
-        )?;
-        let plain_der = seed_cbc_decrypt(&key, &iv, &encrypted.cipher_text)?;
-        let private_key = parse_private_key(&plain_der)?;
-        let vid_random = extract_vid_random(&plain_der)?;
-        return Ok((private_key, STANDARD.encode(vid_random)));
-    }
-
-    let private_key =
-        parse_direct_private_key(sign_pri_key).context("parse direct private key DER")?;
-    Ok((private_key, String::new()))
+    let loaded = load_private_key_material(sign_pri_key, password, "signPri.key")?;
+    Ok((
+        loaded.private_key,
+        loaded
+            .vid_random
+            .map(|vid_random| STANDARD.encode(vid_random))
+            .unwrap_or_default(),
+    ))
 }
 
 fn parse_private_key(plain_der: &[u8]) -> Result<PKey<Private>> {
@@ -263,6 +301,65 @@ fn parse_direct_private_key(der: &[u8]) -> Result<PKey<Private>> {
         Id::RSA | Id::EC => Ok(private_key),
         other => bail!("unsupported direct private key algorithm: {other:?}"),
     }
+}
+
+fn validate_key_pair(
+    cert_der: &[u8],
+    private_key_der: &[u8],
+    password: &str,
+    cert_name: &str,
+    key_name: &str,
+) -> Result<()> {
+    ensure_openssl_legacy_provider()?;
+    let certificate = X509::from_der(cert_der).with_context(|| format!("parse {cert_name}"))?;
+    let certificate_public_key = certificate
+        .public_key()
+        .with_context(|| format!("extract public key from {cert_name}"))?;
+    let private_key = load_private_key_material(private_key_der, password, key_name)?.private_key;
+    if !private_key.public_eq(&certificate_public_key) {
+        bail!("{key_name} does not match {cert_name}");
+    }
+    Ok(())
+}
+
+struct LoadedPrivateKey {
+    private_key: PKey<Private>,
+    vid_random: Option<Vec<u8>>,
+}
+
+fn load_private_key_material(
+    private_key_der: &[u8],
+    password: &str,
+    key_name: &str,
+) -> Result<LoadedPrivateKey> {
+    if let Ok(encrypted) = parse_encrypted_private_key(private_key_der) {
+        let (key, iv) = derive_npki_decryption_key(
+            &encrypted.algorithm,
+            &encrypted.salt,
+            encrypted.iteration,
+            password.as_bytes(),
+        )?;
+        let key = SensitiveBytes::new(key);
+        let iv = SensitiveBytes::new(iv);
+        let plain_der = SensitiveBytes::new(
+            seed_cbc_decrypt(key.as_slice(), iv.as_slice(), &encrypted.cipher_text)
+                .with_context(|| format!("decrypt {key_name}"))?,
+        );
+        let private_key = parse_private_key(plain_der.as_slice())
+            .with_context(|| format!("parse {key_name}"))?;
+        let vid_random = extract_vid_random(plain_der.as_slice()).ok();
+        return Ok(LoadedPrivateKey {
+            private_key,
+            vid_random,
+        });
+    }
+
+    let private_key =
+        parse_direct_private_key(private_key_der).with_context(|| format!("parse {key_name}"))?;
+    Ok(LoadedPrivateKey {
+        private_key,
+        vid_random: None,
+    })
 }
 
 fn extract_vid_random(plain_der: &[u8]) -> Result<Vec<u8>> {

@@ -7,7 +7,7 @@ use infra::{
         generate_data_encryption_key,
     },
     kms::{EnvKmsProvider, KmsProvider},
-    npki::{NpkiBundle, NpkiSigner},
+    npki::{NpkiBundle, NpkiSigner, validate_certificate_bundle},
 };
 use openssl::{
     asn1::Asn1Time,
@@ -151,6 +151,25 @@ fn signer_accepts_direct_pkcs8_private_keys_without_vid_random() {
 }
 
 #[test]
+fn validate_certificate_bundle_accepts_direct_pkcs8_private_keys() {
+    let (sign_certificate, sign_private_key) = test_certificate_and_key();
+    let (km_certificate, km_private_key) = test_certificate_and_key();
+
+    validate_certificate_bundle(&CertificateBundle {
+        business_no: "2768603291".to_owned(),
+        password: "unused-password".to_owned(),
+        common_name: "Direct PKCS8 Test".to_owned(),
+        sign_cert_der: sign_certificate.to_der().expect("sign certificate der"),
+        sign_pri_key: sign_private_key
+            .private_key_to_pkcs8()
+            .expect("sign key pkcs8"),
+        km_cert_der: Some(km_certificate.to_der().expect("km certificate der")),
+        km_pri_key: Some(km_private_key.private_key_to_pkcs8().expect("km key pkcs8")),
+    })
+    .expect("validate direct private key bundle");
+}
+
+#[test]
 fn signer_rejects_unsupported_direct_private_key_algorithms() {
     let (certificate, _) = test_certificate_and_key();
     let private_key = PKey::generate_ed25519().expect("generate ed25519 key");
@@ -187,9 +206,7 @@ fn test_certificate_and_key() -> (X509, PKey<Private>) {
 
     let mut builder = X509::builder().expect("x509 builder");
     builder.set_version(2).expect("set version");
-    builder
-        .set_subject_name(&name)
-        .expect("set subject name");
+    builder.set_subject_name(&name).expect("set subject name");
     builder.set_issuer_name(&name).expect("set issuer name");
     builder.set_pubkey(&private_key).expect("set public key");
     let not_before = Asn1Time::days_from_now(0).expect("not before");
