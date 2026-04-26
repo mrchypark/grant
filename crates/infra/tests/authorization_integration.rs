@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -19,8 +19,8 @@ use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{
     artifacts::ArtifactStore,
     bridge::{
-        BridgeFacility, BridgeGenerationRecord, BridgeRateRecord, BridgeRecRecord, BridgeRun,
-        BridgeSnapshot,
+        BridgeFacility, BridgeGenerationRecord, BridgeOptions, BridgeRateRecord, BridgeRecRecord,
+        BridgeRun, BridgeSnapshot,
     },
     config::{
         AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, KmsConfig,
@@ -177,6 +177,16 @@ fn test_config(artifacts_root: &Path) -> AppConfig {
 }
 
 async fn build_service() -> (AppService, Database, TempDir, TempDir) {
+    build_service_with_collector(mock_collect_snapshot).await
+}
+
+async fn build_service_with_collector<F, Fut>(
+    collector: F,
+) -> (AppService, Database, TempDir, TempDir)
+where
+    F: Fn(BridgeOptions) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<BridgeRun>> + Send + 'static,
+{
     let (runtime, db_dir) = test_runtime().await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
     let cfg = test_config(artifacts_dir.path());
@@ -190,7 +200,7 @@ async fn build_service() -> (AppService, Database, TempDir, TempDir) {
     let artifacts = ArtifactStore::new(&cfg.artifacts)
         .await
         .expect("artifact store");
-    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, mock_collect_snapshot);
+    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, collector);
     service.initialize().await.expect("initialize service");
     db.upsert_organization_identity(&bootstrap_user_id, Some("2768603291"), &bootstrap_user_name)
         .await
@@ -203,6 +213,10 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
         .facility_code
         .clone()
         .unwrap_or_else(|| "FAC-MOCK".to_owned());
+    let month = opts
+        .start_month
+        .clone()
+        .unwrap_or_else(|| "2026-03".to_owned());
     Ok(BridgeRun {
         temp_dir: tempfile::tempdir().expect("collector tempdir"),
         snapshot: BridgeSnapshot {
@@ -218,14 +232,14 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
                 confirm_issued: "Y".to_owned(),
             },
             generation: vec![BridgeGenerationRecord {
-                month: "2026-03".to_owned(),
+                month: month.clone(),
                 generation_kwh: 1000.0,
                 self_consumption_kwh: Some(100.0),
                 supply_kwh: 900.0,
                 application_deadline: Some("2026-04-15".to_owned()),
             }],
             rates: vec![BridgeRateRecord {
-                month: "2026-03".to_owned(),
+                month: month.clone(),
                 self_rate: Some(110.0),
                 national_average: Some(120.0),
                 nearby_average: Some(118.0),
@@ -234,7 +248,7 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
                 source_control_flag: Some("mock".to_owned()),
             }],
             rec: vec![BridgeRecRecord {
-                month: "2026-03".to_owned(),
+                month,
                 application_no: "APP-001".to_owned(),
                 supply_kwh: 900,
                 rec_quantity: 1,
@@ -1712,6 +1726,198 @@ async fn gateway_sync_scope_requires_permission_for_existing_plant() {
         .await
         .expect_err("existing plant should require plant sync execute permission");
     assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn cert_gateway_challenge_requires_scope_authorization_before_sync_planning() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+    seed_gateway_scope_fixture(&db).await;
+
+    let err = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "operator-org".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("delta".to_owned()),
+            origin: Some("https://app.example".to_owned()),
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some(" FAC-SYNC-001 ".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("unauthorized facility challenge should fail before planning");
+
+    assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn ephemeral_execution_uses_challenge_bound_month_window() {
+    let observed = Arc::new(Mutex::new(Vec::<BridgeOptions>::new()));
+    let observed_collector = observed.clone();
+    let (service, db, _db_dir, _artifacts_dir) =
+        build_service_with_collector(move |opts: BridgeOptions| {
+            let observed = observed_collector.clone();
+            async move {
+                observed.lock().expect("collector log").push(opts.clone());
+                mock_collect_snapshot(opts).await
+            }
+        })
+        .await;
+
+    let seed_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("full".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("seed challenge");
+    let (seed_bundle, seed_signature) = fake_bundle_and_signature(&seed_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: seed_challenge.id,
+            challenge_payload: seed_challenge.payload,
+            challenge_signature_base64: seed_signature,
+            bundle: seed_bundle,
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: seed_challenge.start_month,
+            end_month: seed_challenge.end_month,
+            mode: SyncMode::Full,
+        })
+        .await
+        .expect("seed execution");
+    db.upsert_role(&Role {
+        id: "role-test-plant-sync-execute".to_owned(),
+        organization_id: None,
+        code: "plant.sync.execute".to_owned(),
+        name: "Plant Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert test sync role");
+    db.upsert_role_action("role-test-plant-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert test sync role action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant organization sync access for seeded plant");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant user sync access for seeded plant");
+
+    let delta_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("delta".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("delta challenge");
+    assert_eq!(delta_challenge.sync_mode.as_deref(), Some("delta"));
+    assert_eq!(delta_challenge.start_month.as_deref(), Some("2026-03"));
+
+    let newer_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("full".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: Some("2026-04".to_owned()),
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("newer challenge");
+    let (newer_bundle, newer_signature) = fake_bundle_and_signature(&newer_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: newer_challenge.id,
+            challenge_payload: newer_challenge.payload,
+            challenge_signature_base64: newer_signature,
+            bundle: newer_bundle,
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: newer_challenge.start_month,
+            end_month: newer_challenge.end_month,
+            mode: SyncMode::Full,
+        })
+        .await
+        .expect("newer execution");
+
+    let (delta_bundle, delta_signature) = fake_bundle_and_signature(&delta_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: delta_challenge.id,
+            challenge_payload: delta_challenge.payload,
+            challenge_signature_base64: delta_signature,
+            bundle: delta_bundle,
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: delta_challenge.start_month,
+            end_month: delta_challenge.end_month,
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("delta execution");
+
+    let calls = observed.lock().expect("collector log");
+    let final_bound_call = calls
+        .iter()
+        .rev()
+        .find(|call| call.facility_code.as_deref() == Some("FAC-BOUND"))
+        .expect("FAC-BOUND collector call");
+    assert_eq!(final_bound_call.start_month.as_deref(), Some("2026-03"));
+    assert!(final_bound_call.skip_documents);
 }
 
 #[tokio::test]

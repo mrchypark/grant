@@ -478,7 +478,20 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
+        let mut facility_code = trim_optional(input.facility_code.as_deref()).map(str::to_owned);
         let (sync_mode, start_month, end_month) = if mode == "ephemeral" {
+            if facility_code.is_some() {
+                facility_code = self
+                    .authorize_gateway_sync_scope(
+                        &created_by_user_id,
+                        &organization_id,
+                        facility_code.as_deref(),
+                    )
+                    .await?;
+            } else {
+                self.authorize_gateway_sync_scope(&created_by_user_id, &organization_id, None)
+                    .await?;
+            }
             let requested_mode = input
                 .sync_mode
                 .as_deref()
@@ -487,7 +500,7 @@ impl AppService {
                 .unwrap_or(SyncMode::Delta);
             let sync_input = SyncInput {
                 organization_id: organization_id.clone(),
-                facility_code: input.facility_code.clone(),
+                facility_code: facility_code.clone(),
                 start_month: input.start_month.clone(),
                 end_month: input.end_month.clone(),
                 mode: requested_mode,
@@ -511,7 +524,7 @@ impl AppService {
             input.origin.as_deref(),
             input.business_no.as_deref(),
             sync_mode.as_deref(),
-            input.facility_code.as_deref(),
+            facility_code.as_deref(),
             start_month.as_deref(),
             end_month.as_deref(),
             input.sign_cert_sha256_hex.as_deref(),
@@ -524,7 +537,7 @@ impl AppService {
                 mode,
                 &nonce,
                 &hash_hex(&payload),
-                input.facility_code.as_deref(),
+                facility_code.as_deref(),
                 &expires_at,
                 &created_by_user_id,
             )
@@ -620,7 +633,8 @@ impl AppService {
         )
         .await?;
 
-        self.run_sync_with_bundle(
+        let skip_documents = matches!(input.mode, SyncMode::Delta);
+        self.run_sync_with_resolved_plan(
             &organization_id,
             business_no,
             input.bundle,
@@ -628,6 +642,7 @@ impl AppService {
             input.start_month,
             input.end_month,
             input.mode,
+            skip_documents,
         )
         .await
     }
@@ -952,9 +967,33 @@ impl AppService {
 
         let (effective_mode, start_month, end_month, skip_documents) =
             self.resolve_sync_plan(&input).await?;
+        self.run_sync_with_resolved_plan(
+            organization_id,
+            business_no,
+            bundle,
+            input.facility_code,
+            start_month,
+            end_month,
+            effective_mode,
+            skip_documents,
+        )
+        .await
+    }
+
+    async fn run_sync_with_resolved_plan(
+        &self,
+        organization_id: &str,
+        business_no: String,
+        bundle: CertificateBundle,
+        facility_code: Option<String>,
+        start_month: Option<String>,
+        end_month: Option<String>,
+        effective_mode: SyncMode,
+        skip_documents: bool,
+    ) -> Result<SyncRun> {
         info!(
             business_no,
-            facility_code = input.facility_code.as_deref().unwrap_or(""),
+            facility_code = facility_code.as_deref().unwrap_or(""),
             mode = ?effective_mode,
             start_month = start_month.as_deref().unwrap_or(""),
             end_month = end_month.as_deref().unwrap_or(""),
@@ -965,7 +1004,7 @@ impl AppService {
             .db
             .start_sync_run(
                 &organization_id,
-                input.facility_code.as_deref(),
+                facility_code.as_deref(),
                 effective_mode.clone(),
             )
             .await?;
@@ -974,7 +1013,7 @@ impl AppService {
         let collect = self
             .collect_snapshot(
                 business_no.clone(),
-                input.facility_code.clone(),
+                facility_code.clone(),
                 start_month.clone(),
                 end_month.clone(),
                 skip_documents,
@@ -1010,7 +1049,7 @@ impl AppService {
                 let message = format!("{err:#}");
                 error!(
                     business_no,
-                    facility_code = input.facility_code.as_deref().unwrap_or(""),
+                    facility_code = facility_code.as_deref().unwrap_or(""),
                     mode = ?effective_mode,
                     duration_ms,
                     error = %message,

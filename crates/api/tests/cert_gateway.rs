@@ -9,6 +9,9 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::Utc;
+use domain::{
+    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
@@ -38,6 +41,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn free_local_addr() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -74,7 +78,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
     )
 }
 
-async fn build_app() -> (axum::Router, TempDir, TempDir) {
+async fn build_app() -> (axum::Router, Database, TempDir, TempDir) {
     let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, db_dir) = test_runtime().await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
@@ -123,7 +127,7 @@ async fn build_app() -> (axum::Router, TempDir, TempDir) {
     db.upsert_organization_identity("bootstrap-user", Some("2768603291"), "Bootstrap User")
         .await
         .expect("seed bootstrap organization identity");
-    (api::build_router(service), db_dir, artifacts_dir)
+    (api::build_router(service), db, db_dir, artifacts_dir)
 }
 
 async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Result<BridgeRun> {
@@ -385,6 +389,58 @@ fn local_execution_snapshot_with_document(facility_code: &str) -> Value {
     snapshot
 }
 
+async fn grant_test_sync_access(
+    db: &Database,
+    organization_id: &str,
+    user_id: &str,
+    facility_code: &str,
+) {
+    db.upsert_role(&Role {
+        id: "role-test-plant-sync-execute".to_owned(),
+        organization_id: None,
+        code: "plant.sync.execute".to_owned(),
+        name: "Plant Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert test sync role");
+    db.upsert_role_action("role-test-plant-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert test sync action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: organization_id.to_owned(),
+        subject_organization_id: organization_id.to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: facility_code.to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: user_id.to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save org sync binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: user_id.to_owned(),
+        subject_organization_id: organization_id.to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: facility_code.to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: user_id.to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save user sync binding");
+}
+
 fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
     let mut name = X509NameBuilder::new().expect("x509 name");
     name.append_entry_by_text("CN", "Test Certificate")
@@ -461,7 +517,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
-    let (app, _db_dir, artifacts_dir) = build_app().await;
+    let (app, db, _db_dir, artifacts_dir) = build_app().await;
     let stored_material = proof_material();
     let stored_sign_cert_sha256_hex = sha256_hex(&stored_material.sign_cert_der);
 
@@ -693,6 +749,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let local_result_json = json_body(local_result_response).await;
     assert_eq!(local_result_json["status"], "completed");
     assert_eq!(local_result_json["plantId"], "FAC-004");
+    grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-004").await;
 
     let local_delta_challenge = app
         .clone()
@@ -766,7 +823,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
 
 #[tokio::test]
 async fn local_execution_result_rejects_document_source_path_fallback() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
     let secret_dir = tempfile::tempdir().expect("secret tempdir");
     let secret_path = secret_dir.path().join("server-secret.txt");
     std::fs::write(&secret_path, b"SERVER-SECRET").expect("secret fixture");
@@ -828,7 +885,7 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
 
 #[tokio::test]
 async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismatch() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
     let material = proof_material();
 
     let challenge = app
@@ -876,7 +933,7 @@ async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismat
 
 #[tokio::test]
 async fn local_execution_result_persists_normalized_facility_code() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let challenge = app
         .clone()
@@ -922,7 +979,7 @@ async fn local_execution_result_persists_normalized_facility_code() {
 
 #[tokio::test]
 async fn crawl_start_rejects_organization_path_mismatch() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let challenge_response = app
         .clone()
@@ -1009,7 +1066,7 @@ async fn crawl_start_rejects_organization_path_mismatch() {
 
 #[tokio::test]
 async fn crawl_start_returns_not_found_for_unknown_token() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let response = app
         .oneshot(task_token_request(
@@ -1026,7 +1083,7 @@ async fn crawl_start_returns_not_found_for_unknown_token() {
 
 #[tokio::test]
 async fn issue_crawl_task_token_returns_not_found_for_unknown_certificate() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let response = app
         .oneshot(auth_request(
@@ -1051,7 +1108,7 @@ async fn issue_crawl_task_token_returns_not_found_for_unknown_certificate() {
 
 #[tokio::test]
 async fn create_cert_gateway_challenge_rejects_unsupported_mode() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let response = app
         .oneshot(auth_request(
@@ -1071,7 +1128,7 @@ async fn create_cert_gateway_challenge_rejects_unsupported_mode() {
 
 #[tokio::test]
 async fn stored_registration_requires_challenge_signature() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let challenge_response = app
         .clone()
@@ -1119,7 +1176,7 @@ async fn stored_registration_requires_challenge_signature() {
 
 #[tokio::test]
 async fn stored_registration_accepts_omitted_or_empty_km_material() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     for bundle_builder in [
         signed_proof_bundle_without_km as fn(&str) -> (Value, String),
@@ -1172,7 +1229,7 @@ async fn stored_registration_accepts_omitted_or_empty_km_material() {
 
 #[tokio::test]
 async fn stored_registration_rejects_asymmetric_km_material() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     for keep_cert in [true, false] {
         let challenge_response = app
@@ -1225,7 +1282,7 @@ async fn stored_registration_rejects_asymmetric_km_material() {
 
 #[tokio::test]
 async fn stored_registration_returns_not_found_for_unknown_challenge_id() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
 
     let register_response = app
         .oneshot(auth_request(
