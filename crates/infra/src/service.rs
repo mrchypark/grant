@@ -676,8 +676,13 @@ impl AppService {
         mut input: IngestLocalExecutionResultInput,
     ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let requested_business_no = decode_challenge_payload(&input.challenge_payload)?.business_no;
         let business_no = self
-            .validate_sign_cert_for_organization(&organization_id, &input.sign_cert_der)
+            .validate_sign_cert_for_organization(
+                &organization_id,
+                requested_business_no.as_deref(),
+                &input.sign_cert_der,
+            )
             .await?;
         let snapshot_business_no =
             require_non_empty("facilityBusinessNo", &input.snapshot.facility.business_no)?;
@@ -1921,10 +1926,11 @@ impl AppService {
     async fn validate_sign_cert_for_organization(
         &self,
         organization_id: &str,
+        requested_business_no: Option<&str>,
         sign_cert_der: &[u8],
     ) -> Result<String> {
         let business_no = self
-            .resolve_organization_business_no(organization_id, None)
+            .resolve_organization_business_no(organization_id, requested_business_no)
             .await?;
         if let Some(cert_business_no) = extract_business_no(sign_cert_der)? {
             if cert_business_no != business_no {
@@ -2160,14 +2166,14 @@ impl AppService {
                     .clone()
                     .or_else(|| doc.source_sha256.clone()),
                 object_key,
-                content_type: document_content_type(doc).to_owned(),
+                content_type: document_content_type(doc)?.to_owned(),
             });
         }
         Ok(persisted)
     }
 
     async fn persist_document(&self, object_key: String, doc: &BridgeDocument) -> Result<()> {
-        let content_type = document_content_type(doc);
+        let content_type = document_content_type(doc)?;
         if let Some(content_base64) = doc
             .content_base64
             .as_deref()
@@ -2315,12 +2321,20 @@ fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocum
     hex::encode(&digest[..16])
 }
 
-fn document_content_type(doc: &BridgeDocument) -> &str {
-    doc.content_type
+fn document_content_type(doc: &BridgeDocument) -> Result<&str> {
+    let content_type = doc
+        .content_type
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("application/pdf")
+        .unwrap_or("application/pdf");
+    if content_type != "application/pdf" {
+        return Err(bad_request_error(format!(
+            "document {} has unsupported contentType",
+            doc.file_name
+        )));
+    }
+    Ok(content_type)
 }
 
 fn map_rate_record(row: &BridgeRateRecord) -> StoredRateRecord {
@@ -2873,9 +2887,9 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
-        document_source_path, estimated_base64_decoded_len, normalize_optional_text,
-        require_local_execution_document_contents, select_organization_business_no,
-        validate_month_format,
+        document_content_type, document_source_path, estimated_base64_decoded_len,
+        normalize_optional_text, require_local_execution_document_contents,
+        select_organization_business_no, validate_month_format,
     };
     use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
     use chrono::{DateTime, FixedOffset};
@@ -3001,6 +3015,24 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("document permit.pdf has no contentBase64 and no sourcePath")
+        );
+    }
+
+    #[test]
+    fn document_content_type_rejects_untrusted_values() {
+        let mut doc = fixture_document("permit.pdf", "UERGLUNPTlRFTlQ=".to_owned());
+        doc.content_type = Some("application/pdf\r\nx-evil: 1".to_owned());
+
+        let err = document_content_type(&doc).expect_err("invalid content type");
+        assert!(
+            err.to_string()
+                .contains("document permit.pdf has unsupported contentType")
+        );
+
+        doc.content_type = Some(" application/pdf ".to_owned());
+        assert_eq!(
+            document_content_type(&doc).expect("pdf content type"),
+            "application/pdf"
         );
     }
 

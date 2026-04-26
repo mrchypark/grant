@@ -10,7 +10,7 @@ use base64::{
 };
 use chrono::Utc;
 use domain::{
-    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
+    Plant, Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -898,6 +898,133 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
             .as_str()
             .expect("error message")
             .contains("contentBase64"),
+        "body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn local_execution_result_uses_bound_business_number_for_unlinked_organizations() {
+    let (app, db, _db_dir, _artifacts_dir) = build_app().await;
+    db.upsert_organization_with_owner("unlinked-org", "Unlinked Org", None, "Unlinked Org")
+        .await
+        .expect("seed unlinked organization");
+    db.upsert_plant(&Plant {
+        id: "FAC-UNLINKED".to_owned(),
+        facility_code: "FAC-UNLINKED".to_owned(),
+        name: "Unlinked Plant".to_owned(),
+        owner_organization_id: "unlinked-org".to_owned(),
+        created_by_organization_id: Some("unlinked-org".to_owned()),
+        contract_no: "CONTRACT-UNLINKED".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.5,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("seed unlinked plant");
+    grant_test_sync_access(&db, "unlinked-org", "bootstrap-user", "FAC-UNLINKED").await;
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/unlinked-org/cert-gateway/challenges",
+            "bootstrap-user",
+            "unlinked-org",
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "businessNo": "2768603291",
+                "facilityCode": "FAC-UNLINKED"
+            }),
+        ))
+        .await
+        .expect("local challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("local challenge payload");
+    let (bundle, signature) = signed_proof_bundle(payload);
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/unlinked-org/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "unlinked-org",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": challenge_json["syncMode"],
+                "snapshot": local_execution_snapshot("FAC-UNLINKED")
+            }),
+        ))
+        .await
+        .expect("local result response");
+
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
+    assert_eq!(body["plantId"], "FAC-UNLINKED");
+}
+
+#[tokio::test]
+async fn local_execution_result_rejects_untrusted_document_content_type() {
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-BAD-CTYPE"
+            }),
+        ))
+        .await
+        .expect("local document challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("local document challenge payload");
+    let (bundle, signature) = signed_proof_bundle(payload);
+    let mut snapshot = local_execution_snapshot_with_document("FAC-BAD-CTYPE");
+    snapshot["documents"][0]["contentType"] =
+        Value::String("application/pdf\r\nx-evil: 1".to_owned());
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": "full",
+                "snapshot": snapshot
+            }),
+        ))
+        .await
+        .expect("local document result response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("unsupported contentType"),
         "body = {body}"
     );
 }
