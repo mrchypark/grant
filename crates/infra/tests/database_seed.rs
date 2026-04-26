@@ -1,7 +1,7 @@
 use domain::{
     Agreement, AgreementDocument, AgreementDocumentType, AgreementStatus, AgreementType, Client,
     ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant, ClientGrantAction,
-    ClientGrantStatus, ClientType,
+    ClientGrantStatus, ClientType, Plant,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
@@ -216,6 +216,49 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
         HiqliteRuntime::embedded(client, ReadConsistency::Local),
         dir,
     )
+}
+
+#[tokio::test]
+async fn plant_upsert_rejects_cross_organization_facility_takeover() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+
+    let mut plant = Plant {
+        id: "FAC-SHARED".to_owned(),
+        facility_code: "FAC-SHARED".to_owned(),
+        owner_organization_id: "ops-seoul".to_owned(),
+        created_by_organization_id: None,
+        name: "Seoul Plant".to_owned(),
+        contract_no: "CONTRACT-1".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("initial plant");
+
+    plant.owner_organization_id = "ops-busan".to_owned();
+    plant.name = "Busan Plant".to_owned();
+    let err = db
+        .upsert_plant(&plant)
+        .await
+        .expect_err("cross-organization takeover");
+    assert!(
+        err.to_string()
+            .contains("plant already belongs to another organization")
+    );
+
+    let stored = db
+        .get_plant_by_facility_code("FAC-SHARED")
+        .await
+        .expect("stored plant");
+    assert_eq!(stored.owner_organization_id, "ops-seoul");
+    assert_eq!(stored.name, "Seoul Plant");
 }
 
 #[tokio::test]

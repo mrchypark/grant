@@ -267,6 +267,8 @@ struct ChallengePayloadBinding {
     start_month: Option<String>,
     end_month: Option<String>,
     sign_cert_sha256_hex: Option<String>,
+    #[serde(skip)]
+    legacy_plaintext: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2569,7 +2571,7 @@ fn validate_challenge_payload_bindings(
     }
     match trim_optional(payload.origin.as_deref()) {
         Some(origin) => validate_challenge_origin(origin)?,
-        None if expected.require_origin => {
+        None if expected.require_origin && !payload.legacy_plaintext => {
             return Err(bad_request_error(
                 "cert gateway challenge payload origin is required",
             ));
@@ -2647,11 +2649,39 @@ fn decode_challenge_payload(challenge_payload: &str) -> Result<ChallengePayloadB
     let encoded = challenge_payload
         .strip_prefix("cert-gateway:")
         .ok_or_else(|| bad_request_error("cert gateway challenge payload prefix mismatch"))?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| bad_request_error("cert gateway challenge payload is not base64"))?;
-    serde_json::from_slice(&raw)
-        .map_err(|_| bad_request_error("cert gateway challenge payload is not json"))
+    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) {
+        Ok(raw) => serde_json::from_slice(&raw)
+            .map_err(|_| bad_request_error("cert gateway challenge payload is not json")),
+        Err(_) => decode_legacy_challenge_payload(encoded),
+    }
+}
+
+fn decode_legacy_challenge_payload(encoded: &str) -> Result<ChallengePayloadBinding> {
+    let mut parts = encoded.splitn(5, ':');
+    let organization_id = parts.next().unwrap_or_default();
+    let mode = parts.next().unwrap_or_default();
+    let facility_code = parts.next().unwrap_or_default();
+    let nonce = parts.next().unwrap_or_default();
+    let expires_at = parts.next().unwrap_or_default();
+    if organization_id.is_empty() || mode.is_empty() || nonce.is_empty() || expires_at.is_empty() {
+        return Err(bad_request_error(
+            "cert gateway challenge payload is not base64",
+        ));
+    }
+    Ok(ChallengePayloadBinding {
+        organization_id: organization_id.to_owned(),
+        mode: mode.to_owned(),
+        nonce: nonce.to_owned(),
+        origin: None,
+        expires_at: expires_at.to_owned(),
+        business_no: None,
+        sync_mode: None,
+        facility_code: trim_optional(Some(facility_code)).map(ToOwned::to_owned),
+        start_month: None,
+        end_month: None,
+        sign_cert_sha256_hex: None,
+        legacy_plaintext: true,
+    })
 }
 
 fn validate_optional_binding(
@@ -2909,8 +2939,8 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
-        decode_content_base64_to_tempfile, document_content_type, document_source_path,
-        estimated_base64_decoded_len, normalize_optional_text,
+        decode_challenge_payload, decode_content_base64_to_tempfile, document_content_type,
+        document_source_path, estimated_base64_decoded_len, normalize_optional_text,
         require_local_execution_document_contents, select_organization_business_no,
         validate_month_format,
     };
@@ -2968,6 +2998,21 @@ mod tests {
                 "{invalid} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn challenge_payload_decoder_accepts_legacy_plaintext_payloads() {
+        let payload = decode_challenge_payload(
+            "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z",
+        )
+        .expect("legacy payload");
+
+        assert_eq!(payload.organization_id, "org-1");
+        assert_eq!(payload.mode, "ephemeral");
+        assert_eq!(payload.facility_code.as_deref(), Some("FAC-001"));
+        assert_eq!(payload.nonce, "nonce-1");
+        assert_eq!(payload.expires_at, "2026-04-12T00:00:00Z");
+        assert!(payload.legacy_plaintext);
     }
 
     #[test]

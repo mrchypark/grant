@@ -944,6 +944,14 @@ func TestNormalizeTrustedGatewayBaseURLPreservesEncodedPath(t *testing.T) {
 	if normalized != "https://gateway.local/base%2Ftenant" {
 		t.Fatalf("normalized = %q, want encoded path preserved", normalized)
 	}
+
+	normalized, err = normalizeTrustedGatewayBaseURL("https://gateway.local/base%2Ftenant/%2F/")
+	if err != nil {
+		t.Fatalf("normalizeTrustedGatewayBaseURL with raw path: %v", err)
+	}
+	if normalized != "https://gateway.local/base%2Ftenant/%2F" {
+		t.Fatalf("normalized = %q, want escaped path and raw path kept in sync", normalized)
+	}
 }
 
 func TestServerRejectsOversizedApprovalBody(t *testing.T) {

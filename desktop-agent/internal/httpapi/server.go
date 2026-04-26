@@ -602,11 +602,29 @@ func normalizeTrustedGatewayBaseURL(value string) (string, error) {
 			"gatewayBaseUrl must use https except for loopback http",
 		)
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	if parsed.RawPath != "" {
-		parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	normalizedPath, normalizedRawPath, err := normalizeURLPath(parsed)
+	if err != nil {
+		return "", newHTTPStatusError(http.StatusBadRequest, "gatewayBaseUrl path is invalid")
 	}
+	parsed.Path = normalizedPath
+	parsed.RawPath = normalizedRawPath
 	return parsed.String(), nil
+}
+
+func normalizeURLPath(parsed *url.URL) (string, string, error) {
+	escapedPath := strings.TrimRight(parsed.EscapedPath(), "/")
+	if escapedPath == "" {
+		return "", "", nil
+	}
+	path, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", "", err
+	}
+	rawPath := ""
+	if escapedPath != (&url.URL{Path: path}).EscapedPath() {
+		rawPath = escapedPath
+	}
+	return path, rawPath, nil
 }
 
 func isLoopbackHost(host string) bool {

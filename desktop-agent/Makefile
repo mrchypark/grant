@@ -54,7 +54,7 @@ WORKER_TARGET_BIN := $(ROOT_DIR)/target/$(CARGO_BUILD_TARGET)/release/repass-loc
 WORKER_DIST_BIN := $(BIN_DIR)/repass-local-worker-$(GOOS)-$(GOARCH)$(WORKER_EXE_EXT)
 endif
 
-.PHONY: all build build-plain build-with-worker build-local-worker test vet clean build-windows build-windows-amd64 build-darwin build-darwin-arm64 build-darwin-amd64 build-linux
+.PHONY: all build build-agent build-plain build-with-worker build-local-worker test vet clean build-windows build-windows-amd64 build-darwin build-darwin-arm64 build-darwin-amd64 build-linux
 
 all: vet test build
 
@@ -64,7 +64,9 @@ vet:
 test:
 	GOTOOLCHAIN="$(GOTOOLCHAIN)" "$(GO)" test ./...
 
-build: $(if $(filter 1,$(GARBLE_ENABLED)),$(GARBLE_BIN))
+build: build-with-worker
+
+build-agent: $(if $(filter 1,$(GARBLE_ENABLED)),$(GARBLE_BIN))
 	@mkdir -p "$(BIN_DIR)"
 ifeq ($(GARBLE_ENABLED),1)
 	# This repo runs make recipes via sh/bash, so PATH remains ':'-delimited on Windows too.
@@ -74,9 +76,9 @@ else
 endif
 
 build-plain:
-	$(MAKE) build GARBLE_ENABLED=0
+	$(MAKE) build-agent GARBLE_ENABLED=0
 
-build-with-worker: build build-local-worker
+build-with-worker: build-agent build-local-worker
 
 build-local-worker:
 	@mkdir -p "$(BIN_DIR)"

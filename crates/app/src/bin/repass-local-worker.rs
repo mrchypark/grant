@@ -204,8 +204,9 @@ fn encode_document_base64_and_sha256(path: &Path) -> Result<(String, String)> {
 fn resolve_local_document_path(document_root: &Path, source_path: &str) -> Result<PathBuf> {
     let root = std::fs::canonicalize(document_root)
         .with_context(|| format!("resolve local document root {}", document_root.display()))?;
-    let path = std::fs::canonicalize(source_path)
-        .with_context(|| format!("resolve local document {source_path}"))?;
+    let path = std::fs::canonicalize(source_path).with_context(|| {
+        format!("resolve local document {source_path}; file must exist under collector workspace")
+    })?;
     if !path.starts_with(&root) {
         bail!("local document {source_path} is outside the collector workspace");
     }
@@ -536,6 +537,35 @@ mod tests {
         let err = embed_document_contents(&mut snapshot, collector_dir.path())
             .expect_err("outside document path");
         assert!(err.to_string().contains("outside the collector workspace"));
+        assert!(snapshot.documents[0].content_base64.is_none());
+    }
+
+    #[test]
+    fn embed_document_contents_reports_missing_local_documents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_path = dir.path().join("missing.pdf");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-MISSING".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "missing.pdf".to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: missing_path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        let err =
+            embed_document_contents(&mut snapshot, dir.path()).expect_err("missing document path");
+        assert!(
+            err.to_string()
+                .contains("file must exist under collector workspace")
+        );
         assert!(snapshot.documents[0].content_base64.is_none());
     }
 

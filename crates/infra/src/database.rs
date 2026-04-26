@@ -3173,7 +3173,8 @@ impl Database {
     }
     pub async fn upsert_plant(&self, plant: &Plant) -> Result<()> {
         let now = now_string();
-        self.runtime
+        let updated = self
+            .runtime
             .execute(
                 "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -3187,7 +3188,8 @@ impl Database {
                     installed_kw = excluded.installed_kw,
                     rec_start_date = excluded.rec_start_date,
                     confirm_issued = excluded.confirm_issued,
-                    updated_at = excluded.updated_at",
+                    updated_at = excluded.updated_at
+                 WHERE plants.owner_organization_id = excluded.owner_organization_id",
                 params!(
                     plant.id.clone(),
                     plant.facility_code.clone(),
@@ -3205,6 +3207,12 @@ impl Database {
             )
             .await
             .context("upsert plant")?;
+        if updated == 0 {
+            return Err(anyhow!(
+                "plant already belongs to another organization: {}",
+                plant.id
+            ));
+        }
         Ok(())
     }
 
