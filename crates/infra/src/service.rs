@@ -1123,23 +1123,26 @@ impl AppService {
                             duration_ms,
                         })
                         .await?;
-                    let persisted_plant = self
-                        .db
-                        .get_plant_by_id_with_consistency(&plant.id, Some(ReadConsistency::Strong))
-                        .await?;
                     if existing_plant.is_none() {
-                        if let Some(created_by_user_id) = created_by_user_id
-                            && persisted_plant.owner_organization_id == organization_id
-                        {
-                            self.bootstrap_created_plant_bindings(
-                                created_by_user_id,
-                                organization_id,
-                                &persisted_plant.owner_organization_id,
-                                None,
-                                &persisted_plant,
-                                &asset_id,
-                            )
-                            .await?;
+                        if let Some(created_by_user_id) = created_by_user_id {
+                            let persisted_plant = self
+                                .db
+                                .get_plant_by_id_with_consistency(
+                                    &plant.id,
+                                    Some(ReadConsistency::Strong),
+                                )
+                                .await?;
+                            if persisted_plant.owner_organization_id == organization_id {
+                                self.bootstrap_created_plant_bindings(
+                                    created_by_user_id,
+                                    organization_id,
+                                    &persisted_plant.owner_organization_id,
+                                    None,
+                                    &persisted_plant,
+                                    &asset_id,
+                                )
+                                .await?;
+                            }
                         }
                     }
                     if effective_mode == SyncMode::Full {
@@ -1147,12 +1150,24 @@ impl AppService {
                             .iter()
                             .map(|doc| doc.object_key.as_str())
                             .collect();
+                        let mut stale_deletes = tokio::task::JoinSet::new();
                         for object_key in existing_objects {
                             if current_objects.contains(object_key.as_str()) {
                                 continue;
                             }
-                            if let Err(err) = self.artifacts.delete_object(&object_key).await {
-                                warn!("delete stale object {} failed: {}", object_key, err);
+                            let artifacts = self.artifacts.clone();
+                            stale_deletes.spawn(async move {
+                                let result = artifacts.delete_object(&object_key).await;
+                                (object_key, result)
+                            });
+                        }
+                        while let Some(result) = stale_deletes.join_next().await {
+                            match result {
+                                Ok((_, Ok(()))) => {}
+                                Ok((object_key, Err(err))) => {
+                                    warn!("delete stale object {} failed: {}", object_key, err);
+                                }
+                                Err(err) => warn!("delete stale object task failed: {}", err),
                             }
                         }
                     }
@@ -1165,7 +1180,7 @@ impl AppService {
                     Ok(SyncRun {
                         id: run.id.clone(),
                         organization_id: organization_id.to_owned(),
-                        plant_id: Some(persisted_plant.id),
+                        plant_id: Some(plant.id.clone()),
                         mode: effective_mode.clone(),
                         status: "completed".to_owned(),
                         started_at: run.started_at.clone(),
