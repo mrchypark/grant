@@ -15,7 +15,7 @@ use crate::{
         StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
-    npki::{validate_certificate_bundle, verify_challenge_signature},
+    npki::{validate_certificate_bundle, verify_challenge_signature, verify_message_signature},
 };
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
@@ -237,6 +237,7 @@ pub struct IngestLocalExecutionResultInput {
     pub challenge_id: String,
     pub challenge_payload: String,
     pub challenge_signature_base64: String,
+    pub result_signature_base64: String,
     pub sign_cert_der: Vec<u8>,
     pub snapshot: bridge::BridgeSnapshot,
     pub mode: SyncMode,
@@ -683,13 +684,8 @@ impl AppService {
         mut input: IngestLocalExecutionResultInput,
     ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
-        let requested_business_no = decode_challenge_payload(&input.challenge_payload)?.business_no;
         let business_no = self
-            .validate_sign_cert_for_organization(
-                &organization_id,
-                requested_business_no.as_deref(),
-                &input.sign_cert_der,
-            )
+            .validate_sign_cert_for_organization(&organization_id, None, &input.sign_cert_der)
             .await?;
         let snapshot_business_no =
             require_non_empty("facilityBusinessNo", &input.snapshot.facility.business_no)?;
@@ -698,6 +694,21 @@ impl AppService {
                 "local execution result business number mismatch",
             ));
         }
+        let result_signature_base64 =
+            require_non_empty("resultSignatureBase64", &input.result_signature_base64)?;
+        let result_signature_payload = local_execution_result_signature_payload(
+            &input.challenge_id,
+            &input.challenge_payload,
+            sync_mode_label(&input.mode),
+            &input.snapshot,
+        )?;
+        verify_message_signature(
+            &input.sign_cert_der,
+            &result_signature_payload,
+            &result_signature_base64,
+            "resultSignatureBase64",
+        )
+        .map_err(|err| bad_request_error(err.to_string()))?;
         let facility_code =
             require_safe_facility_code("facilityCode", &input.snapshot.facility.code)?;
         input.snapshot.facility.code = facility_code.clone();
@@ -2548,6 +2559,30 @@ fn build_challenge_payload(
     format!("cert-gateway:{encoded}")
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalExecutionResultSignaturePayload<'a> {
+    challenge_id: &'a str,
+    challenge_payload: &'a str,
+    mode: &'a str,
+    snapshot: &'a bridge::BridgeSnapshot,
+}
+
+pub fn local_execution_result_signature_payload(
+    challenge_id: &str,
+    challenge_payload: &str,
+    mode: &str,
+    snapshot: &bridge::BridgeSnapshot,
+) -> Result<Vec<u8>> {
+    serde_json::to_vec(&LocalExecutionResultSignaturePayload {
+        challenge_id,
+        challenge_payload,
+        mode,
+        snapshot,
+    })
+    .context("encode local execution result signature payload")
+}
+
 fn validate_challenge_payload_bindings(
     challenge_payload: &str,
     challenge: &crate::database::CertGatewayChallenge,
@@ -2941,9 +2976,9 @@ fn select_organization_business_no<'a>(
     if let Some(business_no) = linked_business_no {
         return Ok(business_no);
     }
-    Err(anyhow!(
+    Err(bad_request_error(format!(
         "organization missing linked legal party business number: {organization_id}"
-    ))
+    )))
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {

@@ -3,6 +3,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use infra::{
     bridge::{self, BridgeOptions, BridgeSnapshot},
     crypto::CertificateBundle,
+    npki::sign_message_base64,
+    service::local_execution_result_signature_payload,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,6 +54,7 @@ struct LocalExecutionResultRequest {
     challenge_id: String,
     challenge_payload: String,
     challenge_signature_base64: String,
+    result_signature_base64: String,
     sign_cert_der_base64: String,
     snapshot: BridgeSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,7 +89,7 @@ async fn run() -> Result<()> {
         start_month: req.start_month.clone(),
         end_month: req.end_month.clone(),
         skip_documents: !should_collect_documents(req.mode.as_deref()),
-        bundle,
+        bundle: bundle.clone(),
     })
     .await
     .context("collect local RPS snapshot")?;
@@ -98,9 +101,13 @@ async fn run() -> Result<()> {
     } else {
         snapshot.documents.clear();
     }
-    let result = post_local_result(&req, local_result_body(&req, snapshot))
-        .await
-        .context("upload local execution result")?;
+    let result_signature_base64 = sign_local_result(&req, &bundle, &snapshot)?;
+    let result = post_local_result(
+        &req,
+        local_result_body(&req, snapshot, result_signature_base64),
+    )
+    .await
+    .context("upload local execution result")?;
     std::io::stdout()
         .write_all(result.as_bytes())
         .context("write local execution response")?;
@@ -288,15 +295,37 @@ async fn post_local_result(
 fn local_result_body(
     req: &LocalEphemeralRequest,
     snapshot: BridgeSnapshot,
+    result_signature_base64: String,
 ) -> LocalExecutionResultRequest {
     LocalExecutionResultRequest {
         challenge_id: req.challenge_id.clone(),
         challenge_payload: req.challenge_payload.clone(),
         challenge_signature_base64: req.challenge_signature_base64.clone(),
+        result_signature_base64,
         sign_cert_der_base64: req.bundle.sign_cert_der_base64.clone(),
         snapshot,
         mode: req.mode.clone(),
     }
+}
+
+fn sign_local_result(
+    req: &LocalEphemeralRequest,
+    bundle: &CertificateBundle,
+    snapshot: &BridgeSnapshot,
+) -> Result<String> {
+    let mode = req
+        .mode
+        .as_deref()
+        .unwrap_or("delta")
+        .trim()
+        .to_ascii_lowercase();
+    let payload = local_execution_result_signature_payload(
+        &req.challenge_id,
+        &req.challenge_payload,
+        &mode,
+        snapshot,
+    )?;
+    sign_message_base64(bundle, &payload).context("sign local execution result")
 }
 
 fn local_result_url(req: &LocalEphemeralRequest) -> Result<String> {
@@ -351,7 +380,7 @@ mod tests {
     #[test]
     fn local_result_body_excludes_certificate_secrets() {
         let req = fixture_request();
-        let body = local_result_body(&req, fixture_snapshot());
+        let body = local_result_body(&req, fixture_snapshot(), "RESULT_SIGNATURE".to_owned());
         let json = serde_json::to_string(&body).expect("serialize result body");
 
         assert!(json.contains("PUBLIC_CERT"));
@@ -443,8 +472,12 @@ mod tests {
         assert_eq!(doc.content_type.as_deref(), Some("application/pdf"));
         assert!(doc.source_sha256.is_some());
 
-        let json = serde_json::to_string(&local_result_body(&fixture_request(), snapshot))
-            .expect("serialize result");
+        let json = serde_json::to_string(&local_result_body(
+            &fixture_request(),
+            snapshot,
+            "RESULT_SIGNATURE".to_owned(),
+        ))
+        .expect("serialize result");
         assert!(!json.contains(path.to_string_lossy().as_ref()));
         assert!(json.contains("contentBase64"));
     }

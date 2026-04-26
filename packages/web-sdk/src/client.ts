@@ -138,6 +138,7 @@ export type IngestLocalExecutionResultInput = {
   challengeId: string;
   challengePayload: string;
   challengeSignatureBase64: string;
+  resultSignatureBase64: string;
   signCertDerBase64: string;
   snapshot: LocalExecutionSnapshot;
   mode?: SyncMode;

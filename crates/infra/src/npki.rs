@@ -9,7 +9,7 @@ use openssl::{
     pkey::{Id, PKey, Private},
     provider::Provider,
     rsa::Rsa,
-    sign::Verifier,
+    sign::{Signer, Verifier},
     stack::Stack,
     symm::{Cipher, Crypter, Mode},
     x509::X509,
@@ -126,9 +126,23 @@ pub fn verify_challenge_signature(
     challenge_payload: &str,
     challenge_signature_base64: &str,
 ) -> Result<()> {
+    verify_message_signature(
+        sign_cert_der,
+        challenge_payload.as_bytes(),
+        challenge_signature_base64,
+        "challengeSignatureBase64",
+    )
+}
+
+pub fn verify_message_signature(
+    sign_cert_der: &[u8],
+    message: &[u8],
+    signature_base64: &str,
+    signature_field: &str,
+) -> Result<()> {
     ensure_openssl_legacy_provider()?;
     let certificate =
-        X509::from_der(sign_cert_der).context("parse signCert.der as X509 for challenge verify")?;
+        X509::from_der(sign_cert_der).context("parse signCert.der as X509 for signature verify")?;
     let now = Asn1Time::days_from_now(0).context("build current ASN.1 time")?;
     if certificate
         .not_after()
@@ -150,20 +164,29 @@ pub fn verify_challenge_signature(
         .public_key()
         .context("extract certificate public key")?;
     let signature = STANDARD
-        .decode(challenge_signature_base64)
-        .context("decode challengeSignatureBase64")?;
-    let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key)
-        .context("create challenge signature verifier")?;
+        .decode(signature_base64)
+        .with_context(|| format!("decode {signature_field}"))?;
+    let mut verifier =
+        Verifier::new(MessageDigest::sha256(), &public_key).context("create signature verifier")?;
     verifier
-        .update(challenge_payload.as_bytes())
-        .context("update challenge signature verifier")?;
-    let verified = verifier
-        .verify(&signature)
-        .context("verify challenge signature")?;
+        .update(message)
+        .context("update signature verifier")?;
+    let verified = verifier.verify(&signature).context("verify signature")?;
     if !verified {
-        bail!("invalid cert gateway challenge signature");
+        bail!("invalid cert gateway signature");
     }
     Ok(())
+}
+
+pub fn sign_message_base64(bundle: &CertificateBundle, message: &[u8]) -> Result<String> {
+    ensure_openssl_legacy_provider()?;
+    let private_key =
+        load_private_key_material(&bundle.sign_pri_key, &bundle.password, "signPri.key")?
+            .private_key;
+    let mut signer =
+        Signer::new(MessageDigest::sha256(), &private_key).context("create message signer")?;
+    signer.update(message).context("update message signer")?;
+    Ok(STANDARD.encode(signer.sign_to_vec().context("sign message")?))
 }
 
 pub fn validate_certificate_bundle(bundle: &CertificateBundle) -> Result<()> {

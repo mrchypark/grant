@@ -208,7 +208,7 @@ Content-Type: application/json
 
 ### Local execution 결과 업로드
 
-이 endpoint는 로컬 worker가 RPS 수집을 끝낸 뒤 서버에 비밀정보 없이 결과만 저장하는 경로다. 요청에는 challenge proof와 공개 sign 인증서, 수집 snapshot만 포함된다. 인증서 비밀번호, 개인키, 인증서 bundle은 포함하면 안 된다. 문서 artifact는 full sync에서만 문서 항목별 `contentBase64`로 전달하며, 서버는 이를 object storage에 저장하고 DB에는 메타데이터만 남긴다.
+이 endpoint는 로컬 worker가 RPS 수집을 끝낸 뒤 서버에 비밀정보 없이 결과만 저장하는 경로다. 요청에는 challenge proof, result proof, 공개 sign 인증서, 수집 snapshot만 포함된다. 인증서 비밀번호, 개인키, 인증서 bundle은 포함하면 안 된다. 문서 artifact는 full sync에서만 문서 항목별 `contentBase64`로 전달하며, 서버는 이를 object storage에 저장하고 DB에는 메타데이터만 남긴다.
 
 ```http
 POST /cert-gateway/local-execution-results
@@ -218,6 +218,7 @@ Content-Type: application/json
   "challengeId": "challenge-3",
   "challengePayload": "cert-gateway:...",
   "challengeSignatureBase64": "BASE64_RSA_SHA256_SIGNATURE",
+  "resultSignatureBase64": "BASE64_RSA_SHA256_RESULT_SIGNATURE",
   "signCertDerBase64": "BASE64_PUBLIC_SIGN_CERT_DER",
   "mode": "delta",
   "snapshot": {
@@ -252,7 +253,7 @@ Content-Type: application/json
 }
 ```
 
-서버는 `signCertDerBase64` 공개키로 challenge 서명을 검증하고, payload에 묶인 조직/mode/사업자번호/시설/date scope/`signCertSha256Hex`가 제출된 공개 인증서와 snapshot에 맞는지 확인한다. challenge가 `ephemeral` 모드이며 요청 조직에 속하고 미사용/미만료인지 확인한 뒤 snapshot을 `plants`, `sync_runs`, 발전량/요율/REC records와 문서 메타데이터/object artifact에 저장한다. `documents`가 비어 있지 않은 요청은 `mode: "full"`에서만 허용된다.
+서버는 `signCertDerBase64` 공개키로 `challengeSignatureBase64`와 `resultSignatureBase64`를 모두 검증한다. `challengeSignatureBase64`는 `challengePayload` 원문 바이트 서명이고, `resultSignatureBase64`는 `challengeId`, `challengePayload`, 정규화된 `mode`, `snapshot`을 담은 canonical JSON payload 서명이다. payload에 묶인 조직/mode/사업자번호/시설/date scope/`signCertSha256Hex`가 제출된 공개 인증서와 snapshot에 맞는지 확인한다. challenge가 `ephemeral` 모드이며 요청 조직에 속하고 미사용/미만료인지 확인한 뒤 snapshot을 `plants`, `sync_runs`, 발전량/요율/REC records와 문서 메타데이터/object artifact에 저장한다. `documents`가 비어 있지 않은 요청은 `mode: "full"`에서만 허용된다.
 
 ### Stored 등록
 
@@ -439,7 +440,7 @@ const run = await sdk.runEphemeral("org-1", {
 
 `runEphemeral()`은 desktop agent의 로컬 실행 경로다. 인증서 번들, 비밀번호, 개인키는 gateway로 보내지 않는다. desktop agent가 `DESKTOP_AGENT_LOCAL_EXECUTOR` 또는 같은 디렉터리의 bundled worker로 로컬 worker를 찾지 못하면 이 호출은 실패한다. 실패 시 SDK나 agent가 escrow endpoint로 자동 fallback하면 안 된다.
 
-기본 제공 worker는 `repass-local-worker` 바이너리다. desktop agent가 stdin으로 로컬 전용 요청을 넘기면 worker가 로컬에서 RPS 수집을 실행하고, gateway에는 `/cert-gateway/local-execution-results`로 공개 인증서와 수집 결과만 업로드한다. `mode: "full"`인 경우 worker는 다운로드한 문서 파일을 `contentBase64`로 싣고 로컬 `sourcePath`는 비워서 전송한다.
+기본 제공 worker는 `repass-local-worker` 바이너리다. desktop agent가 stdin으로 로컬 전용 요청을 넘기면 worker가 로컬에서 RPS 수집을 실행하고, gateway에는 `/cert-gateway/local-execution-results`로 공개 인증서, 수집 결과, result signature만 업로드한다. `mode: "full"`인 경우 worker는 다운로드한 문서 파일을 `contentBase64`로 싣고 로컬 `sourcePath`는 비워서 전송한다.
 
 ### Stored
 

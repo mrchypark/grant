@@ -26,7 +26,7 @@ use infra::{
     },
     database::Database,
     runtime::HiqliteRuntime,
-    service::AppService,
+    service::{AppService, local_execution_result_signature_payload},
 };
 use openssl::{
     asn1::Asn1Time,
@@ -469,11 +469,32 @@ fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
 }
 
 fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
+    sign_bytes(key, challenge_payload.as_bytes())
+}
+
+fn sign_bytes(key: &PKey<Private>, message: &[u8]) -> String {
     let mut signer = Signer::new(MessageDigest::sha256(), key).expect("create signer");
-    signer
-        .update(challenge_payload.as_bytes())
-        .expect("sign challenge payload");
+    signer.update(message).expect("sign payload");
     STANDARD.encode(signer.sign_to_vec().expect("signature"))
+}
+
+fn sign_local_execution_result(
+    key: &PKey<Private>,
+    challenge_id: &Value,
+    challenge_payload: &Value,
+    mode: &Value,
+    snapshot: &Value,
+) -> String {
+    let snapshot: BridgeSnapshot =
+        serde_json::from_value(snapshot.clone()).expect("deserialize local snapshot");
+    let payload = local_execution_result_signature_payload(
+        challenge_id.as_str().expect("challengeId"),
+        challenge_payload.as_str().expect("challengePayload"),
+        mode.as_str().unwrap_or("delta"),
+        &snapshot,
+    )
+    .expect("result signature payload");
+    sign_bytes(key, &payload)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -732,7 +753,16 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let local_payload = local_challenge_json["payload"]
         .as_str()
         .expect("local challenge payload");
-    let (bundle, signature) = signed_proof_bundle(local_payload);
+    let local_material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&local_material, local_payload);
+    let local_snapshot = local_execution_snapshot("FAC-004");
+    let result_signature = sign_local_execution_result(
+        &local_material.sign_key,
+        &local_challenge_json["challengeId"],
+        &local_challenge_json["payload"],
+        &local_challenge_json["syncMode"],
+        &local_snapshot,
+    );
     let local_result_response = app
         .clone()
         .oneshot(auth_request(
@@ -744,9 +774,10 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
                 "challengeId": local_challenge_json["challengeId"],
                 "challengePayload": local_challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": local_challenge_json["syncMode"],
-                "snapshot": local_execution_snapshot("FAC-004")
+                "snapshot": local_snapshot
             }),
         ))
         .await
@@ -805,7 +836,17 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let local_doc_payload = local_doc_challenge_json["payload"]
         .as_str()
         .expect("local document challenge payload");
-    let (doc_bundle, doc_signature) = signed_proof_bundle(local_doc_payload);
+    let doc_material = proof_material();
+    let (doc_bundle, doc_signature) =
+        signed_proof_bundle_from_material(&doc_material, local_doc_payload);
+    let doc_snapshot = local_execution_snapshot_with_document("FAC-DOC");
+    let doc_result_signature = sign_local_execution_result(
+        &doc_material.sign_key,
+        &local_doc_challenge_json["challengeId"],
+        &local_doc_challenge_json["payload"],
+        &Value::String("full".to_owned()),
+        &doc_snapshot,
+    );
     let local_doc_result = app
         .clone()
         .oneshot(auth_request(
@@ -817,9 +858,10 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
                 "challengeId": local_doc_challenge_json["challengeId"],
                 "challengePayload": local_doc_challenge_json["payload"],
                 "challengeSignatureBase64": doc_signature,
+                "resultSignatureBase64": doc_result_signature,
                 "signCertDerBase64": doc_bundle["signCertDerBase64"],
                 "mode": "full",
-                "snapshot": local_execution_snapshot_with_document("FAC-DOC")
+                "snapshot": doc_snapshot
             }),
         ))
         .await
@@ -863,7 +905,8 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
     let payload = challenge_json["payload"]
         .as_str()
         .expect("local document challenge payload");
-    let (bundle, signature) = signed_proof_bundle(payload);
+    let material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
 
     let mut snapshot = local_execution_snapshot_with_document("FAC-SOURCE");
     snapshot["documents"][0]["sourcePath"] =
@@ -872,6 +915,13 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
         .as_object_mut()
         .expect("document object")
         .remove("contentBase64");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &Value::String("full".to_owned()),
+        &snapshot,
+    );
 
     let response = app
         .oneshot(auth_request(
@@ -883,6 +933,7 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
                 "challengeId": challenge_json["challengeId"],
                 "challengePayload": challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": "full",
                 "snapshot": snapshot
@@ -903,7 +954,7 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
 }
 
 #[tokio::test]
-async fn local_execution_result_uses_bound_business_number_for_unlinked_organizations() {
+async fn local_execution_result_rejects_unlinked_organization_business_number_override() {
     let (app, db, _db_dir, _artifacts_dir) = build_app().await;
     db.upsert_organization_with_owner("unlinked-org", "Unlinked Org", None, "Unlinked Org")
         .await
@@ -945,7 +996,16 @@ async fn local_execution_result_uses_bound_business_number_for_unlinked_organiza
     let payload = challenge_json["payload"]
         .as_str()
         .expect("local challenge payload");
-    let (bundle, signature) = signed_proof_bundle(payload);
+    let material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+    let snapshot = local_execution_snapshot("FAC-UNLINKED");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &challenge_json["syncMode"],
+        &snapshot,
+    );
 
     let response = app
         .oneshot(auth_request(
@@ -957,9 +1017,10 @@ async fn local_execution_result_uses_bound_business_number_for_unlinked_organiza
                 "challengeId": challenge_json["challengeId"],
                 "challengePayload": challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": challenge_json["syncMode"],
-                "snapshot": local_execution_snapshot("FAC-UNLINKED")
+                "snapshot": snapshot
             }),
         ))
         .await
@@ -967,8 +1028,14 @@ async fn local_execution_result_uses_bound_business_number_for_unlinked_organiza
 
     let status = response.status();
     let body = json_body(response).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
-    assert_eq!(body["plantId"], "FAC-UNLINKED");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body = {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("business number"),
+        "body = {body}"
+    );
 }
 
 #[tokio::test]
@@ -995,10 +1062,18 @@ async fn local_execution_result_rejects_untrusted_document_content_type() {
     let payload = challenge_json["payload"]
         .as_str()
         .expect("local document challenge payload");
-    let (bundle, signature) = signed_proof_bundle(payload);
+    let material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
     let mut snapshot = local_execution_snapshot_with_document("FAC-BAD-CTYPE");
     snapshot["documents"][0]["contentType"] =
         Value::String("application/pdf\r\nx-evil: 1".to_owned());
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &Value::String("full".to_owned()),
+        &snapshot,
+    );
 
     let response = app
         .oneshot(auth_request(
@@ -1010,6 +1085,7 @@ async fn local_execution_result_rejects_untrusted_document_content_type() {
                 "challengeId": challenge_json["challengeId"],
                 "challengePayload": challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": "full",
                 "snapshot": snapshot
@@ -1049,7 +1125,16 @@ async fn local_execution_result_requires_origin_bound_challenge_payload() {
     let payload = challenge_json["payload"]
         .as_str()
         .expect("local challenge payload");
-    let (bundle, signature) = signed_proof_bundle(payload);
+    let material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+    let snapshot = local_execution_snapshot("FAC-NO-ORIGIN");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &challenge_json["syncMode"],
+        &snapshot,
+    );
 
     let response = app
         .oneshot(auth_request(
@@ -1061,9 +1146,10 @@ async fn local_execution_result_requires_origin_bound_challenge_payload() {
                 "challengeId": challenge_json["challengeId"],
                 "challengePayload": challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": challenge_json["syncMode"],
-                "snapshot": local_execution_snapshot("FAC-NO-ORIGIN")
+                "snapshot": snapshot
             }),
         ))
         .await
@@ -1137,6 +1223,14 @@ async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismat
         .as_str()
         .expect("challenge payload");
     let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+    let snapshot = local_execution_snapshot("FAC-004");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &challenge_json["syncMode"],
+        &snapshot,
+    );
 
     let response = app
         .oneshot(auth_request(
@@ -1148,9 +1242,10 @@ async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismat
                 "challengeId": challenge_json["challengeId"],
                 "challengePayload": challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": challenge_json["syncMode"],
-                "snapshot": local_execution_snapshot("FAC-004")
+                "snapshot": snapshot
             }),
         ))
         .await
@@ -1183,7 +1278,16 @@ async fn local_execution_result_persists_normalized_facility_code() {
     let payload = challenge_json["payload"]
         .as_str()
         .expect("challenge payload");
-    let (bundle, signature) = signed_proof_bundle(payload);
+    let material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+    let snapshot = local_execution_snapshot(" FAC-TRIM ");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &challenge_json["syncMode"],
+        &snapshot,
+    );
 
     let response = app
         .oneshot(auth_request(
@@ -1195,9 +1299,10 @@ async fn local_execution_result_persists_normalized_facility_code() {
                 "challengeId": challenge_json["challengeId"],
                 "challengePayload": challenge_json["payload"],
                 "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
                 "signCertDerBase64": bundle["signCertDerBase64"],
                 "mode": challenge_json["syncMode"],
-                "snapshot": local_execution_snapshot(" FAC-TRIM ")
+                "snapshot": snapshot
             }),
         ))
         .await
@@ -1207,6 +1312,73 @@ async fn local_execution_result_persists_normalized_facility_code() {
     let body = json_body(response).await;
     assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
     assert_eq!(body["plantId"], "FAC-TRIM");
+}
+
+#[tokio::test]
+async fn local_execution_result_rejects_snapshot_not_bound_to_result_signature() {
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+    let material = proof_material();
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-SIGNED"
+            }),
+        ))
+        .await
+        .expect("challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("challenge payload");
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+    let signed_snapshot = local_execution_snapshot("FAC-SIGNED");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &challenge_json["syncMode"],
+        &signed_snapshot,
+    );
+    let mut tampered_snapshot = signed_snapshot;
+    tampered_snapshot["generation"][0]["generationKwh"] = json!(999999.0);
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": challenge_json["syncMode"],
+                "snapshot": tampered_snapshot
+            }),
+        ))
+        .await
+        .expect("local result response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("signature"),
+        "body = {body}"
+    );
 }
 
 #[tokio::test]
