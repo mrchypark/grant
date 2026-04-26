@@ -9,8 +9,6 @@ import {
   type CreateChallengeInput,
   type ProofBundle,
   type EscrowProofBundle,
-  type IngestLocalExecutionResultInput,
-  type LocalExecutionSnapshot,
   type StoredCertificate,
   type SyncMode,
   type SyncRun,
@@ -310,7 +308,7 @@ function approvalRequestFrom(
     const facilityCode = trimOptional(input.facilityCode);
     const startMonth = trimOptional(input.startMonth);
     const endMonth = trimOptional(input.endMonth);
-    const mode = trimOptional(input.mode);
+    const mode = trimOptional(input.mode) as SyncMode | undefined;
     if (facilityCode) {
       request.facilityCode = facilityCode;
     }
@@ -364,24 +362,6 @@ function assertExplicitEscrow(
   );
 }
 
-export type {
-  AgentCapabilities,
-  BrowserCertificateInput,
-  BrowserChallengeProofInput,
-  BrowserEscrowCertificateInput,
-  BrowserEscrowEphemeralRunInput,
-  BrowserEphemeralRunInput,
-  BrowserSignedChallengeProof,
-  Challenge,
-  CreateChallengeInput,
-  ProofBundle,
-  EscrowProofBundle,
-  StoredCertificate,
-  SyncRun,
-  IngestLocalExecutionResultInput,
-  LocalExecutionSnapshot,
-};
-
 export { DesktopAgentClient, GatewayClient };
 export {
   configureHtml5CertificateInput,
@@ -393,24 +373,32 @@ export {
 };
 export type { AgentApprovalRequest, AgentSession } from "./agent.ts";
 export type {
+  Challenge,
   CrawlTaskToken,
   ChallengeMode,
+  CreateChallengeInput,
+  EscrowProofBundle,
   ExecuteEphemeralExecutionInput,
   IssueCrawlTaskTokenInput,
   IngestLocalExecutionResultInput,
   LocalExecutionSnapshot,
+  ProofBundle,
   RegisterStoredCertificateInput,
+  StoredCertificate,
   SyncMode,
+  SyncRun,
 } from "./client.ts";
 export type {
   Html5CertificateBundleInput,
   Html5CertificateFileKey,
   Html5CertificateInputMode,
   Html5CertificateSelection,
+  PreparedHtml5CertificateBundle,
+} from "./html5.ts";
+export type {
   PreparedHtml5ChallengeProof,
   PreparedHtml5SignedChallengeProof,
-  PreparedHtml5CertificateBundle,
-};
+} from "./npki-browser.ts";
 
 export { WebSdk as CertdWebSdk };
 export type { WebSdkOptions as CertdWebSdkOptions };

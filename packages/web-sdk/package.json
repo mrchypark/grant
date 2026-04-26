@@ -7,11 +7,13 @@
     "build:wasm": "node ./scripts/build-wasm.mjs",
     "build:wasm:plain": "node ./scripts/build-wasm.mjs --plain",
     "build:browser": "npm run build:wasm && vite build --config vite.browser.config.ts && node ./scripts/copy-wasm-assets.mjs ./dist/browser",
-    "test": "npm run build:wasm && tsx --test src/index.test.ts",
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --lib ES2022,DOM --types node src/index.ts",
+    "test": "npm run typecheck && npm run build:wasm && tsx --test src/index.test.ts",
     "example": "npm run build:wasm && vite --config examples/browser/vite.config.ts --host 127.0.0.1 --port 4173",
     "example:build": "npm run build:browser && vite build --config examples/browser/vite.config.ts --outDir dist/example"
   },
   "devDependencies": {
+    "@types/node": "^22.19.17",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vite": "^7.1.7"
