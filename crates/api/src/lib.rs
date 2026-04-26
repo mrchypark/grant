@@ -20,7 +20,7 @@ use infra::{
     service::{
         AppService, BackupInfo, CreateCertGatewayChallengeInput, CreateClientInput,
         CreatePlantInput, ExecuteEphemeralCrawlInput, IssueCrawlTaskTokenInput, PlantView,
-        PutCertificateInput, RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
+        RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
         StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
     },
 };
@@ -40,10 +40,6 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
             put(replace_client_actions),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificate",
-            put(put_organization_certificate),
         )
         .route(
             "/api/v1/organizations/{organizationId}/sync",
@@ -105,10 +101,6 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
         )
         .route(
             "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificate",
             any(requires_voter_node),
         )
         .route(
@@ -203,17 +195,6 @@ async fn healthz(State(service): State<Arc<AppService>>) -> Json<HealthStatus> {
 
 async fn auth_root() -> Redirect {
     Redirect::temporary("/auth/login")
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CertificateUploadRequest {
-    business_no: Option<String>,
-    password: String,
-    sign_cert_der_base64: String,
-    sign_pri_key_base64: String,
-    km_cert_der_base64: String,
-    km_pri_key_base64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,26 +425,6 @@ struct ReadConsistencyQuery {
     consistency: Option<String>,
 }
 
-async fn put_organization_certificate(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    Json(body): Json<CertificateUploadRequest>,
-) -> ApiResult<Json<CertificateResponse>> {
-    let cert = service
-        .put_certificate(PutCertificateInput {
-            organization_id: organization_id.clone(),
-            business_no: body.business_no,
-            password: body.password,
-            sign_cert_der_b64: body.sign_cert_der_base64,
-            sign_pri_key_b64: body.sign_pri_key_base64,
-            km_cert_der_b64: body.km_cert_der_base64,
-            km_pri_key_b64: body.km_pri_key_base64,
-        })
-        .await
-        .map_err(ApiError::bad_request_if_known)?;
-    Ok(Json(map_certificate(cert, &organization_id)))
-}
-
 async fn get_current_user(
     State(service): State<Arc<AppService>>,
     Query(query): Query<ReadConsistencyQuery>,
@@ -689,22 +650,15 @@ async fn execute_ephemeral_crawl(
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let facility_code = service
-        .authorize_gateway_sync_scope(
-            &ctx.user_id,
-            &organization_id,
-            body.facility_code.as_deref(),
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
     let run = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id,
+            requested_by_user_id: Some(ctx.user_id),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
             bundle: map_proof_bundle(body.bundle)?,
-            facility_code,
+            facility_code: body.facility_code,
             start_month: body.start_month,
             end_month: body.end_month,
             mode: parse_sync_mode(body.mode.as_deref())?,
@@ -729,6 +683,7 @@ async fn register_stored_certificate(
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: organization_id.clone(),
+            requested_by_user_id: Some(ctx.user_id),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
@@ -1179,14 +1134,10 @@ fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
 }
 
 fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
-    let km_cert_der = decode_optional_base64_field(
-        "kmCertDerBase64",
-        body.km_cert_der_base64.as_deref(),
-    )?;
-    let km_pri_key = decode_optional_base64_field(
-        "kmPriKeyBase64",
-        body.km_pri_key_base64.as_deref(),
-    )?;
+    let km_cert_der =
+        decode_optional_base64_field("kmCertDerBase64", body.km_cert_der_base64.as_deref())?;
+    let km_pri_key =
+        decode_optional_base64_field("kmPriKeyBase64", body.km_pri_key_base64.as_deref())?;
     if km_cert_der.is_some() != km_pri_key.is_some() {
         return Err(ApiError::bad_request(anyhow!(
             "kmCertDerBase64 and kmPriKeyBase64 must both be provided or both omitted"
@@ -1453,26 +1404,6 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             message: err.to_string(),
         }
-    }
-
-    fn bad_request_if_known(err: anyhow::Error) -> Self {
-        if let Some(status) = structured_status(&err) {
-            return Self {
-                status,
-                message: err.to_string(),
-            };
-        }
-        let message = err.to_string();
-        let status = if message.contains("businessNo")
-            || message.contains("organizationId")
-            || message.contains("base64")
-            || message.contains("certificate")
-        {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        Self { status, message }
     }
 
     fn internal<E>(err: E) -> Self

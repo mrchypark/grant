@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
 use domain::{
     Action, ActionRiskLevel, Agreement, AgreementDocument, AgreementDocumentType, Client,
     ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant, ClientGrantAction,
@@ -13,8 +13,9 @@ use domain::{
     RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode, SyncRun, User,
 };
 use hiqlite::Row;
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::{error::Error as StdError, fmt};
 use tracing::warn;
 use uuid::Uuid;
@@ -26,6 +27,7 @@ macro_rules! params {
 }
 
 const CERTIFICATE_LAST_USED_AT_WRITE_INTERVAL_SECS: i64 = 60;
+const KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH: &str = "gross_generation_kwh";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseLookupError {
@@ -104,6 +106,26 @@ pub struct StoredDocument {
     pub content_type: String,
 }
 
+pub struct KrRpsSyncMaterialization<'a> {
+    pub run_id: &'a str,
+    pub plant: &'a Plant,
+    pub registry_account_organization_id: Option<&'a str>,
+    pub business_no: Option<&'a str>,
+    pub mode: &'a SyncMode,
+    pub generation: &'a [GenerationRecord],
+    pub rates: &'a [StoredRateRecord],
+    pub rec: &'a [RecRecord],
+    pub documents: &'a [PersistedDocument],
+    pub duration_ms: i64,
+}
+
+struct KrRpsProjectionContext {
+    asset_id: String,
+    data_source_id: String,
+    rate_source_id: String,
+    registry_project_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BackupEntry {
     pub name: String,
@@ -124,6 +146,31 @@ pub struct PlantSummary {
     pub document_categories: Vec<(DocumentCategory, i64)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KrRpsProjectionCounts {
+    pub asset_profiles: i64,
+    pub registry_projects: i64,
+    pub data_sources: i64,
+    pub generation_data: i64,
+    pub rate_data: i64,
+    pub energy_certificates: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KrRpsRegistryProjectBinding {
+    pub asset_owner_organization_id: String,
+    pub registry_account_organization_id: Option<String>,
+    pub registry_account_external_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncRunAudit {
+    pub run_status: String,
+    pub item_status: Option<String>,
+    pub run_error_message: Option<String>,
+    pub item_error_message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct CountRow {
     count: i64,
@@ -139,6 +186,36 @@ struct CountSumRow {
 struct CountSumIntRow {
     count: i64,
     total: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct TextValueRow {
+    value: String,
+}
+
+impl From<&mut Row<'_>> for TextValueRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MetricPeriodRow {
+    metric_type: String,
+    period_start: String,
+    period_end: String,
+}
+
+impl From<&mut Row<'_>> for MetricPeriodRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            metric_type: row.get("metric_type"),
+            period_start: row.get("period_start"),
+            period_end: row.get("period_end"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -779,6 +856,28 @@ impl Database {
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (user_id, organization_id, plant_id)
                 );
+                CREATE TABLE IF NOT EXISTS effective_organization_asset_actions (
+                    organization_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (organization_id, asset_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS effective_user_asset_actions (
+                    user_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, organization_id, asset_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS effective_user_asset_visibility (
+                    user_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, organization_id, asset_id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_organization_memberships_org_user
                     ON organization_memberships (organization_id, user_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_party_links_org_relation
@@ -824,6 +923,192 @@ impl Database {
                     ON effective_user_plant_actions (user_id, organization_id, plant_id, action_id);
                 CREATE INDEX IF NOT EXISTS idx_effective_user_plant_visibility_user_org
                     ON effective_user_plant_visibility (user_id, organization_id, plant_id);
+                CREATE INDEX IF NOT EXISTS idx_effective_organization_asset_actions_org_asset
+                    ON effective_organization_asset_actions (organization_id, asset_id, action_id);
+                CREATE INDEX IF NOT EXISTS idx_effective_user_asset_actions_user_org
+                    ON effective_user_asset_actions (user_id, organization_id, asset_id, action_id);
+                CREATE INDEX IF NOT EXISTS idx_effective_user_asset_visibility_user_org
+                    ON effective_user_asset_visibility (user_id, organization_id, asset_id);
+                CREATE TABLE IF NOT EXISTS assets (
+                    id TEXT PRIMARY KEY,
+                    owner_organization_id TEXT NOT NULL,
+                    created_by_organization_id TEXT,
+                    name TEXT NOT NULL,
+                    country_code TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    capacity_kw REAL NOT NULL,
+                    timezone TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS asset_profiles (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    country_code TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    profile_type TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS registries (
+                    id TEXT PRIMARY KEY,
+                    registry_type TEXT NOT NULL,
+                    country_code TEXT,
+                    provider TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS registry_accounts (
+                    id TEXT PRIMARY KEY,
+                    registry_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    external_account_id TEXT NOT NULL,
+                    display_name TEXT,
+                    status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (registry_id, organization_id, external_account_id)
+                );
+                CREATE TABLE IF NOT EXISTS registry_projects (
+                    id TEXT PRIMARY KEY,
+                    registry_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    registry_account_id TEXT,
+                    external_project_id TEXT NOT NULL,
+                    project_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (registry_id, external_project_id)
+                );
+                CREATE TABLE IF NOT EXISTS data_sources (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    registry_id TEXT,
+                    registry_project_id TEXT,
+                    source_type TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    external_source_id TEXT,
+                    unit TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS generation_data (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    metric_type TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    unit TEXT NOT NULL,
+                    quality TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    recorded_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
+                );
+                CREATE TABLE IF NOT EXISTS rate_data (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    metric_type TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    unit TEXT NOT NULL,
+                    currency TEXT,
+                    quality TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    recorded_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
+                );
+                CREATE TABLE IF NOT EXISTS energy_certificates (
+                    id TEXT PRIMARY KEY,
+                    certificate_type TEXT NOT NULL,
+                    registry_id TEXT NOT NULL,
+                    registry_project_id TEXT,
+                    asset_id TEXT NOT NULL,
+                    serial_number TEXT NOT NULL,
+                    vintage_start TEXT,
+                    vintage_end TEXT,
+                    quantity_mwh REAL NOT NULL,
+                    owner_account_id TEXT,
+                    status TEXT NOT NULL,
+                    issued_at TEXT,
+                    retired_at TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (registry_id, serial_number)
+                );
+                CREATE TABLE IF NOT EXISTS auth_credentials (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    credential_type TEXT NOT NULL,
+                    country_code TEXT,
+                    provider TEXT NOT NULL,
+                    external_subject_id TEXT,
+                    encrypted_blob TEXT NOT NULL,
+                    wrapped_dek TEXT NOT NULL,
+                    kms_key_id TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_used_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS credential_bindings (
+                    credential_id TEXT NOT NULL,
+                    registry_account_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (credential_id, registry_account_id)
+                );
+                CREATE TABLE IF NOT EXISTS country_capabilities (
+                    country_code TEXT PRIMARY KEY,
+                    has_rps INTEGER NOT NULL DEFAULT 0,
+                    has_rec_registry INTEGER NOT NULL DEFAULT 0,
+                    has_utility_api INTEGER NOT NULL DEFAULT 0,
+                    has_certificate_login INTEGER NOT NULL DEFAULT 0,
+                    enabled_features_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_assets_owner_country
+                    ON assets (owner_organization_id, country_code);
+                CREATE INDEX IF NOT EXISTS idx_asset_profiles_asset_type
+                    ON asset_profiles (asset_id, profile_type);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_profiles_country_provider_type_external
+                    ON asset_profiles (country_code, provider, profile_type, external_id);
+                CREATE INDEX IF NOT EXISTS idx_registries_country_type
+                    ON registries (country_code, registry_type, provider);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_registries_country_provider_type
+                    ON registries (country_code, provider, registry_type)
+                    WHERE country_code IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_registries_global_provider_type
+                    ON registries (provider, registry_type)
+                    WHERE country_code IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_registry_accounts_org_registry
+                    ON registry_accounts (organization_id, registry_id, status);
+                CREATE INDEX IF NOT EXISTS idx_registry_projects_asset_registry
+                    ON registry_projects (asset_id, registry_id, status);
+                CREATE INDEX IF NOT EXISTS idx_data_sources_asset_type
+                    ON data_sources (asset_id, source_type, provider);
+                CREATE INDEX IF NOT EXISTS idx_generation_data_asset_source_metric_period
+                    ON generation_data (asset_id, source_id, metric_type, period_start, period_end);
+                CREATE INDEX IF NOT EXISTS idx_rate_data_asset_source_metric_period
+                    ON rate_data (asset_id, source_id, metric_type, period_start, period_end);
+                CREATE INDEX IF NOT EXISTS idx_energy_certificates_asset_registry
+                    ON energy_certificates (asset_id, registry_id, status);
+                CREATE INDEX IF NOT EXISTS idx_auth_credentials_org_provider
+                    ON auth_credentials (organization_id, provider, credential_type, active);
+                CREATE INDEX IF NOT EXISTS idx_credential_bindings_account
+                    ON credential_bindings (registry_account_id, credential_id);
                 CREATE TABLE IF NOT EXISTS certificates (
                     id TEXT PRIMARY KEY,
                     party_id TEXT NOT NULL,
@@ -891,8 +1176,30 @@ impl Database {
                     duration_ms INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT
                 );
+                CREATE TABLE IF NOT EXISTS sync_run_items (
+                    id TEXT PRIMARY KEY,
+                    sync_run_id TEXT NOT NULL,
+                    asset_id TEXT,
+                    registry_project_id TEXT,
+                    data_source_id TEXT,
+                    facility_code TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    generation_count INTEGER NOT NULL DEFAULT 0,
+                    rate_count INTEGER NOT NULL DEFAULT 0,
+                    rec_count INTEGER NOT NULL DEFAULT 0,
+                    document_count INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    write_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (sync_run_id, facility_code)
+                );
                 CREATE INDEX IF NOT EXISTS idx_plants_owner_facility
                     ON plants (owner_organization_id, facility_code);
+                CREATE INDEX IF NOT EXISTS idx_sync_run_items_run_status
+                    ON sync_run_items (sync_run_id, status);
+                CREATE INDEX IF NOT EXISTS idx_sync_run_items_asset
+                    ON sync_run_items (asset_id, sync_run_id);
                 CREATE TABLE IF NOT EXISTS generation_records (
                     plant_id TEXT NOT NULL,
                     month TEXT NOT NULL,
@@ -1131,8 +1438,22 @@ impl Database {
                 1_i64,
             ),
             (
+                "asset.profile.read",
+                "Read Asset Profile",
+                "low",
+                1_i64,
+                1_i64,
+            ),
+            (
                 "plant.profile.write",
                 "Write Plant Profile",
+                "medium",
+                0_i64,
+                0_i64,
+            ),
+            (
+                "asset.profile.write",
+                "Write Asset Profile",
                 "medium",
                 0_i64,
                 0_i64,
@@ -1144,10 +1465,24 @@ impl Database {
                 0_i64,
                 1_i64,
             ),
+            (
+                "asset.generation.read",
+                "Read Asset Generation",
+                "low",
+                0_i64,
+                1_i64,
+            ),
             ("plant.alert.read", "Read Plant Alerts", "low", 0_i64, 1_i64),
             (
                 "plant.document.read",
                 "Read Plant Documents",
+                "low",
+                0_i64,
+                1_i64,
+            ),
+            (
+                "asset.document.read",
+                "Read Asset Documents",
                 "low",
                 0_i64,
                 1_i64,
@@ -1174,10 +1509,25 @@ impl Database {
                 0_i64,
             ),
             ("plant.rec.read", "Read Plant REC", "low", 0_i64, 1_i64),
+            (
+                "asset.certificate.read",
+                "Read Asset Energy Certificates",
+                "low",
+                0_i64,
+                1_i64,
+            ),
             ("plant.rate.read", "Read Plant Rates", "low", 0_i64, 1_i64),
+            ("asset.rate.read", "Read Asset Rates", "low", 0_i64, 1_i64),
             (
                 "plant.sync.execute",
                 "Execute Plant Sync",
+                "high",
+                0_i64,
+                0_i64,
+            ),
+            (
+                "asset.sync.execute",
+                "Execute Asset Sync",
                 "high",
                 0_i64,
                 0_i64,
@@ -1204,8 +1554,22 @@ impl Database {
                 0_i64,
             ),
             (
+                "asset.credential.use",
+                "Use Asset Credential",
+                "critical",
+                0_i64,
+                0_i64,
+            ),
+            (
                 "plant.permission.manage",
                 "Manage Plant Permissions",
+                "critical",
+                0_i64,
+                0_i64,
+            ),
+            (
+                "asset.permission.manage",
+                "Manage Asset Permissions",
                 "critical",
                 0_i64,
                 0_i64,
@@ -2079,6 +2443,20 @@ impl Database {
 
     pub async fn update_client(&self, client: &Client) -> Result<()> {
         self.validate_client_references(client).await?;
+        let conflict_count = self
+            .query_count(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count
+                 FROM clients
+                 WHERE slug = $1
+                   AND id <> $2",
+                params!(client.slug.clone(), client.id.clone()),
+                "client slug conflict",
+            )
+            .await?;
+        if conflict_count > 0 {
+            return Err(anyhow!("client slug already exists: {}", client.slug));
+        }
         let now = now_string();
         let updated = self
             .runtime
@@ -2095,13 +2473,7 @@ impl Database {
                      active = $10,
                      created_by_user_id = $11,
                      updated_at = $12
-                 WHERE id = $1
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM clients AS conflicting
-                       WHERE conflicting.slug = $3
-                         AND conflicting.id <> $1
-                   )",
+                 WHERE id = $1",
                 params!(
                     client.id.clone(),
                     client.organization_id.clone(),
@@ -2127,7 +2499,6 @@ impl Database {
             {
                 return Err(anyhow!("client not found: {}", client.id));
             }
-            return Err(anyhow!("client slug already exists: {}", client.slug));
         }
         Ok(())
     }
@@ -2693,19 +3064,22 @@ impl Database {
         let mut party_id = self.find_organization_party_id(organization_id).await?;
         if party_id.is_none() {
             if let Some(business_no) = business_no {
-                if let Some(existing_party_id) =
-                    self.find_party_id_by_business_no(business_no).await?
-                {
-                    let now = now_string();
-                    self.upsert_organization_party_link(
-                        organization_id,
-                        &existing_party_id,
-                        organization_party_relation_type_str_legal(),
-                        &now,
-                    )
-                    .await?;
-                    party_id = Some(existing_party_id);
-                }
+                let now = now_string();
+                let linked_party_id = match self.find_party_id_by_business_no(business_no).await? {
+                    Some(existing_party_id) => existing_party_id,
+                    None => {
+                        self.upsert_party_by_business_no(business_no, common_name, &now)
+                            .await?
+                    }
+                };
+                self.upsert_organization_party_link(
+                    organization_id,
+                    &linked_party_id,
+                    organization_party_relation_type_str_legal(),
+                    &now,
+                )
+                .await?;
+                party_id = Some(linked_party_id);
             }
         }
         let party_id = party_id.ok_or_else(|| {
@@ -2721,8 +3095,20 @@ impl Database {
             )
             .await
             .context("deactivate prior certificates")?;
+        self.runtime
+            .execute(
+                "UPDATE auth_credentials
+                 SET active = 0, updated_at = $1
+                 WHERE organization_id = $2
+                   AND provider = 'korea_energy_rps'
+                   AND credential_type = 'certificate'",
+                params!(now_string(), organization_id.to_owned()),
+            )
+            .await
+            .context("deactivate prior KR RPS auth credentials")?;
 
         let id = Uuid::new_v4().simple().to_string();
+        let credential_id = format!("auth-credential-{id}");
         let now = now_string();
         self.runtime
             .execute(
@@ -2737,11 +3123,55 @@ impl Database {
                     kms_key_id.to_owned(),
                     1_i64,
                     Option::<String>::None,
-                    now
+                    now.clone()
                 ),
             )
             .await
             .context("insert certificate")?;
+        self.runtime
+            .execute(
+                "INSERT INTO auth_credentials (
+                    id, organization_id, credential_type, country_code, provider, external_subject_id,
+                    encrypted_blob, wrapped_dek, kms_key_id, active, last_used_at, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                params!(
+                    credential_id.clone(),
+                    organization_id.to_owned(),
+                    "certificate".to_owned(),
+                    Some("KR".to_owned()),
+                    "korea_energy_rps".to_owned(),
+                    business_no.map(ToOwned::to_owned),
+                    encrypted_blob.to_owned(),
+                    STANDARD.encode(wrapped_dek),
+                    kms_key_id.to_owned(),
+                    1_i64,
+                    Option::<String>::None,
+                    now.clone(),
+                    now.clone()
+                ),
+            )
+            .await
+            .context("insert KR RPS auth credential")?;
+        self.runtime
+            .execute(
+                "INSERT OR IGNORE INTO credential_bindings (
+                    credential_id, registry_account_id, created_at
+                 )
+                 SELECT $1, ra.id, $2
+                 FROM registry_accounts ra
+                 WHERE ra.organization_id = $3
+                   AND ra.registry_id = 'registry-kr-rps'
+                   AND ra.status = 'active'
+                   AND ($4 IS NULL OR ra.external_account_id = $4)",
+                params!(
+                    credential_id,
+                    now,
+                    organization_id.to_owned(),
+                    business_no.map(ToOwned::to_owned)
+                ),
+            )
+            .await
+            .context("bind KR RPS auth credential to existing registry accounts")?;
         self.load_active_certificate(organization_id).await
     }
 
@@ -3152,23 +3582,94 @@ impl Database {
             .context("finish sync run")?;
         Ok(())
     }
-    pub async fn upsert_plant(&self, plant: &Plant) -> Result<()> {
-        let now = now_string();
+
+    pub async fn update_sync_run_target(&self, run_id: &str, plant_id: Option<&str>) -> Result<()> {
         self.runtime
             .execute(
-                "INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
+                "UPDATE sync_runs SET plant_id = $1 WHERE id = $2",
+                params!(plant_id.map(ToOwned::to_owned), run_id.to_owned()),
+            )
+            .await
+            .context("update sync run target")?;
+        Ok(())
+    }
+
+    pub async fn upsert_sync_run_item(
+        &self,
+        sync_run_id: &str,
+        asset_id: Option<&str>,
+        facility_code: &str,
+        status: &str,
+        generation_count: usize,
+        rate_count: usize,
+        rec_count: usize,
+        document_count: usize,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let now = now_string();
+        let id = stable_scoped_id("sync_run_item", &format!("{sync_run_id}:{facility_code}"));
+        let registry_project_id =
+            asset_id.map(|_| stable_scoped_id("registry_project:kr_rps", facility_code));
+        let data_source_id =
+            asset_id.map(|_| stable_scoped_id("data_source:kr_rps:generation", facility_code));
+        self.runtime
+            .execute(
+                "INSERT INTO sync_run_items (
+                    id, sync_run_id, asset_id, registry_project_id, data_source_id,
+                    facility_code, status, generation_count, rate_count, rec_count,
+                    document_count, error_message, write_version, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                 ON CONFLICT(sync_run_id, facility_code) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    registry_project_id = excluded.registry_project_id,
+                    data_source_id = excluded.data_source_id,
+                    status = excluded.status,
+                    generation_count = excluded.generation_count,
+                    rate_count = excluded.rate_count,
+                    rec_count = excluded.rec_count,
+                    document_count = excluded.document_count,
+                    error_message = excluded.error_message,
+                    write_version = excluded.write_version,
+                    updated_at = excluded.updated_at",
+                params!(
+                    id,
+                    sync_run_id.to_owned(),
+                    asset_id.map(ToOwned::to_owned),
+                    registry_project_id,
+                    data_source_id,
+                    facility_code.to_owned(),
+                    status.to_owned(),
+                    generation_count as i64,
+                    rate_count as i64,
+                    rec_count as i64,
+                    document_count as i64,
+                    error_message.map(ToOwned::to_owned),
+                    now.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("upsert sync run item")?;
+        Ok(())
+    }
+
+    fn push_upsert_plant_query(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        plant: &Plant,
+        now: &str,
+    ) {
+        queries.push(("INSERT INTO plants (id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                  ON CONFLICT(id) DO UPDATE SET
                     facility_code = excluded.facility_code,
-                    owner_organization_id = excluded.owner_organization_id,
-                    created_by_organization_id = excluded.created_by_organization_id,
                     name = excluded.name,
                     contract_no = excluded.contract_no,
                     address = excluded.address,
                     installed_kw = excluded.installed_kw,
                     rec_start_date = excluded.rec_start_date,
                     confirm_issued = excluded.confirm_issued,
-                    updated_at = excluded.updated_at",
+                    updated_at = excluded.updated_at".to_owned(),
                 params!(
                     plant.id.clone(),
                     plant.facility_code.clone(),
@@ -3180,13 +3681,1218 @@ impl Database {
                     plant.installed_kw,
                     plant.rec_start_date.clone(),
                     plant.confirm_issued.clone(),
-                    now.clone(),
-                    now
+                    now.to_owned(),
+                    now.to_owned()
                 ),
-            )
+            ));
+    }
+
+    pub async fn upsert_plant(&self, plant: &Plant) -> Result<()> {
+        let now = now_string();
+        let mut queries = Vec::with_capacity(1);
+        Self::push_upsert_plant_query(&mut queries, plant, &now);
+        self.runtime
+            .transaction(queries)
             .await
             .context("upsert plant")?;
         Ok(())
+    }
+
+    async fn push_kr_rps_asset_projection_queries(
+        &self,
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        plant: &Plant,
+        registry_account_organization_id: Option<&str>,
+        business_no: Option<&str>,
+        generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
+        rec: &[RecRecord],
+        now: &str,
+    ) -> Result<KrRpsProjectionContext> {
+        let asset_id = self
+            .resolve_kr_rps_asset_id_for_projection(&plant.facility_code)
+            .await?;
+        let profile_id = stable_scoped_id("asset_profile:kr_rps", &plant.facility_code);
+        let registry_id = "registry-kr-rps".to_owned();
+        let existing_registry_account_id = self
+            .existing_kr_rps_registry_account_id_for_facility(&plant.facility_code)
+            .await?;
+        let new_registry_account = match (
+            existing_registry_account_id.as_ref(),
+            registry_account_organization_id,
+            business_no,
+        ) {
+            (None, Some(account_organization_id), Some(account_scope)) => {
+                let registry_account_id = stable_scoped_id(
+                    "registry_account:kr_rps",
+                    &format!("{account_organization_id}:{account_scope}"),
+                );
+                Some((
+                    registry_account_id,
+                    account_organization_id.to_owned(),
+                    account_scope.to_owned(),
+                ))
+            }
+            _ => None,
+        };
+        let registry_account_id = existing_registry_account_id.clone().or_else(|| {
+            new_registry_account
+                .as_ref()
+                .map(|account| account.0.clone())
+        });
+        let registry_project_id = stable_scoped_id("registry_project:kr_rps", &plant.facility_code);
+        let data_source_id =
+            stable_scoped_id("data_source:kr_rps:generation", &plant.facility_code);
+        let rate_source_id = stable_scoped_id("data_source:kr_rps:rate", &plant.facility_code);
+        let profile_metadata = serde_json::json!({
+            "facilityCode": plant.facility_code,
+            "contractNo": plant.contract_no,
+            "recStartDate": plant.rec_start_date,
+            "confirmIssued": plant.confirm_issued,
+            "legacyPlantId": plant.id,
+        })
+        .to_string();
+        let registry_project_metadata = serde_json::json!({
+            "facilityCode": plant.facility_code,
+            "contractNo": plant.contract_no,
+        })
+        .to_string();
+
+        queries.push((
+            "INSERT INTO assets (
+                    id, owner_organization_id, created_by_organization_id, name, country_code,
+                    address, capacity_kw, timezone, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    country_code = excluded.country_code,
+                    address = excluded.address,
+                    capacity_kw = excluded.capacity_kw,
+                    timezone = excluded.timezone,
+                    updated_at = excluded.updated_at"
+                .to_owned(),
+            params!(
+                asset_id.clone(),
+                plant.owner_organization_id.clone(),
+                plant.created_by_organization_id.clone(),
+                plant.name.clone(),
+                "KR".to_owned(),
+                plant.address.clone(),
+                plant.installed_kw,
+                "Asia/Seoul".to_owned(),
+                now.to_owned(),
+                now.to_owned()
+            ),
+        ));
+
+        queries.push(("INSERT INTO asset_profiles (
+                    id, asset_id, country_code, provider, profile_type, external_id, metadata_json, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(country_code, provider, profile_type, external_id) DO UPDATE SET
+                    country_code = excluded.country_code,
+                    provider = excluded.provider,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    profile_id,
+                    asset_id.clone(),
+                    "KR".to_owned(),
+                    "korea_energy_rps".to_owned(),
+                    "kr_rps".to_owned(),
+                    plant.facility_code.clone(),
+                    profile_metadata,
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            ));
+
+        queries.push(("INSERT INTO registries (
+                    id, registry_type, country_code, provider, name, metadata_json, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT(id) DO UPDATE SET
+                    registry_type = excluded.registry_type,
+                    country_code = excluded.country_code,
+                    provider = excluded.provider,
+                    name = excluded.name,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    registry_id.clone(),
+                    "rec".to_owned(),
+                    Some("KR".to_owned()),
+                    "korea_energy_rps".to_owned(),
+                    "Korea RPS".to_owned(),
+                    "{}".to_owned(),
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            ));
+
+        if let Some((registry_account_id, account_organization_id, account_scope)) =
+            &new_registry_account
+        {
+            queries.push((
+                "INSERT INTO registry_accounts (
+                    id, registry_id, organization_id, external_account_id, display_name, status,
+                    metadata_json, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(registry_id, organization_id, external_account_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    status = excluded.status,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at"
+                    .to_owned(),
+                params!(
+                    registry_account_id.clone(),
+                    registry_id.clone(),
+                    account_organization_id.clone(),
+                    account_scope.to_owned(),
+                    Some(account_organization_id.clone()),
+                    "active".to_owned(),
+                    "{}".to_owned(),
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            ));
+        }
+
+        if let Some(registry_account_id) = &registry_account_id {
+            queries.push((
+                "INSERT OR IGNORE INTO credential_bindings (
+                        credential_id, registry_account_id, created_at
+                     )
+                     SELECT id, $1, $2
+                     FROM auth_credentials
+                     WHERE organization_id = (
+                           SELECT organization_id
+                           FROM registry_accounts
+                           WHERE id = $3
+                       )
+                       AND provider = 'korea_energy_rps'
+                       AND credential_type = 'certificate'
+                       AND active = 1"
+                    .to_owned(),
+                params!(
+                    registry_account_id.clone(),
+                    now.to_owned(),
+                    registry_account_id.clone()
+                ),
+            ));
+        }
+
+        queries.push(("INSERT INTO registry_projects (
+                    id, registry_id, asset_id, registry_account_id, external_project_id,
+                    project_type, status, metadata_json, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT(registry_id, external_project_id) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    registry_account_id = COALESCE(registry_projects.registry_account_id, excluded.registry_account_id),
+                    project_type = excluded.project_type,
+                    status = excluded.status,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    registry_project_id.clone(),
+                    registry_id.clone(),
+                    asset_id.clone(),
+                    registry_account_id.clone(),
+                    plant.facility_code.clone(),
+                    "generation_facility".to_owned(),
+                    "active".to_owned(),
+                    registry_project_metadata,
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            ));
+
+        queries.push((
+            "INSERT INTO data_sources (
+                    id, asset_id, registry_id, registry_project_id, source_type, provider,
+                    external_source_id, unit, metadata_json, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT(id) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    registry_id = excluded.registry_id,
+                    registry_project_id = excluded.registry_project_id,
+                    source_type = excluded.source_type,
+                    provider = excluded.provider,
+                    external_source_id = excluded.external_source_id,
+                    unit = excluded.unit,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at"
+                .to_owned(),
+            params!(
+                data_source_id.clone(),
+                asset_id.clone(),
+                Some(registry_id.clone()),
+                Some(registry_project_id.clone()),
+                "registry".to_owned(),
+                "korea_energy_rps".to_owned(),
+                Some(plant.facility_code.clone()),
+                "kWh".to_owned(),
+                serde_json::json!({
+                    "adapter": "kr_rps",
+                    "dataKind": "generation",
+                    "valueMetricType": KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH,
+                    "valueSourceField": "GELEC_QTY",
+                })
+                .to_string(),
+                now.to_owned(),
+                now.to_owned()
+            ),
+        ));
+
+        queries.push((
+            "INSERT INTO data_sources (
+                    id, asset_id, registry_id, registry_project_id, source_type, provider,
+                    external_source_id, unit, metadata_json, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT(id) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    registry_id = excluded.registry_id,
+                    registry_project_id = excluded.registry_project_id,
+                    source_type = excluded.source_type,
+                    provider = excluded.provider,
+                    external_source_id = excluded.external_source_id,
+                    unit = excluded.unit,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at"
+                .to_owned(),
+            params!(
+                rate_source_id.clone(),
+                asset_id.clone(),
+                Some(registry_id.clone()),
+                Some(registry_project_id.clone()),
+                "registry".to_owned(),
+                "korea_energy_rps".to_owned(),
+                Some(plant.facility_code.clone()),
+                "KRW/kWh".to_owned(),
+                serde_json::json!({ "dataKind": "rate" }).to_string(),
+                now.to_owned(),
+                now.to_owned()
+            ),
+        ));
+
+        for record in generation {
+            let period_start = month_start_date(&record.month)?;
+            let period_end = next_month_start_date(&record.month)?;
+            let generation_id = stable_scoped_id(
+                "generation_data:kr_rps",
+                &format!(
+                    "{}:{}:{}:{}",
+                    plant.facility_code,
+                    KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH,
+                    period_start,
+                    period_end
+                ),
+            );
+            queries.push((
+                "INSERT INTO generation_data (
+                        id, asset_id, source_id, period_start, period_end, metric_type, value,
+                        unit, quality, metadata_json, recorded_at, updated_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     ON CONFLICT(asset_id, source_id, metric_type, period_start, period_end) DO UPDATE SET
+                        value = excluded.value,
+                        unit = excluded.unit,
+                        quality = excluded.quality,
+                        metadata_json = excluded.metadata_json,
+                        recorded_at = excluded.recorded_at,
+                        updated_at = excluded.updated_at"
+                    .to_owned(),
+                params!(
+                    generation_id,
+                    asset_id.clone(),
+                    data_source_id.clone(),
+                    period_start,
+                    period_end,
+                    KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH.to_owned(),
+                    record.generation_kwh,
+                    "kWh".to_owned(),
+                    "settled".to_owned(),
+                    serde_json::json!({
+                        "month": record.month,
+                        "adapter": "kr_rps",
+                        "valueMetricType": KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH,
+                        "valueSourceField": "GELEC_QTY",
+                        "selfConsumptionKwh": record.self_consumption_kwh,
+                        "selfConsumptionSourceField": "HOUSE_CNSM_QTY",
+                        "supplyKwh": record.supply_kwh,
+                        "supplySourceField": "SPLY_ELCP_QTY",
+                        "applicationDeadline": record.application_deadline,
+                    })
+                    .to_string(),
+                    now.to_owned(),
+                    now.to_owned()
+                ),
+            ));
+        }
+
+        for record in rates {
+            let period_start = month_start_date(&record.record.month)?;
+            let period_end = next_month_start_date(&record.record.month)?;
+            let quality = if record.published {
+                "published"
+            } else {
+                "unpublished"
+            };
+            let metrics = [
+                ("self_rate", record.record.self_rate),
+                ("national_average", record.record.national_average),
+                ("nearby_average", record.record.nearby_average),
+                ("nearby_highest", record.record.nearby_highest),
+            ];
+            for (metric_type, value) in metrics {
+                let Some(value) = value else {
+                    continue;
+                };
+                let rate_id = stable_scoped_id(
+                    "rate_data:kr_rps",
+                    &format!(
+                        "{}:{metric_type}:{}:{}",
+                        plant.facility_code, period_start, period_end
+                    ),
+                );
+                queries.push((
+                    "INSERT INTO rate_data (
+                        id, asset_id, source_id, period_start, period_end, metric_type, value,
+                        unit, currency, quality, metadata_json, recorded_at, updated_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     ON CONFLICT(asset_id, source_id, metric_type, period_start, period_end)
+                     DO UPDATE SET
+                        value = excluded.value,
+                        unit = excluded.unit,
+                        currency = excluded.currency,
+                        quality = excluded.quality,
+                        metadata_json = excluded.metadata_json,
+                        recorded_at = excluded.recorded_at,
+                        updated_at = excluded.updated_at"
+                        .to_owned(),
+                    params!(
+                        rate_id,
+                        asset_id.clone(),
+                        rate_source_id.clone(),
+                        period_start.clone(),
+                        period_end.clone(),
+                        metric_type.to_owned(),
+                        value,
+                        "KRW/kWh".to_owned(),
+                        Some("KRW".to_owned()),
+                        quality.to_owned(),
+                        serde_json::json!({
+                            "month": record.record.month,
+                            "published": record.published,
+                            "sourceControlFlag": record.source_control_flag,
+                        })
+                        .to_string(),
+                        now.to_owned(),
+                        now.to_owned()
+                    ),
+                ));
+            }
+        }
+
+        for record in rec {
+            let serial_number = format!("{}:{}", plant.facility_code, record.application_no);
+            let certificate_id = stable_scoped_id("energy_certificate:kr_rps", &serial_number);
+            queries.push(("INSERT INTO energy_certificates (
+                        id, certificate_type, registry_id, registry_project_id, asset_id,
+                        serial_number, vintage_start, vintage_end, quantity_mwh, owner_account_id,
+                        status, issued_at, retired_at, metadata_json, updated_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                     ON CONFLICT(registry_id, serial_number) DO UPDATE SET
+                        registry_project_id = excluded.registry_project_id,
+                        asset_id = excluded.asset_id,
+                        vintage_start = excluded.vintage_start,
+                        vintage_end = excluded.vintage_end,
+                        quantity_mwh = excluded.quantity_mwh,
+                        owner_account_id = COALESCE(energy_certificates.owner_account_id, excluded.owner_account_id),
+                        status = excluded.status,
+                        issued_at = excluded.issued_at,
+                        retired_at = excluded.retired_at,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = excluded.updated_at".to_owned(),
+                    params!(
+                        certificate_id,
+                        "REC".to_owned(),
+                        registry_id.clone(),
+                        Some(registry_project_id.clone()),
+                        asset_id.clone(),
+                        serial_number,
+                        Some(month_start_date(&record.month)?),
+                        Some(next_month_start_date(&record.month)?),
+                        record.supply_kwh as f64 / 1000.0,
+                        registry_account_id.clone(),
+                        record
+                            .status
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        Some(record.issued_date.clone()),
+                        Option::<String>::None,
+                        serde_json::json!({
+                            "month": record.month,
+                            "applicationNo": record.application_no,
+                            "recQuantity": record.rec_quantity,
+                            "feeKrw": record.fee_krw,
+                            "expiryDate": record.expiry_date,
+                            "virtualAccount": record.virtual_account,
+                            "bankName": record.bank_name,
+                        })
+                        .to_string(),
+                        now.to_owned()
+                    ),
+                ));
+        }
+
+        Ok(KrRpsProjectionContext {
+            asset_id,
+            data_source_id,
+            rate_source_id,
+            registry_project_id,
+        })
+    }
+
+    pub async fn upsert_kr_rps_asset_projection(
+        &self,
+        plant: &Plant,
+        registry_account_organization_id: Option<&str>,
+        business_no: Option<&str>,
+        generation: &[GenerationRecord],
+        rec: &[RecRecord],
+    ) -> Result<String> {
+        let now = now_string();
+        let mut queries = Vec::with_capacity(8 + generation.len() + rec.len());
+        let context = self
+            .push_kr_rps_asset_projection_queries(
+                &mut queries,
+                plant,
+                registry_account_organization_id,
+                business_no,
+                generation,
+                &[],
+                rec,
+                &now,
+            )
+            .await?;
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("upsert KR RPS asset projection transaction")?;
+        Ok(context.asset_id)
+    }
+
+    pub async fn materialize_kr_rps_sync(
+        &self,
+        input: KrRpsSyncMaterialization<'_>,
+    ) -> Result<String> {
+        let now = now_string();
+        let mut queries = Vec::with_capacity(
+            16 + input.generation.len()
+                + input.rates.len()
+                + input.rec.len()
+                + input.documents.len(),
+        );
+        Self::push_upsert_plant_query(&mut queries, input.plant, &now);
+        let projection = self
+            .push_kr_rps_asset_projection_queries(
+                &mut queries,
+                input.plant,
+                input.registry_account_organization_id,
+                input.business_no,
+                input.generation,
+                input.rates,
+                input.rec,
+                &now,
+            )
+            .await?;
+        Self::push_legacy_record_upsert_queries(
+            &mut queries,
+            &input.plant.id,
+            input.generation,
+            input.rates,
+            input.rec,
+            &now,
+        );
+        if matches!(input.mode, SyncMode::Full) {
+            self.push_kr_rps_projection_prune_queries(
+                &mut queries,
+                &input.plant.facility_code,
+                &projection,
+                input.generation,
+                input.rates,
+                input.rec,
+            )
+            .await?;
+            self.push_legacy_record_prune_queries(
+                &mut queries,
+                &input.plant.id,
+                input.generation,
+                input.rates,
+                input.rec,
+            )
+            .await?;
+            self.push_document_replace_queries(
+                &mut queries,
+                &input.plant.id,
+                input.documents,
+                &now,
+            )
+            .await?;
+        }
+        Self::push_update_sync_run_target_query(&mut queries, input.run_id, Some(&input.plant.id));
+        Self::push_upsert_sync_run_item_query(
+            &mut queries,
+            input.run_id,
+            Some(&projection.asset_id),
+            &input.plant.facility_code,
+            "completed",
+            input.generation.len(),
+            input.rates.len(),
+            input.rec.len(),
+            input.documents.len(),
+            None,
+            &now,
+        );
+        Self::push_finish_sync_run_query(
+            &mut queries,
+            input.run_id,
+            "completed",
+            input.duration_ms,
+            None,
+            &now,
+        );
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("materialize KR RPS sync transaction")?;
+        Ok(projection.asset_id)
+    }
+
+    fn push_update_sync_run_target_query(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        run_id: &str,
+        plant_id: Option<&str>,
+    ) {
+        queries.push((
+            "UPDATE sync_runs SET plant_id = $1 WHERE id = $2".to_owned(),
+            params!(plant_id.map(ToOwned::to_owned), run_id.to_owned()),
+        ));
+    }
+
+    fn push_finish_sync_run_query(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        run_id: &str,
+        status: &str,
+        duration_ms: i64,
+        error_message: Option<&str>,
+        now: &str,
+    ) {
+        queries.push((
+            "UPDATE sync_runs
+             SET status = $1, finished_at = $2, duration_ms = $3, error_message = $4
+             WHERE id = $5"
+                .to_owned(),
+            params!(
+                status.to_owned(),
+                now.to_owned(),
+                duration_ms,
+                error_message.map(ToOwned::to_owned),
+                run_id.to_owned()
+            ),
+        ));
+    }
+
+    fn push_upsert_sync_run_item_query(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        sync_run_id: &str,
+        asset_id: Option<&str>,
+        facility_code: &str,
+        status: &str,
+        generation_count: usize,
+        rate_count: usize,
+        rec_count: usize,
+        document_count: usize,
+        error_message: Option<&str>,
+        now: &str,
+    ) {
+        let id = stable_scoped_id("sync_run_item", &format!("{sync_run_id}:{facility_code}"));
+        let registry_project_id =
+            asset_id.map(|_| stable_scoped_id("registry_project:kr_rps", facility_code));
+        let data_source_id =
+            asset_id.map(|_| stable_scoped_id("data_source:kr_rps:generation", facility_code));
+        queries.push((
+            "INSERT INTO sync_run_items (
+                id, sync_run_id, asset_id, registry_project_id, data_source_id,
+                facility_code, status, generation_count, rate_count, rec_count,
+                document_count, error_message, write_version, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             ON CONFLICT(sync_run_id, facility_code) DO UPDATE SET
+                asset_id = excluded.asset_id,
+                registry_project_id = excluded.registry_project_id,
+                data_source_id = excluded.data_source_id,
+                status = excluded.status,
+                generation_count = excluded.generation_count,
+                rate_count = excluded.rate_count,
+                rec_count = excluded.rec_count,
+                document_count = excluded.document_count,
+                error_message = excluded.error_message,
+                write_version = excluded.write_version,
+                updated_at = excluded.updated_at"
+                .to_owned(),
+            params!(
+                id,
+                sync_run_id.to_owned(),
+                asset_id.map(ToOwned::to_owned),
+                registry_project_id,
+                data_source_id,
+                facility_code.to_owned(),
+                status.to_owned(),
+                generation_count as i64,
+                rate_count as i64,
+                rec_count as i64,
+                document_count as i64,
+                error_message.map(ToOwned::to_owned),
+                now.to_owned(),
+                now.to_owned(),
+                now.to_owned()
+            ),
+        ));
+    }
+
+    fn push_legacy_record_upsert_queries(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        plant_id: &str,
+        generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
+        rec: &[RecRecord],
+        now: &str,
+    ) {
+        for record in generation {
+            queries.push(("INSERT INTO generation_records (plant_id, month, generation_kwh, self_consumption_kwh, supply_kwh, application_deadline, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT(plant_id, month) DO UPDATE SET
+                    generation_kwh = excluded.generation_kwh,
+                    self_consumption_kwh = excluded.self_consumption_kwh,
+                    supply_kwh = excluded.supply_kwh,
+                    application_deadline = excluded.application_deadline,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    plant_id.to_owned(),
+                    record.month.clone(),
+                    record.generation_kwh,
+                    record.self_consumption_kwh,
+                    record.supply_kwh,
+                    record.application_deadline.clone(),
+                    now.to_owned()
+                ),
+            ));
+        }
+        for record in rates {
+            queries.push(("INSERT INTO rate_records (plant_id, month, self_rate, national_average, nearby_average, nearby_highest, published, source_control_flag, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(plant_id, month) DO UPDATE SET
+                    self_rate = excluded.self_rate,
+                    national_average = excluded.national_average,
+                    nearby_average = excluded.nearby_average,
+                    nearby_highest = excluded.nearby_highest,
+                    published = excluded.published,
+                    source_control_flag = excluded.source_control_flag,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    plant_id.to_owned(),
+                    record.record.month.clone(),
+                    record.record.self_rate,
+                    record.record.national_average,
+                    record.record.nearby_average,
+                    record.record.nearby_highest,
+                    if record.published { 1_i64 } else { 0_i64 },
+                    record.source_control_flag.clone(),
+                    now.to_owned()
+                ),
+            ));
+        }
+        for record in rec {
+            queries.push(("INSERT INTO rec_records (plant_id, application_no, month, supply_kwh, rec_quantity, fee_krw, issued_date, expiry_date, virtual_account, bank_name, status, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 ON CONFLICT(plant_id, application_no) DO UPDATE SET
+                    month = excluded.month,
+                    supply_kwh = excluded.supply_kwh,
+                    rec_quantity = excluded.rec_quantity,
+                    fee_krw = excluded.fee_krw,
+                    issued_date = excluded.issued_date,
+                    expiry_date = excluded.expiry_date,
+                    virtual_account = excluded.virtual_account,
+                    bank_name = excluded.bank_name,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    plant_id.to_owned(),
+                    record.application_no.clone(),
+                    record.month.clone(),
+                    record.supply_kwh,
+                    record.rec_quantity,
+                    record.fee_krw,
+                    record.issued_date.clone(),
+                    record.expiry_date.clone(),
+                    record.virtual_account.clone(),
+                    record.bank_name.clone(),
+                    record.status.clone(),
+                    now.to_owned()
+                ),
+            ));
+        }
+    }
+
+    async fn push_kr_rps_projection_prune_queries(
+        &self,
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        facility_code: &str,
+        projection: &KrRpsProjectionContext,
+        generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
+        rec: &[RecRecord],
+    ) -> Result<()> {
+        let expected_generation_pairs = generation
+            .iter()
+            .map(|record| {
+                let period_start = month_start_date(&record.month)?;
+                let period_end = next_month_start_date(&record.month)?;
+                Ok::<_, anyhow::Error>((
+                    KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH.to_owned(),
+                    period_start,
+                    period_end,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut generation_sql =
+            "DELETE FROM generation_data WHERE asset_id = $1 AND source_id = $2".to_owned();
+        let mut generation_params = params!(
+            projection.asset_id.clone(),
+            projection.data_source_id.clone()
+        );
+        if !expected_generation_pairs.is_empty() {
+            generation_sql.push_str(" AND NOT (");
+            let mut clauses = Vec::with_capacity(expected_generation_pairs.len());
+            let mut param_index = 3;
+            for (metric_type, period_start, period_end) in expected_generation_pairs {
+                clauses.push(format!(
+                    "(metric_type = ${} AND period_start = ${} AND period_end = ${})",
+                    param_index,
+                    param_index + 1,
+                    param_index + 2
+                ));
+                generation_params.push(metric_type.into());
+                generation_params.push(period_start.into());
+                generation_params.push(period_end.into());
+                param_index += 3;
+            }
+            generation_sql.push_str(&clauses.join(" OR "));
+            generation_sql.push(')');
+        }
+        queries.push((generation_sql, generation_params));
+
+        let mut expected_rate_pairs = Vec::new();
+        for record in rates {
+            let period_start = month_start_date(&record.record.month)?;
+            let period_end = next_month_start_date(&record.record.month)?;
+            for (metric_type, value) in [
+                ("self_rate", record.record.self_rate),
+                ("national_average", record.record.national_average),
+                ("nearby_average", record.record.nearby_average),
+                ("nearby_highest", record.record.nearby_highest),
+            ] {
+                if value.is_some() {
+                    expected_rate_pairs.push((
+                        metric_type.to_owned(),
+                        period_start.clone(),
+                        period_end.clone(),
+                    ));
+                }
+            }
+        }
+        let mut rate_sql =
+            "DELETE FROM rate_data WHERE asset_id = $1 AND source_id = $2".to_owned();
+        let mut rate_params = params!(
+            projection.asset_id.clone(),
+            projection.rate_source_id.clone()
+        );
+        if !expected_rate_pairs.is_empty() {
+            rate_sql.push_str(" AND NOT (");
+            let mut clauses = Vec::with_capacity(expected_rate_pairs.len());
+            let mut param_index = 3;
+            for (metric_type, period_start, period_end) in expected_rate_pairs {
+                clauses.push(format!(
+                    "(metric_type = ${} AND period_start = ${} AND period_end = ${})",
+                    param_index,
+                    param_index + 1,
+                    param_index + 2
+                ));
+                rate_params.push(metric_type.into());
+                rate_params.push(period_start.into());
+                rate_params.push(period_end.into());
+                param_index += 3;
+            }
+            rate_sql.push_str(&clauses.join(" OR "));
+            rate_sql.push(')');
+        }
+        queries.push((rate_sql, rate_params));
+
+        let expected_serials: Vec<String> = rec
+            .iter()
+            .map(|record| format!("{}:{}", facility_code, record.application_no))
+            .collect();
+        let mut certificate_sql = "DELETE FROM energy_certificates
+             WHERE asset_id = $1
+               AND registry_id = 'registry-kr-rps'
+               AND (registry_project_id = $2 OR registry_project_id IS NULL)"
+            .to_owned();
+        let mut certificate_params = params!(
+            projection.asset_id.clone(),
+            projection.registry_project_id.clone()
+        );
+        if !expected_serials.is_empty() {
+            certificate_sql.push_str(&format!(
+                " AND serial_number NOT IN ({})",
+                Self::numbered_placeholders(3, expected_serials.len())
+            ));
+            for serial in expected_serials {
+                certificate_params.push(serial.into());
+            }
+        }
+        queries.push((certificate_sql, certificate_params));
+        Ok(())
+    }
+
+    async fn push_legacy_record_prune_queries(
+        &self,
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        plant_id: &str,
+        generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
+        rec: &[RecRecord],
+    ) -> Result<()> {
+        let expected_generation_months: Vec<String> = generation
+            .iter()
+            .map(|record| record.month.clone())
+            .collect();
+        let expected_rate_months: Vec<String> = rates
+            .iter()
+            .map(|record| record.record.month.clone())
+            .collect();
+        let expected_rec_applications: Vec<String> = rec
+            .iter()
+            .map(|record| record.application_no.clone())
+            .collect();
+
+        Self::push_delete_not_in_query(
+            queries,
+            "generation_records",
+            "month",
+            plant_id,
+            expected_generation_months,
+        );
+        Self::push_delete_not_in_query(
+            queries,
+            "rate_records",
+            "month",
+            plant_id,
+            expected_rate_months,
+        );
+        Self::push_delete_not_in_query(
+            queries,
+            "rec_records",
+            "application_no",
+            plant_id,
+            expected_rec_applications,
+        );
+        Ok(())
+    }
+
+    async fn push_document_replace_queries(
+        &self,
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        plant_id: &str,
+        docs: &[PersistedDocument],
+        now: &str,
+    ) -> Result<()> {
+        for doc in docs {
+            queries.push(("INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 ON CONFLICT(id) DO UPDATE SET
+                    plant_id = excluded.plant_id,
+                    category = excluded.category,
+                    attachment_code = excluded.attachment_code,
+                    file_class = excluded.file_class,
+                    file_sec_name = excluded.file_sec_name,
+                    file_name = excluded.file_name,
+                    required = excluded.required,
+                    source_sha256 = excluded.source_sha256,
+                    output_sha256 = excluded.output_sha256,
+                    object_key = excluded.object_key,
+                    content_type = excluded.content_type,
+                    updated_at = excluded.updated_at".to_owned(),
+                params!(
+                    doc.id.clone(),
+                    plant_id.to_owned(),
+                    doc.category.to_storage(),
+                    doc.attachment_code.clone(),
+                    doc.file_class.clone(),
+                    doc.file_sec_name.clone(),
+                    doc.file_name.clone(),
+                    if doc.required { 1_i64 } else { 0_i64 },
+                    doc.source_sha256.clone(),
+                    doc.output_sha256.clone(),
+                    doc.object_key.clone(),
+                    doc.content_type.clone(),
+                    now.to_owned()
+                ),
+            ));
+        }
+        let keep_ids: Vec<String> = docs.iter().map(|doc| doc.id.clone()).collect();
+        Self::push_delete_not_in_query(queries, "documents", "id", plant_id, keep_ids);
+        Ok(())
+    }
+
+    fn numbered_placeholders(start: usize, count: usize) -> String {
+        (start..start + count)
+            .map(|idx| format!("${idx}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn push_delete_not_in_query(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        table: &'static str,
+        column: &'static str,
+        plant_id: &str,
+        keep_values: Vec<String>,
+    ) {
+        let mut sql = format!("DELETE FROM {table} WHERE plant_id = $1");
+        let mut params = params!(plant_id.to_owned());
+        if !keep_values.is_empty() {
+            sql.push_str(&format!(
+                " AND {column} NOT IN ({})",
+                Self::numbered_placeholders(2, keep_values.len())
+            ));
+            for value in keep_values {
+                params.push(value.into());
+            }
+        }
+        queries.push((sql, params));
+    }
+
+    pub async fn replace_kr_rps_asset_projection(
+        &self,
+        plant: &Plant,
+        registry_account_organization_id: Option<&str>,
+        business_no: Option<&str>,
+        generation: &[GenerationRecord],
+        rec: &[RecRecord],
+    ) -> Result<String> {
+        let data_source_id =
+            stable_scoped_id("data_source:kr_rps:generation", &plant.facility_code);
+        let registry_project_id = stable_scoped_id("registry_project:kr_rps", &plant.facility_code);
+
+        let asset_id = self
+            .upsert_kr_rps_asset_projection(
+                plant,
+                registry_account_organization_id,
+                business_no,
+                generation,
+                rec,
+            )
+            .await?;
+        self.prune_kr_rps_asset_projection_after_full(
+            &plant.facility_code,
+            &asset_id,
+            &data_source_id,
+            &registry_project_id,
+            generation,
+            rec,
+        )
+        .await?;
+        Ok(asset_id)
+    }
+
+    async fn prune_kr_rps_asset_projection_after_full(
+        &self,
+        facility_code: &str,
+        asset_id: &str,
+        data_source_id: &str,
+        registry_project_id: &str,
+        generation: &[GenerationRecord],
+        rec: &[RecRecord],
+    ) -> Result<()> {
+        let expected_generation_pairs = generation
+            .iter()
+            .map(|record| {
+                let period_start = month_start_date(&record.month)?;
+                let period_end = next_month_start_date(&record.month)?;
+                Ok::<_, anyhow::Error>((
+                    KR_RPS_GENERATION_METRIC_GROSS_GENERATION_KWH.to_owned(),
+                    period_start,
+                    period_end,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        let generation_rows: Vec<MetricPeriodRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT metric_type, period_start, period_end
+                 FROM generation_data
+                 WHERE asset_id = $1 AND source_id = $2",
+                params!(asset_id.to_owned(), data_source_id.to_owned()),
+                "KR RPS generation data full prune candidates",
+            )
+            .await?;
+        for row in generation_rows {
+            if expected_generation_pairs.contains(&(
+                row.metric_type.clone(),
+                row.period_start.clone(),
+                row.period_end.clone(),
+            )) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM generation_data
+                     WHERE asset_id = $1 AND source_id = $2 AND metric_type = $3 AND period_start = $4 AND period_end = $5",
+                    params!(
+                        asset_id.to_owned(),
+                        data_source_id.to_owned(),
+                        row.metric_type,
+                        row.period_start,
+                        row.period_end
+                    ),
+                )
+                .await
+                .context("prune stale KR RPS generation data")?;
+        }
+
+        let expected_serials = rec
+            .iter()
+            .map(|record| format!("{}:{}", facility_code, record.application_no))
+            .collect::<BTreeSet<_>>();
+        let certificate_rows: Vec<TextValueRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT serial_number AS value
+                 FROM energy_certificates
+                 WHERE asset_id = $1
+                   AND registry_id = 'registry-kr-rps'
+                   AND (registry_project_id = $2 OR registry_project_id IS NULL)",
+                params!(asset_id.to_owned(), registry_project_id.to_owned()),
+                "KR RPS energy certificate full prune candidates",
+            )
+            .await?;
+        for row in certificate_rows {
+            if expected_serials.contains(row.value.as_str()) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM energy_certificates
+                     WHERE asset_id = $1
+                       AND registry_id = 'registry-kr-rps'
+                       AND serial_number = $2",
+                    params!(asset_id.to_owned(), row.value),
+                )
+                .await
+                .context("prune stale KR RPS energy certificate")?;
+        }
+        Ok(())
+    }
+
+    async fn resolve_kr_rps_asset_id_for_projection(&self, facility_code: &str) -> Result<String> {
+        let profile_asset_id = match self
+            .get_kr_rps_asset_id_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(asset_id) => Ok(Some(asset_id)),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }?;
+        let project_asset_id = self
+            .existing_kr_rps_registry_project_asset_id_for_facility(facility_code)
+            .await?;
+        match (profile_asset_id, project_asset_id) {
+            (Some(profile_asset_id), Some(project_asset_id))
+                if profile_asset_id != project_asset_id =>
+            {
+                Err(anyhow!(
+                    "KR RPS asset mapping conflict for facility {}: profile asset {}, registry project asset {}",
+                    facility_code,
+                    profile_asset_id,
+                    project_asset_id
+                ))
+            }
+            (Some(asset_id), _) | (_, Some(asset_id)) => Ok(asset_id),
+            (None, None) => Ok(stable_scoped_id(
+                "asset",
+                &format!("kr_rps:{facility_code}"),
+            )),
+        }
+    }
+
+    async fn existing_kr_rps_registry_project_asset_id_for_facility(
+        &self,
+        facility_code: &str,
+    ) -> Result<Option<String>> {
+        let mut rows: Vec<TextValueRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT asset_id AS value
+                 FROM registry_projects
+                 WHERE registry_id = 'registry-kr-rps'
+                   AND external_project_id = $1
+                 LIMIT 1",
+                params!(facility_code.to_owned()),
+                "existing KR RPS registry project asset for facility",
+            )
+            .await?;
+        Ok(rows.pop().map(|row| row.value))
+    }
+
+    async fn existing_kr_rps_registry_account_id_for_facility(
+        &self,
+        facility_code: &str,
+    ) -> Result<Option<String>> {
+        #[derive(Debug)]
+        struct RegistryAccountIdRow {
+            registry_account_id: String,
+        }
+
+        impl From<&mut Row<'_>> for RegistryAccountIdRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    registry_account_id: row.get("registry_account_id"),
+                }
+            }
+        }
+
+        let mut rows: Vec<RegistryAccountIdRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT registry_account_id
+                 FROM registry_projects
+                 WHERE registry_id = 'registry-kr-rps'
+                   AND external_project_id = $1
+                   AND registry_account_id IS NOT NULL
+                 LIMIT 1",
+                params!(facility_code.to_owned()),
+                "existing KR RPS registry account for facility",
+            )
+            .await?;
+        Ok(rows.pop().map(|row| row.registry_account_id))
     }
 
     pub async fn replace_full_records(
@@ -3196,30 +4902,95 @@ impl Database {
         rates: &[StoredRateRecord],
         rec: &[RecRecord],
     ) -> Result<()> {
-        self.runtime
-            .execute(
-                "DELETE FROM generation_records WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
-            )
-            .await
-            .context("clear generation records")?;
-        self.runtime
-            .execute(
-                "DELETE FROM rate_records WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
-            )
-            .await
-            .context("clear rate records")?;
-        self.runtime
-            .execute(
-                "DELETE FROM rec_records WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
-            )
-            .await
-            .context("clear rec records")?;
         self.upsert_generation_records(plant_id, generation).await?;
         self.upsert_rate_records(plant_id, rates).await?;
         self.upsert_rec_records(plant_id, rec).await?;
+        self.prune_full_records_after_replace(plant_id, generation, rates, rec)
+            .await?;
+        Ok(())
+    }
+
+    async fn prune_full_records_after_replace(
+        &self,
+        plant_id: &str,
+        generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
+        rec: &[RecRecord],
+    ) -> Result<()> {
+        let expected_generation_months = generation
+            .iter()
+            .map(|record| record.month.clone())
+            .collect::<BTreeSet<_>>();
+        let expected_rate_months = rates
+            .iter()
+            .map(|record| record.record.month.clone())
+            .collect::<BTreeSet<_>>();
+        let expected_rec_applications = rec
+            .iter()
+            .map(|record| record.application_no.clone())
+            .collect::<BTreeSet<_>>();
+
+        let generation_rows: Vec<TextValueRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT month AS value FROM generation_records WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+                "legacy generation full prune candidates",
+            )
+            .await?;
+        let rate_rows: Vec<TextValueRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT month AS value FROM rate_records WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+                "legacy rate full prune candidates",
+            )
+            .await?;
+        let rec_rows: Vec<TextValueRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT application_no AS value FROM rec_records WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+                "legacy REC full prune candidates",
+            )
+            .await?;
+
+        for row in generation_rows {
+            if expected_generation_months.contains(row.value.as_str()) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM generation_records WHERE plant_id = $1 AND month = $2",
+                    params!(plant_id.to_owned(), row.value),
+                )
+                .await
+                .context("prune stale generation record")?;
+        }
+        for row in rate_rows {
+            if expected_rate_months.contains(row.value.as_str()) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM rate_records WHERE plant_id = $1 AND month = $2",
+                    params!(plant_id.to_owned(), row.value),
+                )
+                .await
+                .context("prune stale rate record")?;
+        }
+        for row in rec_rows {
+            if expected_rec_applications.contains(row.value.as_str()) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM rec_records WHERE plant_id = $1 AND application_no = $2",
+                    params!(plant_id.to_owned(), row.value),
+                )
+                .await
+                .context("prune stale REC record")?;
+        }
         Ok(())
     }
 
@@ -3350,19 +5121,25 @@ impl Database {
         plant_id: &str,
         docs: &[PersistedDocument],
     ) -> Result<()> {
-        self.runtime
-            .execute(
-                "DELETE FROM documents WHERE plant_id = $1",
-                params!(plant_id.to_owned()),
-            )
-            .await
-            .context("clear documents")?;
         let updated_at = now_string();
         for doc in docs {
             self.runtime
                 .execute(
                     "INSERT INTO documents (id, plant_id, category, attachment_code, file_class, file_sec_name, file_name, required, source_sha256, output_sha256, object_key, content_type, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     ON CONFLICT(id) DO UPDATE SET
+                        plant_id = excluded.plant_id,
+                        category = excluded.category,
+                        attachment_code = excluded.attachment_code,
+                        file_class = excluded.file_class,
+                        file_sec_name = excluded.file_sec_name,
+                        file_name = excluded.file_name,
+                        required = excluded.required,
+                        source_sha256 = excluded.source_sha256,
+                        output_sha256 = excluded.output_sha256,
+                        object_key = excluded.object_key,
+                        content_type = excluded.content_type,
+                        updated_at = excluded.updated_at",
                     params!(
                         doc.id.clone(),
                         plant_id.to_owned(),
@@ -3381,6 +5158,30 @@ impl Database {
                 )
                 .await
                 .with_context(|| format!("insert document {}", doc.file_name))?;
+        }
+        let keep_ids = docs
+            .iter()
+            .map(|doc| doc.id.clone())
+            .collect::<BTreeSet<_>>();
+        let rows: Vec<TextValueRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT id AS value FROM documents WHERE plant_id = $1",
+                params!(plant_id.to_owned()),
+                "document full prune candidates",
+            )
+            .await?;
+        for row in rows {
+            if keep_ids.contains(row.value.as_str()) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM documents WHERE plant_id = $1 AND id = $2",
+                    params!(plant_id.to_owned(), row.value),
+                )
+                .await
+                .context("prune stale document row")?;
         }
         Ok(())
     }
@@ -3410,7 +5211,20 @@ impl Database {
                  JOIN plants p ON p.id = v.plant_id
                  WHERE v.user_id = $1
                    AND v.organization_id = $2
-                 ORDER BY p.facility_code ASC",
+                 UNION
+                 SELECT p.id, p.facility_code, p.owner_organization_id, p.created_by_organization_id,
+                        p.name, p.contract_no, p.address, p.installed_kw, p.rec_start_date,
+                        p.confirm_issued
+                 FROM effective_user_asset_visibility v
+                 JOIN asset_profiles ap
+                   ON ap.asset_id = v.asset_id
+                  AND ap.country_code = 'KR'
+                  AND ap.provider = 'korea_energy_rps'
+                  AND ap.profile_type = 'kr_rps'
+                 JOIN plants p ON p.facility_code = ap.external_id
+                 WHERE v.user_id = $1
+                   AND v.organization_id = $2
+                 ORDER BY facility_code ASC",
                 params!(user_id.to_owned(), organization_id.to_owned()),
                 "visible plants",
             )
@@ -3465,6 +5279,289 @@ impl Database {
             > 0)
     }
 
+    pub async fn has_user_asset_action_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        asset_id: &str,
+        action_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        Ok(self
+            .query_count(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT COUNT(*) as count
+                 FROM effective_user_asset_actions
+                 WHERE user_id = $1
+                   AND organization_id = $2
+                   AND asset_id = $3
+                   AND action_id = $4",
+                params!(
+                    user_id.to_owned(),
+                    organization_id.to_owned(),
+                    asset_id.to_owned(),
+                    action_id.to_owned()
+                ),
+                "effective user asset action",
+            )
+            .await?
+            > 0)
+    }
+
+    pub async fn has_usable_kr_rps_certificate_credential_with_consistency(
+        &self,
+        organization_id: &str,
+        facility_code: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        Ok(self
+            .query_count(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT COUNT(*) as count
+                 FROM auth_credentials ac
+                 WHERE ac.organization_id = $1
+                   AND ac.provider = 'korea_energy_rps'
+                   AND ac.credential_type = 'certificate'
+                   AND ac.active = 1
+                   AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM registry_projects rp
+                            JOIN assets a ON a.id = rp.asset_id
+                            WHERE rp.registry_id = 'registry-kr-rps'
+                              AND rp.external_project_id = $2
+                              AND rp.registry_account_id IS NULL
+                              AND a.owner_organization_id = $1
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM registry_projects rp
+                            JOIN registry_accounts ra ON ra.id = rp.registry_account_id
+                            JOIN credential_bindings cb ON cb.registry_account_id = ra.id
+                            WHERE rp.registry_id = 'registry-kr-rps'
+                              AND rp.external_project_id = $2
+                              AND ra.organization_id = ac.organization_id
+                              AND ra.organization_id = $1
+                              AND cb.credential_id = ac.id
+                        )
+                   )",
+                params!(organization_id.to_owned(), facility_code.to_owned()),
+                "usable KR RPS certificate credential",
+            )
+            .await?
+            > 0)
+    }
+
+    pub async fn get_kr_rps_asset_id_by_facility_code_with_consistency(
+        &self,
+        facility_code: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<String> {
+        #[derive(Debug)]
+        struct AssetIdRow {
+            asset_id: String,
+        }
+
+        impl From<&mut Row<'_>> for AssetIdRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    asset_id: row.get("asset_id"),
+                }
+            }
+        }
+
+        let mut rows: Vec<AssetIdRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT asset_id
+                 FROM asset_profiles
+                 WHERE country_code = 'KR'
+                   AND profile_type = 'kr_rps'
+                   AND provider = 'korea_energy_rps'
+                   AND external_id = $1
+                 LIMIT 1",
+                params!(facility_code.to_owned()),
+                "KR RPS asset profile",
+            )
+            .await
+            .context("query KR RPS asset profile")?;
+        rows.pop()
+            .map(|row| row.asset_id)
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))
+    }
+
+    pub async fn kr_rps_projection_counts(
+        &self,
+        facility_code: &str,
+    ) -> Result<KrRpsProjectionCounts> {
+        let asset_id = self
+            .get_kr_rps_asset_id_by_facility_code_with_consistency(facility_code, None)
+            .await?;
+        let asset_profiles = self
+            .query_count(
+                self.default_read_consistency_with_override(None),
+                "SELECT COUNT(*) as count
+                 FROM asset_profiles
+                 WHERE asset_id = $1
+                   AND profile_type = 'kr_rps'
+                   AND provider = 'korea_energy_rps'
+                   AND external_id = $2",
+                params!(asset_id.clone(), facility_code.to_owned()),
+                "KR RPS asset profile count",
+            )
+            .await?;
+        let registry_projects = self
+            .query_count(
+                self.default_read_consistency_with_override(None),
+                "SELECT COUNT(*) as count
+                 FROM registry_projects
+                 WHERE asset_id = $1 AND external_project_id = $2",
+                params!(asset_id.clone(), facility_code.to_owned()),
+                "KR RPS registry project count",
+            )
+            .await?;
+        let data_sources = self
+            .query_count(
+                self.default_read_consistency_with_override(None),
+                "SELECT COUNT(*) as count
+                 FROM data_sources
+                 WHERE asset_id = $1 AND provider = 'korea_energy_rps'",
+                params!(asset_id.clone()),
+                "KR RPS data source count",
+            )
+            .await?;
+        let generation_data = self
+            .query_count(
+                self.default_read_consistency_with_override(None),
+                "SELECT COUNT(*) as count FROM generation_data WHERE asset_id = $1",
+                params!(asset_id.clone()),
+                "KR RPS generation data count",
+            )
+            .await?;
+        let rate_data = self
+            .query_count(
+                self.default_read_consistency_with_override(None),
+                "SELECT COUNT(*) as count FROM rate_data WHERE asset_id = $1",
+                params!(asset_id.clone()),
+                "KR RPS rate data count",
+            )
+            .await?;
+        let energy_certificates = self
+            .query_count(
+                self.default_read_consistency_with_override(None),
+                "SELECT COUNT(*) as count FROM energy_certificates WHERE asset_id = $1",
+                params!(asset_id),
+                "KR RPS energy certificate count",
+            )
+            .await?;
+        Ok(KrRpsProjectionCounts {
+            asset_profiles,
+            registry_projects,
+            data_sources,
+            generation_data,
+            rate_data,
+            energy_certificates,
+        })
+    }
+
+    pub async fn get_kr_rps_registry_project_binding(
+        &self,
+        facility_code: &str,
+    ) -> Result<KrRpsRegistryProjectBinding> {
+        #[derive(Debug)]
+        struct BindingRow {
+            asset_owner_organization_id: String,
+            registry_account_organization_id: Option<String>,
+            registry_account_external_account_id: Option<String>,
+        }
+
+        impl From<&mut Row<'_>> for BindingRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    asset_owner_organization_id: row.get("asset_owner_organization_id"),
+                    registry_account_organization_id: row.get("registry_account_organization_id"),
+                    registry_account_external_account_id: row
+                        .get("registry_account_external_account_id"),
+                }
+            }
+        }
+
+        let mut rows: Vec<BindingRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT a.owner_organization_id AS asset_owner_organization_id,
+                        ra.organization_id AS registry_account_organization_id,
+                        ra.external_account_id AS registry_account_external_account_id
+                 FROM registry_projects rp
+                 JOIN assets a ON a.id = rp.asset_id
+                 LEFT JOIN registry_accounts ra ON ra.id = rp.registry_account_id
+                 WHERE rp.registry_id = 'registry-kr-rps'
+                   AND rp.external_project_id = $1
+                 LIMIT 1",
+                params!(facility_code.to_owned()),
+                "KR RPS registry project binding",
+            )
+            .await?;
+        rows.pop()
+            .map(|row| KrRpsRegistryProjectBinding {
+                asset_owner_organization_id: row.asset_owner_organization_id,
+                registry_account_organization_id: row.registry_account_organization_id,
+                registry_account_external_account_id: row.registry_account_external_account_id,
+            })
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))
+    }
+
+    pub async fn get_latest_sync_run_audit_for_facility(
+        &self,
+        facility_code: &str,
+    ) -> Result<SyncRunAudit> {
+        #[derive(Debug)]
+        struct AuditRow {
+            run_status: String,
+            item_status: Option<String>,
+            run_error_message: Option<String>,
+            item_error_message: Option<String>,
+        }
+
+        impl From<&mut Row<'_>> for AuditRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    run_status: row.get("run_status"),
+                    item_status: row.get("item_status"),
+                    run_error_message: row.get("run_error_message"),
+                    item_error_message: row.get("item_error_message"),
+                }
+            }
+        }
+
+        let mut rows: Vec<AuditRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT sr.status AS run_status,
+                        sri.status AS item_status,
+                        sr.error_message AS run_error_message,
+                        sri.error_message AS item_error_message
+                 FROM sync_runs sr
+                 LEFT JOIN sync_run_items sri
+                   ON sri.sync_run_id = sr.id
+                  AND sri.facility_code = $1
+                 WHERE sr.plant_id = $1 OR sri.facility_code = $1
+                 ORDER BY sr.started_at DESC, sr.id DESC
+                 LIMIT 1",
+                params!(facility_code.to_owned()),
+                "latest sync run audit for facility",
+            )
+            .await?;
+        rows.pop()
+            .map(|row| SyncRunAudit {
+                run_status: row.run_status,
+                item_status: row.item_status,
+                run_error_message: row.run_error_message,
+                item_error_message: row.item_error_message,
+            })
+            .ok_or_else(|| anyhow!("sync run audit not found for facility {facility_code}"))
+    }
+
     pub async fn list_user_plant_action_facility_codes_with_consistency(
         &self,
         user_id: &str,
@@ -3485,9 +5582,10 @@ impl Database {
             }
         }
 
+        let read_consistency = self.default_read_consistency_with_override(consistency);
         let rows: Vec<FacilityCodeRow> = self
             .query_rows_with(
-                self.default_read_consistency_with_override(consistency),
+                read_consistency.clone(),
                 "SELECT DISTINCT p.facility_code
                  FROM effective_user_plant_visibility v
                  JOIN effective_user_plant_actions a
@@ -3508,7 +5606,42 @@ impl Database {
             )
             .await
             .context("list user plant action facility codes")?;
-        Ok(rows.into_iter().map(|row| row.facility_code).collect())
+        let mut facility_codes: BTreeSet<String> =
+            rows.into_iter().map(|row| row.facility_code).collect();
+
+        if let Some(asset_action_id) = kr_rps_plant_action_to_asset_action_id(action_id) {
+            let asset_rows: Vec<FacilityCodeRow> = self
+                .query_rows_with(
+                    read_consistency,
+                    "SELECT DISTINCT p.facility_code
+                     FROM effective_user_asset_visibility v
+                     JOIN effective_user_asset_actions a
+                       ON a.user_id = v.user_id
+                      AND a.organization_id = v.organization_id
+                      AND a.asset_id = v.asset_id
+                     JOIN asset_profiles ap
+                       ON ap.asset_id = v.asset_id
+                      AND ap.country_code = 'KR'
+                      AND ap.provider = 'korea_energy_rps'
+                      AND ap.profile_type = 'kr_rps'
+                     JOIN plants p ON p.facility_code = ap.external_id
+                     WHERE v.user_id = $1
+                       AND v.organization_id = $2
+                       AND a.action_id = $3
+                     ORDER BY p.facility_code ASC",
+                    params!(
+                        user_id.to_owned(),
+                        organization_id.to_owned(),
+                        asset_action_id.to_owned()
+                    ),
+                    "effective user asset action facility codes",
+                )
+                .await
+                .context("list user asset action facility codes")?;
+            facility_codes.extend(asset_rows.into_iter().map(|row| row.facility_code));
+        }
+
+        Ok(facility_codes.into_iter().collect())
     }
 
     pub async fn has_user_organization_action(
@@ -3678,6 +5811,27 @@ impl Database {
                 "SELECT id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued
                  FROM plants WHERE facility_code = $1 LIMIT 1",
                 params!(facility_code.to_owned()),
+                "plant",
+            )
+            .await
+            .context("query plant")?;
+        let plant_row = plants
+            .pop()
+            .ok_or_else(|| anyhow::Error::new(DatabaseLookupError::PlantNotFound))?;
+        Ok(plant_row.into())
+    }
+
+    pub async fn get_plant_by_id_with_consistency(
+        &self,
+        plant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Plant> {
+        let mut plants: Vec<PlantRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT id, facility_code, owner_organization_id, created_by_organization_id, name, contract_no, address, installed_kw, rec_start_date, confirm_issued
+                 FROM plants WHERE id = $1 LIMIT 1",
+                params!(plant_id.to_owned()),
                 "plant",
             )
             .await
@@ -4132,7 +6286,65 @@ impl Database {
                 "user plant action seeds",
             )
             .await?;
-
+        let asset_seed_rows: Vec<OrganizationPlantActionSeedRow> = self
+            .query_rows_with(
+                self.validation_read_consistency(),
+                "SELECT rb.subject_id AS organization_id,
+                        rb.resource_id AS plant_id,
+                        ra.action_id AS action_id
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 LEFT JOIN agreements a ON a.id = rb.agreement_id
+                 WHERE rb.subject_type = 'organization'
+                   AND rb.resource_type = 'asset'
+                   AND rb.state = 'active'
+                   AND (
+                        rb.agreement_id IS NULL
+                        OR (
+                            a.status = 'active'
+                            AND (a.starts_at IS NULL OR a.starts_at <= $1)
+                            AND (a.ends_at IS NULL OR a.ends_at >= $1)
+                        )
+                   )
+                 ORDER BY rb.subject_id ASC, rb.resource_id ASC, ra.action_id ASC",
+                vec![now_string().into()],
+                "organization asset action seeds",
+            )
+            .await?;
+        let group_asset_seed_rows: Vec<GroupPlantActionSeedRow> = self
+            .query_rows_with(
+                self.validation_read_consistency(),
+                "SELECT rb.subject_id AS group_id,
+                        rb.subject_organization_id AS organization_id,
+                        rb.resource_id AS plant_id,
+                        ra.action_id AS action_id
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 WHERE rb.subject_type = 'group'
+                   AND rb.resource_type = 'asset'
+                   AND rb.state = 'active'
+                 ORDER BY rb.subject_id ASC, rb.resource_id ASC, ra.action_id ASC",
+                vec![],
+                "group asset action seeds",
+            )
+            .await?;
+        let user_asset_seed_rows: Vec<UserPlantActionSeedRow> = self
+            .query_rows_with(
+                self.validation_read_consistency(),
+                "SELECT rb.subject_id AS user_id,
+                        rb.subject_organization_id AS organization_id,
+                        rb.resource_id AS plant_id,
+                        ra.action_id AS action_id
+                 FROM role_bindings rb
+                 JOIN role_actions ra ON ra.role_id = rb.role_id
+                 WHERE rb.subject_type = 'user'
+                   AND rb.resource_type = 'asset'
+                   AND rb.state = 'active'
+                 ORDER BY rb.subject_id ASC, rb.resource_id ASC, ra.action_id ASC",
+                vec![],
+                "user asset action seeds",
+            )
+            .await?;
         let mut org_action_rows: HashSet<(String, String, String)> = HashSet::new();
         for seed in &seed_rows {
             org_action_rows.insert((
@@ -4215,6 +6427,62 @@ impl Database {
                 (user_id.clone(), organization_id.clone(), plant_id.clone())
             })
             .collect();
+        let mut asset_org_action_rows: HashSet<(String, String, String)> = HashSet::new();
+        for seed in &asset_seed_rows {
+            asset_org_action_rows.insert((
+                seed.organization_id.clone(),
+                seed.plant_id.clone(),
+                seed.action_id.clone(),
+            ));
+        }
+        let mut asset_user_action_rows: HashSet<(String, String, String, String)> = HashSet::new();
+        for seed in &group_asset_seed_rows {
+            if let Some(users) = users_by_group.get(&seed.group_id) {
+                for (user_id, organization_id) in users {
+                    if organization_id != &seed.organization_id {
+                        continue;
+                    }
+                    if asset_org_action_rows.contains(&(
+                        seed.organization_id.clone(),
+                        seed.plant_id.clone(),
+                        seed.action_id.clone(),
+                    )) {
+                        asset_user_action_rows.insert((
+                            user_id.clone(),
+                            seed.organization_id.clone(),
+                            seed.plant_id.clone(),
+                            seed.action_id.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        for seed in &user_asset_seed_rows {
+            if !active_membership_pairs
+                .contains(&(seed.user_id.clone(), seed.organization_id.clone()))
+            {
+                continue;
+            }
+            if asset_org_action_rows.contains(&(
+                seed.organization_id.clone(),
+                seed.plant_id.clone(),
+                seed.action_id.clone(),
+            )) {
+                asset_user_action_rows.insert((
+                    seed.user_id.clone(),
+                    seed.organization_id.clone(),
+                    seed.plant_id.clone(),
+                    seed.action_id.clone(),
+                ));
+            }
+        }
+        let asset_visibility_rows: HashSet<(String, String, String)> = asset_user_action_rows
+            .iter()
+            .filter(|(_, _, _, action_id)| action_id == "asset.profile.read")
+            .map(|(user_id, organization_id, asset_id, _)| {
+                (user_id.clone(), organization_id.clone(), asset_id.clone())
+            })
+            .collect();
 
         // HashSet iteration is non-deterministic; keep transaction input ordered so rebuilds are
         // reproducible in tests/debugging while using the cheaper unstable sort because duplicates
@@ -4227,20 +6495,55 @@ impl Database {
 
         let mut visibility_rows: Vec<_> = visibility_rows.into_iter().collect();
         visibility_rows.sort_unstable();
+        let mut asset_org_action_rows: Vec<_> = asset_org_action_rows.into_iter().collect();
+        asset_org_action_rows.sort_unstable();
+
+        let mut asset_user_action_rows: Vec<_> = asset_user_action_rows.into_iter().collect();
+        asset_user_action_rows.sort_unstable();
+
+        let mut asset_visibility_rows: Vec<_> = asset_visibility_rows.into_iter().collect();
+        asset_visibility_rows.sort_unstable();
 
         let updated_at = Utc::now().to_rfc3339();
-        let mut queries: Vec<(&'static str, Vec<hiqlite::Param>)> = Vec::with_capacity(
-            3 + org_action_rows.len() + user_action_rows.len() + visibility_rows.len(),
+        let mut queries: Vec<(String, Vec<hiqlite::Param>)> = Vec::with_capacity(
+            6 + org_action_rows.len()
+                + user_action_rows.len()
+                + visibility_rows.len()
+                + asset_org_action_rows.len()
+                + asset_user_action_rows.len()
+                + asset_visibility_rows.len(),
         );
-        queries.push(("DELETE FROM effective_organization_plant_actions", vec![]));
-        queries.push(("DELETE FROM effective_user_plant_actions", vec![]));
-        queries.push(("DELETE FROM effective_user_plant_visibility", vec![]));
+        queries.push((
+            "DELETE FROM effective_organization_plant_actions".to_owned(),
+            vec![],
+        ));
+        queries.push((
+            "DELETE FROM effective_user_plant_actions".to_owned(),
+            vec![],
+        ));
+        queries.push((
+            "DELETE FROM effective_user_plant_visibility".to_owned(),
+            vec![],
+        ));
+        queries.push((
+            "DELETE FROM effective_organization_asset_actions".to_owned(),
+            vec![],
+        ));
+        queries.push((
+            "DELETE FROM effective_user_asset_actions".to_owned(),
+            vec![],
+        ));
+        queries.push((
+            "DELETE FROM effective_user_asset_visibility".to_owned(),
+            vec![],
+        ));
 
         for (organization_id, plant_id, action_id) in org_action_rows {
             queries.push((
                 "INSERT INTO effective_organization_plant_actions (
                     organization_id, plant_id, action_id, updated_at
-                 ) VALUES ($1, $2, $3, $4)",
+                 ) VALUES ($1, $2, $3, $4)"
+                    .to_owned(),
                 params!(organization_id, plant_id, action_id, updated_at.clone()),
             ));
         }
@@ -4249,7 +6552,8 @@ impl Database {
             queries.push((
                 "INSERT INTO effective_user_plant_actions (
                     user_id, organization_id, plant_id, action_id, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5)",
+                 ) VALUES ($1, $2, $3, $4, $5)"
+                    .to_owned(),
                 params!(
                     user_id,
                     organization_id,
@@ -4264,8 +6568,44 @@ impl Database {
             queries.push((
                 "INSERT INTO effective_user_plant_visibility (
                     user_id, organization_id, plant_id, updated_at
-                 ) VALUES ($1, $2, $3, $4)",
+                 ) VALUES ($1, $2, $3, $4)"
+                    .to_owned(),
                 params!(user_id, organization_id, plant_id, updated_at.clone()),
+            ));
+        }
+        for (organization_id, asset_id, action_id) in asset_org_action_rows {
+            queries.push((
+                "INSERT INTO effective_organization_asset_actions (
+                    organization_id, asset_id, action_id, updated_at
+                 ) VALUES ($1, $2, $3, $4)"
+                    .to_owned(),
+                params!(organization_id, asset_id, action_id, updated_at.clone()),
+            ));
+        }
+
+        for (user_id, organization_id, asset_id, action_id) in asset_user_action_rows {
+            queries.push((
+                "INSERT INTO effective_user_asset_actions (
+                    user_id, organization_id, asset_id, action_id, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5)"
+                    .to_owned(),
+                params!(
+                    user_id,
+                    organization_id,
+                    asset_id,
+                    action_id,
+                    updated_at.clone()
+                ),
+            ));
+        }
+
+        for (user_id, organization_id, asset_id) in asset_visibility_rows {
+            queries.push((
+                "INSERT INTO effective_user_asset_visibility (
+                    user_id, organization_id, asset_id, updated_at
+                 ) VALUES ($1, $2, $3, $4)"
+                    .to_owned(),
+                params!(user_id, organization_id, asset_id, updated_at.clone()),
             ));
         }
 
@@ -4410,23 +6750,47 @@ impl Database {
         } else {
             None
         };
+        let asset_owner = if matches!(binding.resource_type, RoleBindingResourceType::Asset) {
+            let asset_owner_rows = self
+                .query_rows_with::<PlantOwnerRow, _>(
+                    consistency.clone(),
+                    "SELECT owner_organization_id FROM assets WHERE id = $1",
+                    params!(binding.resource_id.clone()),
+                    "asset owner for role binding validation",
+                )
+                .await?;
+            Some(
+                asset_owner_rows
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow!("asset resource {} does not exist", binding.resource_id)
+                    })?
+                    .owner_organization_id,
+            )
+        } else {
+            None
+        };
+        let facility_owner = asset_owner.as_ref().or(plant_owner.as_ref());
 
         if matches!(binding.subject_type, RoleBindingSubjectType::Organization)
-            && matches!(binding.resource_type, RoleBindingResourceType::Plant)
+            && matches!(
+                binding.resource_type,
+                RoleBindingResourceType::Asset | RoleBindingResourceType::Plant
+            )
         {
-            let subject_is_owner = plant_owner
-                .as_deref()
-                .map(|owner| owner == binding.subject_id)
+            let subject_is_owner = facility_owner
+                .map(|owner| owner.as_str() == binding.subject_id.as_str())
                 .unwrap_or(false);
             if subject_is_owner {
                 if binding.agreement_id.is_some() {
                     return Err(anyhow!(
-                        "owner organization plant binding must not carry agreement references"
+                        "owner organization facility binding must not carry agreement references"
                     ));
                 }
             } else if binding.agreement_id.is_none() {
                 return Err(anyhow!(
-                    "organization-to-plant role binding must reference an agreement unless the subject organization owns the plant"
+                    "organization-to-facility role binding must reference an agreement unless the subject organization owns the facility"
                 ));
             }
         }
@@ -4486,6 +6850,35 @@ impl Database {
                 if agreement_matches == 0 {
                     return Err(anyhow!(
                         "agreement {} does not match plant {} and organization {}",
+                        agreement_id,
+                        binding.resource_id,
+                        binding.subject_id
+                    ));
+                }
+            }
+            if matches!(binding.subject_type, RoleBindingSubjectType::Organization)
+                && matches!(binding.resource_type, RoleBindingResourceType::Asset)
+            {
+                let agreement_matches = self
+                    .query_count(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count
+                         FROM agreements a, assets asset
+                         WHERE a.id = $1
+                           AND asset.id = $2
+                           AND a.grantee_organization_id = $3
+                           AND a.grantor_organization_id = asset.owner_organization_id",
+                        params!(
+                            agreement_id.clone(),
+                            binding.resource_id.clone(),
+                            binding.subject_id.clone()
+                        ),
+                        "agreement asset relationship match",
+                    )
+                    .await?;
+                if agreement_matches == 0 {
+                    return Err(anyhow!(
+                        "agreement {} does not match asset {} and organization {}",
                         agreement_id,
                         binding.resource_id,
                         binding.subject_id
@@ -4566,6 +6959,14 @@ impl Database {
                 {
                     return Err(anyhow!(
                         "organization resource {} does not exist",
+                        binding.resource_id
+                    ));
+                }
+            }
+            RoleBindingResourceType::Asset => {
+                if asset_owner.is_none() {
+                    return Err(anyhow!(
+                        "asset resource {} does not exist",
                         binding.resource_id
                     ));
                 }
@@ -4654,6 +7055,51 @@ fn sync_mode_str(mode: &SyncMode) -> &'static str {
 
 fn now_string() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
+}
+
+fn stable_scoped_id(scope: &str, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    format!(
+        "{}-{}",
+        scope.replace(':', "-"),
+        hex::encode(&hasher.finalize()[..8])
+    )
+}
+
+fn kr_rps_plant_action_to_asset_action_id(action_id: &str) -> Option<&'static str> {
+    match action_id {
+        "plant.profile.read" => Some("asset.profile.read"),
+        "plant.profile.write" => Some("asset.profile.write"),
+        "plant.sync.execute" => Some("asset.sync.execute"),
+        "plant.telemetry.read" => Some("asset.generation.read"),
+        "plant.document.read" => Some("asset.document.read"),
+        "plant.rec.read" => Some("asset.certificate.read"),
+        "plant.rate.read" => Some("asset.rate.read"),
+        "plant.permission.manage" => Some("asset.permission.manage"),
+        _ => None,
+    }
+}
+
+fn month_start_date(month: &str) -> Result<String> {
+    let date = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .with_context(|| format!("parse month {month}"))?;
+    Ok(date.format("%Y-%m-%d").to_string())
+}
+
+fn next_month_start_date(month: &str) -> Result<String> {
+    let date = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .with_context(|| format!("parse month {month}"))?;
+    let (year, month) = if date.month() == 12 {
+        (date.year() + 1, 1)
+    } else {
+        (date.year(), date.month() + 1)
+    };
+    let next = NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| anyhow!("invalid next month for {}", date.format("%Y-%m-%d")))?;
+    Ok(next.format("%Y-%m-%d").to_string())
 }
 
 fn should_refresh_certificate_last_used_at(last_used_at: Option<&str>) -> Result<bool> {
@@ -5350,6 +7796,7 @@ fn role_binding_subject_type_from_str(value: &str) -> Result<RoleBindingSubjectT
 fn role_binding_resource_type_str(resource_type: &RoleBindingResourceType) -> &'static str {
     match resource_type {
         RoleBindingResourceType::Organization => "organization",
+        RoleBindingResourceType::Asset => "asset",
         RoleBindingResourceType::Plant => "plant",
     }
 }
@@ -5357,6 +7804,7 @@ fn role_binding_resource_type_str(resource_type: &RoleBindingResourceType) -> &'
 fn role_binding_resource_type_from_str(value: &str) -> Result<RoleBindingResourceType> {
     match value {
         "organization" => Ok(RoleBindingResourceType::Organization),
+        "asset" => Ok(RoleBindingResourceType::Asset),
         "plant" => Ok(RoleBindingResourceType::Plant),
         other => Err(anyhow!("invalid role binding resource type {other}")),
     }

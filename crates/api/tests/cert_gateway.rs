@@ -1,4 +1,6 @@
 mod support;
+#[path = "support/auth.rs"]
+mod auth_support;
 
 use axum::{
     body::Body,
@@ -82,6 +84,7 @@ async fn build_app() -> (axum::Router, TempDir, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -184,7 +187,7 @@ fn auth_request(
     Request::builder()
         .method(method)
         .uri(path)
-        .header("authorization", support::bearer_header(token))
+        .header("authorization", auth_support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
@@ -211,6 +214,7 @@ fn proof_bundle_request(challenge_payload: &str) -> Value {
 fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
     let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
     let cert_der = create_sign_cert_der(&key);
+    let private_key_der = key.private_key_to_pkcs8().expect("private key pkcs8");
     let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
     (
         json!({
@@ -218,9 +222,9 @@ fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
             "password": "secret-password",
             "commonName": "Spoofed Client Name",
             "signCertDerBase64": STANDARD.encode(cert_der),
-            "signPriKeyBase64": "BAUG",
-            "kmCertDerBase64": "BwgJ",
-            "kmPriKeyBase64": "CgsM"
+            "signPriKeyBase64": STANDARD.encode(private_key_der),
+            "kmCertDerBase64": STANDARD.encode(create_sign_cert_der(&key)),
+            "kmPriKeyBase64": STANDARD.encode(key.private_key_to_pkcs8().expect("km key pkcs8"))
         }),
         challenge_signature_base64,
     )
@@ -312,7 +316,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            json!({ "mode": "stored" }),
         ))
         .await
         .expect("challenge response");
@@ -365,7 +369,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/organizations/bootstrap-user/certificates")
-                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header("authorization", auth_support::bearer_header("bootstrap-user"))
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("list request"),
@@ -391,8 +395,6 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "bootstrap-user",
             json!({
                 "facilityCode": "FAC-003",
-                "startMonth": "2026-01",
-                "endMonth": "2026-04",
                 "mode": "full"
             }),
         ))
@@ -416,7 +418,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(start_response.status(), StatusCode::ACCEPTED);
     let start_json = json_body(start_response).await;
     assert_eq!(start_json["status"], "completed");
-    assert_eq!(start_json["plantId"], "FAC-003");
+    assert!(
+        start_json["plantId"]
+            .as_str()
+            .unwrap()
+            .starts_with("plant-")
+    );
 
     let reuse_response = app
         .clone()
@@ -467,7 +474,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(ephemeral_response.status(), StatusCode::ACCEPTED);
     let ephemeral_json = json_body(ephemeral_response).await;
     assert_eq!(ephemeral_json["status"], "completed");
-    assert_eq!(ephemeral_json["plantId"], "FAC-002");
+    assert!(
+        ephemeral_json["plantId"]
+            .as_str()
+            .unwrap()
+            .starts_with("plant-")
+    );
 }
 
 #[tokio::test]
@@ -481,7 +493,7 @@ async fn crawl_start_rejects_organization_path_mismatch() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            json!({ "mode": "stored" }),
         ))
         .await
         .expect("challenge response");
@@ -630,7 +642,7 @@ async fn stored_registration_requires_challenge_signature() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            json!({ "mode": "stored" }),
         ))
         .await
         .expect("challenge response");
@@ -682,7 +694,7 @@ async fn stored_registration_accepts_omitted_or_empty_km_material() {
                 "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
                 "bootstrap-user",
                 "bootstrap-user",
-                json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+                json!({ "mode": "stored" }),
             ))
             .await
             .expect("challenge response");
@@ -732,7 +744,7 @@ async fn stored_registration_rejects_asymmetric_km_material() {
                 "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
                 "bootstrap-user",
                 "bootstrap-user",
-                json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+                json!({ "mode": "stored" }),
             ))
             .await
             .expect("challenge response");

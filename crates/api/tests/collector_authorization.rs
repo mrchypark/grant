@@ -1,4 +1,6 @@
 mod support;
+#[path = "support/auth.rs"]
+mod auth_support;
 
 use std::sync::Arc;
 
@@ -73,6 +75,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -111,7 +114,7 @@ fn sync_request(organization_id: &str, token: &str, active_organization_id: &str
         .method("POST")
         .uri(format!("/api/v1/organizations/{organization_id}/sync"))
         .header("content-type", "application/json")
-        .header("authorization", support::bearer_header(token))
+        .header("authorization", auth_support::bearer_header(token))
         .header("x-organization-id", active_organization_id)
         .body(Body::from(
             json!({

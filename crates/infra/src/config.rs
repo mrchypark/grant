@@ -14,6 +14,7 @@ pub struct SecurityConfig {
     pub master_key: String,
     pub bootstrap_user_id: String,
     pub bootstrap_user_name: String,
+    pub allow_untrusted_certificates: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +105,7 @@ impl AppConfig {
             master_key: env_or("CERTD_MASTER_KEY", "dev-only-master-key"),
             bootstrap_user_id: env_or("CERTD_BOOTSTRAP_USER_ID", "conalog-account"),
             bootstrap_user_name: env_or("CERTD_BOOTSTRAP_USER_NAME", "Conalog Account"),
+            allow_untrusted_certificates: env_bool("CERTD_ALLOW_UNTRUSTED_CERTIFICATES", false),
         };
         Ok(Self {
             server: ServerConfig {

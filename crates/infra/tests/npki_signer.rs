@@ -19,10 +19,10 @@ use openssl::{
 
 #[test]
 fn load_bundle_from_directory_reads_all_files() {
-    let bundle = NpkiBundle::from_directory(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert"),
-    )
-    .expect("load bundle from secrets/cert");
+    let Some(cert_dir) = local_secret_cert_dir() else {
+        return;
+    };
+    let bundle = NpkiBundle::from_directory(cert_dir).expect("load bundle from secrets/cert");
 
     assert!(!bundle.sign_cert_der.is_empty());
     assert!(!bundle.sign_pri_key.is_empty());
@@ -32,12 +32,12 @@ fn load_bundle_from_directory_reads_all_files() {
 
 #[test]
 fn signer_loads_certificate_and_builds_payloads() {
+    let Some(cert_dir) = local_secret_cert_dir() else {
+        return;
+    };
     let password =
         std::env::var("RPS_TEST_CERT_PASSWORD").unwrap_or_else(|_| "jmztnti132!".to_owned());
-    let bundle = NpkiBundle::from_directory(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert"),
-    )
-    .expect("load bundle from secrets/cert");
+    let bundle = NpkiBundle::from_directory(cert_dir).expect("load bundle from secrets/cert");
 
     let signer = NpkiSigner::new(&bundle, &password).expect("build signer");
 
@@ -155,17 +155,20 @@ fn validate_certificate_bundle_accepts_direct_pkcs8_private_keys() {
     let (sign_certificate, sign_private_key) = test_certificate_and_key();
     let (km_certificate, km_private_key) = test_certificate_and_key();
 
-    validate_certificate_bundle(&CertificateBundle {
-        business_no: "2768603291".to_owned(),
-        password: "unused-password".to_owned(),
-        common_name: "Direct PKCS8 Test".to_owned(),
-        sign_cert_der: sign_certificate.to_der().expect("sign certificate der"),
-        sign_pri_key: sign_private_key
-            .private_key_to_pkcs8()
-            .expect("sign key pkcs8"),
-        km_cert_der: Some(km_certificate.to_der().expect("km certificate der")),
-        km_pri_key: Some(km_private_key.private_key_to_pkcs8().expect("km key pkcs8")),
-    })
+    validate_certificate_bundle(
+        &CertificateBundle {
+            business_no: "2768603291".to_owned(),
+            password: "unused-password".to_owned(),
+            common_name: "Direct PKCS8 Test".to_owned(),
+            sign_cert_der: sign_certificate.to_der().expect("sign certificate der"),
+            sign_pri_key: sign_private_key
+                .private_key_to_pkcs8()
+                .expect("sign key pkcs8"),
+            km_cert_der: Some(km_certificate.to_der().expect("km certificate der")),
+            km_pri_key: Some(km_private_key.private_key_to_pkcs8().expect("km key pkcs8")),
+        },
+        true,
+    )
     .expect("validate direct private key bundle");
 }
 
@@ -221,4 +224,20 @@ fn test_certificate_and_key() -> (X509, PKey<Private>) {
         .sign(&private_key, MessageDigest::sha256())
         .expect("sign certificate");
     (builder.build(), private_key)
+}
+
+fn local_secret_cert_dir() -> Option<PathBuf> {
+    if std::env::var("RUN_SECRET_CERT_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping local secrets/cert test; set RUN_SECRET_CERT_TESTS=1 to enable");
+        return None;
+    }
+    let cert_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert");
+    if !cert_dir.join("signCert.der").exists() {
+        eprintln!(
+            "skipping local secrets/cert test; missing {}",
+            cert_dir.display()
+        );
+        return None;
+    }
+    Some(cert_dir)
 }

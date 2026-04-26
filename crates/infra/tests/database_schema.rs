@@ -119,6 +119,22 @@ async fn ensure_schema_creates_authorization_tables() {
         "client_actions",
         "client_grants",
         "client_grant_actions",
+        "sync_run_items",
+        "assets",
+        "asset_profiles",
+        "registries",
+        "registry_accounts",
+        "registry_projects",
+        "data_sources",
+        "generation_data",
+        "rate_data",
+        "energy_certificates",
+        "auth_credentials",
+        "credential_bindings",
+        "country_capabilities",
+        "effective_organization_asset_actions",
+        "effective_user_asset_actions",
+        "effective_user_asset_visibility",
         "effective_organization_plant_actions",
         "effective_user_plant_actions",
         "effective_user_plant_visibility",
@@ -280,21 +296,90 @@ async fn ensure_schema_creates_authorization_tables() {
         vec!["client_grant_id", "action_id"]
     );
 
-    let plant_columns: Vec<ColumnRow> = runtime
+    let asset_columns: Vec<ColumnRow> = runtime
         .query_rows(
             ReadConsistency::Local,
-            "SELECT name FROM pragma_table_info('plants') ORDER BY cid ASC",
+            "SELECT name FROM pragma_table_info('assets') ORDER BY cid ASC",
             vec![],
         )
         .await
-        .expect("plants columns");
-    let plant_columns: Vec<String> = plant_columns
+        .expect("assets columns");
+    let asset_columns: Vec<String> = asset_columns
         .into_iter()
         .map(|column| column.name)
         .collect();
-    assert!(plant_columns.contains(&"owner_organization_id".to_owned()));
-    assert!(plant_columns.contains(&"created_by_organization_id".to_owned()));
-    assert!(plant_columns.contains(&"facility_code".to_owned()));
+    assert_eq!(
+        asset_columns,
+        vec![
+            "id",
+            "owner_organization_id",
+            "created_by_organization_id",
+            "name",
+            "country_code",
+            "address",
+            "capacity_kw",
+            "timezone",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let asset_profile_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('asset_profiles') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("asset_profiles columns");
+    let asset_profile_columns: Vec<String> = asset_profile_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        asset_profile_columns,
+        vec![
+            "id",
+            "asset_id",
+            "country_code",
+            "provider",
+            "profile_type",
+            "external_id",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let generation_data_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('generation_data') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("generation_data columns");
+    let generation_data_columns: Vec<String> = generation_data_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        generation_data_columns,
+        vec![
+            "id",
+            "asset_id",
+            "source_id",
+            "period_start",
+            "period_end",
+            "metric_type",
+            "value",
+            "unit",
+            "quality",
+            "metadata_json",
+            "recorded_at",
+            "updated_at",
+        ]
+    );
 
     let organization_columns: Vec<ColumnRow> = runtime
         .query_rows(
@@ -475,9 +560,25 @@ async fn ensure_schema_creates_authorization_tables() {
         "idx_agreement_documents_agreement",
         "idx_client_grants_active_unique",
         "idx_client_grants_user_client",
+        "idx_assets_owner_country",
+        "idx_asset_profiles_asset_type",
+        "idx_asset_profiles_country_provider_type_external",
+        "idx_registries_country_type",
+        "idx_registries_country_provider_type",
+        "idx_registries_global_provider_type",
+        "idx_registry_accounts_org_registry",
+        "idx_registry_projects_asset_registry",
+        "idx_data_sources_asset_type",
+        "idx_generation_data_asset_source_metric_period",
+        "idx_rate_data_asset_source_metric_period",
+        "idx_energy_certificates_asset_registry",
+        "idx_auth_credentials_org_provider",
+        "idx_credential_bindings_account",
         "idx_organization_party_links_org_relation",
         "idx_parties_business_no",
         "idx_plants_owner_facility",
+        "idx_sync_run_items_asset",
+        "idx_sync_run_items_run_status",
         "idx_roles_global_code",
         "idx_sync_runs_plant_started",
         "idx_user_identities_provider_external",

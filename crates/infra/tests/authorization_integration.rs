@@ -12,8 +12,8 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use domain::{
-    Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType, SyncMode,
+    Agreement, AgreementStatus, AgreementType, GenerationRecord, Role, RoleBinding,
+    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{
@@ -143,6 +143,7 @@ fn test_config(artifacts_root: &Path) -> AppConfig {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
         },
         auth: AuthConfig {
             trailbase: TrailbaseAuthConfig {
@@ -175,6 +176,16 @@ fn test_config(artifacts_root: &Path) -> AppConfig {
 }
 
 async fn build_service() -> (AppService, Database, TempDir, TempDir) {
+    build_service_with_collector(mock_collect_snapshot).await
+}
+
+async fn build_service_with_collector<F, Fut>(
+    collector: F,
+) -> (AppService, Database, TempDir, TempDir)
+where
+    F: Fn(infra::bridge::BridgeOptions) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<BridgeRun>> + Send + 'static,
+{
     let (runtime, db_dir) = test_runtime().await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
     let cfg = test_config(artifacts_dir.path());
@@ -188,7 +199,7 @@ async fn build_service() -> (AppService, Database, TempDir, TempDir) {
     let artifacts = ArtifactStore::new(&cfg.artifacts)
         .await
         .expect("artifact store");
-    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, mock_collect_snapshot);
+    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, collector);
     service.initialize().await.expect("initialize service");
     db.upsert_organization_identity(&bootstrap_user_id, Some("2768603291"), &bootstrap_user_name)
         .await
@@ -246,6 +257,14 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
             documents: Vec::new(),
         },
     })
+}
+
+async fn mismatched_collect_snapshot(
+    opts: infra::bridge::BridgeOptions,
+) -> anyhow::Result<BridgeRun> {
+    let mut run = mock_collect_snapshot(opts).await?;
+    run.snapshot.facility.code = "FAC-RETURNED".to_owned();
+    Ok(run)
 }
 
 fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, String) {
@@ -428,6 +447,605 @@ async fn seed_gateway_scope_fixture(db: &Database) {
 }
 
 #[tokio::test]
+async fn sync_rejects_collector_facility_mismatch_before_writing_rows() {
+    let (service, db, _db_dir, _artifacts_dir) =
+        build_service_with_collector(mismatched_collect_snapshot).await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-REQUESTED".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    let err = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-REQUESTED".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect_err("collector returning another facility must be rejected");
+
+    assert!(err.to_string().contains("facility code mismatch"));
+    db.get_plant_by_facility_code("FAC-RETURNED")
+        .await
+        .expect_err("mismatched facility must not be materialized");
+    let audit = db
+        .get_latest_sync_run_audit_for_facility("FAC-REQUESTED")
+        .await
+        .expect("load failed sync audit");
+    assert_eq!(audit.run_status, "failed");
+    assert_eq!(audit.item_status.as_deref(), Some("failed"));
+    assert!(
+        audit
+            .item_error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("facility code mismatch")
+    );
+}
+
+#[tokio::test]
+async fn delegated_sync_preserves_existing_asset_and_plant_owner() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    db.upsert_organization_with_owner("owner-org", "Owner Org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("owner org");
+    db.upsert_organization_with_owner(
+        "operator-org",
+        "Operator Org",
+        Some("2768603291"),
+        "Operator Org",
+    )
+    .await
+    .expect("operator org");
+
+    let existing_plant = domain::Plant {
+        id: "FAC-OWNER-001".to_owned(),
+        facility_code: "FAC-OWNER-001".to_owned(),
+        name: "Owner Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        contract_no: "CN-OWNER-001".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&existing_plant)
+        .await
+        .expect("upsert existing plant");
+    db.upsert_kr_rps_asset_projection(
+        &existing_plant,
+        Some("owner-org"),
+        Some("1234567890"),
+        &[],
+        &[],
+    )
+    .await
+    .expect("upsert existing projection");
+    db.upsert_role(&Role {
+        id: "role-delegated-sync-execute".to_owned(),
+        organization_id: None,
+        code: "delegated.sync.execute".to_owned(),
+        name: "Delegated Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert sync role");
+    db.upsert_role_action("role-delegated-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert sync action");
+    db.upsert_agreement(&Agreement {
+        id: "agreement-owner-operator-sync".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "owner-org".to_owned(),
+        grantee_organization_id: "operator-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "Owner to Operator Sync".to_owned(),
+        reference_no: None,
+        starts_at: None,
+        ends_at: None,
+    })
+    .await
+    .expect("upsert agreement");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "operator-org".to_owned(),
+        subject_organization_id: "operator-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-OWNER-001".to_owned(),
+        role_id: "role-delegated-sync-execute".to_owned(),
+        agreement_id: Some("agreement-owner-operator-sync".to_owned()),
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-25T00:00:00Z".to_owned(),
+        updated_at: "2026-04-25T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save org sync binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "operator-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-OWNER-001".to_owned(),
+        role_id: "role-delegated-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-25T00:00:00Z".to_owned(),
+        updated_at: "2026-04-25T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save user sync binding");
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "operator-org".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-OWNER-001".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "operator-org".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-OWNER-001".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("execute delegated sync");
+
+    let plant = db
+        .get_plant_by_facility_code("FAC-OWNER-001")
+        .await
+        .expect("reload plant");
+    assert_eq!(plant.owner_organization_id, "owner-org");
+    let binding = db
+        .get_kr_rps_registry_project_binding("FAC-OWNER-001")
+        .await
+        .expect("load registry project binding");
+    assert_eq!(binding.asset_owner_organization_id, "owner-org");
+    assert_eq!(
+        binding.registry_account_organization_id.as_deref(),
+        Some("owner-org")
+    );
+    assert_eq!(
+        binding.registry_account_external_account_id.as_deref(),
+        Some("1234567890")
+    );
+}
+
+#[tokio::test]
+async fn delegated_first_sync_does_not_attach_operator_registry_account_to_owner_asset() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    db.upsert_organization_with_owner("owner-org", "Owner Org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("owner org");
+    db.upsert_organization_with_owner(
+        "operator-org",
+        "Operator Org",
+        Some("2768603291"),
+        "Operator Org",
+    )
+    .await
+    .expect("operator org");
+    db.upsert_plant(&domain::Plant {
+        id: "FAC-FIRST-DELEGATED".to_owned(),
+        facility_code: "FAC-FIRST-DELEGATED".to_owned(),
+        name: "First Delegated Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        contract_no: "CN-FIRST-DELEGATED".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert existing owner plant");
+    db.upsert_role(&Role {
+        id: "role-first-delegated-sync-execute".to_owned(),
+        organization_id: None,
+        code: "first.delegated.sync.execute".to_owned(),
+        name: "First Delegated Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert sync role");
+    db.upsert_role_action("role-first-delegated-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert sync action");
+    db.upsert_agreement(&Agreement {
+        id: "agreement-first-delegated-sync".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "owner-org".to_owned(),
+        grantee_organization_id: "operator-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "First Delegated Sync".to_owned(),
+        reference_no: None,
+        starts_at: None,
+        ends_at: None,
+    })
+    .await
+    .expect("upsert agreement");
+    for (subject_type, subject_id, agreement_id) in [
+        (
+            RoleBindingSubjectType::Organization,
+            "operator-org",
+            Some("agreement-first-delegated-sync"),
+        ),
+        (RoleBindingSubjectType::User, "bootstrap-user", None),
+    ] {
+        db.save_role_binding(&RoleBinding {
+            id: Uuid::new_v4().simple().to_string(),
+            subject_type,
+            subject_id: subject_id.to_owned(),
+            subject_organization_id: "operator-org".to_owned(),
+            resource_type: RoleBindingResourceType::Plant,
+            resource_id: "FAC-FIRST-DELEGATED".to_owned(),
+            role_id: "role-first-delegated-sync-execute".to_owned(),
+            agreement_id: agreement_id.map(ToOwned::to_owned),
+            state: RoleBindingState::Active,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            created_at: "2026-04-25T00:00:00Z".to_owned(),
+            updated_at: "2026-04-25T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("save sync binding");
+    }
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "operator-org".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-FIRST-DELEGATED".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "operator-org".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-FIRST-DELEGATED".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("execute delegated sync");
+
+    let binding = db
+        .get_kr_rps_registry_project_binding("FAC-FIRST-DELEGATED")
+        .await
+        .expect("load registry project binding");
+    assert_eq!(binding.asset_owner_organization_id, "owner-org");
+    assert_eq!(binding.registry_account_organization_id, None);
+    assert_eq!(binding.registry_account_external_account_id, None);
+}
+
+#[tokio::test]
+async fn sync_created_plant_bootstraps_creator_asset_permissions() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-SYNC-CREATED".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-SYNC-CREATED".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("execute first sync");
+
+    service
+        .get_plant_profile(
+            "bootstrap-user",
+            "bootstrap-user",
+            "FAC-SYNC-CREATED",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("creator can read sync-created plant");
+    let plant = db
+        .get_plant_by_facility_code("FAC-SYNC-CREATED")
+        .await
+        .expect("sync-created plant");
+    assert_ne!(plant.id, plant.facility_code);
+    let summary = db
+        .get_plant_summary_by_id_with_consistency(&plant.id, Some(ReadConsistency::Strong))
+        .await
+        .expect("sync-created summary");
+    assert_eq!(summary.generation_count, 1);
+    assert_eq!(summary.rates_count, 1);
+    assert_eq!(summary.rec_count, 1);
+    service
+        .authorize_gateway_sync_scope("bootstrap-user", "bootstrap-user", Some("FAC-SYNC-CREATED"))
+        .await
+        .expect("creator can resync sync-created plant");
+}
+
+#[tokio::test]
+async fn stored_certificate_registration_rejects_requester_different_from_challenge_creator() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+    let err = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("other-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+        })
+        .await
+        .expect_err("challenge requester mismatch must be rejected");
+    assert!(err.to_string().contains("challenge creator"));
+}
+
+#[tokio::test]
+async fn full_sync_rejects_bounded_month_range() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-FULL-RANGE".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    let err = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-FULL-RANGE".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Full,
+        })
+        .await
+        .expect_err("full sync range must be rejected");
+    assert!(
+        err.to_string()
+            .contains("full sync cannot be bounded by startMonth or endMonth")
+    );
+}
+
+#[tokio::test]
+async fn issue_crawl_task_token_requires_created_by_user_scope_authorization() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+    let cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+        })
+        .await
+        .expect("register certificate");
+
+    db.upsert_plant(&domain::Plant {
+        id: "FAC-AUTHZ-TOKEN".to_owned(),
+        facility_code: "FAC-AUTHZ-TOKEN".to_owned(),
+        name: "Token Authz Plant".to_owned(),
+        owner_organization_id: "bootstrap-user".to_owned(),
+        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        contract_no: "CN-AUTHZ-TOKEN".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert plant");
+
+    let err = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: cert.id,
+            facility_code: Some("FAC-AUTHZ-TOKEN".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-02".to_owned()),
+            mode: SyncMode::Delta,
+            created_by_user_id: "missing-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("unauthorized token creator must not mint crawl token");
+    assert!(err.to_string().contains("forbidden"));
+}
+
+#[tokio::test]
+async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-SIGNED".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    let err = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-OTHER".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect_err("challenge scope must be authoritative");
+    assert!(err.to_string().contains("challenge facilityCode mismatch"));
+}
+
+#[tokio::test]
+async fn ephemeral_crawl_rejects_binding_unscoped_challenge_to_request_facility() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    let err = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-OTHER".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect_err("unscoped challenge must not be rebound to a facility");
+    assert!(err.to_string().contains("challenge facilityCode mismatch"));
+}
+
+#[tokio::test]
+async fn ephemeral_crawl_rejects_requester_different_from_challenge_creator() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-REQUESTER-MISMATCH".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    let err = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("other-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: Some("FAC-REQUESTER-MISMATCH".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect_err("requester must match challenge creator");
+    assert!(err.to_string().contains("challenge creator"));
+}
+
+#[tokio::test]
 async fn requires_explicit_contract_backed_access_for_each_organization() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
@@ -443,6 +1061,14 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
     db.upsert_organization_with_owner("dealer-org", "Dealer Org", None, "Dealer Org")
         .await
         .expect("upsert dealer org");
+    db.upsert_organization_with_owner(
+        "distributor-org",
+        "Distributor Org",
+        None,
+        "Distributor Org",
+    )
+    .await
+    .expect("upsert distributor org");
 
     runtime
         .execute(
@@ -460,6 +1086,20 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         .expect("insert user");
     runtime
         .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "dist-user".into(),
+                "dist@example.com".into(),
+                "Distributor User".into(),
+                1_i64.into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert distributor user");
+    runtime
+        .execute(
             "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
             vec![
@@ -474,6 +1114,22 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         )
         .await
         .expect("insert membership");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-dist-user".into(),
+                "distributor-org".into(),
+                "dist-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert distributor membership");
     runtime
         .execute(
             "INSERT INTO groups (id, organization_id, name, description, created_at, updated_at)
@@ -596,6 +1252,22 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
     })
     .await
     .expect("save distributor org role binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "dist-user".to_owned(),
+        subject_organization_id: "distributor-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-1".to_owned(),
+        role_id: "role-plant-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save distributor user role binding");
 
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
@@ -818,6 +1490,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
     let err = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: expired.id.clone(),
             challenge_payload: expired.payload.clone(),
             challenge_signature_base64: expired_signature,
@@ -831,7 +1504,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-001".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -841,6 +1514,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: stored.id.clone(),
             challenge_payload: stored.payload.clone(),
             challenge_signature_base64: stored_signature.clone(),
@@ -854,6 +1528,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
     let reuse_err = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: stored.id.clone(),
             challenge_payload: stored.payload.clone(),
             challenge_signature_base64: stored_signature,
@@ -877,6 +1552,7 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
     let run = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: ephemeral.id.clone(),
             challenge_payload: ephemeral.payload.clone(),
             challenge_signature_base64: ephemeral_signature,
@@ -889,7 +1565,11 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .await
         .expect("execute ephemeral crawl");
     assert_eq!(run.status, "completed");
-    assert_eq!(run.plant_id.as_deref(), Some("FAC-002"));
+    assert!(
+        run.plant_id
+            .as_deref()
+            .is_some_and(|plant_id| plant_id.starts_with("plant-"))
+    );
     assert_eq!(
         db.get_plant_by_facility_code("FAC-002")
             .await
@@ -897,14 +1577,29 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
             .facility_code,
         "FAC-002"
     );
+    let asset_id = db
+        .get_kr_rps_asset_id_by_facility_code_with_consistency("FAC-002", None)
+        .await
+        .expect("ephemeral KR RPS asset profile");
+    assert_ne!(asset_id, "FAC-002");
+    let projection_counts = db
+        .kr_rps_projection_counts("FAC-002")
+        .await
+        .expect("ephemeral KR RPS projection counts");
+    assert_eq!(projection_counts.asset_profiles, 1);
+    assert_eq!(projection_counts.registry_projects, 1);
+    assert_eq!(projection_counts.data_sources, 2);
+    assert_eq!(projection_counts.generation_data, 1);
+    assert_eq!(projection_counts.rate_data, 4);
+    assert_eq!(projection_counts.energy_certificates, 1);
 
     let issued = service
         .issue_crawl_task_token(IssueCrawlTaskTokenInput {
             organization_id: "bootstrap-user".to_owned(),
             certificate_id: cert.id.clone(),
             facility_code: Some("FAC-003".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-04".to_owned()),
+            start_month: None,
+            end_month: None,
             mode: SyncMode::Full,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
@@ -920,7 +1615,22 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .expect("consume crawl task token");
     assert_eq!(started.status, "completed");
     assert_eq!(started.mode, SyncMode::Full);
-    assert_eq!(started.plant_id.as_deref(), Some("FAC-003"));
+    assert!(
+        started
+            .plant_id
+            .as_deref()
+            .is_some_and(|plant_id| plant_id.starts_with("plant-"))
+    );
+    let full_projection_counts = db
+        .kr_rps_projection_counts("FAC-003")
+        .await
+        .expect("stored KR RPS projection counts");
+    assert_eq!(full_projection_counts.asset_profiles, 1);
+    assert_eq!(full_projection_counts.registry_projects, 1);
+    assert_eq!(full_projection_counts.data_sources, 2);
+    assert_eq!(full_projection_counts.generation_data, 1);
+    assert_eq!(full_projection_counts.rate_data, 4);
+    assert_eq!(full_projection_counts.energy_certificates, 1);
     let used_certificate = db
         .get_certificate_by_id(&cert.id)
         .await
@@ -961,6 +1671,7 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
     let expired_err = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: expired.id.clone(),
             challenge_payload: expired.payload.clone(),
             challenge_signature_base64: expired_signature,
@@ -995,6 +1706,7 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
     let stored_cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: stored.id.clone(),
             challenge_payload: stored.payload.clone(),
             challenge_signature_base64: valid_signature,
@@ -1021,7 +1733,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-010".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1034,6 +1746,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
     let stored_cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: stored.id.clone(),
             challenge_payload: stored.payload.clone(),
             challenge_signature_base64: stored_signature,
@@ -1069,6 +1782,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
     let run = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: ephemeral.id.clone(),
             challenge_payload: ephemeral.payload.clone(),
             challenge_signature_base64: ephemeral_signature,
@@ -1089,7 +1803,11 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
         .await
         .expect("execute ephemeral crawl without km");
     assert_eq!(run.status, "completed");
-    assert_eq!(run.plant_id.as_deref(), Some("FAC-011"));
+    assert!(
+        run.plant_id
+            .as_deref()
+            .is_some_and(|plant_id| plant_id.starts_with("plant-"))
+    );
 }
 
 #[tokio::test]
@@ -1114,6 +1832,7 @@ async fn certificate_gateway_accepts_certificate_without_subject_business_no() {
     let stored_cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: stored.id,
             challenge_payload: stored.payload,
             challenge_signature_base64: signature,
@@ -1132,6 +1851,53 @@ async fn certificate_gateway_accepts_certificate_without_subject_business_no() {
 
     assert_eq!(stored_cert.business_no.as_deref(), Some("2768603291"));
     assert_eq!(stored_cert.common_name, "No Serial Number Certificate");
+}
+
+#[tokio::test]
+async fn certificate_gateway_rejects_no_subject_business_number_for_unlinked_organization() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+    db.upsert_organization_with_owner("unlinked-org", "Unlinked Org", None, "Unlinked Org")
+        .await
+        .expect("unlinked organization");
+
+    let stored = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "unlinked-org".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create stored challenge");
+    let key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate stored rsa key")).expect("wrap key");
+    let cert_der = create_sign_cert_der_for_common_name(&key, "No Serial Number Certificate");
+    let signature = sign_challenge(&key, &stored.payload);
+
+    let err = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "unlinked-org".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: stored.id,
+            challenge_payload: stored.payload,
+            challenge_signature_base64: signature,
+            bundle: CertificateBundle {
+                business_no: "9999999999".to_owned(),
+                password: "secret-password".to_owned(),
+                common_name: "Client Spoofed Name".to_owned(),
+                sign_cert_der: cert_der,
+                sign_pri_key: direct_private_key_der(&key),
+                km_cert_der: None,
+                km_pri_key: None,
+            },
+        })
+        .await
+        .expect_err("client-supplied business number must not bootstrap legal identity");
+    assert!(
+        err.to_string()
+            .contains("organization missing linked legal party business number")
+    );
 }
 
 #[tokio::test]
@@ -1160,6 +1926,7 @@ async fn certificate_gateway_rejects_stored_proof_when_certificate_business_no_m
     let err = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: stored.id,
             challenge_payload: stored.payload,
             challenge_signature_base64: signature,
@@ -1208,6 +1975,7 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
     let err = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: ephemeral.id,
             challenge_payload: ephemeral.payload,
             challenge_signature_base64: signature,
@@ -1235,7 +2003,7 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
 }
 
 #[tokio::test]
-async fn certificate_gateway_links_unlinked_organization_by_business_no_on_save() {
+async fn certificate_gateway_rejects_subject_business_number_for_unlinked_organization() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
     db.upsert_organization_with_owner("pending-org", "Pending Org", None, "Pending Org")
         .await
@@ -1245,19 +2013,24 @@ async fn certificate_gateway_links_unlinked_organization_by_business_no_on_save(
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "pending-org".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-012".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
         .await
         .expect("create stored challenge");
     let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
-    let cert_der = create_sign_cert_der_for_common_name(&key, "Pending Org Certificate");
+    let cert_der = create_sign_cert_der_for_common_name_and_business_no(
+        &key,
+        "Pending Org Certificate",
+        "2768603291",
+    );
     let signature = sign_challenge(&key, &challenge.payload);
 
-    let stored_cert = service
+    let err = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "pending-org".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: challenge.id.clone(),
             challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
@@ -1272,14 +2045,11 @@ async fn certificate_gateway_links_unlinked_organization_by_business_no_on_save(
             },
         })
         .await
-        .expect("register certificate with business-no fallback");
-    assert_eq!(stored_cert.party_id, "party-2768603291");
-
-    let organization = db
-        .get_organization("pending-org")
-        .await
-        .expect("load linked organization");
-    assert_eq!(organization.party_id.as_deref(), Some("party-2768603291"));
+        .expect_err("certificate subject business number must not bootstrap legal identity");
+    assert!(
+        err.to_string()
+            .contains("organization missing linked legal party business number")
+    );
 }
 
 #[tokio::test]
@@ -1290,7 +2060,7 @@ async fn crawl_task_token_start_rejects_inactive_organization_without_consuming_
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-005".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1300,6 +2070,7 @@ async fn crawl_task_token_start_rejects_inactive_organization_without_consuming_
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: challenge.id.clone(),
             challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
@@ -1347,7 +2118,11 @@ async fn crawl_task_token_start_rejects_inactive_organization_without_consuming_
         .await
         .expect("token should remain usable after reactivation");
     assert_eq!(run.status, "completed");
-    assert_eq!(run.plant_id.as_deref(), Some("FAC-005"));
+    assert!(
+        run.plant_id
+            .as_deref()
+            .is_some_and(|plant_id| plant_id.starts_with("plant-"))
+    );
 }
 
 #[tokio::test]
@@ -1358,7 +2133,7 @@ async fn issue_crawl_task_token_rejects_inactive_certificate() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-006".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1368,6 +2143,7 @@ async fn issue_crawl_task_token_rejects_inactive_certificate() {
     let first_cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: first_challenge.id.clone(),
             challenge_payload: first_challenge.payload.clone(),
             challenge_signature_base64: first_signature,
@@ -1380,7 +2156,7 @@ async fn issue_crawl_task_token_rejects_inactive_certificate() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-006".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1390,6 +2166,7 @@ async fn issue_crawl_task_token_rejects_inactive_certificate() {
     service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: second_challenge.id.clone(),
             challenge_payload: second_challenge.payload.clone(),
             challenge_signature_base64: second_signature,
@@ -1422,7 +2199,7 @@ async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-007".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1432,6 +2209,7 @@ async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_t
     let first_cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: first_challenge.id.clone(),
             challenge_payload: first_challenge.payload.clone(),
             challenge_signature_base64: first_signature,
@@ -1458,7 +2236,7 @@ async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
-            facility_code: Some("FAC-007".to_owned()),
+            facility_code: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1468,6 +2246,7 @@ async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_t
     service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
             challenge_id: second_challenge.id.clone(),
             challenge_payload: second_challenge.payload.clone(),
             challenge_signature_base64: second_signature,
@@ -1505,6 +2284,121 @@ async fn gateway_sync_scope_requires_permission_for_existing_plant() {
         .await
         .expect_err("existing plant should require plant sync execute permission");
     assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn asset_permissions_authorize_kr_rps_sync_listing_and_generation() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+    seed_gateway_scope_fixture(&db).await;
+    let plant = db
+        .get_plant_by_facility_code("FAC-SYNC-001")
+        .await
+        .expect("load plant");
+    let generation = vec![GenerationRecord {
+        month: "2026-03".to_owned(),
+        generation_kwh: 1000.0,
+        self_consumption_kwh: Some(100.0),
+        supply_kwh: 900.0,
+        application_deadline: Some("2026-04-15".to_owned()),
+    }];
+    db.upsert_generation_records(&plant.id, &generation)
+        .await
+        .expect("upsert legacy generation");
+    let asset_id = db
+        .upsert_kr_rps_asset_projection(
+            &plant,
+            Some("operator-org"),
+            Some("2768603291"),
+            &generation,
+            &[],
+        )
+        .await
+        .expect("upsert KR RPS asset projection");
+
+    db.upsert_role(&Role {
+        id: "role-asset-sync-and-generation".to_owned(),
+        organization_id: None,
+        code: "asset.sync_and_generation".to_owned(),
+        name: "Asset Sync And Generation".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert asset role");
+    for action in [
+        "asset.profile.read",
+        "asset.sync.execute",
+        "asset.generation.read",
+    ] {
+        db.upsert_role_action("role-asset-sync-and-generation", action)
+            .await
+            .expect("upsert asset role action");
+    }
+
+    for (binding_id, subject_type, subject_id, agreement_id) in [
+        (
+            "binding-asset-org-sync-generation",
+            RoleBindingSubjectType::Organization,
+            "operator-org",
+            Some("agreement-sync"),
+        ),
+        (
+            "binding-asset-user-sync-generation",
+            RoleBindingSubjectType::User,
+            "bootstrap-user",
+            None,
+        ),
+    ] {
+        db.save_role_binding(&RoleBinding {
+            id: binding_id.to_owned(),
+            subject_type,
+            subject_id: subject_id.to_owned(),
+            subject_organization_id: "operator-org".to_owned(),
+            resource_type: RoleBindingResourceType::Asset,
+            resource_id: asset_id.clone(),
+            role_id: "role-asset-sync-and-generation".to_owned(),
+            agreement_id: agreement_id.map(ToOwned::to_owned),
+            state: RoleBindingState::Active,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            created_at: "2026-04-03T00:00:00Z".to_owned(),
+            updated_at: "2026-04-03T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("save asset binding");
+    }
+
+    service
+        .authorize_gateway_sync_scope("bootstrap-user", "operator-org", Some("FAC-SYNC-001"))
+        .await
+        .expect("asset sync permission should authorize existing KR RPS plant");
+
+    let facilities = db
+        .list_user_plant_action_facility_codes_with_consistency(
+            "bootstrap-user",
+            "operator-org",
+            "plant.sync.execute",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("list executable facilities through asset permission");
+    assert_eq!(facilities, vec!["FAC-SYNC-001".to_owned()]);
+
+    let visible = service
+        .list_visible_plants("bootstrap-user", "operator-org", None)
+        .await
+        .expect("asset profile permission should make KR RPS plant visible");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].facility_code, "FAC-SYNC-001");
+
+    let generation_rows = service
+        .list_generation_authorized(
+            "bootstrap-user",
+            "operator-org",
+            "FAC-SYNC-001",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("asset generation permission should authorize legacy generation read");
+    assert_eq!(generation_rows, generation);
 }
 
 #[tokio::test]

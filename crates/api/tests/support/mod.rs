@@ -29,10 +29,6 @@ pub fn test_kms_config() -> KmsConfig {
     }
 }
 
-pub fn bearer_header(token: &str) -> String {
-    format!("Bearer {token}")
-}
-
 pub async fn start_mock_trailbase() -> String {
     async fn login_ui() -> Html<&'static str> {
         Html(

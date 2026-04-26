@@ -314,6 +314,7 @@ pub enum RoleBindingSubjectType {
 #[serde(rename_all = "snake_case")]
 pub enum RoleBindingResourceType {
     Organization,
+    Asset,
     Plant,
 }
 
@@ -342,6 +343,171 @@ pub struct Party {
     pub legal_name: String,
     pub active: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Asset {
+    pub id: String,
+    pub owner_organization_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_organization_id: Option<String>,
+    pub name: String,
+    pub country_code: String,
+    pub address: String,
+    pub capacity_kw: f64,
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetProfile {
+    pub id: String,
+    pub asset_id: String,
+    pub country_code: String,
+    pub provider: String,
+    pub profile_type: String,
+    pub external_id: String,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Registry {
+    pub id: String,
+    pub registry_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    pub provider: String,
+    pub name: String,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryAccount {
+    pub id: String,
+    pub registry_id: String,
+    pub organization_id: String,
+    pub external_account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub status: String,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryProject {
+    pub id: String,
+    pub registry_id: String,
+    pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_account_id: Option<String>,
+    pub external_project_id: String,
+    pub project_type: String,
+    pub status: String,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DataSource {
+    pub id: String,
+    pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_project_id: Option<String>,
+    pub source_type: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_source_id: Option<String>,
+    pub unit: String,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationDatum {
+    pub id: String,
+    pub asset_id: String,
+    pub source_id: String,
+    pub period_start: String,
+    pub period_end: String,
+    pub metric_type: String,
+    pub value: f64,
+    pub unit: String,
+    pub quality: String,
+    pub metadata_json: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateDatum {
+    pub id: String,
+    pub asset_id: String,
+    pub source_id: String,
+    pub period_start: String,
+    pub period_end: String,
+    pub metric_type: String,
+    pub value: f64,
+    pub unit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    pub quality: String,
+    pub metadata_json: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnergyCertificate {
+    pub id: String,
+    pub certificate_type: String,
+    pub registry_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_project_id: Option<String>,
+    pub asset_id: String,
+    pub serial_number: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vintage_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vintage_end: Option<String>,
+    pub quantity_mwh: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_account_id: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<String>,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthCredential {
+    pub id: String,
+    pub organization_id: String,
+    pub credential_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_subject_id: Option<String>,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialBinding {
+    pub credential_id: String,
+    pub registry_account_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Plant {
