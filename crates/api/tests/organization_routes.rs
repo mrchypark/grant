@@ -1,6 +1,6 @@
-mod support;
 #[path = "support/auth.rs"]
 mod auth_support;
+mod support;
 
 use std::sync::Arc;
 
@@ -159,7 +159,10 @@ async fn organization_sync_route_replaces_business_route() {
                 .method("POST")
                 .uri("/api/v1/organizations/bootstrap-user/sync")
                 .header("content-type", "application/json")
-                .header("authorization", auth_support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::from(
                     json!({

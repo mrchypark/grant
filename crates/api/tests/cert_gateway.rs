@@ -1,6 +1,6 @@
-mod support;
 #[path = "support/auth.rs"]
 mod auth_support;
+mod support;
 
 use axum::{
     body::Body,
@@ -369,7 +369,10 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/organizations/bootstrap-user/certificates")
-                .header("authorization", auth_support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("list request"),

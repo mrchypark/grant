@@ -1,6 +1,6 @@
-mod support;
 #[path = "support/auth.rs"]
 mod auth_support;
+mod support;
 
 use axum::{
     body::Body,

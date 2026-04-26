@@ -1,6 +1,6 @@
-mod support;
 #[path = "support/auth.rs"]
 mod auth_support;
+mod support;
 
 use axum::{
     body::Body,
@@ -322,7 +322,10 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -362,7 +365,10 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .header("x-organization-id", "creator-org")
                 .body(Body::empty())
                 .expect("request"),

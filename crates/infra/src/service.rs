@@ -440,7 +440,7 @@ impl AppService {
             .validate_bundle_for_organization(&organization_id, None, &input.bundle)
             .await?;
         let challenge = self
-            .consume_valid_challenge(
+            .validate_cert_gateway_challenge(
                 &input.challenge_id,
                 &input.challenge_payload,
                 &input.challenge_signature_base64,
@@ -466,6 +466,9 @@ impl AppService {
                 );
             }
         }
+        self.db
+            .consume_cert_gateway_challenge(&input.challenge_id)
+            .await?;
         self.store_certificate_bundle(&organization_id, business_no, input.bundle)
             .await
     }
@@ -508,7 +511,7 @@ impl AppService {
             .validate_bundle_for_organization(&organization_id, None, &input.bundle)
             .await?;
         let challenge = self
-            .consume_valid_challenge(
+            .validate_cert_gateway_challenge(
                 &input.challenge_id,
                 &input.challenge_payload,
                 &input.challenge_signature_base64,
@@ -554,6 +557,14 @@ impl AppService {
             effective_facility_code.as_deref(),
         )
         .await?;
+        validate_sync_request_shape(
+            &input.mode,
+            input.start_month.as_deref(),
+            input.end_month.as_deref(),
+        )?;
+        self.db
+            .consume_cert_gateway_challenge(&input.challenge_id)
+            .await?;
 
         self.run_sync_with_bundle(
             &organization_id,
@@ -2292,7 +2303,7 @@ impl AppService {
             .await
     }
 
-    async fn consume_valid_challenge(
+    async fn validate_cert_gateway_challenge(
         &self,
         challenge_id: &str,
         challenge_payload: &str,
@@ -2334,7 +2345,6 @@ impl AppService {
             &challenge_signature_base64,
         )
         .map_err(|err| bad_request_error(err.to_string()))?;
-        self.db.consume_cert_gateway_challenge(challenge_id).await?;
         Ok(challenge)
     }
 
@@ -2645,6 +2655,19 @@ fn is_expired(expires_at: &str) -> Result<bool> {
         .with_context(|| format!("parse expiresAt {expires_at}"))?
         .with_timezone(&Utc);
     Ok(Utc::now() > expires_at)
+}
+
+fn validate_sync_request_shape(
+    mode: &SyncMode,
+    start_month: Option<&str>,
+    end_month: Option<&str>,
+) -> Result<()> {
+    if matches!(mode, SyncMode::Full) && (start_month.is_some() || end_month.is_some()) {
+        return Err(bad_request_error(
+            "full sync cannot be bounded by startMonth or endMonth",
+        ));
+    }
+    Ok(())
 }
 
 fn now_string() -> String {

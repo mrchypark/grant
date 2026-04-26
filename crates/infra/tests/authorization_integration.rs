@@ -821,7 +821,7 @@ async fn sync_created_plant_bootstraps_creator_asset_permissions() {
 
 #[tokio::test]
 async fn stored_certificate_registration_rejects_requester_different_from_challenge_creator() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
@@ -838,19 +838,24 @@ async fn stored_certificate_registration_rejects_requester_different_from_challe
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
             requested_by_user_id: Some("other-user".to_owned()),
-            challenge_id: challenge.id,
-            challenge_payload: challenge.payload,
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
             bundle,
         })
         .await
         .expect_err("challenge requester mismatch must be rejected");
     assert!(err.to_string().contains("challenge creator"));
+    let challenge = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("challenge after requester mismatch");
+    assert!(challenge.consumed_at.is_none());
 }
 
 #[tokio::test]
 async fn full_sync_rejects_bounded_month_range() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
@@ -868,8 +873,8 @@ async fn full_sync_rejects_bounded_month_range() {
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
             requested_by_user_id: Some("bootstrap-user".to_owned()),
-            challenge_id: challenge.id,
-            challenge_payload: challenge.payload,
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-FULL-RANGE".to_owned()),
@@ -883,6 +888,11 @@ async fn full_sync_rejects_bounded_month_range() {
         err.to_string()
             .contains("full sync cannot be bounded by startMonth or endMonth")
     );
+    let challenge = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("challenge after invalid full sync request");
+    assert!(challenge.consumed_at.is_none());
 }
 
 #[tokio::test]
@@ -945,7 +955,7 @@ async fn issue_crawl_task_token_requires_created_by_user_scope_authorization() {
 
 #[tokio::test]
 async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
@@ -963,8 +973,8 @@ async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope(
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
             requested_by_user_id: Some("bootstrap-user".to_owned()),
-            challenge_id: challenge.id,
-            challenge_payload: challenge.payload,
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-OTHER".to_owned()),
@@ -975,11 +985,16 @@ async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope(
         .await
         .expect_err("challenge scope must be authoritative");
     assert!(err.to_string().contains("challenge facilityCode mismatch"));
+    let challenge = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("challenge after facility mismatch");
+    assert!(challenge.consumed_at.is_none());
 }
 
 #[tokio::test]
 async fn ephemeral_crawl_rejects_binding_unscoped_challenge_to_request_facility() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
@@ -997,8 +1012,8 @@ async fn ephemeral_crawl_rejects_binding_unscoped_challenge_to_request_facility(
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
             requested_by_user_id: Some("bootstrap-user".to_owned()),
-            challenge_id: challenge.id,
-            challenge_payload: challenge.payload,
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-OTHER".to_owned()),
@@ -1009,11 +1024,16 @@ async fn ephemeral_crawl_rejects_binding_unscoped_challenge_to_request_facility(
         .await
         .expect_err("unscoped challenge must not be rebound to a facility");
     assert!(err.to_string().contains("challenge facilityCode mismatch"));
+    let challenge = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("challenge after unscoped facility binding attempt");
+    assert!(challenge.consumed_at.is_none());
 }
 
 #[tokio::test]
 async fn ephemeral_crawl_rejects_requester_different_from_challenge_creator() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
@@ -1031,8 +1051,8 @@ async fn ephemeral_crawl_rejects_requester_different_from_challenge_creator() {
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id: "bootstrap-user".to_owned(),
             requested_by_user_id: Some("other-user".to_owned()),
-            challenge_id: challenge.id,
-            challenge_payload: challenge.payload,
+            challenge_id: challenge.id.clone(),
+            challenge_payload: challenge.payload.clone(),
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-REQUESTER-MISMATCH".to_owned()),
@@ -1043,6 +1063,11 @@ async fn ephemeral_crawl_rejects_requester_different_from_challenge_creator() {
         .await
         .expect_err("requester must match challenge creator");
     assert!(err.to_string().contains("challenge creator"));
+    let challenge = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("challenge after requester mismatch");
+    assert!(challenge.consumed_at.is_none());
 }
 
 #[tokio::test]
