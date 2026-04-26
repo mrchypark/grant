@@ -76,7 +76,7 @@ else
 endif
 
 build-plain:
-	$(MAKE) build-agent GARBLE_ENABLED=0
+	$(MAKE) build-with-worker GARBLE_ENABLED=0
 
 build-with-worker: build-agent build-local-worker
 
