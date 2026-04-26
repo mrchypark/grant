@@ -927,8 +927,11 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
       jsonResponse({
         challengeId: "browser-challenge-1",
         mode: "ephemeral",
+        syncMode: "delta",
         nonce: "nonce-browser-1",
         payload: "cert-gateway:test",
+        startMonth: "2026-02",
+        endMonth: "2026-04",
         expiresAt: "2026-04-20T00:00:00Z",
       }, 201),
     ({ init }) => {
@@ -937,6 +940,9 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
       assert.equal(body.bundle.commonName, "Fixture Certificate");
       assert.equal(body.bundle.businessNo, "2768603291");
       assert.equal(body.bundle.password, "test-password");
+      assert.equal(body.mode, "delta");
+      assert.equal(body.startMonth, "2026-02");
+      assert.equal(body.endMonth, "2026-04");
       return jsonResponse({
         id: "browser-sync-1",
         organizationId: "org-1",
@@ -974,6 +980,7 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
 
     assert.equal(run.id, "browser-sync-1");
     assert.equal(mock.calls.length, 2);
+    assert.equal(JSON.parse(String(mock.calls[0].init?.body)).syncMode, "full");
     assert.equal(
       String(mock.calls[0].input),
       "https://gateway.local/api/v1/organizations/org-1/cert-gateway/challenges",

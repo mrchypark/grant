@@ -12,8 +12,11 @@ export type GatewayClientOptions = {
 export type Challenge = {
   challengeId: string;
   mode: ChallengeMode;
+  syncMode?: SyncMode;
   nonce: string;
   payload: string;
+  startMonth?: string;
+  endMonth?: string;
   expiresAt: string;
 };
 
@@ -27,6 +30,7 @@ export type ProofBundle = Omit<AgentProofBundle, "password">;
 
 export type CreateChallengeInput = {
   mode: ChallengeMode;
+  syncMode?: SyncMode;
   origin?: string;
   businessNo?: string;
   facilityCode?: string;
