@@ -192,13 +192,20 @@ pub fn validate_certificate_bundle(
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
     }
     if !allow_untrusted {
-        validate_certificate_trust(
+        let store = default_trust_store()?;
+        validate_certificate_trust_with_store(
             &bundle.sign_cert_der,
             "signCert.der",
             &bundle.certificate_chain_der,
+            &store,
         )?;
         if let Some(km_cert_der) = &bundle.km_cert_der {
-            validate_certificate_trust(km_cert_der, "kmCert.der", &bundle.certificate_chain_der)?;
+            validate_certificate_trust_with_store(
+                km_cert_der,
+                "kmCert.der",
+                &bundle.certificate_chain_der,
+                &store,
+            )?;
         }
     }
     Ok(())
@@ -338,17 +345,12 @@ fn validate_key_pair(
     Ok(())
 }
 
-fn validate_certificate_trust(
-    cert_der: &[u8],
-    cert_name: &str,
-    certificate_chain_der: &[Vec<u8>],
-) -> Result<()> {
+fn default_trust_store() -> Result<openssl::x509::store::X509Store> {
     let mut store_builder = X509StoreBuilder::new().context("create X509 trust store")?;
     store_builder
         .set_default_paths()
         .context("load default X509 trust paths")?;
-    let store = store_builder.build();
-    validate_certificate_trust_with_store(cert_der, cert_name, certificate_chain_der, &store)
+    Ok(store_builder.build())
 }
 
 fn validate_certificate_trust_with_store(

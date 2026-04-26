@@ -363,7 +363,7 @@
 - `mode` > `stored` 또는 `ephemeral`
 - `nonce` > 서명 대상 nonce
 - `payload_hash` > challenge payload 해시
-- `facility_code` > ephemeral sync challenge의 signed facility scope. 저장형 인증서 등록 challenge에서는 사용하지 않으며, service layer가 facility-scoped stored challenge를 거부한다.
+- `facility_code` > ephemeral sync challenge의 signed facility scope. 저장형 인증서 등록 challenge에서는 사용하지 않으며, service layer가 facility-scoped stored challenge를 생성 시점부터 거부한다.
 - `expires_at` > 만료 시각
 - `consumed_at` > 1회 사용 완료 시각
 - `created_by_user_id` > 요청 사용자 ID
@@ -375,7 +375,7 @@
 - `organization_id` > 요청 조직 ID
 - `certificate_id` > 저장 인증서 ID
 - `token_hash` > 작업 토큰 해시
-- `scope_json` > 작업 스코프 JSON. `facility_code`는 요청 body 원문이 아니라 service authorization이 확정한 facility scope이며, 생략 요청이 단일 실행 가능 plant로 해석되면 그 facility code가 저장된다.
+- `scope_json` > 작업 스코프 JSON. `facility_code`는 요청 body 원문이 아니라 service authorization이 확정한 facility scope이며, 생략 요청이 단일 실행 가능 plant로 해석되면 그 facility code가 저장된다. bounded full sync처럼 실행 불가능한 shape은 token 발급 및 소비 전 검증에서 거부된다.
 - `expires_at` > 만료 시각
 - `used_at` > 사용 완료 시각
 - `created_by_user_id` > 요청 사용자 ID

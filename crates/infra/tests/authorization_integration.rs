@@ -855,6 +855,27 @@ async fn stored_certificate_registration_rejects_requester_different_from_challe
 }
 
 #[tokio::test]
+async fn stored_certificate_challenge_rejects_facility_scope_at_creation() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let err = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("FAC-STORED-SCOPE".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("stored challenge must not accept facility scope");
+
+    assert!(
+        err.to_string()
+            .contains("stored certificate challenges cannot be facility-scoped")
+    );
+}
+
+#[tokio::test]
 async fn full_sync_rejects_bounded_month_range() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
@@ -1691,6 +1712,25 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .expect("implicit token plant")
         .facility_code,
         "FAC-002"
+    );
+
+    let invalid_full_token = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: cert.id.clone(),
+            facility_code: Some("FAC-002".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Full,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("bounded full sync crawl token must be rejected before issue");
+    assert!(
+        invalid_full_token
+            .to_string()
+            .contains("full sync cannot be bounded by startMonth or endMonth")
     );
 
     let issued = service

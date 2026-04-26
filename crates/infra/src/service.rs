@@ -401,6 +401,18 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
+        if mode == "stored"
+            && input
+                .facility_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+        {
+            return Err(bad_request_error(
+                "stored certificate challenges cannot be facility-scoped",
+            ));
+        }
         let nonce = Uuid::new_v4().simple().to_string();
         let expires_at = (Utc::now() + ChronoDuration::seconds(input.ttl_seconds)).to_rfc3339();
         let payload = build_challenge_payload(
@@ -607,6 +619,11 @@ impl AppService {
         if certificate.active != 1 {
             return Err(bad_request_error("certificate is inactive"));
         }
+        validate_sync_request_shape(
+            &input.mode,
+            input.start_month.as_deref(),
+            input.end_month.as_deref(),
+        )?;
         let authorized_facility_code = self
             .authorize_gateway_sync_scope(
                 &created_by_user_id,
@@ -759,6 +776,11 @@ impl AppService {
         let scope: CrawlTaskScope =
             serde_json::from_str(&issued.scope_json).context("parse crawl task scope")?;
         let mode = parse_sync_mode(&scope.mode)?;
+        validate_sync_request_shape(
+            &mode,
+            scope.start_month.as_deref(),
+            scope.end_month.as_deref(),
+        )?;
         let authorized_facility_code = self
             .authorize_gateway_sync_scope(
                 &issued.created_by_user_id,
@@ -1170,6 +1192,11 @@ impl AppService {
                             }
                         }
                     }
+                    let duration_ms = started.elapsed().as_millis() as i64;
+                    let finished_at = now_string();
+                    self.db
+                        .finish_sync_run_at(&run.id, "completed", duration_ms, None, &finished_at)
+                        .await?;
                     item_asset_id = Some(asset_id.clone());
                     info!(
                         "sync completed organization={} plant={} mode={:?} duration_ms={}",
@@ -1183,7 +1210,7 @@ impl AppService {
                         mode: effective_mode.clone(),
                         status: "completed".to_owned(),
                         started_at: run.started_at.clone(),
-                        finished_at: Some(now_string()),
+                        finished_at: Some(finished_at),
                         duration_ms,
                     })
                 }

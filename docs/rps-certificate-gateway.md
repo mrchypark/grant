@@ -148,9 +148,12 @@ Content-Type: application/json
 
 {
   "mode": "stored" | "ephemeral",
+  "facilityCode": "FAC-001",
   "ttlSeconds": 120
 }
 ```
+
+`facilityCode`는 ephemeral challenge에서만 사용할 수 있다. 저장형 인증서 등록용 `stored` challenge는 조직/registry credential 증명이므로 facility scope를 받으면 즉시 거부된다.
 
 응답:
 
@@ -223,9 +226,15 @@ POST /certificates/{certificateId}/crawl-tokens
 Content-Type: application/json
 
 {
+  "facilityCode": "FAC-001",
+  "mode": "delta",
+  "startMonth": "2026-01",
+  "endMonth": "2026-03",
   "ttlSeconds": 60
 }
 ```
+
+`mode=full`은 전체 snapshot replace 의미이므로 `startMonth`/`endMonth`와 함께 token을 발급할 수 없다. service는 token 발급 시점과 token 소비 시점 모두에서 같은 scope shape을 검증한다.
 
 응답:
 

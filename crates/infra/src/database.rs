@@ -3565,6 +3565,18 @@ impl Database {
         duration_ms: i64,
         error_message: Option<&str>,
     ) -> Result<()> {
+        self.finish_sync_run_at(run_id, status, duration_ms, error_message, &now_string())
+            .await
+    }
+
+    pub async fn finish_sync_run_at(
+        &self,
+        run_id: &str,
+        status: &str,
+        duration_ms: i64,
+        error_message: Option<&str>,
+        finished_at: &str,
+    ) -> Result<()> {
         self.runtime
             .execute(
                 "UPDATE sync_runs
@@ -3572,7 +3584,7 @@ impl Database {
                  WHERE id = $5",
                 params!(
                     status.to_owned(),
-                    now_string(),
+                    finished_at.to_owned(),
                     duration_ms,
                     error_message.map(ToOwned::to_owned),
                     run_id.to_owned()
