@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use infra::{
     bridge::{self, BridgeOptions, BridgeSnapshot},
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -134,27 +134,68 @@ fn should_collect_documents(mode: Option<&str>) -> bool {
 
 fn embed_document_contents(snapshot: &mut BridgeSnapshot, document_root: &Path) -> Result<()> {
     let mut total_bytes = 0_u64;
-    for doc in &mut snapshot.documents {
-        let document_path = resolve_local_document_path(document_root, &doc.source_path)?;
-        let size = std::fs::metadata(&document_path)
-            .with_context(|| format!("stat local document {}", doc.source_path))?
-            .len();
+    let mut embedded_documents = Vec::with_capacity(snapshot.documents.len());
+    for mut doc in std::mem::take(&mut snapshot.documents) {
+        let source_path = doc.source_path.trim();
+        if source_path.is_empty() {
+            if doc.required {
+                let err = anyhow!(
+                    "required local document {} has no source path",
+                    doc.file_name
+                );
+                return finish_with_document_error(snapshot, embedded_documents, doc, err);
+            }
+            continue;
+        }
+        let document_path = match resolve_local_document_path(document_root, source_path) {
+            Ok(path) => path,
+            Err(err) if !doc.required && is_not_found_error(&err) => {
+                match is_missing_path_under_root(document_root, source_path) {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        return finish_with_document_error(snapshot, embedded_documents, doc, err);
+                    }
+                    Err(err) => {
+                        return finish_with_document_error(snapshot, embedded_documents, doc, err);
+                    }
+                }
+            }
+            Err(err) => return finish_with_document_error(snapshot, embedded_documents, doc, err),
+        };
+        let size = match std::fs::metadata(&document_path)
+            .with_context(|| format!("stat local document {}", doc.source_path))
+        {
+            Ok(metadata) => metadata.len(),
+            Err(err) if !doc.required && is_not_found_error(&err) => continue,
+            Err(err) => return finish_with_document_error(snapshot, embedded_documents, doc, err),
+        };
         if size > MAX_DOCUMENT_BYTES {
-            bail!(
+            let err = anyhow!(
                 "local document {} exceeds {} bytes",
                 doc.file_name,
                 MAX_DOCUMENT_BYTES
             );
+            return finish_with_document_error(snapshot, embedded_documents, doc, err);
         }
+        let (content_base64, sha256) = match encode_document_base64_and_sha256(&document_path)
+            .with_context(|| format!("read local document {}", doc.source_path))
+        {
+            Ok(encoded) => encoded,
+            Err(err) if !doc.required && is_not_found_error(&err) => continue,
+            Err(err) => return finish_with_document_error(snapshot, embedded_documents, doc, err),
+        };
         total_bytes = total_bytes.saturating_add(size);
         if total_bytes > MAX_TOTAL_DOCUMENT_BYTES {
-            bail!(
-                "local execution documents exceed {} bytes",
-                MAX_TOTAL_DOCUMENT_BYTES
+            return finish_with_document_error(
+                snapshot,
+                embedded_documents,
+                doc,
+                anyhow!(
+                    "local execution documents exceed {} bytes",
+                    MAX_TOTAL_DOCUMENT_BYTES
+                ),
             );
         }
-        let (content_base64, sha256) = encode_document_base64_and_sha256(&document_path)
-            .with_context(|| format!("read local document {}", doc.source_path))?;
         if doc
             .source_sha256
             .as_deref()
@@ -176,8 +217,21 @@ fn embed_document_contents(snapshot: &mut BridgeSnapshot, document_root: &Path) 
         doc.content_base64 = Some(content_base64);
         doc.content_type = Some("application/pdf".to_owned());
         doc.source_path.clear();
+        embedded_documents.push(doc);
     }
+    snapshot.documents = embedded_documents;
     Ok(())
+}
+
+fn finish_with_document_error(
+    snapshot: &mut BridgeSnapshot,
+    mut embedded_documents: Vec<bridge::BridgeDocument>,
+    doc: bridge::BridgeDocument,
+    err: anyhow::Error,
+) -> Result<()> {
+    embedded_documents.push(doc);
+    snapshot.documents = embedded_documents;
+    Err(err)
 }
 
 fn encode_document_base64_and_sha256(path: &Path) -> Result<(String, String)> {
@@ -218,6 +272,45 @@ fn resolve_local_document_path(document_root: &Path, source_path: &str) -> Resul
         bail!("local document {source_path} is outside the collector workspace");
     }
     Ok(path)
+}
+
+fn is_not_found_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .map(|io_err| io_err.kind() == io::ErrorKind::NotFound)
+            .unwrap_or(false)
+    })
+}
+
+fn is_missing_path_under_root(document_root: &Path, source_path: &str) -> Result<bool> {
+    let root = std::fs::canonicalize(document_root)
+        .with_context(|| format!("resolve local document root {}", document_root.display()))?;
+    let path = Path::new(source_path);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let parent = candidate.parent().ok_or_else(|| {
+        anyhow!("local document {source_path} has no parent under collector workspace")
+    })?;
+    let parent = std::fs::canonicalize(parent).with_context(|| {
+        format!("resolve local document parent {source_path}; parent must exist under collector workspace")
+    })?;
+    if !parent.starts_with(&root) {
+        bail!("local document {source_path} is outside the collector workspace");
+    }
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("local document {source_path} is a dangling symlink")
+        }
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(err) => {
+            Err(err).with_context(|| format!("inspect local document candidate {source_path}"))
+        }
+    }
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -574,6 +667,63 @@ mod tests {
     }
 
     #[test]
+    fn embed_document_contents_rejects_missing_optional_paths_outside_collector_workspace() {
+        let collector_dir = tempfile::tempdir().expect("collector tempdir");
+        let outside_dir = tempfile::tempdir().expect("outside tempdir");
+        let outside_path = outside_dir.path().join("missing.pdf");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-OPTIONAL-OUTSIDE-MISSING".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "missing.pdf".to_owned(),
+            required: false,
+            category: "permit".to_owned(),
+            source_path: outside_path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        let err = embed_document_contents(&mut snapshot, collector_dir.path())
+            .expect_err("missing outside optional document path");
+        assert!(err.to_string().contains("outside the collector workspace"));
+        assert!(snapshot.documents[0].content_base64.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embed_document_contents_rejects_missing_optional_dangling_symlink() {
+        let collector_dir = tempfile::tempdir().expect("collector tempdir");
+        let outside_dir = tempfile::tempdir().expect("outside tempdir");
+        let symlink_path = collector_dir.path().join("dangling.pdf");
+        std::os::unix::fs::symlink(outside_dir.path().join("missing.pdf"), &symlink_path)
+            .expect("dangling symlink fixture");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-OPTIONAL-DANGLING".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "dangling.pdf".to_owned(),
+            required: false,
+            category: "permit".to_owned(),
+            source_path: symlink_path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        let err = embed_document_contents(&mut snapshot, collector_dir.path())
+            .expect_err("dangling optional symlink");
+        assert!(err.to_string().contains("dangling symlink"));
+        assert!(snapshot.documents[0].content_base64.is_none());
+    }
+
+    #[test]
     fn embed_document_contents_reports_missing_local_documents() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing_path = dir.path().join("missing.pdf");
@@ -600,6 +750,57 @@ mod tests {
                 .contains("file must exist under collector workspace")
         );
         assert!(snapshot.documents[0].content_base64.is_none());
+    }
+
+    #[test]
+    fn embed_document_contents_skips_missing_optional_local_documents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_path = dir.path().join("missing-optional.pdf");
+        let disappearing_path = dir.path().join("disappearing-optional.pdf");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-OPTIONAL-MISSING".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "missing-optional.pdf".to_owned(),
+            required: false,
+            category: "permit".to_owned(),
+            source_path: missing_path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-OPTIONAL-DISAPPEARING".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "disappearing-optional.pdf".to_owned(),
+            required: false,
+            category: "permit".to_owned(),
+            source_path: disappearing_path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-OPTIONAL-BLANK".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "blank-optional.pdf".to_owned(),
+            required: false,
+            category: "permit".to_owned(),
+            source_path: " \t\n ".to_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        embed_document_contents(&mut snapshot, dir.path()).expect("skip optional documents");
+        assert!(snapshot.documents.is_empty());
     }
 
     #[test]
