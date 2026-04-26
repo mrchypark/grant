@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_STDIN_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,10 +63,7 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let mut raw = String::new();
-    std::io::stdin()
-        .read_to_string(&mut raw)
-        .context("read local execution request from stdin")?;
+    let raw = read_limited_stdin(std::io::stdin())?;
     let req: LocalEphemeralRequest =
         serde_json::from_str(&raw).context("decode local execution request")?;
     normalize_gateway_base_url(&req.gateway_base_url)?;
@@ -102,6 +100,18 @@ async fn run() -> Result<()> {
         .write_all(result.as_bytes())
         .context("write local execution response")?;
     Ok(())
+}
+
+fn read_limited_stdin<R: Read>(reader: R) -> Result<String> {
+    let mut raw = String::new();
+    let mut limited = reader.take(MAX_STDIN_BYTES + 1);
+    limited
+        .read_to_string(&mut raw)
+        .context("read local execution request from stdin")?;
+    if raw.len() as u64 > MAX_STDIN_BYTES {
+        bail!("local execution request exceeds {} bytes", MAX_STDIN_BYTES);
+    }
+    Ok(raw)
 }
 
 fn should_collect_documents(mode: Option<&str>) -> bool {
@@ -320,6 +330,20 @@ mod tests {
                 "local result body leaked {forbidden}: {json}"
             );
         }
+    }
+
+    #[test]
+    fn read_limited_stdin_accepts_bounded_request() {
+        let input = br#"{"ok":true}"#;
+        let raw = read_limited_stdin(input.as_slice()).expect("bounded stdin");
+        assert_eq!(raw, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn read_limited_stdin_rejects_oversized_request() {
+        let input = vec![b'a'; (MAX_STDIN_BYTES + 1) as usize];
+        let err = read_limited_stdin(input.as_slice()).expect_err("oversized stdin");
+        assert!(err.to_string().contains("request exceeds"));
     }
 
     #[test]

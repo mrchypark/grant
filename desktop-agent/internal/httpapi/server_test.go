@@ -12,6 +12,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -1213,6 +1214,19 @@ func TestLimitedBufferWriterCapsOutputAndRecordsTruncation(t *testing.T) {
 	}
 	if !writer.truncated {
 		t.Fatal("writer.truncated = false, want true")
+	}
+}
+
+func TestLocalExecutorRunErrorReportsTruncatedStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	limit := &limitedBufferWriter{w: &stderr, limit: maxLocalExecutorStderr, truncated: true}
+
+	err := localExecutorRunError(errors.New("exit status 1"), &stderr, limit)
+	if !strings.Contains(err.Error(), "local executor stderr exceeds") {
+		t.Fatalf("error = %q, want stderr truncation failure", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("error = %q, want original command error", err)
 	}
 }
 

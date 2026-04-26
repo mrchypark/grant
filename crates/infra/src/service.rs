@@ -40,6 +40,8 @@ use uuid::Uuid;
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
 const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
+const MAX_LOCAL_EXECUTION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -2231,21 +2233,59 @@ fn require_safe_facility_code(field_name: &str, value: &str) -> Result<String> {
 }
 
 fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapshot) -> Result<()> {
+    let mut total_content_bytes = 0_usize;
     for doc in &mut snapshot.documents {
-        let has_content = doc
+        let Some(content_base64) = doc
             .content_base64
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .is_some();
-        if !has_content {
+        else {
             return Err(bad_request_error(
                 "local execution documents require contentBase64",
             ));
+        };
+        let decoded_len = estimated_base64_decoded_len(content_base64)?;
+        if decoded_len > MAX_LOCAL_EXECUTION_DOCUMENT_BYTES {
+            return Err(bad_request_error(format!(
+                "local execution document {} exceeds {} bytes",
+                doc.file_name, MAX_LOCAL_EXECUTION_DOCUMENT_BYTES
+            )));
+        }
+        total_content_bytes = total_content_bytes
+            .checked_add(decoded_len)
+            .ok_or_else(|| bad_request_error("local execution document content is too large"))?;
+        if total_content_bytes > MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES {
+            return Err(bad_request_error(format!(
+                "local execution documents exceed {} bytes",
+                MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES
+            )));
         }
         doc.source_path.clear();
     }
     Ok(())
+}
+
+fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(0);
+    }
+    let padding = value
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    let groups = value
+        .len()
+        .checked_add(3)
+        .and_then(|len| len.checked_div(4))
+        .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+    Ok(groups
+        .checked_mul(3)
+        .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?
+        .saturating_sub(padding))
 }
 
 fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocument) -> String {
@@ -2817,7 +2857,14 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_optional_text, select_organization_business_no, validate_month_format};
+    use super::{
+        MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
+        estimated_base64_decoded_len, normalize_optional_text,
+        require_local_execution_document_contents, select_organization_business_no,
+        validate_month_format,
+    };
+    use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
+    use chrono::{DateTime, FixedOffset};
 
     #[test]
     fn requested_business_number_wins() {
@@ -2869,6 +2916,106 @@ mod tests {
                 validate_month_format("start month", invalid).is_err(),
                 "{invalid} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn base64_decoded_length_estimate_counts_padding() {
+        assert_eq!(
+            estimated_base64_decoded_len("UERGLUNPTlRFTlQ=").expect("estimate"),
+            11
+        );
+    }
+
+    #[test]
+    fn local_execution_document_contents_rejects_oversized_document_payloads() {
+        let mut snapshot = fixture_snapshot(vec![fixture_document(
+            "large.pdf",
+            "A".repeat(encoded_len_for_decoded_bytes(
+                MAX_LOCAL_EXECUTION_DOCUMENT_BYTES + 1,
+            )),
+        )]);
+
+        let err = require_local_execution_document_contents(&mut snapshot)
+            .expect_err("oversized document");
+        assert!(err.to_string().contains("document large.pdf exceeds"));
+        assert_eq!(snapshot.documents[0].source_path, "/tmp/source.pdf");
+    }
+
+    #[test]
+    fn local_execution_document_contents_rejects_oversized_document_sets() {
+        let per_document_len = MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES / 3 + 1;
+        let mut snapshot = fixture_snapshot(vec![
+            fixture_document(
+                "first.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_len)),
+            ),
+            fixture_document(
+                "second.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_len)),
+            ),
+            fixture_document(
+                "third.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_len)),
+            ),
+        ]);
+
+        let err = require_local_execution_document_contents(&mut snapshot)
+            .expect_err("oversized document set");
+        assert!(err.to_string().contains("documents exceed"));
+        assert_eq!(snapshot.documents[2].source_path, "/tmp/source.pdf");
+    }
+
+    #[test]
+    fn local_execution_document_contents_clears_source_paths_for_bounded_payloads() {
+        let mut snapshot = fixture_snapshot(vec![fixture_document(
+            "permit.pdf",
+            "UERGLUNPTlRFTlQ=".to_owned(),
+        )]);
+
+        require_local_execution_document_contents(&mut snapshot).expect("bounded document");
+        assert_eq!(snapshot.documents[0].source_path, "");
+    }
+
+    fn encoded_len_for_decoded_bytes(decoded_bytes: usize) -> usize {
+        decoded_bytes.div_ceil(3) * 4
+    }
+
+    fn fixture_snapshot(documents: Vec<BridgeDocument>) -> BridgeSnapshot {
+        BridgeSnapshot {
+            collected_at: DateTime::parse_from_rfc3339("2026-04-09T12:00:00+09:00")
+                .expect("date")
+                .with_timezone(&FixedOffset::east_opt(9 * 3600).expect("offset")),
+            facility: BridgeFacility {
+                code: "FAC-001".to_owned(),
+                name: "Plant FAC-001".to_owned(),
+                business_no: "2768603291".to_owned(),
+                contract_no: "CONTRACT-1".to_owned(),
+                address: "Seoul".to_owned(),
+                installed_kw: 100.5,
+                rec_start_date: "2026-01-01".to_owned(),
+                confirm_issued: "Y".to_owned(),
+            },
+            generation: Vec::new(),
+            rates: Vec::new(),
+            rec: Vec::new(),
+            documents,
+        }
+    }
+
+    fn fixture_document(file_name: &str, content_base64: String) -> BridgeDocument {
+        BridgeDocument {
+            attachment_code: "ATT-1".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: file_name.to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: "/tmp/source.pdf".to_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: Some(content_base64),
+            content_type: None,
         }
     }
 }

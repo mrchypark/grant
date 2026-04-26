@@ -767,20 +767,30 @@ func (c commandLocalExecutor) RunEphemeral(ctx context.Context, req LocalEphemer
 	cmd.Stdout = stdoutLimit
 	cmd.Stderr = stderrLimit
 	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return nil, fmt.Errorf("local executor failed: %w: %s", err, detail)
-		}
-		return nil, fmt.Errorf("local executor failed: %w", err)
+		return nil, localExecutorRunError(err, &stderr, stderrLimit)
 	}
 	if stdoutLimit.truncated {
 		return nil, fmt.Errorf("local executor response exceeds %d bytes", maxLocalExecutorBytes)
+	}
+	if stderrLimit.truncated {
+		return nil, fmt.Errorf("local executor stderr exceeds %d bytes", maxLocalExecutorStderr)
 	}
 	var result map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		return nil, fmt.Errorf("decode local executor response: %w", err)
 	}
 	return result, nil
+}
+
+func localExecutorRunError(err error, stderr *bytes.Buffer, stderrLimit *limitedBufferWriter) error {
+	if stderrLimit.truncated {
+		return fmt.Errorf("local executor stderr exceeds %d bytes: %w", maxLocalExecutorStderr, err)
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if detail != "" {
+		return fmt.Errorf("local executor failed: %w: %s", err, detail)
+	}
+	return fmt.Errorf("local executor failed: %w", err)
 }
 
 type limitedBufferWriter struct {
