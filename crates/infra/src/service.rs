@@ -2082,8 +2082,26 @@ impl AppService {
                 let Some(facility_code) = input.facility_code.as_deref() else {
                     return Ok((SyncMode::Full, None, None, false));
                 };
-                let Some(latest_month) = self.db.latest_generation_month(facility_code).await?
-                else {
+                let plant = match self
+                    .db
+                    .get_plant_by_facility_code_with_consistency(
+                        facility_code,
+                        Some(ReadConsistency::Strong),
+                    )
+                    .await
+                {
+                    Ok(plant) => plant,
+                    Err(err)
+                        if matches!(
+                            err.downcast_ref::<DatabaseLookupError>(),
+                            Some(DatabaseLookupError::PlantNotFound)
+                        ) =>
+                    {
+                        return Ok((SyncMode::Full, None, None, false));
+                    }
+                    Err(err) => return Err(err),
+                };
+                let Some(latest_month) = self.db.latest_generation_month(&plant.id).await? else {
                     return Ok((SyncMode::Full, None, None, false));
                 };
                 let end_month = current_month_seoul();

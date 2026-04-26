@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -818,6 +818,94 @@ async fn sync_created_plant_bootstraps_creator_asset_permissions() {
         .authorize_gateway_sync_scope("bootstrap-user", "bootstrap-user", Some("FAC-SYNC-CREATED"))
         .await
         .expect("creator can resync sync-created plant");
+}
+
+#[tokio::test]
+async fn delta_sync_uses_internal_plant_id_for_latest_generation_baseline() {
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let collector_requests = Arc::clone(&captured_requests);
+    let (service, db, _db_dir, _artifacts_dir) = build_service_with_collector(move |opts| {
+        let collector_requests = Arc::clone(&collector_requests);
+        async move {
+            collector_requests.lock().expect("capture request").push((
+                opts.facility_code.clone(),
+                opts.start_month.clone(),
+                opts.end_month.clone(),
+                opts.skip_documents,
+            ));
+            mock_collect_snapshot(opts).await
+        }
+    })
+    .await;
+
+    let first_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-DELTA-ID".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create first challenge");
+    let (first_bundle, first_signature) = fake_bundle_and_signature(&first_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: first_challenge.id,
+            challenge_payload: first_challenge.payload,
+            challenge_signature_base64: first_signature,
+            bundle: first_bundle,
+            facility_code: Some("FAC-DELTA-ID".to_owned()),
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("first delta falls back to full sync");
+
+    let plant = db
+        .get_plant_by_facility_code("FAC-DELTA-ID")
+        .await
+        .expect("materialized plant");
+    assert_ne!(plant.id, plant.facility_code);
+
+    let second_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: Some("FAC-DELTA-ID".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create second challenge");
+    let (second_bundle, second_signature) = fake_bundle_and_signature(&second_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: second_challenge.id,
+            challenge_payload: second_challenge.payload,
+            challenge_signature_base64: second_signature,
+            bundle: second_bundle,
+            facility_code: Some("FAC-DELTA-ID".to_owned()),
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("second delta uses existing generation baseline");
+
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].1, None);
+    assert!(!requests[0].3);
+    assert_eq!(requests[1].0.as_deref(), Some("FAC-DELTA-ID"));
+    assert_eq!(requests[1].1.as_deref(), Some("2026-03"));
+    assert!(requests[1].2.is_some());
+    assert!(requests[1].3);
 }
 
 #[tokio::test]
