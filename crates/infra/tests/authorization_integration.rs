@@ -412,6 +412,16 @@ fn assert_challenge_payload_binds_context(
     assert_eq!(payload["signCertSha256Hex"], sign_cert_sha256_hex);
 }
 
+fn decode_challenge_payload_json(challenge_payload: &str) -> Value {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .expect("challenge payload prefix");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode challenge payload");
+    serde_json::from_slice(&raw).expect("challenge payload json")
+}
+
 async fn seed_gateway_scope_fixture(db: &Database) {
     db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
@@ -1810,6 +1820,18 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
     db.upsert_role_action("role-test-plant-sync-execute", "plant.sync.execute")
         .await
         .expect("upsert test sync role action");
+    db.upsert_role(&Role {
+        id: "role-test-plant-profile-read".to_owned(),
+        organization_id: None,
+        code: "plant.profile.read".to_owned(),
+        name: "Plant Profile Read".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert test profile role");
+    db.upsert_role_action("role-test-plant-profile-read", "plant.profile.read")
+        .await
+        .expect("upsert test profile role action");
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::Organization,
@@ -1828,6 +1850,22 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
     .expect("grant organization sync access for seeded plant");
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-profile-read".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant organization profile access for seeded plant");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::User,
         subject_id: "bootstrap-user".to_owned(),
         subject_organization_id: "bootstrap-user".to_owned(),
@@ -1842,6 +1880,46 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
     })
     .await
     .expect("grant user sync access for seeded plant");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-profile-read".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant user profile access for seeded plant");
+
+    let auto_scoped_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("delta".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("auto scoped delta challenge");
+    assert_eq!(auto_scoped_challenge.sync_mode.as_deref(), Some("delta"));
+    assert_eq!(
+        auto_scoped_challenge.start_month.as_deref(),
+        Some("2026-03")
+    );
+    let auto_payload = decode_challenge_payload_json(&auto_scoped_challenge.payload);
+    assert_eq!(auto_payload["facilityCode"], "FAC-BOUND");
 
     let delta_challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {

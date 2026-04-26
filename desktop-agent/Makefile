@@ -27,17 +27,31 @@ $(GARBLE_BIN):
 ifeq ($(GOOS),windows)
   BIN     := $(BIN_DIR)/desktop-agent-$(GOOS)-$(GOARCH).exe
   LDFLAGS := -H=windowsgui
+  WORKER_EXE_EXT := .exe
 else
   BIN     := $(BIN_DIR)/desktop-agent-$(GOOS)-$(GOARCH)
   LDFLAGS :=
+  WORKER_EXE_EXT :=
 endif
 
-ifeq ($(GOHOSTOS),windows)
-  WORKER_HOST_BIN := $(BIN_DIR)/repass-local-worker-$(GOHOSTOS)-$(GOHOSTARCH).exe
-  WORKER_TARGET_BIN := $(ROOT_DIR)/target/release/repass-local-worker.exe
-else
-  WORKER_HOST_BIN := $(BIN_DIR)/repass-local-worker-$(GOHOSTOS)-$(GOHOSTARCH)
-  WORKER_TARGET_BIN := $(ROOT_DIR)/target/release/repass-local-worker
+ifeq ($(GOOS)/$(GOARCH),darwin/arm64)
+  CARGO_BUILD_TARGET ?= aarch64-apple-darwin
+else ifeq ($(GOOS)/$(GOARCH),darwin/amd64)
+  CARGO_BUILD_TARGET ?= x86_64-apple-darwin
+else ifeq ($(GOOS)/$(GOARCH),windows/amd64)
+  CARGO_BUILD_TARGET ?= x86_64-pc-windows-msvc
+else ifeq ($(GOOS)/$(GOARCH),windows/arm64)
+  CARGO_BUILD_TARGET ?= aarch64-pc-windows-msvc
+else ifeq ($(GOOS)/$(GOARCH),linux/amd64)
+  CARGO_BUILD_TARGET ?= x86_64-unknown-linux-gnu
+else ifeq ($(GOOS)/$(GOARCH),linux/arm64)
+  CARGO_BUILD_TARGET ?= aarch64-unknown-linux-gnu
+endif
+
+ifneq ($(strip $(CARGO_BUILD_TARGET)),)
+CARGO_TARGET_FLAGS := --target $(CARGO_BUILD_TARGET)
+WORKER_TARGET_BIN := $(ROOT_DIR)/target/$(CARGO_BUILD_TARGET)/release/repass-local-worker$(WORKER_EXE_EXT)
+WORKER_DIST_BIN := $(BIN_DIR)/repass-local-worker-$(GOOS)-$(GOARCH)$(WORKER_EXE_EXT)
 endif
 
 .PHONY: all build build-plain build-with-worker build-local-worker test vet clean build-windows build-windows-amd64 build-darwin build-darwin-arm64 build-darwin-amd64 build-linux
@@ -66,9 +80,10 @@ build-with-worker: build build-local-worker
 
 build-local-worker:
 	@mkdir -p "$(BIN_DIR)"
-	cd "$(ROOT_DIR)" && "$(CARGO)" build -p app --bin repass-local-worker --release
-	cp "$(WORKER_TARGET_BIN)" "$(WORKER_HOST_BIN)"
-	cp "$(WORKER_TARGET_BIN)" "$(BIN_DIR)/repass-local-worker$(if $(filter windows,$(GOHOSTOS)),.exe,)"
+	@test -n "$(CARGO_BUILD_TARGET)" || { echo "unsupported local worker target GOOS=$(GOOS) GOARCH=$(GOARCH)" >&2; exit 1; }
+	cd "$(ROOT_DIR)" && "$(CARGO)" build -p app --bin repass-local-worker --release $(CARGO_TARGET_FLAGS)
+	cp "$(WORKER_TARGET_BIN)" "$(WORKER_DIST_BIN)"
+	cp "$(WORKER_TARGET_BIN)" "$(BIN_DIR)/repass-local-worker$(WORKER_EXE_EXT)"
 
 # darwin은 Cocoa cgo 의존 때문에 macOS 호스트에서만 동작.
 build-darwin: build-darwin-arm64 build-darwin-amd64

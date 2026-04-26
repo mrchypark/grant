@@ -506,7 +506,8 @@ impl AppService {
                     )
                     .await?;
             } else {
-                self.authorize_gateway_sync_scope(&created_by_user_id, &organization_id, None)
+                facility_code = self
+                    .authorize_gateway_sync_scope(&created_by_user_id, &organization_id, None)
                     .await?;
             }
             let requested_mode = input
