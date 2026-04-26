@@ -345,12 +345,19 @@ fn validate_key_pair(
     Ok(())
 }
 
-fn default_trust_store() -> Result<openssl::x509::store::X509Store> {
-    let mut store_builder = X509StoreBuilder::new().context("create X509 trust store")?;
-    store_builder
-        .set_default_paths()
-        .context("load default X509 trust paths")?;
-    Ok(store_builder.build())
+fn default_trust_store() -> Result<&'static openssl::x509::store::X509Store> {
+    static STORE: OnceLock<Result<openssl::x509::store::X509Store, String>> = OnceLock::new();
+    match STORE.get_or_init(|| {
+        let mut store_builder =
+            X509StoreBuilder::new().map_err(|err| format!("create X509 trust store: {err:#}"))?;
+        store_builder
+            .set_default_paths()
+            .map_err(|err| format!("load default X509 trust paths: {err:#}"))?;
+        Ok(store_builder.build())
+    }) {
+        Ok(store) => Ok(store),
+        Err(message) => bail!("{message}"),
+    }
 }
 
 fn validate_certificate_trust_with_store(

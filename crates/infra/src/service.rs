@@ -463,7 +463,9 @@ impl AppService {
             )
             .await?;
         if challenge.facility_code.is_some() {
-            anyhow::bail!("stored certificate challenges cannot be facility-scoped");
+            return Err(bad_request_error(
+                "stored certificate challenges cannot be facility-scoped",
+            ));
         }
         if let Some(requested_by_user_id) = input
             .requested_by_user_id
@@ -1110,13 +1112,20 @@ impl AppService {
                     };
                     let (existing_objects, persisted_docs) = if effective_mode == SyncMode::Full {
                         let existing_objects = self.db.list_document_objects(&plant.id).await?;
+                        let existing_object_keys =
+                            existing_objects.iter().map(String::as_str).collect();
                         info!(
                             plant_code = plant.facility_code,
                             document_count = snapshot.documents.len(),
                             "persisting documents to object storage"
                         );
                         let persisted_docs = self
-                            .persist_documents(organization_id, &plant.id, &snapshot.documents)
+                            .persist_documents(
+                                organization_id,
+                                &plant.id,
+                                &snapshot.documents,
+                                &existing_object_keys,
+                            )
                             .await?;
                         info!(
                             plant_code = plant.facility_code,
@@ -1129,7 +1138,7 @@ impl AppService {
                         (Vec::new(), Vec::new())
                     };
                     let duration_ms = started.elapsed().as_millis() as i64;
-                    let asset_id = self
+                    let asset_id = match self
                         .db
                         .materialize_kr_rps_sync(KrRpsSyncMaterialization {
                             run_id: &run.id,
@@ -1144,7 +1153,22 @@ impl AppService {
                             documents: &persisted_docs,
                             duration_ms,
                         })
-                        .await?;
+                        .await
+                    {
+                        Ok(asset_id) => asset_id,
+                        Err(err) => {
+                            if effective_mode == SyncMode::Full {
+                                let existing_object_keys =
+                                    existing_objects.iter().map(String::as_str).collect();
+                                self.cleanup_unmaterialized_documents(
+                                    &persisted_docs,
+                                    &existing_object_keys,
+                                )
+                                .await;
+                            }
+                            return Err(err);
+                        }
+                    };
                     if existing_plant.is_none() {
                         if let Some(created_by_user_id) = created_by_user_id {
                             let persisted_plant = self
@@ -2440,23 +2464,65 @@ impl AppService {
         organization_id: &str,
         plant_code: &str,
         docs: &[BridgeDocument],
+        existing_object_keys: &BTreeSet<&str>,
     ) -> Result<Vec<PersistedDocument>> {
         let mut persisted = Vec::with_capacity(docs.len());
         for doc in docs {
             let id = stable_document_id(organization_id, plant_code, doc);
             let category = resolved_document_category(doc);
-            let object_key = format!("{organization_id}/{plant_code}/{id}.pdf");
             let source_path = Path::new(&doc.source_path);
+            let uploaded_sha256 = match sha256_file_hex(source_path).await {
+                Ok(value) => value,
+                Err(err) => {
+                    self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                        .await;
+                    return Err(err).with_context(|| format!("hash document {}", doc.file_name));
+                }
+            };
+            for (field_name, expected_sha256) in [
+                ("outputSha256", doc.output_sha256.as_deref()),
+                ("sourceSha256", doc.source_sha256.as_deref()),
+            ] {
+                let Some(expected_sha256) = expected_sha256 else {
+                    continue;
+                };
+                if expected_sha256 == uploaded_sha256 {
+                    continue;
+                }
+                self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                    .await;
+                return Err(bad_request_error(format!(
+                    "document {} {} mismatch: expected {}, got {}",
+                    doc.file_name, field_name, expected_sha256, uploaded_sha256
+                )));
+            }
+            let source_sha256 = doc
+                .source_sha256
+                .clone()
+                .unwrap_or_else(|| uploaded_sha256.clone());
+            let output_sha256 = doc
+                .output_sha256
+                .clone()
+                .unwrap_or_else(|| uploaded_sha256.clone());
+            let object_version = uploaded_sha256.chars().take(16).collect::<String>();
+            let object_key = format!("{organization_id}/{plant_code}/{id}-{object_version}.pdf");
             info!(
                 plant_code,
                 file_name = doc.file_name.as_str(),
                 object_key = object_key.as_str(),
                 "uploading document"
             );
-            self.artifacts
+            if let Err(err) = self
+                .artifacts
                 .put_file(object_key.clone(), source_path, "application/pdf")
                 .await
-                .with_context(|| format!("upload document {}", doc.file_name))?;
+            {
+                self.delete_unmaterialized_object(&object_key, existing_object_keys)
+                    .await;
+                self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                    .await;
+                return Err(err).with_context(|| format!("upload document {}", doc.file_name));
+            }
             persisted.push(PersistedDocument {
                 id,
                 category,
@@ -2465,17 +2531,51 @@ impl AppService {
                 file_sec_name: doc.file_sec_name.clone(),
                 file_name: doc.file_name.clone(),
                 required: doc.required,
-                source_sha256: doc.source_sha256.clone(),
-                output_sha256: doc
-                    .output_sha256
-                    .clone()
-                    .or_else(|| doc.source_sha256.clone()),
+                source_sha256: Some(source_sha256),
+                output_sha256: Some(output_sha256),
                 object_key,
                 content_type: "application/pdf".to_owned(),
             });
         }
         Ok(persisted)
     }
+
+    async fn cleanup_unmaterialized_documents(
+        &self,
+        docs: &[PersistedDocument],
+        existing_object_keys: &BTreeSet<&str>,
+    ) {
+        for doc in docs {
+            self.delete_unmaterialized_object(&doc.object_key, existing_object_keys)
+                .await;
+        }
+    }
+
+    async fn delete_unmaterialized_object(
+        &self,
+        object_key: &str,
+        existing_object_keys: &BTreeSet<&str>,
+    ) {
+        if existing_object_keys.contains(object_key) {
+            return;
+        }
+        if let Err(err) = self.artifacts.delete_object(object_key).await {
+            warn!(
+                object_key,
+                error = %err,
+                "failed to delete unmaterialized document object"
+            );
+        }
+    }
+}
+
+async fn sha256_file_hex(path: &Path) -> Result<String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read document {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn normalize_active_organization(

@@ -32,7 +32,8 @@ use infra::{
     runtime::HiqliteRuntime,
     service::{
         AppService, CreateCertGatewayChallengeInput, ExecuteEphemeralCrawlInput,
-        IssueCrawlTaskTokenInput, RegisterCertificateFromProofInput, StartCrawlWithTaskTokenInput,
+        IssueCrawlTaskTokenInput, RegisterCertificateFromProofInput, ServiceError,
+        ServiceErrorKind, StartCrawlWithTaskTokenInput,
     },
 };
 use openssl::{
@@ -960,6 +961,10 @@ async fn stored_certificate_challenge_rejects_facility_scope_at_creation() {
     assert!(
         err.to_string()
             .contains("stored certificate challenges cannot be facility-scoped")
+    );
+    assert_eq!(
+        err.downcast_ref::<ServiceError>().map(ServiceError::kind),
+        Some(ServiceErrorKind::BadRequest)
     );
 }
 
