@@ -373,10 +373,10 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		BaseURL:              gatewayBaseURL,
 		OrganizationID:       req.OrganizationID,
 		BearerToken:          req.BearerToken,
-			ActiveOrganizationID: req.ActiveOrganizationID,
-			Mode:                 action,
-			SyncMode:             req.Mode,
-			Origin:               origin,
+		ActiveOrganizationID: req.ActiveOrganizationID,
+		Mode:                 action,
+		SyncMode:             req.Mode,
+		Origin:               origin,
 		BusinessNo:           req.BusinessNo,
 		FacilityCode:         req.FacilityCode,
 		StartMonth:           req.StartMonth,
@@ -400,12 +400,12 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	}
 
 	switch action {
-		case "ephemeral":
-			localPassword := string(decision.Password)
-			syncMode := firstNonEmpty(challenge.SyncMode, req.Mode)
-			startMonth := firstNonEmpty(challenge.StartMonth, req.StartMonth)
-			endMonth := firstNonEmpty(challenge.EndMonth, req.EndMonth)
-			body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
+	case "ephemeral":
+		localPassword := string(decision.Password)
+		syncMode := firstNonEmpty(challenge.SyncMode, req.Mode)
+		startMonth := firstNonEmpty(challenge.StartMonth, req.StartMonth)
+		endMonth := firstNonEmpty(challenge.EndMonth, req.EndMonth)
+		body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
 			BusinessNo:               req.BusinessNo,
@@ -416,11 +416,11 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 			ChallengePayload:         challenge.Payload,
 			ChallengeSignatureBase64: signResult.ChallengeSignatureBase64,
 			FacilityCode:             req.FacilityCode,
-				StartMonth:               startMonth,
-				EndMonth:                 endMonth,
-				Mode:                     syncMode,
-				Bundle:                   signResult.Bundle,
-			})
+			StartMonth:               startMonth,
+			EndMonth:                 endMonth,
+			Mode:                     syncMode,
+			Bundle:                   signResult.Bundle,
+		})
 		return body, http.StatusAccepted, err
 	case "stored":
 		gatewayPassword := string(decision.Password)

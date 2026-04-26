@@ -1307,15 +1307,6 @@ impl AppService {
             )
             .await?;
         let slug = require_non_empty("slug", &input.slug)?;
-        if let Some(conflicting) = self
-            .db
-            .find_client_by_slug_with_consistency(&slug, Some(ReadConsistency::Strong))
-            .await?
-        {
-            if conflicting.id != existing.id {
-                return Err(anyhow!("client slug already exists: {slug}"));
-            }
-        }
         let client = Client {
             id: existing.id,
             organization_id: existing.organization_id,
