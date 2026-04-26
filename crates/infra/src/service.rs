@@ -42,6 +42,7 @@ use uuid::Uuid;
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
 const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
+const STALE_OBJECT_DELETE_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -1172,15 +1173,34 @@ impl AppService {
                             .map(|doc| doc.object_key.as_str())
                             .collect();
                         let mut stale_deletes = tokio::task::JoinSet::new();
+                        let mut active_deletes = 0usize;
                         for object_key in existing_objects {
                             if current_objects.contains(object_key.as_str()) {
                                 continue;
+                            }
+                            if active_deletes >= STALE_OBJECT_DELETE_CONCURRENCY {
+                                if let Some(result) = stale_deletes.join_next().await {
+                                    active_deletes = active_deletes.saturating_sub(1);
+                                    match result {
+                                        Ok((_, Ok(()))) => {}
+                                        Ok((object_key, Err(err))) => {
+                                            warn!(
+                                                "delete stale object {} failed: {}",
+                                                object_key, err
+                                            );
+                                        }
+                                        Err(err) => {
+                                            warn!("delete stale object task failed: {}", err)
+                                        }
+                                    }
+                                }
                             }
                             let artifacts = self.artifacts.clone();
                             stale_deletes.spawn(async move {
                                 let result = artifacts.delete_object(&object_key).await;
                                 (object_key, result)
                             });
+                            active_deletes += 1;
                         }
                         while let Some(result) = stale_deletes.join_next().await {
                             match result {
@@ -1194,9 +1214,17 @@ impl AppService {
                     }
                     let duration_ms = started.elapsed().as_millis() as i64;
                     let finished_at = now_string();
-                    self.db
-                        .finish_sync_run_at(&run.id, "completed", duration_ms, None, &finished_at)
-                        .await?;
+                    if let Err(err) = self
+                        .db
+                        .refresh_completed_sync_run_timing(&run.id, duration_ms, &finished_at)
+                        .await
+                    {
+                        warn!(
+                            run_id = run.id.as_str(),
+                            error = %err,
+                            "failed to refresh completed sync run timing"
+                        );
+                    }
                     item_asset_id = Some(asset_id.clone());
                     info!(
                         "sync completed organization={} plant={} mode={:?} duration_ms={}",

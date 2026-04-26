@@ -3595,6 +3595,24 @@ impl Database {
         Ok(())
     }
 
+    pub async fn refresh_completed_sync_run_timing(
+        &self,
+        run_id: &str,
+        duration_ms: i64,
+        finished_at: &str,
+    ) -> Result<()> {
+        self.runtime
+            .execute(
+                "UPDATE sync_runs
+                 SET finished_at = $1, duration_ms = $2
+                 WHERE id = $3 AND status = 'completed'",
+                params!(finished_at.to_owned(), duration_ms, run_id.to_owned()),
+            )
+            .await
+            .context("refresh completed sync run timing")?;
+        Ok(())
+    }
+
     pub async fn update_sync_run_target(&self, run_id: &str, plant_id: Option<&str>) -> Result<()> {
         self.runtime
             .execute(
