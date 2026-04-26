@@ -976,7 +976,13 @@ func firstNonEmpty(values ...string) string {
 func validateSignedBusinessNo(requested string, signed string) error {
 	requested = digitsOnly(requested)
 	signed = digitsOnly(signed)
-	if requested == "" || signed == "" || requested == signed {
+	if requested == "" {
+		return nil
+	}
+	if signed == "" {
+		return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo is missing")
+	}
+	if requested == signed {
 		return nil
 	}
 	return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")
