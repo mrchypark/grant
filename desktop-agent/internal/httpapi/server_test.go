@@ -35,8 +35,9 @@ var testServerConfig = Config{
 }
 
 type stubNPKIService struct {
-	certificates []npki.CertificateMetadata
-	lastSignReq  npki.SignRequest
+	certificates     []npki.CertificateMetadata
+	signedBusinessNo *string
+	lastSignReq      npki.SignRequest
 }
 
 func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateMetadata, error) {
@@ -46,12 +47,16 @@ func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateM
 func (s *stubNPKIService) Sign(_ context.Context, req npki.SignRequest) (npki.SignResult, error) {
 	req.PasswordBytes = append([]byte(nil), req.PasswordBytes...)
 	s.lastSignReq = req
+	businessNo := "2768603291"
+	if s.signedBusinessNo != nil {
+		businessNo = *s.signedBusinessNo
+	}
 	return npki.SignResult{
 		CertificateID:            "cert-1",
 		Challenge:                req.Challenge,
 		ChallengeSignatureBase64: "c2lnbmF0dXJl",
 		Bundle: npki.ProofBundle{
-			BusinessNo:        "2768603291",
+			BusinessNo:        businessNo,
 			CommonName:        "Test Certificate",
 			SignCertDerBase64: "AQID",
 			SignPriKeyBase64:  "BAUG",
@@ -818,6 +823,103 @@ func TestServerApproveEphemeralRunAllowsMissingCertificateMetadataBusinessNumber
 	}
 	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-cert-business-missing" {
 		t.Fatalf("local executor challenge = %q, want challenge-ephemeral-cert-business-missing", local.lastEphemeral.ChallengeID)
+	}
+}
+
+func TestServerApproveEphemeralRunAllowsMissingSignedBundleBusinessNumber(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-signed-business-missing",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	local := &stubLocalExecutor{}
+	emptySignedBusinessNo := ""
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+			signedBusinessNo: &emptySignedBusinessNo,
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-signed-business-missing" {
+		t.Fatalf("local executor challenge = %q, want challenge-ephemeral-signed-business-missing", local.lastEphemeral.ChallengeID)
+	}
+	if local.lastEphemeral.Bundle.BusinessNo != "" {
+		t.Fatalf("signed bundle businessNo = %q, want empty", local.lastEphemeral.Bundle.BusinessNo)
+	}
+}
+
+func TestServerApproveEphemeralRunRejectsMalformedSignedBundleBusinessNumber(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-signed-business-malformed",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	local := &stubLocalExecutor{}
+	malformedSignedBusinessNo := "biz:2768603291"
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+			signedBusinessNo: &malformedSignedBusinessNo,
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if local.lastEphemeral.ChallengeID != "" {
+		t.Fatalf("local executor was called with challenge %q", local.lastEphemeral.ChallengeID)
 	}
 }
 

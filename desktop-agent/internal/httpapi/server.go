@@ -993,17 +993,31 @@ func challengeMonthBounds(startMonth string, endMonth string) (string, string) {
 
 func validateSignedBusinessNo(requested string, signed string) error {
 	requested = digitsOnly(requested)
+	signedRaw := strings.TrimSpace(signed)
 	signed = digitsOnly(signed)
 	if requested == "" {
 		return nil
 	}
-	if signed == "" {
-		return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo is missing")
+	if signedRaw == "" {
+		return nil
+	}
+	if !isBusinessNoPresentation(signedRaw) {
+		return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")
 	}
 	if requested == signed {
 		return nil
 	}
 	return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")
+}
+
+func isBusinessNoPresentation(value string) bool {
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || r == '-' || r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func digitsOnly(value string) string {
