@@ -10,7 +10,8 @@ use base64::{
 };
 use chrono::Utc;
 use domain::{
-    Plant, Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
+    Agreement, AgreementStatus, AgreementType, Plant, Role, RoleBinding, RoleBindingResourceType,
+    RoleBindingState, RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -439,6 +440,75 @@ async fn grant_test_sync_access(
     })
     .await
     .expect("save user sync binding");
+}
+
+async fn grant_test_delegated_sync_access(
+    db: &Database,
+    grantor_organization_id: &str,
+    grantee_organization_id: &str,
+    user_id: &str,
+    facility_code: &str,
+) {
+    db.upsert_role(&Role {
+        id: "role-test-plant-sync-execute".to_owned(),
+        organization_id: None,
+        code: "plant.sync.execute".to_owned(),
+        name: "Plant Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert test sync role");
+    db.upsert_role_action("role-test-plant-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert test sync action");
+
+    let agreement_id = Uuid::new_v4().simple().to_string();
+    db.upsert_agreement(&Agreement {
+        id: agreement_id.clone(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: grantor_organization_id.to_owned(),
+        grantee_organization_id: grantee_organization_id.to_owned(),
+        status: AgreementStatus::Active,
+        title: "Delegated Sync".to_owned(),
+        reference_no: None,
+        starts_at: None,
+        ends_at: None,
+    })
+    .await
+    .expect("upsert delegated sync agreement");
+
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: grantee_organization_id.to_owned(),
+        subject_organization_id: grantee_organization_id.to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: facility_code.to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: Some(agreement_id),
+        state: RoleBindingState::Active,
+        created_by_user_id: user_id.to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save delegated org sync binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: user_id.to_owned(),
+        subject_organization_id: grantee_organization_id.to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: facility_code.to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: user_id.to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save delegated user sync binding");
 }
 
 fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
@@ -1036,6 +1106,110 @@ async fn local_execution_result_rejects_unlinked_organization_business_number_ov
             .contains("business number"),
         "body = {body}"
     );
+}
+
+#[tokio::test]
+async fn local_execution_result_preserves_existing_plant_owner_for_authorized_non_owner_sync() {
+    let (app, db, _db_dir, _artifacts_dir) = build_app().await;
+    db.upsert_organization_with_owner("owner-org", "Owner Org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("seed owner organization");
+    db.upsert_organization_with_owner(
+        "operator-org",
+        "Operator Org",
+        Some("2768603291"),
+        "Operator Org",
+    )
+    .await
+    .expect("seed operator organization");
+    db.upsert_plant(&Plant {
+        id: "FAC-CROSS".to_owned(),
+        facility_code: "FAC-CROSS".to_owned(),
+        name: "Original Owner Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        contract_no: "CONTRACT-ORIGINAL".to_owned(),
+        address: "Busan".to_owned(),
+        installed_kw: 80.0,
+        rec_start_date: "2025-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("seed owner plant");
+    grant_test_delegated_sync_access(
+        &db,
+        "owner-org",
+        "operator-org",
+        "bootstrap-user",
+        "FAC-CROSS",
+    )
+    .await;
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/operator-org/cert-gateway/challenges",
+            "bootstrap-user",
+            "operator-org",
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-CROSS"
+            }),
+        ))
+        .await
+        .expect("local challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("local challenge payload");
+    let material = proof_material();
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+    let snapshot = local_execution_snapshot("FAC-CROSS");
+    let result_signature = sign_local_execution_result(
+        &material.sign_key,
+        &challenge_json["challengeId"],
+        &challenge_json["payload"],
+        &challenge_json["syncMode"],
+        &snapshot,
+    );
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/operator-org/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "operator-org",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "resultSignatureBase64": result_signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": challenge_json["syncMode"],
+                "snapshot": snapshot
+            }),
+        ))
+        .await
+        .expect("local result response");
+
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
+
+    let plant = db
+        .get_plant_by_facility_code("FAC-CROSS")
+        .await
+        .expect("plant after authorized non-owner sync");
+    assert_eq!(plant.owner_organization_id, "owner-org");
+    assert_eq!(
+        plant.created_by_organization_id.as_deref(),
+        Some("bootstrap-user")
+    );
+    assert_eq!(plant.name, "Plant FAC-CROSS");
+    assert_eq!(plant.contract_no, "CONTRACT-LOCAL");
 }
 
 #[tokio::test]

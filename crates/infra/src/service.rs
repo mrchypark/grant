@@ -1971,12 +1971,31 @@ impl AppService {
         let mut snapshot = snapshot;
         let facility_code = require_safe_facility_code("facilityCode", &snapshot.facility.code)?;
         snapshot.facility.code = facility_code;
+        let (owner_organization_id, created_by_organization_id) = match self
+            .db
+            .get_plant_by_facility_code(&snapshot.facility.code)
+            .await
+        {
+            Ok(existing) => (
+                existing.owner_organization_id,
+                existing.created_by_organization_id,
+            ),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                (organization_id.to_owned(), None)
+            }
+            Err(err) => return Err(err),
+        };
         let plant = Plant {
             id: snapshot.facility.code.clone(),
             facility_code: snapshot.facility.code.clone(),
             name: snapshot.facility.name.clone(),
-            owner_organization_id: organization_id.to_owned(),
-            created_by_organization_id: None,
+            owner_organization_id,
+            created_by_organization_id,
             contract_no: snapshot.facility.contract_no.clone(),
             address: snapshot.facility.address.clone(),
             installed_kw: snapshot.facility.installed_kw,
