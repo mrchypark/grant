@@ -366,6 +366,9 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := validateCertificateBusinessNo(req.BusinessNo, selectedCertificate.BusinessNo); err != nil {
+		return nil, 0, err
+	}
 	challenge, err := s.gateway.CreateChallenge(r.Context(), GatewayChallengeRequest{
 		BaseURL:              gatewayBaseURL,
 		OrganizationID:       req.OrganizationID,
@@ -392,7 +395,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := validateSignedBusinessNo(req.BusinessNo, signResult.Bundle.BusinessNo); err != nil {
+	if err := validateCertificateBusinessNo(req.BusinessNo, signResult.Bundle.BusinessNo); err != nil {
 		return nil, 0, err
 	}
 
@@ -991,20 +994,20 @@ func challengeMonthBounds(startMonth string, endMonth string) (string, string) {
 	return strings.TrimSpace(startMonth), strings.TrimSpace(endMonth)
 }
 
-func validateSignedBusinessNo(requested string, signed string) error {
+func validateCertificateBusinessNo(requested string, certificateBusinessNo string) error {
 	requested = digitsOnly(requested)
-	signedRaw := strings.TrimSpace(signed)
-	signed = digitsOnly(signed)
+	certificateBusinessNoRaw := strings.TrimSpace(certificateBusinessNo)
+	certificateBusinessNo = digitsOnly(certificateBusinessNo)
 	if requested == "" {
 		return nil
 	}
-	if signedRaw == "" {
+	if certificateBusinessNoRaw == "" {
 		return nil
 	}
-	if !isBusinessNoPresentation(signedRaw) {
+	if !isBusinessNoPresentation(certificateBusinessNoRaw) {
 		return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")
 	}
-	if requested == signed {
+	if requested == certificateBusinessNo {
 		return nil
 	}
 	return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")

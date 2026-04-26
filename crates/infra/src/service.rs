@@ -30,7 +30,7 @@ use domain::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error as StdError,
     fmt,
     future::Future,
@@ -2006,11 +2006,6 @@ impl AppService {
                     "listing stale document objects"
                 );
                 let existing_objects = self.db.list_document_objects(&plant.facility_code).await?;
-                for object_key in existing_objects {
-                    if let Err(err) = self.artifacts.delete_object(&object_key).await {
-                        warn!("delete stale object {} failed: {}", object_key, err);
-                    }
-                }
                 info!(
                     plant_code = plant.facility_code,
                     document_count = snapshot.documents.len(),
@@ -2027,6 +2022,18 @@ impl AppService {
                 self.db
                     .replace_documents(&plant.facility_code, &persisted_docs)
                     .await?;
+                let active_objects: BTreeSet<&str> = persisted_docs
+                    .iter()
+                    .map(|doc| doc.object_key.as_str())
+                    .collect();
+                for object_key in existing_objects {
+                    if active_objects.contains(object_key.as_str()) {
+                        continue;
+                    }
+                    if let Err(err) = self.artifacts.delete_object(&object_key).await {
+                        warn!("delete stale object {} failed: {}", object_key, err);
+                    }
+                }
             }
         } else {
             info!(plant_code = plant.facility_code, "upserting delta records");
@@ -2657,12 +2664,11 @@ fn decode_challenge_payload(challenge_payload: &str) -> Result<ChallengePayloadB
 }
 
 fn decode_legacy_challenge_payload(encoded: &str) -> Result<ChallengePayloadBinding> {
-    let mut parts = encoded.splitn(5, ':');
+    let mut parts = encoded.splitn(3, ':');
     let organization_id = parts.next().unwrap_or_default();
     let mode = parts.next().unwrap_or_default();
-    let facility_code = parts.next().unwrap_or_default();
-    let nonce = parts.next().unwrap_or_default();
-    let expires_at = parts.next().unwrap_or_default();
+    let scope = parts.next().unwrap_or_default();
+    let (facility_code, nonce, expires_at) = decode_legacy_challenge_scope(scope)?;
     if organization_id.is_empty() || mode.is_empty() || nonce.is_empty() || expires_at.is_empty() {
         return Err(bad_request_error(
             "cert gateway challenge payload is not base64",
@@ -2682,6 +2688,22 @@ fn decode_legacy_challenge_payload(encoded: &str) -> Result<ChallengePayloadBind
         sign_cert_sha256_hex: None,
         legacy_plaintext: true,
     })
+}
+
+fn decode_legacy_challenge_scope(scope: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = scope.splitn(3, ':');
+    let facility_code = parts.next().unwrap_or_default();
+    let nonce = parts.next().unwrap_or_default();
+    let expires_at = parts.next().unwrap_or_default();
+    if nonce.is_empty()
+        || expires_at.is_empty()
+        || DateTime::parse_from_rfc3339(expires_at).is_err()
+    {
+        return Err(bad_request_error(
+            "cert gateway challenge payload is not base64",
+        ));
+    }
+    Ok((facility_code, nonce, expires_at))
 }
 
 fn validate_optional_binding(
@@ -3013,6 +3035,21 @@ mod tests {
         assert_eq!(payload.nonce, "nonce-1");
         assert_eq!(payload.expires_at, "2026-04-12T00:00:00Z");
         assert!(payload.legacy_plaintext);
+    }
+
+    #[test]
+    fn challenge_payload_decoder_rejects_legacy_facility_codes_with_colons() {
+        let err = match decode_challenge_payload(
+            "cert-gateway:org-1:ephemeral:FAC:001:nonce-1:2026-04-12T00:00:00Z",
+        ) {
+            Ok(_) => panic!("colon-delimited legacy payload must be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("cert gateway challenge payload is not base64")
+        );
     }
 
     #[test]

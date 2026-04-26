@@ -776,6 +776,9 @@ func TestServerApproveEphemeralRunRejectsCertificateBusinessNumberMismatch(t *te
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
+	if gateway.lastChallenge.OrganizationID != "" {
+		t.Fatalf("gateway challenge was created for organization %q", gateway.lastChallenge.OrganizationID)
+	}
 	if local.lastEphemeral.ChallengeID != "" {
 		t.Fatalf("local executor was called with challenge %q", local.lastEphemeral.ChallengeID)
 	}

@@ -402,7 +402,7 @@ ok
 - `/sessions/open`으로 짧은 local session token 발급
 - `/certificates`, `/sign`는 session 없으면 거절
 - `/sign`은 challenge signature와 공개 인증서 identity만 반환하고 `bundle`, `password`, `signPriKeyBase64`, `kmPriKeyBase64`를 반환하지 않는다
-- `/approve-*` 경로는 native approval 뒤에 선택 인증서의 사업자번호가 요청 사업자번호와 충돌하면 challenge 생성/로컬 실행/서버 등록 전에 거부한다
+- `/approve-*` 경로는 native approval 뒤에 선택 인증서 metadata의 사업자번호가 요청 사업자번호와 충돌하면 challenge 생성 전에 거부하고, 서명 후 bundle의 사업자번호가 비어 있지 않은데 요청과 충돌하거나 오염된 형식이면 로컬 실행/서버 등록 전에 거부한다. 사업자번호가 없는 인증서는 gateway challenge의 요청 사업자번호, 조직, origin, scope, 선택 인증서 fingerprint binding으로만 허용한다
 - gateway challenge는 approval origin, 요청 사업자번호, facility/date scope, 선택 인증서 `signCertSha256Hex`를 포함해 발급한다
 - 제품형 high-level SDK는 `/approve-ephemeral-run`, `/approve-stored-registration` 사용
 - 실제 NPKI/GPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
