@@ -375,7 +375,7 @@
 - `organization_id` > 요청 조직 ID
 - `certificate_id` > 저장 인증서 ID
 - `token_hash` > 작업 토큰 해시
-- `scope_json` > 작업 스코프 JSON
+- `scope_json` > 작업 스코프 JSON. `facility_code`는 요청 body 원문이 아니라 service authorization이 확정한 facility scope이며, 생략 요청이 단일 실행 가능 plant로 해석되면 그 facility code가 저장된다.
 - `expires_at` > 만료 시각
 - `used_at` > 사용 완료 시각
 - `created_by_user_id` > 요청 사용자 ID
@@ -383,7 +383,7 @@
 
 ### `plants` > 한국 RPS 호환 발전소 마스터
 
-- `id` > 내부 plant row ID. 새 생성/수집 경로에서는 `facility_code` 원문을 ID로 쓰지 않고, 동일 facility의 동시 최초 sync가 같은 row로 수렴하도록 provider-scoped opaque ID를 쓴다.
+- `id` > 내부 plant row ID. 새 생성/수집 경로에서는 `facility_code` 원문을 ID로 쓰지 않고, 동일 facility의 동시 최초 sync가 같은 row로 수렴하도록 provider-scoped opaque ID를 쓴다. KR RPS adapter는 `plant-` + SHA-256 32 hex prefix를 사용한다.
 - `facility_code` > 외부 RPS 설비 코드
 - `owner_organization_id` > 현재 소유 조직 ID
 - `created_by_organization_id` > 최초 생성 조직 ID
@@ -475,7 +475,7 @@
 - `required` > 필수 제출 문서 여부
 - `source_sha256` > 원본 해시
 - `output_sha256` > 변환/저장 결과 해시
-- `object_key` > blob/object storage 키
+- `object_key` > blob/object storage 키. 수집 저장 경로는 외부 `facility_code`가 아니라 내부 `plants.id`를 key segment로 사용한다.
 - `content_type` > MIME type
 - `updated_at` > 갱신 시각
 
@@ -573,7 +573,7 @@
 - `asset_id`는 내부 비즈니스 로직과 권한 모델이 의존하는 canonical facility ID다.
 - `facility_code`, I-REC project ID, utility meter ID 같은 값은 외부 시스템 식별자다.
 - 외부 설비 코드 변경, 중복 이슈, 소스별 키 차이를 내부 식별자에 전파하지 않기 위해 분리한다.
-- 새 `asset_id`는 KR RPS `facility_code` 원문을 ID로 사용하지 않는다. KR RPS 경로는 기존 `asset_profiles`/`registry_projects` 매핑을 먼저 해석하고, 없으면 동일 facility의 동시 최초 sync가 같은 asset으로 수렴하도록 provider-scoped opaque ID를 발급한다.
+- 새 `asset_id`는 KR RPS `facility_code` 원문을 ID로 사용하지 않는다. KR RPS 경로는 기존 `asset_profiles`/`registry_projects` 매핑을 먼저 해석하고, 없으면 동일 facility의 동시 최초 sync가 같은 asset으로 수렴하도록 provider-scoped opaque ID를 발급한다. 호환 `plants.id`도 같은 이유로 짧은 외부 ID가 아니라 32 hex prefix 이상의 deterministic opaque key를 쓴다.
 - 국가/시장별 외부 ID는 `asset_profiles.external_id` 또는 `registry_projects.external_project_id`에 저장한다.
 - 기존 `plants`/`plant_id`는 한국 RPS 호환 경로로 남아 있지만 `facility_code`와 같은 값으로 취급하지 않는다. 글로벌 권한과 신규 데이터 모델의 기준은 `asset_id`다.
 
@@ -617,7 +617,7 @@
 - 한국 공동인증서를 저장하면 한국 RPS `certificate` credential도 `auth_credentials`에 함께 기록하고, registry account가 확인되는 시점에 `credential_bindings`로 연결한다.
 - registry project가 특정 account에 묶인 뒤에는 저장형 KR RPS credential 사용도 해당 account의 `credential_bindings`를 통과해야 한다.
 - 공동인증서 subject에 사업자번호가 없으면 이미 연결된 legal party나 명시적으로 검증된 조직 business number만 사용할 수 있다. 요청 payload의 `business_no`만으로 새 legal party를 bootstrap하지 않는다.
-- 신뢰 체인 검증이 없는 self-signed/test 인증서는 기본 운영 설정에서 `auth_credentials`로 저장하지 않는다. local/test fixture는 `allow_untrusted_certificates` 설정을 명시적으로 켠다.
+- self-signed/test 인증서는 기본 운영 설정에서 `auth_credentials`로 저장하지 않는다. 기본 설정은 proof bundle의 intermediate DER chain과 시스템 X.509 trust store 기준으로 인증서 체인을 검증하며, local/test fixture만 `allow_untrusted_certificates` 설정을 명시적으로 켠다.
 - 저장형 인증서, 일회성 증명 challenge, 저장형 작업 토큰은 수명과 보안 성격이 다르다.
 - `certificates`는 한국 공동인증서 호환 경로의 장기 보관 대상이고 암호화 저장이 필요하다.
 - `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다.

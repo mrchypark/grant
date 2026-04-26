@@ -181,7 +181,8 @@ Content-Type: application/json
     "signCertDerBase64": "AQID",
     "signPriKeyBase64": "BAUG",
     "kmCertDerBase64": "BwgJ",
-    "kmPriKeyBase64": "CgsM"
+    "kmPriKeyBase64": "CgsM",
+    "certificateChainDerBase64": ["BASE64_INTERMEDIATE_DER"]
   }
 }
 ```
@@ -205,12 +206,13 @@ Content-Type: application/json
     "signCertDerBase64": "AQID",
     "signPriKeyBase64": "BAUG",
     "kmCertDerBase64": "BwgJ",
-    "kmPriKeyBase64": "CgsM"
+    "kmPriKeyBase64": "CgsM",
+    "certificateChainDerBase64": ["BASE64_INTERMEDIATE_DER"]
   }
 }
 ```
 
-`challengeSignatureBase64`는 local desktop agent가 `challengePayload` 원문 바이트를 공동인증서 sign key로 RSA/SHA-256 서명한 값이다. 서버는 `bundle.signCertDerBase64`의 공개키로 이 값을 검증한 뒤에만 challenge를 consume 한다.
+`challengeSignatureBase64`는 local desktop agent가 `challengePayload` 원문 바이트를 공동인증서 sign key로 RSA/SHA-256 서명한 값이다. 서버는 `bundle.signCertDerBase64`의 공개키로 이 값을 검증한 뒤에만 challenge를 consume 한다. 운영 기본값에서는 `certificateChainDerBase64`로 전달된 intermediate chain과 시스템 trust store를 함께 사용해 sign/KM 인증서 신뢰 체인을 검증한다.
 
 성공 시 `201 Created`와 저장된 인증서 메타데이터를 반환한다.
 

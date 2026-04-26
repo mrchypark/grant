@@ -283,6 +283,7 @@ fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, Str
             sign_pri_key: direct_private_key_der(&key),
             km_cert_der: Some(km_cert_der),
             km_pri_key: Some(direct_private_key_der(&km_key)),
+            certificate_chain_der: Vec::new(),
         },
         challenge_signature_base64,
     )
@@ -1618,6 +1619,80 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
     assert_eq!(projection_counts.rate_data, 4);
     assert_eq!(projection_counts.energy_certificates, 1);
 
+    let implicit_ephemeral = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            facility_code: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create implicit ephemeral challenge");
+    let (implicit_bundle, implicit_signature) =
+        fake_bundle_and_signature(&implicit_ephemeral.payload);
+    let implicit_run = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: implicit_ephemeral.id,
+            challenge_payload: implicit_ephemeral.payload,
+            challenge_signature_base64: implicit_signature,
+            bundle: implicit_bundle,
+            facility_code: None,
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("execute implicit facility ephemeral crawl");
+    let implicit_plant_id = implicit_run
+        .plant_id
+        .as_deref()
+        .expect("implicit ephemeral plant id");
+    assert_eq!(
+        db.get_plant_by_id_with_consistency(implicit_plant_id, Some(ReadConsistency::Strong))
+            .await
+            .expect("implicit ephemeral plant")
+            .facility_code,
+        "FAC-002"
+    );
+
+    let implicit_token = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: cert.id.clone(),
+            facility_code: None,
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: SyncMode::Delta,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("issue implicit facility crawl task token");
+    let implicit_started = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            token: implicit_token.token,
+        })
+        .await
+        .expect("consume implicit facility crawl task token");
+    let implicit_started_plant_id = implicit_started
+        .plant_id
+        .as_deref()
+        .expect("implicit token plant id");
+    assert_eq!(
+        db.get_plant_by_id_with_consistency(
+            implicit_started_plant_id,
+            Some(ReadConsistency::Strong)
+        )
+        .await
+        .expect("implicit token plant")
+        .facility_code,
+        "FAC-002"
+    );
+
     let issued = service
         .issue_crawl_task_token(IssueCrawlTaskTokenInput {
             organization_id: "bootstrap-user".to_owned(),
@@ -1708,6 +1783,7 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
                 sign_pri_key: direct_private_key_der(&expired_key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await
@@ -1743,6 +1819,7 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
                 sign_pri_key: direct_private_key_der(&valid_key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await
@@ -1783,6 +1860,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
                 sign_pri_key: direct_private_key_der(&stored_key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await
@@ -1819,6 +1897,7 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
                 sign_pri_key: direct_private_key_der(&ephemeral_key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
             facility_code: Some("FAC-011".to_owned()),
             start_month: Some("2026-01".to_owned()),
@@ -1869,6 +1948,7 @@ async fn certificate_gateway_accepts_certificate_without_subject_business_no() {
                 sign_pri_key: direct_private_key_der(&key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await
@@ -1915,6 +1995,7 @@ async fn certificate_gateway_rejects_no_subject_business_number_for_unlinked_org
                 sign_pri_key: direct_private_key_der(&key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await
@@ -1963,6 +2044,7 @@ async fn certificate_gateway_rejects_stored_proof_when_certificate_business_no_m
                 sign_pri_key: direct_private_key_der(&key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await
@@ -2012,6 +2094,7 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
                 sign_pri_key: direct_private_key_der(&key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
             facility_code: Some("FAC-013".to_owned()),
             start_month: Some("2026-01".to_owned()),
@@ -2067,6 +2150,7 @@ async fn certificate_gateway_rejects_subject_business_number_for_unlinked_organi
                 sign_pri_key: direct_private_key_der(&key),
                 km_cert_der: None,
                 km_pri_key: None,
+                certificate_chain_der: Vec::new(),
             },
         })
         .await

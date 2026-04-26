@@ -68,6 +68,7 @@ fn dek_encrypted_bundle_round_trips_after_kms_wrap_and_unwrap() {
         sign_pri_key: vec![4, 5, 6],
         km_cert_der: Some(vec![7, 8, 9]),
         km_pri_key: Some(vec![10, 11, 12]),
+        certificate_chain_der: vec![vec![13, 14, 15]],
     };
     let kms = EnvKmsProvider::from_config(&KmsConfig {
         active_key_id: "local-dev-v1".to_owned(),
@@ -90,6 +91,7 @@ fn dek_encrypted_bundle_round_trips_after_kms_wrap_and_unwrap() {
     assert_eq!(decrypted.sign_cert_der, vec![1, 2, 3]);
     assert_eq!(decrypted.km_cert_der, Some(vec![7, 8, 9]));
     assert_eq!(decrypted.km_pri_key, Some(vec![10, 11, 12]));
+    assert_eq!(decrypted.certificate_chain_der, vec![vec![13, 14, 15]]);
 }
 
 #[test]
@@ -102,6 +104,7 @@ fn dek_encrypted_bundle_round_trips_without_km_material() {
         sign_pri_key: vec![4, 5, 6],
         km_cert_der: None,
         km_pri_key: None,
+        certificate_chain_der: Vec::new(),
     };
     let kms = EnvKmsProvider::from_config(&KmsConfig {
         active_key_id: "local-dev-v1".to_owned(),
@@ -166,10 +169,35 @@ fn validate_certificate_bundle_accepts_direct_pkcs8_private_keys() {
                 .expect("sign key pkcs8"),
             km_cert_der: Some(km_certificate.to_der().expect("km certificate der")),
             km_pri_key: Some(km_private_key.private_key_to_pkcs8().expect("km key pkcs8")),
+            certificate_chain_der: Vec::new(),
         },
         true,
     )
     .expect("validate direct private key bundle");
+}
+
+#[test]
+fn validate_certificate_bundle_rejects_untrusted_self_signed_certificates_by_default() {
+    let (sign_certificate, sign_private_key) = test_certificate_and_key();
+
+    let err = validate_certificate_bundle(
+        &CertificateBundle {
+            business_no: "2768603291".to_owned(),
+            password: "unused-password".to_owned(),
+            common_name: "Untrusted Test".to_owned(),
+            sign_cert_der: sign_certificate.to_der().expect("sign certificate der"),
+            sign_pri_key: sign_private_key
+                .private_key_to_pkcs8()
+                .expect("sign key pkcs8"),
+            km_cert_der: None,
+            km_pri_key: None,
+            certificate_chain_der: Vec::new(),
+        },
+        false,
+    )
+    .expect_err("self-signed fixture must not validate against system trust");
+
+    assert!(err.to_string().contains("signCert.der is not trusted"));
 }
 
 #[test]

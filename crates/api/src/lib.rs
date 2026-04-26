@@ -244,6 +244,8 @@ struct ProofBundleRequest {
     sign_pri_key_base64: String,
     km_cert_der_base64: Option<String>,
     km_pri_key_base64: Option<String>,
+    #[serde(default)]
+    certificate_chain_der_base64: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1144,6 +1146,21 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         )));
     }
 
+    let certificate_chain_der = body
+        .certificate_chain_der_base64
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            base64::engine::general_purpose::STANDARD
+                .decode(value.trim())
+                .map_err(|_| {
+                    ApiError::bad_request(anyhow!(
+                        "invalid base64 for certificateChainDerBase64[{idx}]"
+                    ))
+                })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+
     Ok(CertificateBundle {
         business_no: body.business_no,
         password: body.password,
@@ -1152,6 +1169,7 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         sign_pri_key: decode_base64_field("signPriKeyBase64", &body.sign_pri_key_base64)?,
         km_cert_der,
         km_pri_key,
+        certificate_chain_der,
     })
 }
 
@@ -1502,7 +1520,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiError, decode_base64_field, ensure_active_organization_path_matches, map_certificate,
+        ApiError, ProofBundleRequest, decode_base64_field, ensure_active_organization_path_matches,
+        map_certificate, map_proof_bundle,
     };
     use anyhow::anyhow;
     use axum::http::StatusCode;
@@ -1566,6 +1585,26 @@ mod tests {
         let decoded = decode_base64_field("signCertDerBase64", "  Zm9vYmFy\n")
             .expect("trimmed base64 should decode");
         assert_eq!(decoded, b"foobar");
+    }
+
+    #[test]
+    fn proof_bundle_maps_certificate_chain_entries() {
+        let bundle = map_proof_bundle(ProofBundleRequest {
+            business_no: "2768603291".to_owned(),
+            common_name: "Test Certificate".to_owned(),
+            password: "password".to_owned(),
+            sign_cert_der_base64: "AQID".to_owned(),
+            sign_pri_key_base64: "BAUG".to_owned(),
+            km_cert_der_base64: None,
+            km_pri_key_base64: None,
+            certificate_chain_der_base64: vec!["BwgJ".to_owned(), "CgsM".to_owned()],
+        })
+        .expect("proof bundle should decode certificate chain");
+
+        assert_eq!(
+            bundle.certificate_chain_der,
+            vec![vec![7, 8, 9], vec![10, 11, 12]]
+        );
     }
 
     #[test]

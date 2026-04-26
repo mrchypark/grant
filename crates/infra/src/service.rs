@@ -551,12 +551,13 @@ impl AppService {
             (Some(challenge_facility_code), _) => Some(challenge_facility_code.to_owned()),
             (None, None) => None,
         };
-        self.authorize_gateway_sync_scope(
-            &challenge.created_by_user_id,
-            &organization_id,
-            effective_facility_code.as_deref(),
-        )
-        .await?;
+        let authorized_facility_code = self
+            .authorize_gateway_sync_scope(
+                &challenge.created_by_user_id,
+                &organization_id,
+                effective_facility_code.as_deref(),
+            )
+            .await?;
         validate_sync_request_shape(
             &input.mode,
             input.start_month.as_deref(),
@@ -572,7 +573,7 @@ impl AppService {
             false,
             business_no,
             input.bundle,
-            effective_facility_code,
+            authorized_facility_code,
             input.start_month,
             input.end_month,
             input.mode,
@@ -606,13 +607,14 @@ impl AppService {
         if certificate.active != 1 {
             return Err(bad_request_error("certificate is inactive"));
         }
-        self.authorize_gateway_sync_scope(
-            &created_by_user_id,
-            &organization_id,
-            input.facility_code.as_deref(),
-        )
-        .await?;
-        if let Some(facility_code) = input.facility_code.as_deref() {
+        let authorized_facility_code = self
+            .authorize_gateway_sync_scope(
+                &created_by_user_id,
+                &organization_id,
+                input.facility_code.as_deref(),
+            )
+            .await?;
+        if let Some(facility_code) = authorized_facility_code.as_deref() {
             if self
                 .db
                 .get_plant_by_facility_code(facility_code)
@@ -630,7 +632,7 @@ impl AppService {
 
         let scope = CrawlTaskScope {
             certificate_id: certificate.id,
-            facility_code: input.facility_code,
+            facility_code: authorized_facility_code,
             start_month: input.start_month,
             end_month: input.end_month,
             mode: sync_mode_label(&input.mode).to_owned(),
@@ -757,13 +759,14 @@ impl AppService {
         let scope: CrawlTaskScope =
             serde_json::from_str(&issued.scope_json).context("parse crawl task scope")?;
         let mode = parse_sync_mode(&scope.mode)?;
-        self.authorize_gateway_sync_scope(
-            &issued.created_by_user_id,
-            &organization_id,
-            scope.facility_code.as_deref(),
-        )
-        .await?;
-        if let Some(facility_code) = scope.facility_code.as_deref() {
+        let authorized_facility_code = self
+            .authorize_gateway_sync_scope(
+                &issued.created_by_user_id,
+                &organization_id,
+                scope.facility_code.as_deref(),
+            )
+            .await?;
+        if let Some(facility_code) = authorized_facility_code.as_deref() {
             if self
                 .db
                 .get_plant_by_facility_code(facility_code)
@@ -814,7 +817,7 @@ impl AppService {
                     true,
                     business_no,
                     bundle,
-                    scope.facility_code,
+                    authorized_facility_code,
                     scope.start_month,
                     scope.end_month,
                     mode,
@@ -1090,11 +1093,7 @@ impl AppService {
                             "persisting documents to object storage"
                         );
                         let persisted_docs = self
-                            .persist_documents(
-                                organization_id,
-                                &plant.facility_code,
-                                &snapshot.documents,
-                            )
+                            .persist_documents(organization_id, &plant.id, &snapshot.documents)
                             .await?;
                         info!(
                             plant_code = plant.facility_code,
@@ -2632,7 +2631,7 @@ fn hash_hex(value: &str) -> String {
 fn kr_rps_plant_id(facility_code: &str) -> String {
     format!(
         "plant-{}",
-        &hash_hex(&format!("kr_rps:{facility_code}"))[..16]
+        &hash_hex(&format!("kr_rps:{facility_code}"))[..32]
     )
 }
 

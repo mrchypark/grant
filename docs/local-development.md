@@ -95,7 +95,8 @@ cat > /tmp/cert-upload.json <<JSON
   "signCertDerBase64": "${SIGN_CERT}",
   "signPriKeyBase64": "${SIGN_PRI}",
   "kmCertDerBase64": "${KM_CERT}",
-  "kmPriKeyBase64": "${KM_PRI}"
+  "kmPriKeyBase64": "${KM_PRI}",
+  "certificateChainDerBase64": []
 }
 JSON
 

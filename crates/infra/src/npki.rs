@@ -12,7 +12,10 @@ use openssl::{
     sign::Verifier,
     stack::Stack,
     symm::{Cipher, Crypter, Mode},
-    x509::X509,
+    x509::{
+        X509, X509StoreContext,
+        store::{X509StoreBuilder, X509StoreRef},
+    },
 };
 use sha1::{Digest, Sha1};
 use simple_asn1::{ASN1Block, ASN1Class, BigUint, OID, from_der};
@@ -170,11 +173,6 @@ pub fn validate_certificate_bundle(
     bundle: &CertificateBundle,
     allow_untrusted: bool,
 ) -> Result<()> {
-    if !allow_untrusted {
-        bail!(
-            "trusted certificate chain validation is required; set CERTD_ALLOW_UNTRUSTED_CERTIFICATES=true only for local development"
-        );
-    }
     validate_key_pair(
         &bundle.sign_cert_der,
         &bundle.sign_pri_key,
@@ -192,6 +190,16 @@ pub fn validate_certificate_bundle(
         )?,
         (None, None) => {}
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
+    }
+    if !allow_untrusted {
+        validate_certificate_trust(
+            &bundle.sign_cert_der,
+            "signCert.der",
+            &bundle.certificate_chain_der,
+        )?;
+        if let Some(km_cert_der) = &bundle.km_cert_der {
+            validate_certificate_trust(km_cert_der, "kmCert.der", &bundle.certificate_chain_der)?;
+        }
     }
     Ok(())
 }
@@ -326,6 +334,45 @@ fn validate_key_pair(
     let private_key = load_private_key_material(private_key_der, password, key_name)?.private_key;
     if !private_key.public_eq(&certificate_public_key) {
         bail!("{key_name} does not match {cert_name}");
+    }
+    Ok(())
+}
+
+fn validate_certificate_trust(
+    cert_der: &[u8],
+    cert_name: &str,
+    certificate_chain_der: &[Vec<u8>],
+) -> Result<()> {
+    let mut store_builder = X509StoreBuilder::new().context("create X509 trust store")?;
+    store_builder
+        .set_default_paths()
+        .context("load default X509 trust paths")?;
+    let store = store_builder.build();
+    validate_certificate_trust_with_store(cert_der, cert_name, certificate_chain_der, &store)
+}
+
+fn validate_certificate_trust_with_store(
+    cert_der: &[u8],
+    cert_name: &str,
+    certificate_chain_der: &[Vec<u8>],
+    store: &X509StoreRef,
+) -> Result<()> {
+    let certificate = X509::from_der(cert_der).with_context(|| format!("parse {cert_name}"))?;
+    let mut chain = Stack::new().context("create certificate chain")?;
+    for (idx, chain_cert_der) in certificate_chain_der.iter().enumerate() {
+        chain
+            .push(
+                X509::from_der(chain_cert_der)
+                    .with_context(|| format!("parse certificateChainDer[{idx}]"))?,
+            )
+            .with_context(|| format!("add certificateChainDer[{idx}] to chain"))?;
+    }
+    let mut context = X509StoreContext::new().context("create X509 store context")?;
+    let trusted = context
+        .init(&store, &certificate, &chain, |ctx| ctx.verify_cert())
+        .with_context(|| format!("verify {cert_name} trust chain"))?;
+    if !trusted {
+        bail!("{cert_name} is not trusted: {}", context.error());
     }
     Ok(())
 }
@@ -536,15 +583,20 @@ fn biguint_to_u64(value: &BigUint) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::verify_challenge_signature;
+    use super::{validate_certificate_trust_with_store, verify_challenge_signature};
     use base64::{Engine, engine::general_purpose::STANDARD};
     use openssl::{
         asn1::Asn1Time,
+        bn::BigNum,
         hash::MessageDigest,
         pkey::{PKey, Private},
         rsa::Rsa,
         sign::Signer,
-        x509::{X509Builder, X509NameBuilder},
+        x509::{
+            X509, X509Builder, X509NameBuilder,
+            extension::{BasicConstraints, KeyUsage},
+            store::X509StoreBuilder,
+        },
     };
 
     #[test]
@@ -557,6 +609,39 @@ mod tests {
         let err = verify_challenge_signature(&cert_der, payload, &signature)
             .expect_err("future certificate should be rejected");
         assert!(err.to_string().contains("not yet valid"));
+    }
+
+    #[test]
+    fn validate_certificate_trust_accepts_leaf_with_intermediate_chain() {
+        let root_key = generate_key();
+        let intermediate_key = generate_key();
+        let leaf_key = generate_key();
+        let root = create_ca_certificate("Root Test CA", &root_key, None, None, 1);
+        let intermediate = create_ca_certificate(
+            "Intermediate Test CA",
+            &intermediate_key,
+            Some(&root),
+            Some(&root_key),
+            2,
+        );
+        let leaf = create_leaf_certificate(
+            "Leaf Test Certificate",
+            &leaf_key,
+            &intermediate,
+            &intermediate_key,
+            3,
+        );
+        let mut store_builder = X509StoreBuilder::new().expect("store builder");
+        store_builder.add_cert(root).expect("add root");
+        let store = store_builder.build();
+
+        validate_certificate_trust_with_store(
+            &leaf.to_der().expect("leaf der"),
+            "signCert.der",
+            &[intermediate.to_der().expect("intermediate der")],
+            &store,
+        )
+        .expect("leaf should validate through supplied intermediate");
     }
 
     fn create_sign_cert_der_with_validity(
@@ -587,6 +672,116 @@ mod tests {
             .sign(key, MessageDigest::sha256())
             .expect("sign cert");
         builder.build().to_der().expect("cert der")
+    }
+
+    fn generate_key() -> PKey<Private> {
+        PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key")
+    }
+
+    fn create_ca_certificate(
+        common_name: &str,
+        key: &PKey<Private>,
+        issuer_cert: Option<&X509>,
+        issuer_key: Option<&PKey<Private>>,
+        serial: u32,
+    ) -> X509 {
+        let name = certificate_name(common_name);
+        let signing_key = issuer_key.unwrap_or(key);
+        let mut builder = base_certificate_builder(serial, key);
+        builder.set_subject_name(&name).expect("set subject");
+        builder
+            .set_issuer_name(
+                issuer_cert
+                    .map(|cert| cert.subject_name())
+                    .unwrap_or_else(|| name.as_ref()),
+            )
+            .expect("set issuer");
+        builder
+            .append_extension(
+                BasicConstraints::new()
+                    .critical()
+                    .ca()
+                    .build()
+                    .expect("ca basic constraints"),
+            )
+            .expect("append ca basic constraints");
+        builder
+            .append_extension(
+                KeyUsage::new()
+                    .critical()
+                    .key_cert_sign()
+                    .crl_sign()
+                    .build()
+                    .expect("ca key usage"),
+            )
+            .expect("append ca key usage");
+        builder
+            .sign(signing_key, MessageDigest::sha256())
+            .expect("sign ca cert");
+        builder.build()
+    }
+
+    fn create_leaf_certificate(
+        common_name: &str,
+        key: &PKey<Private>,
+        issuer_cert: &X509,
+        issuer_key: &PKey<Private>,
+        serial: u32,
+    ) -> X509 {
+        let name = certificate_name(common_name);
+        let mut builder = base_certificate_builder(serial, key);
+        builder.set_subject_name(&name).expect("set subject");
+        builder
+            .set_issuer_name(issuer_cert.subject_name())
+            .expect("set issuer");
+        builder
+            .append_extension(
+                BasicConstraints::new()
+                    .critical()
+                    .build()
+                    .expect("leaf basic constraints"),
+            )
+            .expect("append leaf basic constraints");
+        builder
+            .append_extension(
+                KeyUsage::new()
+                    .critical()
+                    .digital_signature()
+                    .build()
+                    .expect("leaf key usage"),
+            )
+            .expect("append leaf key usage");
+        builder
+            .sign(issuer_key, MessageDigest::sha256())
+            .expect("sign leaf cert");
+        builder.build()
+    }
+
+    fn base_certificate_builder(serial: u32, key: &PKey<Private>) -> X509Builder {
+        let mut builder = X509Builder::new().expect("x509 builder");
+        builder.set_version(2).expect("set version");
+        let serial = BigNum::from_u32(serial)
+            .expect("serial bignum")
+            .to_asn1_integer()
+            .expect("serial asn1");
+        builder.set_serial_number(&serial).expect("set serial");
+        builder.set_pubkey(key).expect("set pubkey");
+        let not_before = Asn1Time::days_from_now(0).expect("not before");
+        let not_after = Asn1Time::days_from_now(365).expect("not after");
+        builder
+            .set_not_before(not_before.as_ref())
+            .expect("set not before");
+        builder
+            .set_not_after(not_after.as_ref())
+            .expect("set not after");
+        builder
+    }
+
+    fn certificate_name(common_name: &str) -> openssl::x509::X509Name {
+        let mut name = X509NameBuilder::new().expect("name builder");
+        name.append_entry_by_text("CN", common_name)
+            .expect("append cn");
+        name.build()
     }
 
     fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
