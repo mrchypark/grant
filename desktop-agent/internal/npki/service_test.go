@@ -514,6 +514,7 @@ func TestServiceBusinessNumberDoesNotFallbackToHeuristicDigits(t *testing.T) {
 		CertificateID: bundleCertificateID(fixture.path),
 		Challenge:     "challenge-1",
 		Password:      "secret-password",
+		BusinessNo:    "2768603291",
 	})
 	if err != nil {
 		t.Fatalf("Sign() error = %v", err)

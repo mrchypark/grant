@@ -998,6 +998,67 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
   }
 });
 
+test("runEphemeralWithEscrowedBrowserCertificate() does not reuse caller months after full challenge resolution", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        challengeId: "browser-challenge-full-1",
+        mode: "ephemeral",
+        syncMode: "full",
+        facilityCode: "FAC-BOUND",
+        nonce: "nonce-browser-full-1",
+        payload: "cert-gateway:test",
+        expiresAt: "2026-04-20T00:00:00Z",
+      }, 201),
+    ({ init }) => {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.mode, "full");
+      assert.equal(body.facilityCode, "FAC-BOUND");
+      assert.equal("startMonth" in body, false);
+      assert.equal("endMonth" in body, false);
+      return jsonResponse({
+        id: "browser-sync-full-1",
+        organizationId: "org-1",
+        plantId: "FAC-101",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 777,
+      }, 202);
+    },
+  ]);
+
+  try {
+    const sdk = new WebSdk({
+      gatewayBaseUrl: "https://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+      activeOrganizationId: "org-1",
+    });
+
+    await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
+      certificateFiles: [
+        fileWithBytes("signCert.der", base64Bytes(FIXTURE_SIGN_CERT_DER_BASE64)),
+        fileWithBytes("signPri.key", base64Bytes(FIXTURE_SIGN_PRI_BASE64)),
+        fileWithBytes("kmCert.der", Uint8Array.of(4, 5, 6)),
+        fileWithBytes("kmPri.key", Uint8Array.of(7, 8, 9)),
+      ],
+      businessNo: "1111111111",
+      password: "test-password",
+      facilityCode: " FAC-101 ",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      mode: "delta",
+      escrow: true,
+    });
+
+    assert.equal(mock.calls.length, 2);
+    assert.equal(JSON.parse(String(mock.calls[0].init?.body)).syncMode, "delta");
+  } finally {
+    mock.restore();
+  }
+});
+
 function fileWithPath(path: string, contents: string): File {
   const file = new File([contents], path.split(/[\\/]/).pop() ?? path);
   Object.defineProperty(file, "webkitRelativePath", {

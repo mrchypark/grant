@@ -225,8 +225,8 @@ export class WebSdk {
       challengeSignatureBase64: proof.challengeSignatureBase64,
       bundle: proof.bundle,
       facilityCode: trimOptional(challenge.facilityCode) ?? trimOptional(input.facilityCode),
-      startMonth: trimOptional(challenge.startMonth) ?? trimOptional(input.startMonth),
-      endMonth: trimOptional(challenge.endMonth) ?? trimOptional(input.endMonth),
+      startMonth: trimOptional(challenge.startMonth),
+      endMonth: trimOptional(challenge.endMonth),
       mode: (trimOptional(challenge.syncMode) as SyncMode | undefined) ?? requestedSyncMode,
     });
   }

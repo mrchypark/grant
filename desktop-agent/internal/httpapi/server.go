@@ -366,9 +366,6 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := validateSignedBusinessNo(req.BusinessNo, selectedCertificate.BusinessNo); err != nil {
-		return nil, 0, err
-	}
 	challenge, err := s.gateway.CreateChallenge(r.Context(), GatewayChallengeRequest{
 		BaseURL:              gatewayBaseURL,
 		OrganizationID:       req.OrganizationID,
@@ -404,8 +401,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		localPassword := string(decision.Password)
 		syncMode := firstNonEmpty(challenge.SyncMode, req.Mode)
 		facilityCode := firstNonEmpty(challenge.FacilityCode, req.FacilityCode)
-		startMonth := firstNonEmpty(challenge.StartMonth, req.StartMonth)
-		endMonth := firstNonEmpty(challenge.EndMonth, req.EndMonth)
+		startMonth, endMonth := challengeMonthBounds(challenge.StartMonth, challenge.EndMonth)
 		body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
@@ -971,6 +967,10 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func challengeMonthBounds(startMonth string, endMonth string) (string, string) {
+	return strings.TrimSpace(startMonth), strings.TrimSpace(endMonth)
 }
 
 func validateSignedBusinessNo(requested string, signed string) error {

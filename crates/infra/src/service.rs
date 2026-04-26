@@ -19,7 +19,6 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
-use bytes::Bytes;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
@@ -31,7 +30,13 @@ use domain::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap, error::Error as StdError, fmt, future::Future, path::Path, pin::Pin,
+    collections::BTreeMap,
+    error::Error as StdError,
+    fmt,
+    future::Future,
+    io::{self, Write},
+    path::Path,
+    pin::Pin,
     sync::Arc,
 };
 use tracing::{error, info, warn};
@@ -2180,12 +2185,10 @@ impl AppService {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(content_base64)
-                .map(Bytes::from)
-                .map_err(|_| bad_request_error("document contentBase64 is not valid base64"))?;
+            let decoded = decode_content_base64_to_tempfile(content_base64)
+                .with_context(|| format!("decode document {}", doc.file_name))?;
             self.artifacts
-                .put_bytes(object_key, bytes, content_type)
+                .put_file(object_key, decoded.path(), content_type)
                 .await
                 .with_context(|| format!("upload document {}", doc.file_name))?;
             return Ok(());
@@ -2198,6 +2201,25 @@ impl AppService {
             .with_context(|| format!("upload document {}", doc.file_name))?;
         Ok(())
     }
+}
+
+fn decode_content_base64_to_tempfile(content_base64: &str) -> Result<tempfile::NamedTempFile> {
+    let mut decoder = base64::read::DecoderReader::new(
+        content_base64.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    let mut output = tempfile::NamedTempFile::new().context("create document decode tempfile")?;
+    io::copy(&mut decoder, &mut output)
+        .map_err(|err| {
+            if err.kind() == io::ErrorKind::InvalidData {
+                bad_request_error("document contentBase64 is not valid base64")
+            } else {
+                anyhow!(err)
+            }
+        })
+        .context("decode document contentBase64")?;
+    output.flush().context("flush document decode tempfile")?;
+    Ok(output)
 }
 
 fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
@@ -2887,9 +2909,10 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
-        document_content_type, document_source_path, estimated_base64_decoded_len,
-        normalize_optional_text, require_local_execution_document_contents,
-        select_organization_business_no, validate_month_format,
+        decode_content_base64_to_tempfile, document_content_type, document_source_path,
+        estimated_base64_decoded_len, normalize_optional_text,
+        require_local_execution_document_contents, select_organization_business_no,
+        validate_month_format,
     };
     use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
     use chrono::{DateTime, FixedOffset};
@@ -2953,6 +2976,24 @@ mod tests {
             estimated_base64_decoded_len("UERGLUNPTlRFTlQ=").expect("estimate"),
             11
         );
+    }
+
+    #[test]
+    fn content_base64_decoder_streams_to_tempfile() {
+        let file = decode_content_base64_to_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
+        let contents = std::fs::read(file.path()).expect("read decoded tempfile");
+        assert_eq!(contents, b"PDF-CONTENT");
+    }
+
+    #[test]
+    fn content_base64_decoder_rejects_invalid_base64() {
+        let err =
+            decode_content_base64_to_tempfile("not valid base64").expect_err("invalid base64");
+        assert!(err.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("document contentBase64 is not valid base64")
+        }));
     }
 
     #[test]

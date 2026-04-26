@@ -116,16 +116,20 @@ impl ArtifactStore {
                 })
             }
             Self::S3 { client, bucket } => {
-                let bytes = fs::read(path.as_ref())
+                let metadata = fs::metadata(path.as_ref())
                     .await
-                    .with_context(|| format!("read artifact file {}", path.as_ref().display()))?;
-                let body = ByteStream::from(bytes.clone());
+                    .with_context(|| format!("stat artifact file {}", path.as_ref().display()))?;
+                let body = ByteStream::from_path(path.as_ref())
+                    .await
+                    .with_context(|| {
+                        format!("open artifact file stream {}", path.as_ref().display())
+                    })?;
                 client
                     .put_object()
                     .bucket(bucket)
                     .key(&object_key)
                     .content_type(content_type)
-                    .content_length(bytes.len() as i64)
+                    .content_length(metadata.len() as i64)
                     .body(body)
                     .send()
                     .await

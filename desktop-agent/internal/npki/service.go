@@ -230,17 +230,12 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 			return SignResult{}, err
 		}
 
-		businessNo := metadata.BusinessNo
-		if businessNo == "" {
-			businessNo = digitsOnly(req.BusinessNo)
-		}
-
 		return SignResult{
 			CertificateID:            bundle.id,
 			Challenge:                req.Challenge,
 			ChallengeSignatureBase64: challengeSignatureBase64,
 			Bundle: ProofBundle{
-				BusinessNo:        businessNo,
+				BusinessNo:        metadata.BusinessNo,
 				CommonName:        metadata.CommonName,
 				SignCertDerBase64: base64.StdEncoding.EncodeToString(files.signCertDER),
 				SignPriKeyBase64:  base64.StdEncoding.EncodeToString(files.signPriKey),
@@ -258,17 +253,12 @@ func (s *Service) Sign(_ context.Context, req SignRequest) (SignResult, error) {
 			return SignResult{}, err
 		}
 
-		businessNo := metadata.BusinessNo
-		if businessNo == "" {
-			businessNo = digitsOnly(req.BusinessNo)
-		}
-
 		return SignResult{
 			CertificateID:            bundle.id,
 			Challenge:                req.Challenge,
 			ChallengeSignatureBase64: challengeSignatureBase64,
 			Bundle: ProofBundle{
-				BusinessNo:        businessNo,
+				BusinessNo:        metadata.BusinessNo,
 				CommonName:        metadata.CommonName,
 				SignCertDerBase64: base64.StdEncoding.EncodeToString(files.signCertDER),
 				SignPriKeyBase64:  base64.StdEncoding.EncodeToString(files.signPriKeyDER),

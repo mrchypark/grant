@@ -510,6 +510,14 @@ func TestSummarizeGatewayErrorValueDropsNonJSONValues(t *testing.T) {
 	}
 }
 
+func TestChallengeMonthBoundsPreservesChallengeValuesForFullSync(t *testing.T) {
+	startMonth, endMonth := challengeMonthBounds(" 2026-02 ", " 2026-04 ")
+
+	if startMonth != "2026-02" || endMonth != "2026-04" {
+		t.Fatalf("bounds = %q/%q, want 2026-02/2026-04", startMonth, endMonth)
+	}
+}
+
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{
@@ -517,8 +525,6 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 			Payload:      "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z",
 			SyncMode:     "full",
 			FacilityCode: "FAC-BOUND",
-			StartMonth:   "2026-02",
-			EndMonth:     "2026-04",
 		},
 	}
 	local := &stubLocalExecutor{}
@@ -608,11 +614,11 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	if local.lastEphemeral.FacilityCode != "FAC-BOUND" {
 		t.Fatalf("facilityCode = %q, want FAC-BOUND", local.lastEphemeral.FacilityCode)
 	}
-	if local.lastEphemeral.StartMonth != "2026-02" {
-		t.Fatalf("startMonth = %q, want 2026-02", local.lastEphemeral.StartMonth)
+	if local.lastEphemeral.StartMonth != "" {
+		t.Fatalf("startMonth = %q, want empty for challenge full sync", local.lastEphemeral.StartMonth)
 	}
-	if local.lastEphemeral.EndMonth != "2026-04" {
-		t.Fatalf("endMonth = %q, want 2026-04", local.lastEphemeral.EndMonth)
+	if local.lastEphemeral.EndMonth != "" {
+		t.Fatalf("endMonth = %q, want empty for challenge full sync", local.lastEphemeral.EndMonth)
 	}
 	if local.lastEphemeral.Mode != "full" {
 		t.Fatalf("mode = %q, want full", local.lastEphemeral.Mode)
@@ -708,7 +714,7 @@ func TestServerApproveEphemeralRunRejectsCertificateBusinessNumberMismatch(t *te
 	}
 }
 
-func TestServerApproveEphemeralRunRejectsMissingCertificateBusinessNumberWhenRequested(t *testing.T) {
+func TestServerApproveEphemeralRunAllowsMissingCertificateMetadataBusinessNumberWhenSignedBundleMatches(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{
 			ChallengeID: "challenge-ephemeral-cert-business-missing",
@@ -745,11 +751,11 @@ func TestServerApproveEphemeralRunRejectsMissingCertificateBusinessNumberWhenReq
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	if local.lastEphemeral.ChallengeID != "" {
-		t.Fatalf("local executor was called with challenge %q", local.lastEphemeral.ChallengeID)
+	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-cert-business-missing" {
+		t.Fatalf("local executor challenge = %q, want challenge-ephemeral-cert-business-missing", local.lastEphemeral.ChallengeID)
 	}
 }
 
