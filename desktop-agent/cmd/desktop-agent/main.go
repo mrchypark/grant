@@ -86,20 +86,24 @@ func localExecutorPath() string {
 		return ""
 	}
 	dir := filepath.Dir(exe)
-	suffix := ""
-	if runtime.GOOS == "windows" {
-		suffix = ".exe"
-	}
-	candidates := []string{
-		filepath.Join(dir, "repass-local-worker"+suffix),
-		filepath.Join(dir, "repass-local-worker-"+runtime.GOOS+"-"+runtime.GOARCH+suffix),
-	}
+	candidates := localExecutorCandidates(dir, runtime.GOOS, runtime.GOARCH)
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate
 		}
 	}
 	return ""
+}
+
+func localExecutorCandidates(dir string, goos string, goarch string) []string {
+	suffix := ""
+	if goos == "windows" {
+		suffix = ".exe"
+	}
+	return []string{
+		filepath.Join(dir, "repass-local-worker-"+goos+"-"+goarch+suffix),
+		filepath.Join(dir, "repass-local-worker"+suffix),
+	}
 }
 
 func loadOrCreateSessionSecret() ([]byte, error) {

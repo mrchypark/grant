@@ -89,20 +89,20 @@ build-local-worker:
 build-darwin: build-darwin-arm64 build-darwin-amd64
 
 build-darwin-arm64:
-	$(MAKE) build GOOS=darwin GOARCH=arm64
+	$(MAKE) build-with-worker GOOS=darwin GOARCH=arm64
 
 build-darwin-amd64:
-	$(MAKE) build GOOS=darwin GOARCH=amd64
+	$(MAKE) build-with-worker GOOS=darwin GOARCH=amd64
 
 # Official Windows GUI release target. Additional Windows architectures need
 # matching manifest .syso resources before being treated as release artifacts.
 build-windows: build-windows-amd64
 
 build-windows-amd64:
-	$(MAKE) build GOOS=windows GOARCH=amd64
+	$(MAKE) build-with-worker GOOS=windows GOARCH=amd64
 
 build-linux:
-	$(MAKE) build GOOS=linux GOARCH=amd64
+	$(MAKE) build-with-worker GOOS=linux GOARCH=amd64
 
 clean:
 	rm -rf $(BIN_DIR)

@@ -6,7 +6,10 @@ use infra::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
@@ -87,9 +90,10 @@ async fn run() -> Result<()> {
     .await
     .context("collect local RPS snapshot")?;
 
+    let document_root = run.temp_dir.path().to_path_buf();
     let mut snapshot = run.snapshot;
     if should_collect_documents(req.mode.as_deref()) {
-        embed_document_contents(&mut snapshot)?;
+        embed_document_contents(&mut snapshot, &document_root)?;
     } else {
         snapshot.documents.clear();
     }
@@ -120,10 +124,11 @@ fn should_collect_documents(mode: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-fn embed_document_contents(snapshot: &mut BridgeSnapshot) -> Result<()> {
+fn embed_document_contents(snapshot: &mut BridgeSnapshot, document_root: &Path) -> Result<()> {
     let mut total_bytes = 0_u64;
     for doc in &mut snapshot.documents {
-        let size = std::fs::metadata(&doc.source_path)
+        let document_path = resolve_local_document_path(document_root, &doc.source_path)?;
+        let size = std::fs::metadata(&document_path)
             .with_context(|| format!("stat local document {}", doc.source_path))?
             .len();
         if size > MAX_DOCUMENT_BYTES {
@@ -140,7 +145,7 @@ fn embed_document_contents(snapshot: &mut BridgeSnapshot) -> Result<()> {
                 MAX_TOTAL_DOCUMENT_BYTES
             );
         }
-        let bytes = std::fs::read(&doc.source_path)
+        let bytes = std::fs::read(&document_path)
             .with_context(|| format!("read local document {}", doc.source_path))?;
         let sha256 = sha256_hex(&bytes);
         if doc
@@ -166,6 +171,17 @@ fn embed_document_contents(snapshot: &mut BridgeSnapshot) -> Result<()> {
         doc.source_path.clear();
     }
     Ok(())
+}
+
+fn resolve_local_document_path(document_root: &Path, source_path: &str) -> Result<PathBuf> {
+    let root = std::fs::canonicalize(document_root)
+        .with_context(|| format!("resolve local document root {}", document_root.display()))?;
+    let path = std::fs::canonicalize(source_path)
+        .with_context(|| format!("resolve local document {source_path}"))?;
+    if !path.starts_with(&root) {
+        bail!("local document {source_path} is outside the collector workspace");
+    }
+    Ok(path)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -397,7 +413,7 @@ mod tests {
             content_type: None,
         });
 
-        embed_document_contents(&mut snapshot).expect("embed document");
+        embed_document_contents(&mut snapshot, dir.path()).expect("embed document");
         let doc = &snapshot.documents[0];
         assert_eq!(doc.source_path, "");
         assert_eq!(doc.content_base64.as_deref(), Some("UERGLUNPTlRFTlQ="));
@@ -432,8 +448,37 @@ mod tests {
             content_type: None,
         });
 
-        let err = embed_document_contents(&mut snapshot).expect_err("oversized document");
+        let err =
+            embed_document_contents(&mut snapshot, dir.path()).expect_err("oversized document");
         assert!(err.to_string().contains("exceeds"));
+        assert!(snapshot.documents[0].content_base64.is_none());
+    }
+
+    #[test]
+    fn embed_document_contents_rejects_paths_outside_collector_workspace() {
+        let collector_dir = tempfile::tempdir().expect("collector tempdir");
+        let outside_dir = tempfile::tempdir().expect("outside tempdir");
+        let outside_path = outside_dir.path().join("secret.pdf");
+        std::fs::write(&outside_path, b"SECRET").expect("write outside fixture");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-OUTSIDE".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "secret.pdf".to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: outside_path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        let err = embed_document_contents(&mut snapshot, collector_dir.path())
+            .expect_err("outside document path");
+        assert!(err.to_string().contains("outside the collector workspace"));
         assert!(snapshot.documents[0].content_base64.is_none());
     }
 
@@ -492,7 +537,8 @@ mod tests {
             },
         ];
 
-        let err = embed_document_contents(&mut snapshot).expect_err("oversized document set");
+        let err =
+            embed_document_contents(&mut snapshot, dir.path()).expect_err("oversized document set");
         assert!(err.to_string().contains("documents exceed"));
         assert!(snapshot.documents[2].content_base64.is_none());
     }
