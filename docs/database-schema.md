@@ -181,8 +181,8 @@
 - `organization_id` > 요청 조직 ID
 - `mode` > `stored` 또는 `ephemeral`
 - `nonce` > 서명 대상 nonce
-- `payload_hash` > challenge payload 해시
-- `facility_code` > 현재는 선택 입력, 향후 메타/스코프용
+- `payload_hash` > `cert-gateway:` payload 원문 SHA-256 해시. payload는 canonical JSON을 URL-safe base64로 감싼 값이며 `organizationId`, `mode`, `nonce`, `expiresAt`를 기본으로 포함하고, 요청에 있으면 `origin`, `businessNo`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶는다.
+- `facility_code` > challenge가 특정 발전소 실행 스코프에 묶인 경우의 발전소 코드
 - `expires_at` > 만료 시각
 - `consumed_at` > 1회 사용 완료 시각
 - `created_by_user_id` > 요청 사용자 ID
@@ -357,7 +357,7 @@
 
 - 저장형 인증서, 일회성 증명 challenge, 저장형 작업 토큰은 수명과 보안 성격이 다르다.
 - `certificates`는 장기 보관 대상이고 암호화 저장이 필요하다.
-- `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다.
+- `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다. payload hash는 사용자가 승인한 origin/scope/certificate fingerprint가 서명 대상과 분리되지 않도록 묶는다.
 - `crawl_task_tokens`는 저장형 인증서로 작업을 위임할 때만 쓰는 짧은 수명 capability다.
 - 이 셋을 분리해야 만료, 재사용 방지, 감사 추적을 명확히 할 수 있다.
 

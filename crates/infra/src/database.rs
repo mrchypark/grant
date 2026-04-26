@@ -2095,13 +2095,11 @@ impl Database {
                      active = $10,
                      created_by_user_id = $11,
                      updated_at = $12
-                 WHERE id = $1
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM clients AS conflicting
-                       WHERE conflicting.slug = $3
-                         AND conflicting.id <> $1
-                   )",
+	                 WHERE id = $1
+	                   AND NOT EXISTS (
+	                       SELECT 1 FROM clients existing
+	                       WHERE existing.slug = $3 AND existing.id != $1
+	                   )",
                 params!(
                     client.id.clone(),
                     client.organization_id.clone(),
@@ -2127,7 +2125,14 @@ impl Database {
             {
                 return Err(anyhow!("client not found: {}", client.id));
             }
-            return Err(anyhow!("client slug already exists: {}", client.slug));
+            if let Some(conflicting) = self
+                .find_client_by_slug_with_consistency(&client.slug, Some(ReadConsistency::Strong))
+                .await?
+            {
+                if conflicting.id != client.id {
+                    return Err(anyhow!("client slug already exists: {}", client.slug));
+                }
+            }
         }
         Ok(())
     }

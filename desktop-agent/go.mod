@@ -1,10 +1,11 @@
 module desktop-agent
 
-go 1.26
+go 1.26.2
 
 require (
 	github.com/deatil/go-cryptobin v1.1.1013
 	github.com/getlantern/systray v1.2.2
+	golang.org/x/sys v0.43.0
 	software.sslmate.com/src/go-pkcs12 v0.7.1
 )
 
@@ -18,5 +19,4 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	golang.org/x/crypto v0.31.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
 )

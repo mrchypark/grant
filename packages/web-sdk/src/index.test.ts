@@ -93,6 +93,12 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
     });
     const challenge = await sdk.createChallenge("org-1", {
       mode: "ephemeral",
+      origin: "http://127.0.0.1:4173",
+      businessNo: "2768603291",
+      facilityCode: "FAC-001",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      signCertSha256Hex: "sha256-cert-1",
     });
 
     assert.equal(challenge.challengeId, "challenge-1");
@@ -100,6 +106,41 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
     assert.equal(
       String(mock.calls[0].input),
       "https://gateway.local/api/v1/organizations/org-1/cert-gateway/challenges",
+    );
+    assert.deepEqual(JSON.parse(String(mock.calls[0].init?.body)), {
+      mode: "ephemeral",
+      origin: "http://127.0.0.1:4173",
+      businessNo: "2768603291",
+      facilityCode: "FAC-001",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      signCertSha256Hex: "sha256-cert-1",
+    });
+  } finally {
+    mock.restore();
+  }
+});
+
+test("gateway paths escape organization and certificate identifiers", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        crawlTaskToken: "token-1",
+        expiresAt: "2026-04-09T00:01:00Z",
+      }, 201),
+  ]);
+
+  try {
+    const sdk = new WebSdk({
+      gatewayBaseUrl: "https://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    await sdk.raw.gateway.issueCrawlTaskToken("org/../evil", "cert/../evil");
+
+    assert.equal(
+      String(mock.calls[0].input),
+      "https://gateway.local/api/v1/organizations/org%2F..%2Fevil/certificates/cert%2F..%2Fevil/crawl-tokens",
     );
   } finally {
     mock.restore();

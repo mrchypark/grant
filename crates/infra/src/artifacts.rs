@@ -137,6 +137,48 @@ impl ArtifactStore {
         }
     }
 
+    pub async fn put_bytes(
+        &self,
+        object_key: String,
+        bytes: Bytes,
+        content_type: &str,
+    ) -> Result<ArtifactObject> {
+        match self {
+            Self::FileSystem { root_dir } => {
+                let dest = root_dir.join(&object_key);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("create artifact parent {}", parent.display()))?;
+                }
+                fs::write(&dest, &bytes)
+                    .await
+                    .with_context(|| format!("write artifact to {}", dest.display()))?;
+                Ok(ArtifactObject {
+                    object_key,
+                    content_type: content_type.to_owned(),
+                })
+            }
+            Self::S3 { client, bucket } => {
+                let body = ByteStream::from(bytes.clone());
+                client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(&object_key)
+                    .content_type(content_type)
+                    .content_length(bytes.len() as i64)
+                    .body(body)
+                    .send()
+                    .await
+                    .with_context(|| format!("put object {object_key}"))?;
+                Ok(ArtifactObject {
+                    object_key,
+                    content_type: content_type.to_owned(),
+                })
+            }
+        }
+    }
+
     pub async fn get_bytes(&self, object_key: &str) -> Result<Bytes> {
         match self {
             Self::FileSystem { root_dir } => fs::read(root_dir.join(object_key))

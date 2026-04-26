@@ -11,7 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -29,8 +32,11 @@ type approvalPrompter interface {
 
 type gatewayExecutor interface {
 	CreateChallenge(context.Context, GatewayChallengeRequest) (challengeResponse, error)
-	RunEphemeral(context.Context, GatewayEphemeralRequest) (map[string]any, error)
 	RegisterStored(context.Context, GatewayStoredRegistrationRequest) (map[string]any, error)
+}
+
+type localExecutor interface {
+	RunEphemeral(context.Context, LocalEphemeralRequest) (map[string]any, error)
 }
 
 type Config struct {
@@ -41,10 +47,14 @@ type Config struct {
 }
 
 var ErrApprovalRejected = errors.New("approval rejected")
+var ErrLocalExecutorUnavailable = errors.New("local executor is not configured")
 var errMethodNotAllowed = errors.New("method not allowed")
 
 const maxJSONBodyBytes int64 = 1024 * 1024
+const maxLocalExecutorBytes = 64 * 1024 * 1024
+const maxLocalExecutorStderr = 64 * 1024
 const gatewayRequestTimeout = 5 * time.Minute
+const localExecutorTimeout = 5 * time.Minute
 
 type httpStatusError struct {
 	status  int
@@ -88,23 +98,6 @@ type ApprovalActionRequest struct {
 	Mode                 string `json:"mode,omitempty"`
 }
 
-type GatewayEphemeralRequest struct {
-	BaseURL                  string
-	OrganizationID           string
-	BusinessNo               string
-	Password                 string
-	BearerToken              string
-	ActiveOrganizationID     string
-	ChallengeID              string
-	ChallengePayload         string
-	ChallengeSignatureBase64 string
-	FacilityCode             string
-	StartMonth               string
-	EndMonth                 string
-	Mode                     string
-	Bundle                   npki.ProofBundle
-}
-
 type GatewayStoredRegistrationRequest struct {
 	BaseURL                  string
 	OrganizationID           string
@@ -118,19 +111,43 @@ type GatewayStoredRegistrationRequest struct {
 	Bundle                   npki.ProofBundle
 }
 
+type LocalEphemeralRequest struct {
+	BaseURL                  string           `json:"gatewayBaseUrl"`
+	OrganizationID           string           `json:"organizationId"`
+	BusinessNo               string           `json:"businessNo,omitempty"`
+	Password                 string           `json:"password"`
+	BearerToken              string           `json:"bearerToken,omitempty"`
+	ActiveOrganizationID     string           `json:"activeOrganizationId,omitempty"`
+	ChallengeID              string           `json:"challengeId"`
+	ChallengePayload         string           `json:"challengePayload"`
+	ChallengeSignatureBase64 string           `json:"challengeSignatureBase64"`
+	FacilityCode             string           `json:"facilityCode,omitempty"`
+	StartMonth               string           `json:"startMonth,omitempty"`
+	EndMonth                 string           `json:"endMonth,omitempty"`
+	Mode                     string           `json:"mode,omitempty"`
+	Bundle                   npki.ProofBundle `json:"bundle"`
+}
+
 type GatewayChallengeRequest struct {
 	BaseURL              string
 	OrganizationID       string
 	BearerToken          string
 	ActiveOrganizationID string
 	Mode                 string
+	SyncMode             string
+	Origin               string
+	BusinessNo           string
 	FacilityCode         string
+	StartMonth           string
+	EndMonth             string
+	SignCertSHA256Hex    string
 }
 
 type Server struct {
 	npki           npkiService
 	approver       approvalPrompter
 	gateway        gatewayExecutor
+	local          localExecutor
 	gatewayBaseURL string
 	mux            *http.ServeMux
 	allowedOrigins map[string]struct{}
@@ -148,11 +165,15 @@ type sessionPayload struct {
 	Nonce  string `json:"nonce"`
 }
 
-func NewServer(service npkiService, approver approvalPrompter, gateway gatewayExecutor, cfg Config) *Server {
+func NewServer(service npkiService, approver approvalPrompter, gateway gatewayExecutor, local localExecutor, cfg Config) *Server {
+	if local == nil {
+		local = unavailableLocalExecutor{}
+	}
 	server := &Server{
 		npki:           service,
 		approver:       approver,
 		gateway:        gateway,
+		local:          local,
 		gatewayBaseURL: strings.TrimRight(strings.TrimSpace(cfg.GatewayBaseURL), "/"),
 		mux:            http.NewServeMux(),
 		allowedOrigins: allowlistFromConfig(cfg.AllowedOrigins),
@@ -227,6 +248,9 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	case req.Challenge == "":
 		writeError(w, http.StatusBadRequest, "challenge must not be empty")
 		return
+	case !strings.HasPrefix(req.Challenge, "cert-gateway:"):
+		writeError(w, http.StatusBadRequest, "challenge must be a cert-gateway payload")
+		return
 	case strings.TrimSpace(req.Password) == "":
 		if req.Password == "" && strings.HasPrefix(req.CertificateID, "pkcs12:") {
 			break
@@ -249,7 +273,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, signResponseFromResult(result))
 }
 
 func (s *Server) handleOpenSession(w http.ResponseWriter, r *http.Request) {
@@ -322,18 +346,6 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
-	challenge, err := s.gateway.CreateChallenge(r.Context(), GatewayChallengeRequest{
-		BaseURL:              gatewayBaseURL,
-		OrganizationID:       req.OrganizationID,
-		BearerToken:          req.BearerToken,
-		ActiveOrganizationID: req.ActiveOrganizationID,
-		Mode:                 action,
-		FacilityCode:         req.FacilityCode,
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	certificates, err := s.npki.ListCertificates(r.Context())
 	if err != nil {
@@ -350,6 +362,30 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		return nil, 0, err
 	}
 	defer zeroBytes(decision.Password)
+	selectedCertificate, err := findCertificateByID(certificates, decision.CertificateID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := validateSignedBusinessNo(req.BusinessNo, selectedCertificate.BusinessNo); err != nil {
+		return nil, 0, err
+	}
+	challenge, err := s.gateway.CreateChallenge(r.Context(), GatewayChallengeRequest{
+		BaseURL:              gatewayBaseURL,
+		OrganizationID:       req.OrganizationID,
+		BearerToken:          req.BearerToken,
+			ActiveOrganizationID: req.ActiveOrganizationID,
+			Mode:                 action,
+			SyncMode:             req.Mode,
+			Origin:               origin,
+		BusinessNo:           req.BusinessNo,
+		FacilityCode:         req.FacilityCode,
+		StartMonth:           req.StartMonth,
+		EndMonth:             req.EndMonth,
+		SignCertSHA256Hex:    selectedCertificate.SignCertSHA256Hex,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
 	signResult, err := s.npki.Sign(r.Context(), npki.SignRequest{
 		CertificateID: decision.CertificateID,
 		Challenge:     challenge.Payload,
@@ -359,26 +395,32 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := validateSignedBusinessNo(req.BusinessNo, signResult.Bundle.BusinessNo); err != nil {
+		return nil, 0, err
+	}
 
 	switch action {
-	case "ephemeral":
-		gatewayPassword := string(decision.Password)
-		body, err := s.gateway.RunEphemeral(r.Context(), GatewayEphemeralRequest{
+		case "ephemeral":
+			localPassword := string(decision.Password)
+			syncMode := firstNonEmpty(challenge.SyncMode, req.Mode)
+			startMonth := firstNonEmpty(challenge.StartMonth, req.StartMonth)
+			endMonth := firstNonEmpty(challenge.EndMonth, req.EndMonth)
+			body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
 			BusinessNo:               req.BusinessNo,
-			Password:                 gatewayPassword,
+			Password:                 localPassword,
 			BearerToken:              req.BearerToken,
 			ActiveOrganizationID:     req.ActiveOrganizationID,
 			ChallengeID:              challenge.ChallengeID,
 			ChallengePayload:         challenge.Payload,
 			ChallengeSignatureBase64: signResult.ChallengeSignatureBase64,
 			FacilityCode:             req.FacilityCode,
-			StartMonth:               req.StartMonth,
-			EndMonth:                 req.EndMonth,
-			Mode:                     req.Mode,
-			Bundle:                   signResult.Bundle,
-		})
+				StartMonth:               startMonth,
+				EndMonth:                 endMonth,
+				Mode:                     syncMode,
+				Bundle:                   signResult.Bundle,
+			})
 		return body, http.StatusAccepted, err
 	case "stored":
 		gatewayPassword := string(decision.Password)
@@ -415,6 +457,19 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+func signResponseFromResult(result npki.SignResult) map[string]any {
+	return map[string]any{
+		"certificateId":            result.CertificateID,
+		"challenge":                result.Challenge,
+		"challengeSignatureBase64": result.ChallengeSignatureBase64,
+		"certificate": map[string]any{
+			"businessNo":        result.Bundle.BusinessNo,
+			"commonName":        result.Bundle.CommonName,
+			"signCertDerBase64": result.Bundle.SignCertDerBase64,
+		},
+	}
+}
+
 func writeApprovalError(w http.ResponseWriter, err error) {
 	var statusErr *httpStatusError
 	if errors.As(err, &statusErr) {
@@ -425,6 +480,8 @@ func writeApprovalError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrApprovalRejected):
 		status = http.StatusForbidden
+	case errors.Is(err, ErrLocalExecutorUnavailable):
+		status = http.StatusNotImplemented
 	case errors.Is(err, npki.ErrCertificateNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, npki.ErrInvalidPassword):
@@ -505,14 +562,62 @@ func (s *Server) trustedGatewayBaseURL(requestValue string) (string, error) {
 	if s.gatewayBaseURL == "" {
 		return "", newHTTPStatusError(http.StatusBadRequest, "gateway backend is not configured")
 	}
-	requested := strings.TrimRight(strings.TrimSpace(requestValue), "/")
-	if requested != "" && requested != s.gatewayBaseURL {
+	configured, err := normalizeTrustedGatewayBaseURL(s.gatewayBaseURL)
+	if err != nil {
+		return "", err
+	}
+	requested := strings.TrimSpace(requestValue)
+	if requested != "" {
+		normalizedRequested, err := normalizeTrustedGatewayBaseURL(requested)
+		if err != nil {
+			return "", err
+		}
+		if normalizedRequested != configured {
+			return "", newHTTPStatusError(
+				http.StatusBadRequest,
+				"gatewayBaseUrl does not match configured gateway backend",
+			)
+		}
+	}
+	return configured, nil
+}
+
+func normalizeTrustedGatewayBaseURL(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", newHTTPStatusError(http.StatusBadRequest, "gatewayBaseUrl must be an absolute URL")
+	}
+	if parsed.User != nil {
+		return "", newHTTPStatusError(http.StatusBadRequest, "gatewayBaseUrl must not include userinfo")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", newHTTPStatusError(http.StatusBadRequest, "gatewayBaseUrl must not include query or fragment")
+	}
+	switch parsed.Scheme {
+	case "https":
+	case "http":
+		if !isLoopbackHost(parsed.Hostname()) {
+			return "", newHTTPStatusError(http.StatusBadRequest, "gatewayBaseUrl must use https except for loopback http")
+		}
+	default:
 		return "", newHTTPStatusError(
 			http.StatusBadRequest,
-			"gatewayBaseUrl does not match configured gateway backend",
+			"gatewayBaseUrl must use https except for loopback http",
 		)
 	}
-	return s.gatewayBaseURL, nil
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if parsed.RawPath != "" {
+		parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	}
+	return parsed.String(), nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func allowlistFromConfig(origins []string) map[string]struct{} {
@@ -525,6 +630,15 @@ func allowlistFromConfig(origins []string) map[string]struct{} {
 		allowlist[trimmed] = struct{}{}
 	}
 	return allowlist
+}
+
+func findCertificateByID(certificates []npki.CertificateMetadata, certificateID string) (npki.CertificateMetadata, error) {
+	for _, certificate := range certificates {
+		if certificate.ID == certificateID {
+			return certificate, nil
+		}
+	}
+	return npki.CertificateMetadata{}, npki.ErrCertificateNotFound
 }
 
 func newSessionManager(secret []byte, ttl time.Duration) sessionManager {
@@ -619,6 +733,77 @@ func randomNonce() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
 }
 
+type unavailableLocalExecutor struct{}
+
+func (unavailableLocalExecutor) RunEphemeral(context.Context, LocalEphemeralRequest) (map[string]any, error) {
+	return nil, ErrLocalExecutorUnavailable
+}
+
+type commandLocalExecutor struct {
+	path string
+}
+
+func NewCommandLocalExecutor(path string) localExecutor {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return unavailableLocalExecutor{}
+	}
+	return commandLocalExecutor{path: path}
+}
+
+func (c commandLocalExecutor) RunEphemeral(ctx context.Context, req LocalEphemeralRequest) (map[string]any, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, localExecutorTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.path)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	stdoutLimit := &limitedBufferWriter{w: &stdout, limit: maxLocalExecutorBytes}
+	stderrLimit := &limitedBufferWriter{w: &stderr, limit: maxLocalExecutorStderr}
+	cmd.Stdout = stdoutLimit
+	cmd.Stderr = stderrLimit
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return nil, fmt.Errorf("local executor failed: %w: %s", err, detail)
+		}
+		return nil, fmt.Errorf("local executor failed: %w", err)
+	}
+	if stdoutLimit.truncated {
+		return nil, fmt.Errorf("local executor response exceeds %d bytes", maxLocalExecutorBytes)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return nil, fmt.Errorf("decode local executor response: %w", err)
+	}
+	return result, nil
+}
+
+type limitedBufferWriter struct {
+	w         *bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (l *limitedBufferWriter) Write(p []byte) (int, error) {
+	remaining := l.limit - l.w.Len()
+	if remaining <= 0 {
+		l.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = l.w.Write(p[:remaining])
+		l.truncated = true
+		return len(p), nil
+	}
+	_, _ = l.w.Write(p)
+	return len(p), nil
+}
+
 type httpGatewayExecutor struct {
 	client *http.Client
 }
@@ -633,46 +818,10 @@ func (h httpGatewayExecutor) CreateChallenge(ctx context.Context, req GatewayCha
 	return h.createChallenge(ctx, req)
 }
 
-func (h httpGatewayExecutor) RunEphemeral(ctx context.Context, req GatewayEphemeralRequest) (map[string]any, error) {
-	body := map[string]any{
-		"challengeId":              req.ChallengeID,
-		"challengePayload":         req.ChallengePayload,
-		"challengeSignatureBase64": req.ChallengeSignatureBase64,
-		"bundle": map[string]any{
-			"businessNo":        firstNonEmpty(req.Bundle.BusinessNo, req.BusinessNo),
-			"password":          req.Password,
-			"commonName":        req.Bundle.CommonName,
-			"signCertDerBase64": req.Bundle.SignCertDerBase64,
-			"signPriKeyBase64":  req.Bundle.SignPriKeyBase64,
-			"kmCertDerBase64":   req.Bundle.KMCertDerBase64,
-			"kmPriKeyBase64":    req.Bundle.KMPriKeyBase64,
-		},
-	}
-	if req.FacilityCode != "" {
-		body["facilityCode"] = req.FacilityCode
-	}
-	if req.StartMonth != "" {
-		body["startMonth"] = req.StartMonth
-	}
-	if req.EndMonth != "" {
-		body["endMonth"] = req.EndMonth
-	}
-	if req.Mode != "" {
-		body["mode"] = req.Mode
-	}
-	return h.postJSON(ctx, gatewayRequest{
-		BaseURL:              req.BaseURL,
-		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/ephemeral-executions", req.OrganizationID),
-		BearerToken:          req.BearerToken,
-		ActiveOrganizationID: req.ActiveOrganizationID,
-		Body:                 body,
-	})
-}
-
 func (h httpGatewayExecutor) RegisterStored(ctx context.Context, req GatewayStoredRegistrationRequest) (map[string]any, error) {
 	return h.postJSON(ctx, gatewayRequest{
 		BaseURL:              req.BaseURL,
-		Path:                 fmt.Sprintf("/api/v1/organizations/%s/certificates", req.OrganizationID),
+		Path:                 fmt.Sprintf("/api/v1/organizations/%s/certificates", url.PathEscape(req.OrganizationID)),
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
 		Body: map[string]any{
@@ -703,6 +852,9 @@ type gatewayRequest struct {
 type challengeResponse struct {
 	ChallengeID string `json:"challengeId"`
 	Payload     string `json:"payload"`
+	SyncMode    string `json:"syncMode,omitempty"`
+	StartMonth  string `json:"startMonth,omitempty"`
+	EndMonth    string `json:"endMonth,omitempty"`
 }
 
 func (h httpGatewayExecutor) createChallenge(ctx context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
@@ -710,12 +862,30 @@ func (h httpGatewayExecutor) createChallenge(ctx context.Context, req GatewayCha
 	body := map[string]any{
 		"mode": req.Mode,
 	}
+	if req.Origin != "" {
+		body["origin"] = req.Origin
+	}
+	if req.BusinessNo != "" {
+		body["businessNo"] = req.BusinessNo
+	}
+	if req.SyncMode != "" {
+		body["syncMode"] = req.SyncMode
+	}
 	if req.FacilityCode != "" {
 		body["facilityCode"] = req.FacilityCode
 	}
+	if req.StartMonth != "" {
+		body["startMonth"] = req.StartMonth
+	}
+	if req.EndMonth != "" {
+		body["endMonth"] = req.EndMonth
+	}
+	if req.SignCertSHA256Hex != "" {
+		body["signCertSha256Hex"] = req.SignCertSHA256Hex
+	}
 	responseBody, err := h.postJSON(ctx, gatewayRequest{
 		BaseURL:              req.BaseURL,
-		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/challenges", req.OrganizationID),
+		Path:                 fmt.Sprintf("/api/v1/organizations/%s/cert-gateway/challenges", url.PathEscape(req.OrganizationID)),
 		BearerToken:          req.BearerToken,
 		ActiveOrganizationID: req.ActiveOrganizationID,
 		Body:                 body,
@@ -789,6 +959,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func validateSignedBusinessNo(requested string, signed string) error {
+	requested = digitsOnly(requested)
+	signed = digitsOnly(signed)
+	if requested == "" || signed == "" || requested == signed {
+		return nil
+	}
+	return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")
+}
+
+func digitsOnly(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func summarizeGatewayErrorBody(raw []byte) string {

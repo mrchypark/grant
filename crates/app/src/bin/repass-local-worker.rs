@@ -1,0 +1,548 @@
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use infra::{
+    bridge::{self, BridgeOptions, BridgeSnapshot},
+    crypto::CertificateBundle,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+
+const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TOTAL_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalEphemeralRequest {
+    gateway_base_url: String,
+    organization_id: String,
+    business_no: Option<String>,
+    password: String,
+    bearer_token: Option<String>,
+    active_organization_id: Option<String>,
+    challenge_id: String,
+    challenge_payload: String,
+    challenge_signature_base64: String,
+    facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    mode: Option<String>,
+    bundle: ProofBundle,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofBundle {
+    business_no: String,
+    common_name: String,
+    sign_cert_der_base64: String,
+    sign_pri_key_base64: String,
+    km_cert_der_base64: String,
+    km_pri_key_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalExecutionResultRequest {
+    challenge_id: String,
+    challenge_payload: String,
+    challenge_signature_base64: String,
+    sign_cert_der_base64: String,
+    snapshot: BridgeSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(err) = run().await {
+        let _ = writeln!(std::io::stderr(), "{err:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_to_string(&mut raw)
+        .context("read local execution request from stdin")?;
+    let req: LocalEphemeralRequest =
+        serde_json::from_str(&raw).context("decode local execution request")?;
+    normalize_gateway_base_url(&req.gateway_base_url)?;
+    let bundle = certificate_bundle(&req)?;
+    let business_no = req
+        .business_no
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(req.bundle.business_no.as_str())
+        .to_owned();
+
+    let run = bridge::collect_snapshot(BridgeOptions {
+        business_no,
+        facility_code: req.facility_code.clone(),
+        start_month: req.start_month.clone(),
+        end_month: req.end_month.clone(),
+        skip_documents: !should_collect_documents(req.mode.as_deref()),
+        bundle,
+    })
+    .await
+    .context("collect local RPS snapshot")?;
+
+    let mut snapshot = run.snapshot;
+    if should_collect_documents(req.mode.as_deref()) {
+        embed_document_contents(&mut snapshot)?;
+    } else {
+        snapshot.documents.clear();
+    }
+    let result = post_local_result(&req, local_result_body(&req, snapshot))
+        .await
+        .context("upload local execution result")?;
+    std::io::stdout()
+        .write_all(result.as_bytes())
+        .context("write local execution response")?;
+    Ok(())
+}
+
+fn should_collect_documents(mode: Option<&str>) -> bool {
+    mode.map(str::trim)
+        .map(|value| value.eq_ignore_ascii_case("full"))
+        .unwrap_or(false)
+}
+
+fn embed_document_contents(snapshot: &mut BridgeSnapshot) -> Result<()> {
+    let mut total_bytes = 0_u64;
+    for doc in &mut snapshot.documents {
+        let size = std::fs::metadata(&doc.source_path)
+            .with_context(|| format!("stat local document {}", doc.source_path))?
+            .len();
+        if size > MAX_DOCUMENT_BYTES {
+            bail!(
+                "local document {} exceeds {} bytes",
+                doc.file_name,
+                MAX_DOCUMENT_BYTES
+            );
+        }
+        total_bytes = total_bytes.saturating_add(size);
+        if total_bytes > MAX_TOTAL_DOCUMENT_BYTES {
+            bail!(
+                "local execution documents exceed {} bytes",
+                MAX_TOTAL_DOCUMENT_BYTES
+            );
+        }
+        let bytes = std::fs::read(&doc.source_path)
+            .with_context(|| format!("read local document {}", doc.source_path))?;
+        let sha256 = sha256_hex(&bytes);
+        if doc
+            .source_sha256
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            doc.source_sha256 = Some(sha256.clone());
+        }
+        if doc
+            .output_sha256
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            doc.output_sha256 = Some(sha256);
+        }
+        doc.content_base64 = Some(STANDARD.encode(bytes));
+        doc.content_type = Some("application/pdf".to_owned());
+        doc.source_path.clear();
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_lower(&hasher.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn certificate_bundle(req: &LocalEphemeralRequest) -> Result<CertificateBundle> {
+    Ok(CertificateBundle {
+        business_no: req.bundle.business_no.clone(),
+        password: req.password.clone(),
+        common_name: req.bundle.common_name.clone(),
+        sign_cert_der: decode_base64("bundle.signCertDerBase64", &req.bundle.sign_cert_der_base64)?,
+        sign_pri_key: decode_base64("bundle.signPriKeyBase64", &req.bundle.sign_pri_key_base64)?,
+        km_cert_der: decode_optional_base64(
+            "bundle.kmCertDerBase64",
+            &req.bundle.km_cert_der_base64,
+        )?,
+        km_pri_key: decode_optional_base64("bundle.kmPriKeyBase64", &req.bundle.km_pri_key_base64)?,
+    })
+}
+
+fn decode_base64(field: &str, value: &str) -> Result<Vec<u8>> {
+    STANDARD
+        .decode(value.trim())
+        .with_context(|| format!("decode {field}"))
+}
+
+fn decode_optional_base64(field: &str, value: &str) -> Result<Option<Vec<u8>>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    decode_base64(field, value).map(Some)
+}
+
+async fn post_local_result(
+    req: &LocalEphemeralRequest,
+    body: LocalExecutionResultRequest,
+) -> Result<String> {
+    let url = local_result_url(req)?;
+    let mut request = reqwest::Client::new().post(url).json(&body);
+    if let Some(token) = req
+        .bearer_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request = request.bearer_auth(token);
+    }
+    if let Some(org_id) = req
+        .active_organization_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request = request.header("x-organization-id", org_id);
+    }
+    let response = request
+        .send()
+        .await
+        .context("send local execution result")?;
+    let status = response.status();
+    let text = response.text().await.context("read gateway response")?;
+    if !status.is_success() {
+        bail!("gateway local execution result failed with status {status}: {text}");
+    }
+    Ok(text)
+}
+
+fn local_result_body(
+    req: &LocalEphemeralRequest,
+    snapshot: BridgeSnapshot,
+) -> LocalExecutionResultRequest {
+    LocalExecutionResultRequest {
+        challenge_id: req.challenge_id.clone(),
+        challenge_payload: req.challenge_payload.clone(),
+        challenge_signature_base64: req.challenge_signature_base64.clone(),
+        sign_cert_der_base64: req.bundle.sign_cert_der_base64.clone(),
+        snapshot,
+        mode: req.mode.clone(),
+    }
+}
+
+fn local_result_url(req: &LocalEphemeralRequest) -> Result<String> {
+    let base_url = normalize_gateway_base_url(&req.gateway_base_url)?;
+    Ok(format!(
+        "{}/api/v1/organizations/{}/cert-gateway/local-execution-results",
+        base_url,
+        urlencoding::encode(&req.organization_id)
+    ))
+}
+
+fn normalize_gateway_base_url(base_url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(base_url.trim()).context("parse gatewayBaseUrl")?;
+    if parsed.username() != "" || parsed.password().is_some() {
+        bail!("gatewayBaseUrl must not include userinfo");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        bail!("gatewayBaseUrl must not include query or fragment");
+    }
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback(parsed.host_str().unwrap_or_default()) => {}
+        _ => bail!("gatewayBaseUrl must use https except for loopback http"),
+    }
+    let mut normalized = parsed.as_str().to_owned();
+    if parsed.path() == "/" {
+        normalized.pop();
+    } else {
+        while normalized.ends_with('/') {
+            normalized.pop();
+        }
+    }
+    Ok(normalized)
+}
+
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, FixedOffset};
+    use infra::bridge::{
+        BridgeDocument, BridgeFacility, BridgeGenerationRecord, BridgeRateRecord, BridgeRecRecord,
+    };
+
+    #[test]
+    fn local_result_body_excludes_certificate_secrets() {
+        let req = fixture_request();
+        let body = local_result_body(&req, fixture_snapshot());
+        let json = serde_json::to_string(&body).expect("serialize result body");
+
+        assert!(json.contains("PUBLIC_CERT"));
+        for forbidden in [
+            "secret-password",
+            "PRIVATE_KEY",
+            "KM_PRIVATE_KEY",
+            "signPriKeyBase64",
+            "kmPriKeyBase64",
+            "\"bundle\"",
+            "\"password\"",
+        ] {
+            assert!(
+                !json.contains(forbidden),
+                "local result body leaked {forbidden}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_result_url_normalizes_base_url_escapes_organization_and_rejects_untrusted_urls() {
+        let mut req = fixture_request();
+        req.gateway_base_url = "https://gateway.local/base/".to_owned();
+        req.organization_id = "org/../evil".to_owned();
+        assert_eq!(
+            local_result_url(&req).expect("url"),
+            "https://gateway.local/base/api/v1/organizations/org%2F..%2Fevil/cert-gateway/local-execution-results"
+        );
+
+        req.gateway_base_url = "https://gateway.local/base%2Ftenant/".to_owned();
+        req.organization_id = "org-1".to_owned();
+        assert_eq!(
+            local_result_url(&req).expect("encoded base path url"),
+            "https://gateway.local/base%2Ftenant/api/v1/organizations/org-1/cert-gateway/local-execution-results"
+        );
+
+        req.gateway_base_url = "http://gateway.local".to_owned();
+        assert!(local_result_url(&req).is_err());
+
+        req.gateway_base_url = "https://user:pass@gateway.local".to_owned();
+        assert!(local_result_url(&req).is_err());
+
+        req.gateway_base_url = "https://gateway.local?target=evil".to_owned();
+        assert!(local_result_url(&req).is_err());
+
+        req.gateway_base_url = "http://127.0.0.1:18080".to_owned();
+        assert!(local_result_url(&req).is_ok());
+    }
+
+    #[test]
+    fn embed_document_contents_replaces_local_paths_with_base64_payloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("permit.pdf");
+        std::fs::write(&path, b"PDF-CONTENT").expect("write fixture document");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-1".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "permit.pdf".to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        embed_document_contents(&mut snapshot).expect("embed document");
+        let doc = &snapshot.documents[0];
+        assert_eq!(doc.source_path, "");
+        assert_eq!(doc.content_base64.as_deref(), Some("UERGLUNPTlRFTlQ="));
+        assert_eq!(doc.content_type.as_deref(), Some("application/pdf"));
+        assert!(doc.source_sha256.is_some());
+
+        let json = serde_json::to_string(&local_result_body(&fixture_request(), snapshot))
+            .expect("serialize result");
+        assert!(!json.contains(path.to_string_lossy().as_ref()));
+        assert!(json.contains("contentBase64"));
+    }
+
+    #[test]
+    fn embed_document_contents_rejects_oversized_documents_before_serialization() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.pdf");
+        let file = std::fs::File::create(&path).expect("large fixture");
+        file.set_len(MAX_DOCUMENT_BYTES + 1).expect("size fixture");
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-LARGE".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "large.pdf".to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: path.to_string_lossy().into_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        let err = embed_document_contents(&mut snapshot).expect_err("oversized document");
+        assert!(err.to_string().contains("exceeds"));
+        assert!(snapshot.documents[0].content_base64.is_none());
+    }
+
+    #[test]
+    fn embed_document_contents_rejects_oversized_document_sets_before_serialization() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first_path = dir.path().join("first.pdf");
+        let second_path = dir.path().join("second.pdf");
+        let third_path = dir.path().join("third.pdf");
+        let per_file_size = MAX_TOTAL_DOCUMENT_BYTES / 3 + 1;
+        for path in [&first_path, &second_path, &third_path] {
+            let file = std::fs::File::create(path).expect("document fixture");
+            file.set_len(per_file_size).expect("document size fixture");
+        }
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents = vec![
+            BridgeDocument {
+                attachment_code: "ATT-1".to_owned(),
+                file_class: "permit".to_owned(),
+                file_sec_name: "permit".to_owned(),
+                file_name: "first.pdf".to_owned(),
+                required: true,
+                category: "permit".to_owned(),
+                source_path: first_path.to_string_lossy().into_owned(),
+                source_sha256: None,
+                output_sha256: None,
+                content_base64: None,
+                content_type: None,
+            },
+            BridgeDocument {
+                attachment_code: "ATT-2".to_owned(),
+                file_class: "permit".to_owned(),
+                file_sec_name: "permit".to_owned(),
+                file_name: "second.pdf".to_owned(),
+                required: true,
+                category: "permit".to_owned(),
+                source_path: second_path.to_string_lossy().into_owned(),
+                source_sha256: None,
+                output_sha256: None,
+                content_base64: None,
+                content_type: None,
+            },
+            BridgeDocument {
+                attachment_code: "ATT-3".to_owned(),
+                file_class: "permit".to_owned(),
+                file_sec_name: "permit".to_owned(),
+                file_name: "third.pdf".to_owned(),
+                required: true,
+                category: "permit".to_owned(),
+                source_path: third_path.to_string_lossy().into_owned(),
+                source_sha256: None,
+                output_sha256: None,
+                content_base64: None,
+                content_type: None,
+            },
+        ];
+
+        let err = embed_document_contents(&mut snapshot).expect_err("oversized document set");
+        assert!(err.to_string().contains("documents exceed"));
+        assert!(snapshot.documents[2].content_base64.is_none());
+    }
+
+    fn fixture_request() -> LocalEphemeralRequest {
+        LocalEphemeralRequest {
+            gateway_base_url: "https://gateway.local".to_owned(),
+            organization_id: "org-1".to_owned(),
+            business_no: Some("2768603291".to_owned()),
+            password: "secret-password".to_owned(),
+            bearer_token: Some("bearer-token".to_owned()),
+            active_organization_id: Some("org-1".to_owned()),
+            challenge_id: "challenge-1".to_owned(),
+            challenge_payload: "cert-gateway:test".to_owned(),
+            challenge_signature_base64: "SIGNATURE".to_owned(),
+            facility_code: Some("FAC-001".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            mode: Some("delta".to_owned()),
+            bundle: ProofBundle {
+                business_no: "2768603291".to_owned(),
+                common_name: "Test Certificate".to_owned(),
+                sign_cert_der_base64: "PUBLIC_CERT".to_owned(),
+                sign_pri_key_base64: "PRIVATE_KEY".to_owned(),
+                km_cert_der_base64: "KM_PUBLIC_CERT".to_owned(),
+                km_pri_key_base64: "KM_PRIVATE_KEY".to_owned(),
+            },
+        }
+    }
+
+    fn fixture_snapshot() -> BridgeSnapshot {
+        BridgeSnapshot {
+            collected_at: DateTime::parse_from_rfc3339("2026-04-09T12:00:00+09:00")
+                .expect("date")
+                .with_timezone(&FixedOffset::east_opt(9 * 3600).expect("offset")),
+            facility: BridgeFacility {
+                code: "FAC-001".to_owned(),
+                name: "Plant FAC-001".to_owned(),
+                business_no: "2768603291".to_owned(),
+                contract_no: "CONTRACT-1".to_owned(),
+                address: "Seoul".to_owned(),
+                installed_kw: 100.5,
+                rec_start_date: "2026-01-01".to_owned(),
+                confirm_issued: "Y".to_owned(),
+            },
+            generation: vec![BridgeGenerationRecord {
+                month: "2026-03".to_owned(),
+                generation_kwh: 1000.0,
+                self_consumption_kwh: Some(100.0),
+                supply_kwh: 900.0,
+                application_deadline: Some("2026-04-10".to_owned()),
+            }],
+            rates: vec![BridgeRateRecord {
+                month: "2026-03".to_owned(),
+                self_rate: Some(12.5),
+                national_average: Some(98.0),
+                nearby_average: Some(97.0),
+                nearby_highest: Some(110.0),
+                published: true,
+                source_control_flag: Some("local".to_owned()),
+            }],
+            rec: vec![BridgeRecRecord {
+                month: "2026-03".to_owned(),
+                application_no: "LOCAL-APP-001".to_owned(),
+                supply_kwh: 900,
+                rec_quantity: 1,
+                fee_krw: 1000,
+                issued_date: "2026-04-01".to_owned(),
+                expiry_date: "2027-04-01".to_owned(),
+                virtual_account: None,
+                bank_name: None,
+                status: Some("issued".to_owned()),
+            }],
+            documents: Vec::new(),
+        }
+    }
+}

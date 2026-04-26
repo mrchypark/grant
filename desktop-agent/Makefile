@@ -1,4 +1,5 @@
 GO      ?= go
+CARGO   ?= cargo
 GOOS    ?= $(shell "$(GO)" env GOOS)
 GOARCH  ?= $(shell "$(GO)" env GOARCH)
 GOHOSTOS ?= $(shell "$(GO)" env GOHOSTOS)
@@ -6,6 +7,7 @@ GOHOSTARCH ?= $(shell "$(GO)" env GOHOSTARCH)
 GOTOOLCHAIN ?= auto
 BIN_DIR := dist
 PKG     := ./cmd/desktop-agent
+ROOT_DIR := $(abspath $(CURDIR)/..)
 # Keep this version in sync with packages/web-sdk/scripts/build-wasm.mjs.
 GARBLE_VERSION ?= v0.16.0
 GARBLE_ENABLED ?= 1
@@ -30,7 +32,15 @@ else
   LDFLAGS :=
 endif
 
-.PHONY: all build build-plain test vet clean build-windows build-darwin build-linux
+ifeq ($(GOHOSTOS),windows)
+  WORKER_HOST_BIN := $(BIN_DIR)/repass-local-worker-$(GOHOSTOS)-$(GOHOSTARCH).exe
+  WORKER_TARGET_BIN := $(ROOT_DIR)/target/release/repass-local-worker.exe
+else
+  WORKER_HOST_BIN := $(BIN_DIR)/repass-local-worker-$(GOHOSTOS)-$(GOHOSTARCH)
+  WORKER_TARGET_BIN := $(ROOT_DIR)/target/release/repass-local-worker
+endif
+
+.PHONY: all build build-plain build-with-worker build-local-worker test vet clean build-windows build-windows-amd64 build-darwin build-darwin-arm64 build-darwin-amd64 build-linux
 
 all: vet test build
 
@@ -52,11 +62,28 @@ endif
 build-plain:
 	$(MAKE) build GARBLE_ENABLED=0
 
+build-with-worker: build build-local-worker
+
+build-local-worker:
+	@mkdir -p "$(BIN_DIR)"
+	cd "$(ROOT_DIR)" && "$(CARGO)" build -p app --bin repass-local-worker --release
+	cp "$(WORKER_TARGET_BIN)" "$(WORKER_HOST_BIN)"
+	cp "$(WORKER_TARGET_BIN)" "$(BIN_DIR)/repass-local-worker$(if $(filter windows,$(GOHOSTOS)),.exe,)"
+
 # darwin은 Cocoa cgo 의존 때문에 macOS 호스트에서만 동작.
-build-darwin:
+build-darwin: build-darwin-arm64 build-darwin-amd64
+
+build-darwin-arm64:
 	$(MAKE) build GOOS=darwin GOARCH=arm64
 
-build-windows:
+build-darwin-amd64:
+	$(MAKE) build GOOS=darwin GOARCH=amd64
+
+# Official Windows GUI release target. Additional Windows architectures need
+# matching manifest .syso resources before being treated as release artifacts.
+build-windows: build-windows-amd64
+
+build-windows-amd64:
 	$(MAKE) build GOOS=windows GOARCH=amd64
 
 build-linux:

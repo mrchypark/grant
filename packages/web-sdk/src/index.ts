@@ -9,6 +9,8 @@ import {
   type CreateChallengeInput,
   type ProofBundle,
   type EscrowProofBundle,
+  type IngestLocalExecutionResultInput,
+  type LocalExecutionSnapshot,
   type StoredCertificate,
   type SyncMode,
   type SyncRun,
@@ -203,7 +205,11 @@ export class WebSdk {
   ): Promise<SyncRun> {
     const challenge = await this.createChallenge(organizationId, {
       mode: "ephemeral",
+      origin: currentOrigin(),
+      businessNo: trimOptional(input.businessNo),
       facilityCode: trimOptional(input.facilityCode),
+      startMonth: trimOptional(input.startMonth),
+      endMonth: trimOptional(input.endMonth),
       ttlSeconds: input.challengeTtlSeconds,
     });
     const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
@@ -239,6 +245,8 @@ export class WebSdk {
   ): Promise<StoredCertificate> {
     const challenge = await this.createChallenge(organizationId, {
       mode: "stored",
+      origin: currentOrigin(),
+      businessNo: trimOptional(input.businessNo),
       ttlSeconds: input.challengeTtlSeconds,
     });
     const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
@@ -260,6 +268,8 @@ export class WebSdk {
   ): Promise<BrowserSignedChallengeProof> {
     const challenge = await this.createChallenge(organizationId, {
       mode: input.mode,
+      origin: currentOrigin(),
+      businessNo: trimOptional(input.businessNo),
       facilityCode: input.mode === "ephemeral" ? trimOptional(input.facilityCode) : undefined,
       ttlSeconds: input.challengeTtlSeconds,
     });
@@ -335,6 +345,11 @@ function trimOptional(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function currentOrigin(): string | undefined {
+  const origin = globalThis.location?.origin;
+  return typeof origin === "string" && origin ? origin : undefined;
+}
+
 function assertExplicitEscrow(
   input: BrowserCertificateInput,
   methodName: string,
@@ -361,6 +376,8 @@ export type {
   EscrowProofBundle,
   StoredCertificate,
   SyncRun,
+  IngestLocalExecutionResultInput,
+  LocalExecutionSnapshot,
 };
 
 export { DesktopAgentClient, GatewayClient };
@@ -378,6 +395,8 @@ export type {
   ChallengeMode,
   ExecuteEphemeralExecutionInput,
   IssueCrawlTaskTokenInput,
+  IngestLocalExecutionResultInput,
+  LocalExecutionSnapshot,
   RegisterStoredCertificateInput,
   SyncMode,
 } from "./client.ts";

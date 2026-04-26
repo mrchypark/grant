@@ -4,7 +4,10 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use chrono::Utc;
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -27,6 +30,7 @@ use openssl::{
     hash::MessageDigest,
     pkey::{PKey, Private},
     rsa::Rsa,
+    sha::sha256,
     sign::Signer,
     x509::{X509, X509NameBuilder},
 };
@@ -208,22 +212,84 @@ fn proof_bundle_request(challenge_payload: &str) -> Value {
     })
 }
 
-fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
-    let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
-    let cert_der = create_sign_cert_der(&key);
-    let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
+struct ProofMaterial {
+    sign_key: PKey<Private>,
+    sign_cert_der: Vec<u8>,
+    sign_pri_key_der: Vec<u8>,
+    km_cert_der: Vec<u8>,
+    km_pri_key_der: Vec<u8>,
+}
+
+fn proof_material() -> ProofMaterial {
+    let sign_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate sign rsa key")).expect("wrap sign key");
+    let sign_cert_der = create_sign_cert_der(&sign_key);
+    let sign_pri_key_der = sign_key
+        .private_key_to_der()
+        .expect("serialize sign private key");
+    let km_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate km rsa key")).expect("wrap km key");
+    let km_cert_der = create_sign_cert_der(&km_key);
+    let km_pri_key_der = km_key
+        .private_key_to_der()
+        .expect("serialize km private key");
+    ProofMaterial {
+        sign_key,
+        sign_cert_der,
+        sign_pri_key_der,
+        km_cert_der,
+        km_pri_key_der,
+    }
+}
+
+fn signed_proof_bundle_from_material(
+    material: &ProofMaterial,
+    challenge_payload: &str,
+) -> (Value, String) {
+    let challenge_signature_base64 = sign_challenge(&material.sign_key, challenge_payload);
     (
         json!({
             "businessNo": "1111111111",
             "password": "secret-password",
             "commonName": "Spoofed Client Name",
-            "signCertDerBase64": STANDARD.encode(cert_der),
-            "signPriKeyBase64": "BAUG",
-            "kmCertDerBase64": "BwgJ",
-            "kmPriKeyBase64": "CgsM"
+            "signCertDerBase64": STANDARD.encode(&material.sign_cert_der),
+            "signPriKeyBase64": STANDARD.encode(&material.sign_pri_key_der),
+            "kmCertDerBase64": STANDARD.encode(&material.km_cert_der),
+            "kmPriKeyBase64": STANDARD.encode(&material.km_pri_key_der)
         }),
         challenge_signature_base64,
     )
+}
+
+fn signed_proof_bundle(challenge_payload: &str) -> (Value, String) {
+    signed_proof_bundle_from_material(&proof_material(), challenge_payload)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    sha256(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn stable_document_id(
+    organization_id: &str,
+    plant_code: &str,
+    attachment_code: &str,
+    file_name: &str,
+) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(organization_id.as_bytes());
+    input.extend_from_slice(b":");
+    input.extend_from_slice(plant_code.as_bytes());
+    input.extend_from_slice(b":");
+    input.extend_from_slice(attachment_code.as_bytes());
+    input.extend_from_slice(b":");
+    input.extend_from_slice(file_name.as_bytes());
+    sha256(&input)[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn signed_proof_bundle_without_km(challenge_payload: &str) -> (Value, String) {
@@ -254,6 +320,69 @@ fn signed_proof_bundle_with_asymmetric_km(
         bundle.remove("kmCertDerBase64");
     }
     (Value::Object(bundle), challenge_signature_base64)
+}
+
+fn local_execution_snapshot(facility_code: &str) -> Value {
+    json!({
+        "collectedAt": "2026-04-09T12:00:00+09:00",
+        "facility": {
+            "code": facility_code,
+            "name": format!("Plant {facility_code}"),
+            "businessNo": "2768603291",
+            "contractNo": "CONTRACT-LOCAL",
+            "address": "Seoul",
+            "installedKw": 100.5,
+            "recStartDate": "2026-01-01",
+            "confirmIssued": "Y"
+        },
+        "generation": [{
+            "month": "2026-03",
+            "generationKwh": 1000.0,
+            "selfConsumptionKwh": 100.0,
+            "supplyKwh": 900.0,
+            "applicationDeadline": "2026-04-10"
+        }],
+        "rates": [{
+            "month": "2026-03",
+            "selfRate": 12.5,
+            "nationalAverage": 98.0,
+            "nearbyAverage": 97.0,
+            "nearbyHighest": 110.0,
+            "published": true,
+            "sourceControlFlag": "local"
+        }],
+        "rec": [{
+            "month": "2026-03",
+            "applicationNo": "LOCAL-APP-001",
+            "supplyKwh": 900,
+            "recQuantity": 1,
+            "feeKrw": 1000,
+            "issuedDate": "2026-04-01",
+            "expiryDate": "2027-04-01",
+            "virtualAccount": null,
+            "bankName": null,
+            "status": "issued"
+        }],
+        "documents": []
+    })
+}
+
+fn local_execution_snapshot_with_document(facility_code: &str) -> Value {
+    let mut snapshot = local_execution_snapshot(facility_code);
+    snapshot["documents"] = json!([{
+        "attachmentCode": "ATT-LOCAL-1",
+        "fileClass": "permit",
+        "fileSecName": "permit",
+        "fileName": "permit.pdf",
+        "required": true,
+        "category": "permit",
+        "sourcePath": "",
+        "sourceSha256": "sha-local",
+        "outputSha256": "sha-local",
+        "contentBase64": STANDARD.encode(b"PDF-CONTENT"),
+        "contentType": "application/pdf"
+    }]);
+    snapshot
 }
 
 fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
@@ -291,6 +420,35 @@ fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
     STANDARD.encode(signer.sign_to_vec().expect("signature"))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn assert_challenge_payload_binds_context(
+    challenge_payload: &str,
+    organization_id: &str,
+    mode: &str,
+    origin: &str,
+    business_no: &str,
+    facility_code: &str,
+    start_month: &str,
+    end_month: &str,
+    sign_cert_sha256_hex: &str,
+) {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .expect("challenge payload prefix");
+    let raw = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode challenge payload");
+    let payload: Value = serde_json::from_slice(&raw).expect("challenge payload json");
+    assert_eq!(payload["organizationId"], organization_id);
+    assert_eq!(payload["mode"], mode);
+    assert_eq!(payload["origin"], origin);
+    assert_eq!(payload["businessNo"], business_no);
+    assert_eq!(payload["facilityCode"], facility_code);
+    assert_eq!(payload["startMonth"], start_month);
+    assert_eq!(payload["endMonth"], end_month);
+    assert_eq!(payload["signCertSha256Hex"], sign_cert_sha256_hex);
+}
+
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = response
         .into_body()
@@ -303,7 +461,9 @@ async fn json_body(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
-    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, _db_dir, artifacts_dir) = build_app().await;
+    let stored_material = proof_material();
+    let stored_sign_cert_sha256_hex = sha256_hex(&stored_material.sign_cert_der);
 
     let challenge_response = app
         .clone()
@@ -312,7 +472,15 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            json!({
+                "mode": "stored",
+                "origin": "http://127.0.0.1:4173",
+                "businessNo": "2768603291",
+                "facilityCode": "FAC-001",
+                "startMonth": "2026-01",
+                "endMonth": "2026-03",
+                "signCertSha256Hex": stored_sign_cert_sha256_hex
+            }),
         ))
         .await
         .expect("challenge response");
@@ -326,6 +494,17 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .as_str()
         .expect("challenge payload")
         .to_owned();
+    assert_challenge_payload_binds_context(
+        &challenge_payload,
+        "bootstrap-user",
+        "stored",
+        "http://127.0.0.1:4173",
+        "2768603291",
+        "FAC-001",
+        "2026-01",
+        "2026-03",
+        &stored_sign_cert_sha256_hex,
+    );
 
     let register_response = app
         .clone()
@@ -335,7 +514,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "bootstrap-user",
             "bootstrap-user",
             {
-                let mut request = proof_bundle_request(&challenge_payload);
+                let (bundle, challenge_signature_base64) =
+                    signed_proof_bundle_from_material(&stored_material, &challenge_payload);
+                let mut request = json!({
+                    "challengeSignatureBase64": challenge_signature_base64,
+                    "bundle": bundle,
+                });
                 request["challengeId"] = Value::String(challenge_id.clone());
                 request["challengePayload"] = Value::String(challenge_payload.clone());
                 request
@@ -441,8 +625,10 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .expect("ephemeral challenge");
     assert_eq!(ephemeral_challenge.status(), StatusCode::CREATED);
     let ephemeral_challenge_json = json_body(ephemeral_challenge).await;
+    assert_eq!(ephemeral_challenge_json["syncMode"], "full");
 
     let ephemeral_response = app
+        .clone()
         .oneshot(auth_request(
             "POST",
             "/api/v1/organizations/bootstrap-user/cert-gateway/ephemeral-executions",
@@ -456,9 +642,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
                 request["challengeId"] = ephemeral_challenge_json["challengeId"].clone();
                 request["challengePayload"] = ephemeral_challenge_json["payload"].clone();
                 request["facilityCode"] = Value::String("FAC-002".to_owned());
-                request["startMonth"] = Value::String("2026-01".to_owned());
-                request["endMonth"] = Value::String("2026-03".to_owned());
-                request["mode"] = Value::String("delta".to_owned());
+                request["mode"] = ephemeral_challenge_json["syncMode"].clone();
                 request
             },
         ))
@@ -468,6 +652,272 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let ephemeral_json = json_body(ephemeral_response).await;
     assert_eq!(ephemeral_json["status"], "completed");
     assert_eq!(ephemeral_json["plantId"], "FAC-002");
+
+    let local_challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "facilityCode": "FAC-004" }),
+        ))
+        .await
+        .expect("local result challenge");
+    assert_eq!(local_challenge.status(), StatusCode::CREATED);
+    let local_challenge_json = json_body(local_challenge).await;
+    assert_eq!(local_challenge_json["syncMode"], "full");
+    let local_payload = local_challenge_json["payload"]
+        .as_str()
+        .expect("local challenge payload");
+    let (bundle, signature) = signed_proof_bundle(local_payload);
+    let local_result_response = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": local_challenge_json["challengeId"],
+                "challengePayload": local_challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": local_challenge_json["syncMode"],
+                "snapshot": local_execution_snapshot("FAC-004")
+            }),
+        ))
+        .await
+        .expect("local result response");
+    assert_eq!(local_result_response.status(), StatusCode::ACCEPTED);
+    let local_result_json = json_body(local_result_response).await;
+    assert_eq!(local_result_json["status"], "completed");
+    assert_eq!(local_result_json["plantId"], "FAC-004");
+
+    let local_delta_challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "syncMode": "delta", "facilityCode": "FAC-004" }),
+        ))
+        .await
+        .expect("local delta challenge");
+    assert_eq!(local_delta_challenge.status(), StatusCode::CREATED);
+    let local_delta_challenge_json = json_body(local_delta_challenge).await;
+    assert_eq!(local_delta_challenge_json["syncMode"], "delta");
+    assert_eq!(local_delta_challenge_json["startMonth"], "2026-03");
+    assert!(
+        local_delta_challenge_json["endMonth"]
+            .as_str()
+            .expect("endMonth")
+            .len()
+            == 7
+    );
+
+    let local_doc_challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "facilityCode": "FAC-DOC" }),
+        ))
+        .await
+        .expect("local document challenge");
+    assert_eq!(local_doc_challenge.status(), StatusCode::CREATED);
+    let local_doc_challenge_json = json_body(local_doc_challenge).await;
+    let local_doc_payload = local_doc_challenge_json["payload"]
+        .as_str()
+        .expect("local document challenge payload");
+    let (doc_bundle, doc_signature) = signed_proof_bundle(local_doc_payload);
+    let local_doc_result = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": local_doc_challenge_json["challengeId"],
+                "challengePayload": local_doc_challenge_json["payload"],
+                "challengeSignatureBase64": doc_signature,
+                "signCertDerBase64": doc_bundle["signCertDerBase64"],
+                "mode": "full",
+                "snapshot": local_execution_snapshot_with_document("FAC-DOC")
+            }),
+        ))
+        .await
+        .expect("local document result response");
+    assert_eq!(local_doc_result.status(), StatusCode::ACCEPTED);
+
+    let doc_id = stable_document_id("bootstrap-user", "FAC-DOC", "ATT-LOCAL-1", "permit.pdf");
+    let stored_bytes = std::fs::read(
+        artifacts_dir
+            .path()
+            .join(format!("bootstrap-user/FAC-DOC/{doc_id}.pdf")),
+    )
+    .expect("local execution document artifact");
+    assert_eq!(stored_bytes.as_slice(), b"PDF-CONTENT");
+}
+
+#[tokio::test]
+async fn local_execution_result_rejects_document_source_path_fallback() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let secret_dir = tempfile::tempdir().expect("secret tempdir");
+    let secret_path = secret_dir.path().join("server-secret.txt");
+    std::fs::write(&secret_path, b"SERVER-SECRET").expect("secret fixture");
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "facilityCode": "FAC-SOURCE" }),
+        ))
+        .await
+        .expect("local document challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("local document challenge payload");
+    let (bundle, signature) = signed_proof_bundle(payload);
+
+    let mut snapshot = local_execution_snapshot_with_document("FAC-SOURCE");
+    snapshot["documents"][0]["sourcePath"] =
+        Value::String(secret_path.to_string_lossy().into_owned());
+    snapshot["documents"][0]
+        .as_object_mut()
+        .expect("document object")
+        .remove("contentBase64");
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": "full",
+                "snapshot": snapshot
+            }),
+        ))
+        .await
+        .expect("local document result response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("contentBase64"),
+        "body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismatch() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+    let material = proof_material();
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "mode": "ephemeral",
+                "facilityCode": "FAC-004",
+                "signCertSha256Hex": "0000000000000000000000000000000000000000000000000000000000000000"
+            }),
+        ))
+        .await
+        .expect("challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("challenge payload");
+    let (bundle, signature) = signed_proof_bundle_from_material(&material, payload);
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": challenge_json["syncMode"],
+                "snapshot": local_execution_snapshot("FAC-004")
+            }),
+        ))
+        .await
+        .expect("local result response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn local_execution_result_persists_normalized_facility_code() {
+    let (app, _db_dir, _artifacts_dir) = build_app().await;
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "facilityCode": "FAC-TRIM" }),
+        ))
+        .await
+        .expect("challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("challenge payload");
+    let (bundle, signature) = signed_proof_bundle(payload);
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": challenge_json["syncMode"],
+                "snapshot": local_execution_snapshot(" FAC-TRIM ")
+            }),
+        ))
+        .await
+        .expect("local result response");
+
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
+    assert_eq!(body["plantId"], "FAC-TRIM");
 }
 
 #[tokio::test]

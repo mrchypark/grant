@@ -15,8 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"math/big"
 	"log"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -56,16 +56,17 @@ type ServiceConfig struct {
 }
 
 type CertificateMetadata struct {
-	ID            string                 `json:"id"`
-	CommonName    string                 `json:"commonName"`
-	BusinessNo    string                 `json:"businessNo"`
-	NotAfter      time.Time              `json:"notAfter"`
-	SourceKind    CertificateSourceKind  `json:"sourceKind"`
-	StorageKind   CertificateStorageKind `json:"storageKind"`
-	DisplayPath   string                 `json:"displayPath"`
-	IssuerName    string                 `json:"issuerName"`
-	HasKmMaterial bool                   `json:"hasKmMaterial"`
-	Removable     bool                   `json:"removable"`
+	ID                string                 `json:"id"`
+	CommonName        string                 `json:"commonName"`
+	BusinessNo        string                 `json:"businessNo"`
+	NotAfter          time.Time              `json:"notAfter"`
+	SourceKind        CertificateSourceKind  `json:"sourceKind"`
+	StorageKind       CertificateStorageKind `json:"storageKind"`
+	DisplayPath       string                 `json:"displayPath"`
+	IssuerName        string                 `json:"issuerName"`
+	SignCertSHA256Hex string                 `json:"signCertSha256Hex"`
+	HasKmMaterial     bool                   `json:"hasKmMaterial"`
+	Removable         bool                   `json:"removable"`
 }
 
 type CertificateSourceKind string
@@ -352,16 +353,17 @@ func metadataFromCertificate(bundle bundleEntry, signCertDER []byte) (Certificat
 	}
 
 	return CertificateMetadata{
-		ID:            bundle.id,
-		CommonName:    strings.TrimSpace(cert.Subject.CommonName),
-		BusinessNo:    extractBusinessNo(cert),
-		NotAfter:      cert.NotAfter.UTC(),
-		SourceKind:    CertificateSourceKindBundle,
-		StorageKind:   bundle.storage,
-		DisplayPath:   bundleDisplayPath(bundle.path),
-		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
-		HasKmMaterial: true,
-		Removable:     bundle.removable,
+		ID:                bundle.id,
+		CommonName:        strings.TrimSpace(cert.Subject.CommonName),
+		BusinessNo:        extractBusinessNo(cert),
+		NotAfter:          cert.NotAfter.UTC(),
+		SourceKind:        CertificateSourceKindBundle,
+		StorageKind:       bundle.storage,
+		DisplayPath:       bundleDisplayPath(bundle.path),
+		IssuerName:        strings.TrimSpace(cert.Issuer.CommonName),
+		SignCertSHA256Hex: certSHA256Hex(signCertDER),
+		HasKmMaterial:     true,
+		Removable:         bundle.removable,
 	}, nil
 }
 
@@ -375,32 +377,39 @@ func metadataFromPKCS12(bundle bundleEntry) (CertificateMetadata, error) {
 	}
 	_ = files
 	return CertificateMetadata{
-		ID:            bundle.id,
-		CommonName:    strings.TrimSpace(cert.Subject.CommonName),
-		BusinessNo:    extractBusinessNo(cert),
-		NotAfter:      cert.NotAfter.UTC(),
-		SourceKind:    CertificateSourceKindPKCS12,
-		StorageKind:   CertificateStorageKindPKCS12,
-		DisplayPath:   bundleDisplayPath(bundle.path),
-		IssuerName:    strings.TrimSpace(cert.Issuer.CommonName),
-		HasKmMaterial: false,
-		Removable:     bundle.removable,
+		ID:                bundle.id,
+		CommonName:        strings.TrimSpace(cert.Subject.CommonName),
+		BusinessNo:        extractBusinessNo(cert),
+		NotAfter:          cert.NotAfter.UTC(),
+		SourceKind:        CertificateSourceKindPKCS12,
+		StorageKind:       CertificateStorageKindPKCS12,
+		DisplayPath:       bundleDisplayPath(bundle.path),
+		IssuerName:        strings.TrimSpace(cert.Issuer.CommonName),
+		SignCertSHA256Hex: certSHA256Hex(files.signCertDER),
+		HasKmMaterial:     false,
+		Removable:         bundle.removable,
 	}, nil
 }
 
 func fallbackPKCS12Metadata(bundle bundleEntry) CertificateMetadata {
 	return CertificateMetadata{
-		ID:            bundle.id,
-		CommonName:    fallbackPKCS12Label(bundle.path),
-		BusinessNo:    "",
-		NotAfter:      time.Time{},
-		SourceKind:    CertificateSourceKindPKCS12,
-		StorageKind:   CertificateStorageKindPKCS12,
-		DisplayPath:   bundleDisplayPath(bundle.path),
-		IssuerName:    "",
-		HasKmMaterial: false,
-		Removable:     bundle.removable,
+		ID:                bundle.id,
+		CommonName:        fallbackPKCS12Label(bundle.path),
+		BusinessNo:        "",
+		NotAfter:          time.Time{},
+		SourceKind:        CertificateSourceKindPKCS12,
+		StorageKind:       CertificateStorageKindPKCS12,
+		DisplayPath:       bundleDisplayPath(bundle.path),
+		IssuerName:        "",
+		SignCertSHA256Hex: "",
+		HasKmMaterial:     false,
+		Removable:         bundle.removable,
 	}
+}
+
+func certSHA256Hex(der []byte) string {
+	sum := sha256.Sum256(der)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func extractBusinessNo(cert *x509.Certificate) string {

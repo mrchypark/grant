@@ -19,7 +19,11 @@ export type AgentSignResponse = {
   certificateId: string;
   challenge: string;
   challengeSignatureBase64: string;
-  bundle: AgentProofBundle;
+  certificate: {
+    businessNo: string;
+    commonName: string;
+    signCertDerBase64: string;
+  };
 };
 
 export type AgentSession = {

@@ -56,7 +56,8 @@ export DESKTOP_AGENT_SESSION_SECRET="$(openssl rand -base64 32)"
 - `DESKTOP_AGENT_ALLOWED_ORIGINS`
   - 브라우저에서 agent를 호출할 수 있는 allowlist origin
 - `DESKTOP_AGENT_GATEWAY_BASE_URL`
-  - local agent가 certificate bundle과 password를 전달할 단일 trusted certd backend base URL
+  - local agent가 challenge 생성, stored 등록, local execution 결과 업로드에 사용할 단일 trusted certd backend base URL
+  - 기본 local execution은 이 backend에 certificate bundle, private key, password를 보내지 않는다
   - 브라우저가 보낸 `gatewayBaseUrl`는 이 값과 일치할 때만 허용된다
 - `DESKTOP_AGENT_SESSION_SECRET`
   - local session token HMAC에 쓰는 32-byte 이상 secret
@@ -148,9 +149,18 @@ Content-Type: application/json
 
 {
   "mode": "stored" | "ephemeral",
+  "origin": "http://127.0.0.1:4173",
+  "businessNo": "2768603291",
+  "facilityCode": "FAC-001",
+  "startMonth": "2026-01",
+  "endMonth": "2026-03",
+  "signCertSha256Hex": "SHA256_HEX_OF_SIGN_CERT_DER",
   "ttlSeconds": 120
 }
 ```
+
+`payload`는 `cert-gateway:` prefix 뒤에 canonical JSON을 URL-safe base64로 인코딩한 opaque 문자열이다.
+서버는 이 payload hash를 저장하므로 challenge는 최소한 `organizationId`, `mode`, `nonce`, `expiresAt`에 묶이고, 제공된 경우 `origin`, `businessNo`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶인다. desktop agent는 native approval에서 선택된 인증서의 `signCertSha256Hex`와 사용자가 승인한 origin/scope를 challenge 발급 요청에 포함한다.
 
 응답:
 
@@ -164,7 +174,9 @@ Content-Type: application/json
 }
 ```
 
-### Ephemeral 실행
+### Escrowed ephemeral 실행
+
+이 endpoint는 서버가 인증서 번들을 받아 실행하는 explicit escrow/server-execution 경로다. 기본 `sdk.runEphemeral()` 로컬 실행 경로에서 사용하면 안 된다. 로컬 실행은 desktop agent 또는 로컬 worker가 RPS 수집까지 수행하고, gateway에는 인증서 비밀번호나 개인키가 아닌 결과만 전달해야 한다.
 
 ```http
 POST /cert-gateway/ephemeral-executions
@@ -186,7 +198,55 @@ Content-Type: application/json
 }
 ```
 
-성공 시 `202 Accepted`와 `SyncRun`을 반환한다. 기본 제품형 high-level SDK 호출은 여전히 이 스코프를 생략해도 되지만, multi-plant 조직처럼 서버가 단일 대상을 자동 결정할 수 없는 경우를 위해 `facilityCode`, `startMonth`, `endMonth`, `mode`를 선택적으로 agent/raw client 경로로 전달할 수 있다.
+성공 시 `202 Accepted`와 `SyncRun`을 반환한다. 이 경로는 `runEphemeralWithEscrowedBrowserCertificate(..., { escrow: true })` 같은 명시적 opt-in API에서만 사용한다. 기본 제품형 high-level SDK 호출인 `runEphemeral()`은 인증서 번들, 비밀번호, `signPriKeyBase64`, `kmPriKeyBase64`를 gateway로 보내지 않는다.
+
+### Local execution 결과 업로드
+
+이 endpoint는 로컬 worker가 RPS 수집을 끝낸 뒤 서버에 비밀정보 없이 결과만 저장하는 경로다. 요청에는 challenge proof와 공개 sign 인증서, 수집 snapshot만 포함된다. 인증서 비밀번호, 개인키, 인증서 bundle은 포함하면 안 된다. 문서 artifact는 full sync에서만 문서 항목별 `contentBase64`로 전달하며, 서버는 이를 object storage에 저장하고 DB에는 메타데이터만 남긴다.
+
+```http
+POST /cert-gateway/local-execution-results
+Content-Type: application/json
+
+{
+  "challengeId": "challenge-3",
+  "challengePayload": "cert-gateway:...",
+  "challengeSignatureBase64": "BASE64_RSA_SHA256_SIGNATURE",
+  "signCertDerBase64": "BASE64_PUBLIC_SIGN_CERT_DER",
+  "mode": "delta",
+  "snapshot": {
+    "collectedAt": "2026-04-09T12:00:00+09:00",
+    "facility": {
+      "code": "FAC-001",
+      "name": "Plant FAC-001",
+      "businessNo": "2768603291",
+      "contractNo": "CONTRACT-1",
+      "address": "Seoul",
+      "installedKw": 100.5,
+      "recStartDate": "2026-01-01",
+      "confirmIssued": "Y"
+    },
+    "generation": [],
+    "rates": [],
+    "rec": [],
+    "documents": [{
+      "attachmentCode": "ATT-LOCAL-1",
+      "fileClass": "permit",
+      "fileSecName": "permit",
+      "fileName": "permit.pdf",
+      "required": true,
+      "category": "permit",
+      "sourcePath": "",
+      "sourceSha256": "SHA256_HEX",
+      "outputSha256": "SHA256_HEX",
+      "contentBase64": "BASE64_PDF_BYTES",
+      "contentType": "application/pdf"
+    }]
+  }
+}
+```
+
+서버는 `signCertDerBase64` 공개키로 challenge 서명을 검증하고, payload에 묶인 조직/mode/사업자번호/시설/date scope/`signCertSha256Hex`가 제출된 공개 인증서와 snapshot에 맞는지 확인한다. challenge가 `ephemeral` 모드이며 요청 조직에 속하고 미사용/미만료인지 확인한 뒤 snapshot을 `plants`, `sync_runs`, 발전량/요율/REC records와 문서 메타데이터/object artifact에 저장한다. `documents`가 비어 있지 않은 요청은 `mode: "full"`에서만 허용된다.
 
 ### Stored 등록
 
@@ -303,6 +363,7 @@ ok
 ### `POST /sign`
 
 `X-Agent-Session` 헤더가 필요하다.
+`challenge`는 gateway가 발급한 `cert-gateway:` payload여야 한다.
 
 요청:
 
@@ -314,14 +375,32 @@ ok
 }
 ```
 
+응답:
+
+```json
+{
+  "certificateId": "bundle:/Volumes/Lexar/NPKI/yessign/USER/cn=test",
+  "challenge": "cert-gateway:...",
+  "challengeSignatureBase64": "BASE64_RSA_SHA256_SIGNATURE",
+  "certificate": {
+    "businessNo": "2768603291",
+    "commonName": "Test Certificate",
+    "signCertDerBase64": "AQID"
+  }
+}
+```
+
 현재 구현 상태:
 
 - 허용 origin만 CORS 허용
 - `/sessions/open`으로 짧은 local session token 발급
 - `/certificates`, `/sign`는 session 없으면 거절
+- `/sign`은 challenge signature와 공개 인증서 identity만 반환하고 `bundle`, `password`, `signPriKeyBase64`, `kmPriKeyBase64`를 반환하지 않는다
+- `/approve-*` 경로는 native approval 뒤에 선택 인증서의 사업자번호가 요청 사업자번호와 충돌하면 challenge 생성/로컬 실행/서버 등록 전에 거부한다
+- gateway challenge는 approval origin, 요청 사업자번호, facility/date scope, 선택 인증서 `signCertSha256Hex`를 포함해 발급한다
 - 제품형 high-level SDK는 `/approve-ephemeral-run`, `/approve-stored-registration` 사용
 - 실제 NPKI/GPKI USB/파일 시스템 탐색과 비밀번호 검증 구현 포함
-- `.p12`/`.pfx` PKCS#12 파일도 탐색, 목록, 서명, stored registration/ephemeral execution까지 지원
+- `.p12`/`.pfx` PKCS#12 파일도 탐색, 목록, 서명, stored registration까지 지원한다. 로컬 실행은 `DESKTOP_AGENT_LOCAL_EXECUTOR`로 지정된 worker 또는 desktop agent와 같은 디렉터리의 bundled worker가 있을 때만 수행하고, 없으면 실패한다
 - macOS에서는 기본적으로 메뉴바(tray) 앱으로 실행되고 `Open Example Page`, `Quit desktop agent` 메뉴 제공
 - native approval modal
   - macOS: AppKit `NSAlert` + `NSPopUpButton`(인증서 선택) + `NSSecureTextField`(비밀번호) + `NSAlertStyleWarning`
@@ -351,6 +430,10 @@ const run = await sdk.runEphemeral("org-1", {
   businessNo: "2768603291",
 });
 ```
+
+`runEphemeral()`은 desktop agent의 로컬 실행 경로다. 인증서 번들, 비밀번호, 개인키는 gateway로 보내지 않는다. desktop agent가 `DESKTOP_AGENT_LOCAL_EXECUTOR` 또는 같은 디렉터리의 bundled worker로 로컬 worker를 찾지 못하면 이 호출은 실패한다. 실패 시 SDK나 agent가 escrow endpoint로 자동 fallback하면 안 된다.
+
+기본 제공 worker는 `repass-local-worker` 바이너리다. desktop agent가 stdin으로 로컬 전용 요청을 넘기면 worker가 로컬에서 RPS 수집을 실행하고, gateway에는 `/cert-gateway/local-execution-results`로 공개 인증서와 수집 결과만 업로드한다. `mode: "full"`인 경우 worker는 다운로드한 문서 파일을 `contentBase64`로 싣고 로컬 `sourcePath`는 비워서 전송한다.
 
 ### Stored
 
@@ -419,7 +502,7 @@ const run = await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
 });
 ```
 
-이 escrow 경로는 challenge 서명 뒤에 gateway `ephemeral-executions` 또는 `stored-certificates` endpoint로 인증서 번들과 비밀번호를 전송한다. 기본 메서드 `runEphemeralWithBrowserCertificate()` / `registerStoredWithBrowserCertificate()`는 `escrow: true` 없이는 실패하도록 막아 둔다.
+이 escrow 경로는 challenge 서명 뒤에 gateway `ephemeral-executions` 또는 `stored-certificates` endpoint로 인증서 번들과 비밀번호를 전송한다. 기본 메서드 `runEphemeralWithBrowserCertificate()` / `registerStoredWithBrowserCertificate()`는 `escrow: true` 없이는 실패하도록 막아 둔다. 이 경로는 로컬 실행이 아니다.
 
 브라우저 보안 제약 때문에 OS 인증서 저장소 자동 탐색은 여전히 불가능하고, 파일 선택은 사용자가 직접 해야 한다.
 
@@ -444,7 +527,7 @@ desktop agent 경로에서 SDK가 내부적으로 수행하는 순서는 다음�
 3. local agent `approve-*` endpoint 호출
 4. agent가 native approval modal로 인증서 선택과 비밀번호 입력 처리
    - 예: `로컬 NPKI | NPKI/yessign/...`, `이동식디스크 PKCS#12 | protected.p12`
-5. agent가 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
+5. agent가 선택 인증서 fingerprint와 승인 scope가 묶인 gateway challenge 생성, 로컬 sign, gateway 실행까지 처리
 
 브라우저 단독 흐름은 위 agent 단계를 생략하고, 선택된 인증서 파일만으로 challenge 서명과 proof 반환 또는 escrow gateway 호출을 수행한다.
 
@@ -457,6 +540,21 @@ export PATH=/opt/homebrew/bin:$PATH
 cd desktop-agent
 make build
 ```
+
+로컬 실행 worker 빌드:
+
+```bash
+cargo build -p app --bin repass-local-worker
+```
+
+desktop agent 배포 디렉터리에 현재 OS/아키텍처용 worker를 함께 두려면:
+
+```bash
+cd desktop-agent
+make build-with-worker
+```
+
+`make build-with-worker`는 `dist/repass-local-worker`(`.exe`)와 `dist/repass-local-worker-<os>-<arch>`(`.exe`)를 함께 생성한다. desktop agent는 env override가 없을 때 같은 디렉터리의 worker를 자동 탐색한다. macOS와 Windows release artifact는 각 대상 OS/아키텍처 runner에서 이 타깃을 실행해 생성한다.
 
 USB 인증서를 직접 읽도록 agent 실행:
 
@@ -497,6 +595,6 @@ python3 -m http.server 4173 --directory ./examples/browser/dist/example
 
 - Rust gateway route/service는 테스트로 검증된 스켈레톤이 있다
 - stored certificate는 env-backed KMS provider로 wrap된 DEK를 저장한다
-- desktop agent는 loopback HTTP contract만 구현되어 있다
-- 실제 Windows/macOS 인증서 저장소 접근과 서명은 아직 구현되지 않았다
+- desktop agent는 loopback HTTP contract와 native approval modal을 구현한다
+- desktop agent의 기본 local execution은 인증서 번들을 서버로 보내지 않고 env 또는 bundled 로컬 worker에만 넘긴다. worker가 없으면 fail-closed 한다. 기본 worker는 `cargo build -p app --bin repass-local-worker` 또는 `desktop-agent/make build-with-worker`로 빌드한다. full local execution 문서 artifact는 비밀정보가 아닌 `contentBase64` payload로만 서버에 업로드한다
 - JS SDK는 브라우저 orchestration skeleton이며 agent와 gateway 계약을 감싼다

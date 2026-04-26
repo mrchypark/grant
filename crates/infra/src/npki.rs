@@ -345,8 +345,8 @@ fn load_private_key_material(
             seed_cbc_decrypt(key.as_slice(), iv.as_slice(), &encrypted.cipher_text)
                 .with_context(|| format!("decrypt {key_name}"))?,
         );
-        let private_key = parse_private_key(plain_der.as_slice())
-            .with_context(|| format!("parse {key_name}"))?;
+        let private_key =
+            parse_private_key(plain_der.as_slice()).with_context(|| format!("parse {key_name}"))?;
         let vid_random = extract_vid_random(plain_der.as_slice()).ok();
         return Ok(LoadedPrivateKey {
             private_key,

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -30,7 +31,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := httpapi.NewServer(npki.NewService(npki.DefaultConfig()), approval.NewPrompter(), httpapi.NewHTTPGatewayExecutor(), httpapi.Config{
+	server := httpapi.NewServer(npki.NewService(npki.DefaultConfig()), approval.NewPrompter(), httpapi.NewHTTPGatewayExecutor(), httpapi.NewCommandLocalExecutor(localExecutorPath()), httpapi.Config{
 		AllowedOrigins: allowedOrigins(),
 		GatewayBaseURL: gatewayBaseURL(),
 		SessionTTL:     5 * time.Minute,
@@ -74,6 +75,31 @@ func allowedOrigins() []string {
 
 func gatewayBaseURL() string {
 	return strings.TrimSpace(os.Getenv("DESKTOP_AGENT_GATEWAY_BASE_URL"))
+}
+
+func localExecutorPath() string {
+	if override := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_LOCAL_EXECUTOR")); override != "" {
+		return override
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(exe)
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	candidates := []string{
+		filepath.Join(dir, "repass-local-worker"+suffix),
+		filepath.Join(dir, "repass-local-worker-"+runtime.GOOS+"-"+runtime.GOARCH+suffix),
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func loadOrCreateSessionSecret() ([]byte, error) {

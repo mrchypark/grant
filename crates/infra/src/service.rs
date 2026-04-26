@@ -18,6 +18,8 @@ use crate::{
     npki::{validate_certificate_bundle, verify_challenge_signature},
 };
 use anyhow::{Context, Result, anyhow};
+use base64::Engine;
+use bytes::Bytes;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
@@ -176,7 +178,13 @@ pub struct CurrentUserView {
 pub struct CreateCertGatewayChallengeInput {
     pub organization_id: String,
     pub mode: String,
+    pub sync_mode: Option<String>,
+    pub origin: Option<String>,
+    pub business_no: Option<String>,
     pub facility_code: Option<String>,
+    pub start_month: Option<String>,
+    pub end_month: Option<String>,
+    pub sign_cert_sha256_hex: Option<String>,
     pub created_by_user_id: String,
     pub ttl_seconds: i64,
 }
@@ -185,8 +193,11 @@ pub struct CreateCertGatewayChallengeInput {
 pub struct CertGatewayChallengeView {
     pub id: String,
     pub mode: String,
+    pub sync_mode: Option<String>,
     pub nonce: String,
     pub payload: String,
+    pub start_month: Option<String>,
+    pub end_month: Option<String>,
     pub expires_at: String,
 }
 
@@ -210,6 +221,40 @@ pub struct ExecuteEphemeralCrawlInput {
     pub start_month: Option<String>,
     pub end_month: Option<String>,
     pub mode: SyncMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct IngestLocalExecutionResultInput {
+    pub organization_id: String,
+    pub challenge_id: String,
+    pub challenge_payload: String,
+    pub challenge_signature_base64: String,
+    pub sign_cert_der: Vec<u8>,
+    pub snapshot: bridge::BridgeSnapshot,
+    pub mode: SyncMode,
+}
+
+struct ChallengeBindingExpectations<'a> {
+    sign_cert_der: &'a [u8],
+    business_no: Option<&'a str>,
+    sync_mode: Option<&'a str>,
+    facility_code: Option<&'a str>,
+    start_month: Option<&'a str>,
+    end_month: Option<&'a str>,
+    snapshot: Option<&'a bridge::BridgeSnapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengePayloadBinding {
+    organization_id: String,
+    mode: String,
+    business_no: Option<String>,
+    sync_mode: Option<String>,
+    facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    sign_cert_sha256_hex: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -433,13 +478,43 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
+        let (sync_mode, start_month, end_month) = if mode == "ephemeral" {
+            let requested_mode = input
+                .sync_mode
+                .as_deref()
+                .map(parse_sync_mode)
+                .transpose()?
+                .unwrap_or(SyncMode::Delta);
+            let sync_input = SyncInput {
+                organization_id: organization_id.clone(),
+                facility_code: input.facility_code.clone(),
+                start_month: input.start_month.clone(),
+                end_month: input.end_month.clone(),
+                mode: requested_mode,
+            };
+            let (effective_mode, start_month, end_month, _skip_documents) =
+                self.resolve_sync_plan(&sync_input).await?;
+            (
+                Some(sync_mode_label(&effective_mode).to_owned()),
+                start_month,
+                end_month,
+            )
+        } else {
+            (None, input.start_month.clone(), input.end_month.clone())
+        };
         let nonce = Uuid::new_v4().simple().to_string();
         let expires_at = (Utc::now() + ChronoDuration::seconds(input.ttl_seconds)).to_rfc3339();
         let payload = build_challenge_payload(
             &organization_id,
             &mode,
             &nonce,
+            input.origin.as_deref(),
+            input.business_no.as_deref(),
+            sync_mode.as_deref(),
             input.facility_code.as_deref(),
+            start_month.as_deref(),
+            end_month.as_deref(),
+            input.sign_cert_sha256_hex.as_deref(),
             &expires_at,
         );
         let challenge = self
@@ -457,8 +532,11 @@ impl AppService {
         Ok(CertGatewayChallengeView {
             id: challenge.id,
             mode: challenge.mode,
+            sync_mode,
             nonce: challenge.nonce,
             payload,
+            start_month,
+            end_month,
             expires_at: challenge.expires_at,
         })
     }
@@ -475,9 +553,17 @@ impl AppService {
             &input.challenge_id,
             &input.challenge_payload,
             &input.challenge_signature_base64,
-            &input.bundle.sign_cert_der,
             "stored",
             &organization_id,
+            ChallengeBindingExpectations {
+                sign_cert_der: &input.bundle.sign_cert_der,
+                business_no: Some(&business_no),
+                sync_mode: None,
+                facility_code: None,
+                start_month: None,
+                end_month: None,
+                snapshot: None,
+            },
         )
         .await?;
         self.store_certificate_bundle(&organization_id, business_no, input.bundle)
@@ -520,9 +606,17 @@ impl AppService {
             &input.challenge_id,
             &input.challenge_payload,
             &input.challenge_signature_base64,
-            &input.bundle.sign_cert_der,
             "ephemeral",
             &organization_id,
+            ChallengeBindingExpectations {
+                sign_cert_der: &input.bundle.sign_cert_der,
+                business_no: Some(&business_no),
+                sync_mode: Some(sync_mode_label(&input.mode)),
+                facility_code: input.facility_code.as_deref(),
+                start_month: input.start_month.as_deref(),
+                end_month: input.end_month.as_deref(),
+                snapshot: None,
+            },
         )
         .await?;
 
@@ -536,6 +630,84 @@ impl AppService {
             input.mode,
         )
         .await
+    }
+
+    pub async fn ingest_local_execution_result(
+        &self,
+        mut input: IngestLocalExecutionResultInput,
+    ) -> Result<SyncRun> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let business_no = self
+            .validate_sign_cert_for_organization(&organization_id, &input.sign_cert_der)
+            .await?;
+        let snapshot_business_no =
+            require_non_empty("facilityBusinessNo", &input.snapshot.facility.business_no)?;
+        if snapshot_business_no != business_no {
+            return Err(bad_request_error(
+                "local execution result business number mismatch",
+            ));
+        }
+        let facility_code = require_non_empty("facilityCode", &input.snapshot.facility.code)?;
+        input.snapshot.facility.code = facility_code.clone();
+        require_local_execution_document_contents(&mut input.snapshot)?;
+        self.consume_valid_challenge(
+            &input.challenge_id,
+            &input.challenge_payload,
+            &input.challenge_signature_base64,
+            "ephemeral",
+            &organization_id,
+            ChallengeBindingExpectations {
+                sign_cert_der: &input.sign_cert_der,
+                business_no: Some(&business_no),
+                sync_mode: Some(sync_mode_label(&input.mode)),
+                facility_code: Some(facility_code.as_str()),
+                start_month: None,
+                end_month: None,
+                snapshot: Some(&input.snapshot),
+            },
+        )
+        .await?;
+
+        let run = self
+            .db
+            .start_sync_run(
+                &organization_id,
+                Some(facility_code.as_str()),
+                input.mode.clone(),
+            )
+            .await?;
+        let run_id = run.id.clone();
+        let started = std::time::Instant::now();
+        match self
+            .persist_successful_snapshot(
+                &organization_id,
+                business_no.clone(),
+                run,
+                input.mode,
+                input.snapshot,
+                started,
+                true,
+            )
+            .await
+        {
+            Ok(run) => Ok(run),
+            Err(err) => {
+                let duration_ms = started.elapsed().as_millis() as i64;
+                let message = format!("{err:#}");
+                error!(
+                    business_no,
+                    facility_code,
+                    duration_ms,
+                    error = %message,
+                    "local execution ingest failed"
+                );
+                let _ = self
+                    .db
+                    .finish_sync_run(&run_id, "failed", duration_ms, Some(&message))
+                    .await;
+                Err(err)
+            }
+        }
     }
 
     pub async fn issue_crawl_task_token(
@@ -822,106 +994,16 @@ impl AppService {
                     document_count = snapshot.documents.len(),
                     "collector finished"
                 );
-                let plant = Plant {
-                    id: snapshot.facility.code.clone(),
-                    facility_code: snapshot.facility.code.clone(),
-                    name: snapshot.facility.name.clone(),
-                    owner_organization_id: organization_id.to_owned(),
-                    created_by_organization_id: None,
-                    contract_no: snapshot.facility.contract_no.clone(),
-                    address: snapshot.facility.address.clone(),
-                    installed_kw: snapshot.facility.installed_kw,
-                    rec_start_date: snapshot.facility.rec_start_date.clone(),
-                    confirm_issued: snapshot.facility.confirm_issued.clone(),
-                };
-                self.db.upsert_plant(&plant).await?;
-
-                let generation: Vec<GenerationRecord> = snapshot
-                    .generation
-                    .iter()
-                    .map(|row| GenerationRecord {
-                        month: row.month.clone(),
-                        generation_kwh: row.generation_kwh,
-                        self_consumption_kwh: row.self_consumption_kwh,
-                        supply_kwh: row.supply_kwh,
-                        application_deadline: row.application_deadline.clone(),
-                    })
-                    .collect();
-                let rates: Vec<StoredRateRecord> =
-                    snapshot.rates.iter().map(map_rate_record).collect();
-                let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
-
-                if effective_mode == SyncMode::Full {
-                    info!(
-                        plant_code = plant.facility_code,
-                        "replacing canonical full records"
-                    );
-                    self.db
-                        .replace_full_records(&plant.facility_code, &generation, &rates, &rec)
-                        .await?;
-                    info!(
-                        plant_code = plant.facility_code,
-                        "listing stale document objects"
-                    );
-                    let existing_objects =
-                        self.db.list_document_objects(&plant.facility_code).await?;
-                    for object_key in existing_objects {
-                        if let Err(err) = self.artifacts.delete_object(&object_key).await {
-                            warn!("delete stale object {} failed: {}", object_key, err);
-                        }
-                    }
-                    info!(
-                        plant_code = plant.facility_code,
-                        document_count = snapshot.documents.len(),
-                        "persisting documents to object storage"
-                    );
-                    let persisted_docs = self
-                        .persist_documents(
-                            organization_id,
-                            &plant.facility_code,
-                            &snapshot.documents,
-                        )
-                        .await?;
-                    info!(
-                        plant_code = plant.facility_code,
-                        document_count = persisted_docs.len(),
-                        "writing document rows"
-                    );
-                    self.db
-                        .replace_documents(&plant.facility_code, &persisted_docs)
-                        .await?;
-                } else {
-                    info!(plant_code = plant.facility_code, "upserting delta records");
-                    self.db
-                        .upsert_generation_records(&plant.facility_code, &generation)
-                        .await?;
-                    self.db
-                        .upsert_rate_records(&plant.facility_code, &rates)
-                        .await?;
-                    self.db
-                        .upsert_rec_records(&plant.facility_code, &rec)
-                        .await?;
-                }
-
-                let duration_ms = started.elapsed().as_millis() as i64;
-                self.db
-                    .finish_sync_run(&run.id, "completed", duration_ms, None)
-                    .await?;
-                info!(
-                    "sync completed organization={} plant={} mode={:?} duration_ms={}",
-                    organization_id, plant.facility_code, effective_mode, duration_ms
-                );
-
-                Ok(SyncRun {
-                    id: run.id,
-                    organization_id: organization_id.to_owned(),
-                    plant_id: Some(plant.facility_code),
-                    mode: effective_mode,
-                    status: "completed".to_owned(),
-                    started_at: run.started_at,
-                    finished_at: Some(now_string()),
-                    duration_ms,
-                })
+                self.persist_successful_snapshot(
+                    organization_id,
+                    business_no,
+                    run,
+                    effective_mode,
+                    snapshot,
+                    started,
+                    true,
+                )
+                .await
             }
             Err(err) => {
                 let duration_ms = started.elapsed().as_millis() as i64;
@@ -1225,6 +1307,15 @@ impl AppService {
             )
             .await?;
         let slug = require_non_empty("slug", &input.slug)?;
+        if let Some(conflicting) = self
+            .db
+            .find_client_by_slug_with_consistency(&slug, Some(ReadConsistency::Strong))
+            .await?
+        {
+            if conflicting.id != existing.id {
+                return Err(anyhow!("client slug already exists: {slug}"));
+            }
+        }
         let client = Client {
             id: existing.id,
             organization_id: existing.organization_id,
@@ -1770,6 +1861,134 @@ impl AppService {
         Ok(business_no)
     }
 
+    async fn validate_sign_cert_for_organization(
+        &self,
+        organization_id: &str,
+        sign_cert_der: &[u8],
+    ) -> Result<String> {
+        let business_no = self
+            .resolve_organization_business_no(organization_id, None)
+            .await?;
+        if let Some(cert_business_no) = extract_business_no(sign_cert_der)? {
+            if cert_business_no != business_no {
+                return Err(bad_request_error("certificate business number mismatch"));
+            }
+        }
+        Ok(business_no)
+    }
+
+    async fn persist_successful_snapshot(
+        &self,
+        organization_id: &str,
+        business_no: String,
+        run: SyncRun,
+        effective_mode: SyncMode,
+        snapshot: bridge::BridgeSnapshot,
+        started: std::time::Instant,
+        persist_documents: bool,
+    ) -> Result<SyncRun> {
+        let plant = Plant {
+            id: snapshot.facility.code.clone(),
+            facility_code: snapshot.facility.code.clone(),
+            name: snapshot.facility.name.clone(),
+            owner_organization_id: organization_id.to_owned(),
+            created_by_organization_id: None,
+            contract_no: snapshot.facility.contract_no.clone(),
+            address: snapshot.facility.address.clone(),
+            installed_kw: snapshot.facility.installed_kw,
+            rec_start_date: snapshot.facility.rec_start_date.clone(),
+            confirm_issued: snapshot.facility.confirm_issued.clone(),
+        };
+        self.db.upsert_plant(&plant).await?;
+
+        let generation: Vec<GenerationRecord> = snapshot
+            .generation
+            .iter()
+            .map(|row| GenerationRecord {
+                month: row.month.clone(),
+                generation_kwh: row.generation_kwh,
+                self_consumption_kwh: row.self_consumption_kwh,
+                supply_kwh: row.supply_kwh,
+                application_deadline: row.application_deadline.clone(),
+            })
+            .collect();
+        let rates: Vec<StoredRateRecord> = snapshot.rates.iter().map(map_rate_record).collect();
+        let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
+
+        if effective_mode != SyncMode::Full && !snapshot.documents.is_empty() {
+            return Err(bad_request_error("document upload requires full sync"));
+        }
+
+        if effective_mode == SyncMode::Full {
+            info!(
+                plant_code = plant.facility_code,
+                "replacing canonical full records"
+            );
+            self.db
+                .replace_full_records(&plant.facility_code, &generation, &rates, &rec)
+                .await?;
+            if persist_documents {
+                info!(
+                    plant_code = plant.facility_code,
+                    "listing stale document objects"
+                );
+                let existing_objects = self.db.list_document_objects(&plant.facility_code).await?;
+                for object_key in existing_objects {
+                    if let Err(err) = self.artifacts.delete_object(&object_key).await {
+                        warn!("delete stale object {} failed: {}", object_key, err);
+                    }
+                }
+                info!(
+                    plant_code = plant.facility_code,
+                    document_count = snapshot.documents.len(),
+                    "persisting documents to object storage"
+                );
+                let persisted_docs = self
+                    .persist_documents(organization_id, &plant.facility_code, &snapshot.documents)
+                    .await?;
+                info!(
+                    plant_code = plant.facility_code,
+                    document_count = persisted_docs.len(),
+                    "writing document rows"
+                );
+                self.db
+                    .replace_documents(&plant.facility_code, &persisted_docs)
+                    .await?;
+            }
+        } else {
+            info!(plant_code = plant.facility_code, "upserting delta records");
+            self.db
+                .upsert_generation_records(&plant.facility_code, &generation)
+                .await?;
+            self.db
+                .upsert_rate_records(&plant.facility_code, &rates)
+                .await?;
+            self.db
+                .upsert_rec_records(&plant.facility_code, &rec)
+                .await?;
+        }
+
+        let duration_ms = started.elapsed().as_millis() as i64;
+        self.db
+            .finish_sync_run(&run.id, "completed", duration_ms, None)
+            .await?;
+        info!(
+            "sync completed organization={} business_no={} plant={} mode={:?} duration_ms={}",
+            organization_id, business_no, plant.facility_code, effective_mode, duration_ms
+        );
+
+        Ok(SyncRun {
+            id: run.id,
+            organization_id: organization_id.to_owned(),
+            plant_id: Some(plant.facility_code),
+            mode: effective_mode,
+            status: "completed".to_owned(),
+            started_at: run.started_at,
+            finished_at: Some(now_string()),
+            duration_ms,
+        })
+    }
+
     async fn store_certificate_bundle(
         &self,
         organization_id: &str,
@@ -1801,9 +2020,9 @@ impl AppService {
         challenge_id: &str,
         challenge_payload: &str,
         challenge_signature_base64: &str,
-        sign_cert_der: &[u8],
         expected_mode: &str,
         organization_id: &str,
+        bindings: ChallengeBindingExpectations<'_>,
     ) -> Result<()> {
         let challenge = self
             .db
@@ -1830,10 +2049,16 @@ impl AppService {
         if hash_hex(challenge_payload) != challenge.payload_hash {
             return Err(bad_request_error("cert gateway challenge payload mismatch"));
         }
+        validate_challenge_payload_bindings(
+            challenge_payload,
+            organization_id,
+            expected_mode,
+            &bindings,
+        )?;
         let challenge_signature_base64 =
             require_non_empty("challengeSignatureBase64", challenge_signature_base64)?;
         verify_challenge_signature(
-            sign_cert_der,
+            bindings.sign_cert_der,
             challenge_payload,
             &challenge_signature_base64,
         )
@@ -1853,17 +2078,13 @@ impl AppService {
             let id = stable_document_id(organization_id, plant_code, doc);
             let category = resolved_document_category(doc);
             let object_key = format!("{organization_id}/{plant_code}/{id}.pdf");
-            let source_path = Path::new(&doc.source_path);
             info!(
                 plant_code,
                 file_name = doc.file_name.as_str(),
                 object_key = object_key.as_str(),
                 "uploading document"
             );
-            self.artifacts
-                .put_file(object_key.clone(), source_path, "application/pdf")
-                .await
-                .with_context(|| format!("upload document {}", doc.file_name))?;
+            self.persist_document(object_key.clone(), doc).await?;
             persisted.push(PersistedDocument {
                 id,
                 category,
@@ -1878,10 +2099,37 @@ impl AppService {
                     .clone()
                     .or_else(|| doc.source_sha256.clone()),
                 object_key,
-                content_type: "application/pdf".to_owned(),
+                content_type: document_content_type(doc).to_owned(),
             });
         }
         Ok(persisted)
+    }
+
+    async fn persist_document(&self, object_key: String, doc: &BridgeDocument) -> Result<()> {
+        let content_type = document_content_type(doc);
+        if let Some(content_base64) = doc
+            .content_base64
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(content_base64)
+                .map(Bytes::from)
+                .map_err(|_| bad_request_error("document contentBase64 is not valid base64"))?;
+            self.artifacts
+                .put_bytes(object_key, bytes, content_type)
+                .await
+                .with_context(|| format!("upload document {}", doc.file_name))?;
+            return Ok(());
+        }
+
+        let source_path = Path::new(&doc.source_path);
+        self.artifacts
+            .put_file(object_key, source_path, content_type)
+            .await
+            .with_context(|| format!("upload document {}", doc.file_name))?;
+        Ok(())
     }
 }
 
@@ -1913,6 +2161,24 @@ fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapshot) -> Result<()> {
+    for doc in &mut snapshot.documents {
+        let has_content = doc
+            .content_base64
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some();
+        if !has_content {
+            return Err(bad_request_error(
+                "local execution documents require contentBase64",
+            ));
+        }
+        doc.source_path.clear();
+    }
+    Ok(())
+}
+
 fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocument) -> String {
     let mut hasher = Sha256::new();
     hasher.update(organization_id.as_bytes());
@@ -1924,6 +2190,14 @@ fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocum
     hasher.update(doc.file_name.as_bytes());
     let digest = hasher.finalize();
     hex::encode(&digest[..16])
+}
+
+fn document_content_type(doc: &BridgeDocument) -> &str {
+    doc.content_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/pdf")
 }
 
 fn map_rate_record(row: &BridgeRateRecord) -> StoredRateRecord {
@@ -2079,18 +2353,227 @@ fn build_challenge_payload(
     organization_id: &str,
     mode: &str,
     nonce: &str,
+    origin: Option<&str>,
+    business_no: Option<&str>,
+    sync_mode: Option<&str>,
     facility_code: Option<&str>,
+    start_month: Option<&str>,
+    end_month: Option<&str>,
+    sign_cert_sha256_hex: Option<&str>,
     expires_at: &str,
 ) -> String {
-    format!(
-        "cert-gateway:{organization_id}:{mode}:{}:{nonce}:{expires_at}",
-        facility_code.unwrap_or("")
-    )
+    let mut payload = BTreeMap::new();
+    payload.insert("expiresAt", expires_at.to_owned());
+    payload.insert("mode", mode.to_owned());
+    payload.insert("nonce", nonce.to_owned());
+    payload.insert("organizationId", organization_id.to_owned());
+    insert_trimmed(&mut payload, "origin", origin);
+    insert_trimmed(&mut payload, "businessNo", business_no);
+    insert_trimmed(&mut payload, "syncMode", sync_mode);
+    insert_trimmed(&mut payload, "facilityCode", facility_code);
+    insert_trimmed(&mut payload, "startMonth", start_month);
+    insert_trimmed(&mut payload, "endMonth", end_month);
+    insert_trimmed(&mut payload, "signCertSha256Hex", sign_cert_sha256_hex);
+
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).expect("challenge payload map serializes"));
+    format!("cert-gateway:{encoded}")
+}
+
+fn validate_challenge_payload_bindings(
+    challenge_payload: &str,
+    organization_id: &str,
+    expected_mode: &str,
+    expected: &ChallengeBindingExpectations<'_>,
+) -> Result<()> {
+    let payload = decode_challenge_payload(challenge_payload)?;
+    if payload.organization_id != organization_id {
+        return Err(bad_request_error(
+            "cert gateway challenge payload organization mismatch",
+        ));
+    }
+    if payload.mode != expected_mode {
+        return Err(bad_request_error(
+            "cert gateway challenge payload mode mismatch",
+        ));
+    }
+    if let Some(bound_fingerprint) = trim_optional(payload.sign_cert_sha256_hex.as_deref()) {
+        let actual_fingerprint = hash_bytes_hex(expected.sign_cert_der);
+        if !bound_fingerprint.eq_ignore_ascii_case(&actual_fingerprint) {
+            return Err(bad_request_error(
+                "cert gateway challenge certificate fingerprint mismatch",
+            ));
+        }
+    }
+    if let Some(bound_business_no) = trim_optional(payload.business_no.as_deref()) {
+        let expected_business_no = expected
+            .business_no
+            .and_then(|value| normalize_business_no(value).ok())
+            .ok_or_else(|| bad_request_error("cert gateway challenge business number mismatch"))?;
+        let bound_business_no = normalize_business_no(bound_business_no)?;
+        if bound_business_no != expected_business_no {
+            return Err(bad_request_error(
+                "cert gateway challenge business number mismatch",
+            ));
+        }
+    }
+    if expected_mode == "ephemeral" {
+        validate_optional_binding(
+            "sync mode",
+            payload.sync_mode.as_deref(),
+            expected.sync_mode,
+        )?;
+        validate_optional_binding(
+            "facility code",
+            payload.facility_code.as_deref(),
+            expected.facility_code,
+        )?;
+        validate_month_binding(
+            "start month",
+            payload.start_month.as_deref(),
+            expected.start_month,
+            expected.snapshot,
+            true,
+        )?;
+        validate_month_binding(
+            "end month",
+            payload.end_month.as_deref(),
+            expected.end_month,
+            expected.snapshot,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+fn decode_challenge_payload(challenge_payload: &str) -> Result<ChallengePayloadBinding> {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .ok_or_else(|| bad_request_error("cert gateway challenge payload prefix mismatch"))?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| bad_request_error("cert gateway challenge payload is not base64"))?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| bad_request_error("cert gateway challenge payload is not json"))
+}
+
+fn validate_optional_binding(
+    field: &str,
+    bound: Option<&str>,
+    expected: Option<&str>,
+) -> Result<()> {
+    let Some(bound) = trim_optional(bound) else {
+        return Ok(());
+    };
+    let Some(expected) = expected.and_then(|value| trim_optional(Some(value))) else {
+        return Err(bad_request_error(format!(
+            "cert gateway challenge {field} mismatch"
+        )));
+    };
+    if bound != expected {
+        return Err(bad_request_error(format!(
+            "cert gateway challenge {field} mismatch"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_month_binding(
+    field: &str,
+    bound: Option<&str>,
+    expected: Option<&str>,
+    snapshot: Option<&bridge::BridgeSnapshot>,
+    is_start: bool,
+) -> Result<()> {
+    let Some(bound) = trim_optional(bound) else {
+        return Ok(());
+    };
+    validate_month_format(field, bound)?;
+    if let Some(expected) = expected.and_then(|value| trim_optional(Some(value))) {
+        validate_month_format(field, expected)?;
+        if bound != expected {
+            return Err(bad_request_error(format!(
+                "cert gateway challenge {field} mismatch"
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(snapshot) = snapshot {
+        for month in snapshot_record_months(snapshot) {
+            validate_month_format("snapshot month", month)?;
+            let outside_range = if is_start {
+                month < bound
+            } else {
+                month > bound
+            };
+            if outside_range {
+                return Err(bad_request_error(format!(
+                    "cert gateway challenge {field} mismatch"
+                )));
+            }
+        }
+        return Ok(());
+    }
+    Err(bad_request_error(format!(
+        "cert gateway challenge {field} mismatch"
+    )))
+}
+
+fn validate_month_format(field: &str, value: &str) -> Result<()> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 7
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..].iter().all(u8::is_ascii_digit);
+    if !valid {
+        return Err(bad_request_error(format!(
+            "{field} must use YYYY-MM format"
+        )));
+    }
+    let month: u8 = value[5..7]
+        .parse()
+        .map_err(|_| bad_request_error(format!("{field} must use YYYY-MM format")))?;
+    if !(1..=12).contains(&month) {
+        return Err(bad_request_error(format!(
+            "{field} must use YYYY-MM format"
+        )));
+    }
+    Ok(())
+}
+
+fn snapshot_record_months(snapshot: &bridge::BridgeSnapshot) -> Vec<&str> {
+    snapshot
+        .generation
+        .iter()
+        .map(|record| record.month.as_str())
+        .chain(snapshot.rates.iter().map(|record| record.month.as_str()))
+        .chain(snapshot.rec.iter().map(|record| record.month.as_str()))
+        .collect()
+}
+
+fn trim_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn insert_trimmed(
+    map: &mut BTreeMap<&'static str, String>,
+    key: &'static str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        map.insert(key, value.to_owned());
+    }
 }
 
 fn hash_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn hash_bytes_hex(value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value);
     hex::encode(hasher.finalize())
 }
 
@@ -2227,7 +2710,7 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_optional_text, select_organization_business_no};
+    use super::{normalize_optional_text, select_organization_business_no, validate_month_format};
 
     #[test]
     fn requested_business_number_wins() {
@@ -2269,5 +2752,16 @@ mod tests {
             normalize_optional_text(Some("  hello  ".to_owned())).as_deref(),
             Some("hello")
         );
+    }
+
+    #[test]
+    fn challenge_month_binding_requires_zero_padded_months() {
+        assert!(validate_month_format("start month", "2026-03").is_ok());
+        for invalid in ["2026-3", "2026-00", "2026-13", "26-03", "2026/03"] {
+            assert!(
+                validate_month_format("start month", invalid).is_err(),
+                "{invalid} should be rejected"
+            );
+        }
     }
 }

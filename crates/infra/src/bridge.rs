@@ -7,8 +7,8 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Utc};
 use chrono_tz::Asia::Seoul;
 use curl::easy::{Easy, List};
 use regex::Regex;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
@@ -36,7 +36,8 @@ pub struct BridgeRun {
     pub snapshot: BridgeSnapshot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeFacility {
     pub code: String,
     pub name: String,
@@ -48,7 +49,8 @@ pub struct BridgeFacility {
     pub confirm_issued: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeGenerationRecord {
     pub month: String,
     pub generation_kwh: f64,
@@ -57,7 +59,8 @@ pub struct BridgeGenerationRecord {
     pub application_deadline: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeRateRecord {
     pub month: String,
     pub self_rate: Option<f64>,
@@ -68,7 +71,8 @@ pub struct BridgeRateRecord {
     pub source_control_flag: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeRecRecord {
     pub month: String,
     pub application_no: String,
@@ -82,7 +86,8 @@ pub struct BridgeRecRecord {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeDocument {
     pub attachment_code: String,
     pub file_class: String,
@@ -93,9 +98,14 @@ pub struct BridgeDocument {
     pub source_path: String,
     pub source_sha256: Option<String>,
     pub output_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeSnapshot {
     pub collected_at: DateTime<FixedOffset>,
     pub facility: BridgeFacility,
@@ -628,6 +638,8 @@ impl Collector {
                     source_path,
                     source_sha256: None,
                     output_sha256: None,
+                    content_base64: None,
+                    content_type: None,
                 });
             }
         }
