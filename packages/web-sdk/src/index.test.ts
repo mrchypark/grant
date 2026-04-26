@@ -80,6 +80,7 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
       jsonResponse({
         challengeId: "challenge-1",
         mode: "ephemeral",
+        facilityCode: "FAC-BOUND",
         nonce: "nonce-1",
         payload: "payload-1",
         expiresAt: "2026-04-09T00:00:00Z",
@@ -102,6 +103,7 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
     });
 
     assert.equal(challenge.challengeId, "challenge-1");
+    assert.equal(challenge.facilityCode, "FAC-BOUND");
     assert.equal(mock.calls.length, 1);
     assert.equal(
       String(mock.calls[0].input),
@@ -928,6 +930,7 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
         challengeId: "browser-challenge-1",
         mode: "ephemeral",
         syncMode: "delta",
+        facilityCode: "FAC-BOUND",
         nonce: "nonce-browser-1",
         payload: "cert-gateway:test",
         startMonth: "2026-02",
@@ -941,6 +944,7 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
       assert.equal(body.bundle.businessNo, "2768603291");
       assert.equal(body.bundle.password, "test-password");
       assert.equal(body.mode, "delta");
+      assert.equal(body.facilityCode, "FAC-BOUND");
       assert.equal(body.startMonth, "2026-02");
       assert.equal(body.endMonth, "2026-04");
       return jsonResponse({

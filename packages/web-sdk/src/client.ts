@@ -13,6 +13,7 @@ export type Challenge = {
   challengeId: string;
   mode: ChallengeMode;
   syncMode?: SyncMode;
+  facilityCode?: string;
   nonce: string;
   payload: string;
   startMonth?: string;

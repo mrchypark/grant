@@ -224,7 +224,7 @@ export class WebSdk {
       challengePayload: challenge.payload,
       challengeSignatureBase64: proof.challengeSignatureBase64,
       bundle: proof.bundle,
-      facilityCode: trimOptional(input.facilityCode),
+      facilityCode: trimOptional(challenge.facilityCode) ?? trimOptional(input.facilityCode),
       startMonth: trimOptional(challenge.startMonth) ?? trimOptional(input.startMonth),
       endMonth: trimOptional(challenge.endMonth) ?? trimOptional(input.endMonth),
       mode: (trimOptional(challenge.syncMode) as SyncMode | undefined) ?? requestedSyncMode,

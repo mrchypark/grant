@@ -550,6 +550,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .as_str()
         .expect("challenge payload")
         .to_owned();
+    assert_eq!(challenge_json["facilityCode"], "FAC-001");
     assert_challenge_payload_binds_context(
         &challenge_payload,
         "bootstrap-user",
@@ -682,6 +683,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(ephemeral_challenge.status(), StatusCode::CREATED);
     let ephemeral_challenge_json = json_body(ephemeral_challenge).await;
     assert_eq!(ephemeral_challenge_json["syncMode"], "full");
+    assert_eq!(ephemeral_challenge_json["facilityCode"], "FAC-002");
 
     let ephemeral_response = app
         .clone()

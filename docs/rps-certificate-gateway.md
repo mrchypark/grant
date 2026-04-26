@@ -168,11 +168,17 @@ Content-Type: application/json
 {
   "challengeId": "challenge-1",
   "mode": "ephemeral",
+  "syncMode": "delta",
+  "facilityCode": "FAC-001",
+  "startMonth": "2026-01",
+  "endMonth": "2026-03",
   "nonce": "nonce-1",
   "payload": "cert-gateway:...",
   "expiresAt": "2026-04-09T00:00:00Z"
 }
 ```
+
+ephemeral challenge 응답의 `facilityCode`, `syncMode`, `startMonth`, `endMonth`는 서버가 권한과 sync planning을 적용한 최종 실행 범위다. 로컬 실행형 클라이언트는 요청값이 아니라 이 응답값을 로컬 워커/실행 요청에 전달해야 challenge에 묶인 범위와 실제 수집 범위가 어긋나지 않는다.
 
 ### Escrowed ephemeral 실행
 

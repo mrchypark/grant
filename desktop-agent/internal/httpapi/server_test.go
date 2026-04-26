@@ -513,11 +513,12 @@ func TestSummarizeGatewayErrorValueDropsNonJSONValues(t *testing.T) {
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{
-			ChallengeID: "challenge-ephemeral-1",
-			Payload:     "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z",
-			SyncMode:    "full",
-			StartMonth:  "2026-02",
-			EndMonth:    "2026-04",
+			ChallengeID:  "challenge-ephemeral-1",
+			Payload:      "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z",
+			SyncMode:     "full",
+			FacilityCode: "FAC-BOUND",
+			StartMonth:   "2026-02",
+			EndMonth:     "2026-04",
 		},
 	}
 	local := &stubLocalExecutor{}
@@ -568,7 +569,7 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	if got["status"] != "completed" {
 		t.Fatalf("status = %v, want completed", got["status"])
 	}
-	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
+	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z" {
 		t.Fatalf("challenge = %q", npkiSvc.lastSignReq.Challenge)
 	}
 	if string(npkiSvc.lastSignReq.PasswordBytes) != "secret-password" {
@@ -580,7 +581,7 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-1" {
 		t.Fatalf("challengeId = %q, want challenge-ephemeral-1", local.lastEphemeral.ChallengeID)
 	}
-	if local.lastEphemeral.ChallengePayload != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
+	if local.lastEphemeral.ChallengePayload != "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z" {
 		t.Fatalf("challengePayload = %q", local.lastEphemeral.ChallengePayload)
 	}
 	if local.lastEphemeral.ChallengeSignatureBase64 == "" {
@@ -604,8 +605,8 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	if gateway.lastChallenge.SignCertSHA256Hex != "sha256-cert-1" {
 		t.Fatalf("challenge sign cert fingerprint = %q", gateway.lastChallenge.SignCertSHA256Hex)
 	}
-	if local.lastEphemeral.FacilityCode != "FAC-001" {
-		t.Fatalf("facilityCode = %q, want FAC-001", local.lastEphemeral.FacilityCode)
+	if local.lastEphemeral.FacilityCode != "FAC-BOUND" {
+		t.Fatalf("facilityCode = %q, want FAC-BOUND", local.lastEphemeral.FacilityCode)
 	}
 	if local.lastEphemeral.StartMonth != "2026-02" {
 		t.Fatalf("startMonth = %q, want 2026-02", local.lastEphemeral.StartMonth)
@@ -1071,12 +1072,12 @@ func TestHTTPGatewayExecutorEscapesOrganizationIDInPaths(t *testing.T) {
 			t.Fatalf("decode body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"challengeId":"challenge-1","payload":"payload-1"}`))
+		_, _ = w.Write([]byte(`{"challengeId":"challenge-1","payload":"payload-1","facilityCode":"FAC-BOUND"}`))
 	}))
 	defer backend.Close()
 
 	executor := httpGatewayExecutor{client: backend.Client()}
-	_, err := executor.CreateChallenge(context.Background(), GatewayChallengeRequest{
+	challenge, err := executor.CreateChallenge(context.Background(), GatewayChallengeRequest{
 		BaseURL:           backend.URL,
 		OrganizationID:    "org/../evil",
 		Mode:              "ephemeral",
@@ -1090,6 +1091,9 @@ func TestHTTPGatewayExecutorEscapesOrganizationIDInPaths(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create challenge: %v", err)
+	}
+	if challenge.FacilityCode != "FAC-BOUND" {
+		t.Fatalf("challenge facilityCode = %q, want FAC-BOUND", challenge.FacilityCode)
 	}
 	if gotPath != "/api/v1/organizations/org%2F..%2Fevil/cert-gateway/challenges" {
 		t.Fatalf("path = %q, want escaped organization id", gotPath)

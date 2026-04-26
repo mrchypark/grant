@@ -403,6 +403,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	case "ephemeral":
 		localPassword := string(decision.Password)
 		syncMode := firstNonEmpty(challenge.SyncMode, req.Mode)
+		facilityCode := firstNonEmpty(challenge.FacilityCode, req.FacilityCode)
 		startMonth := firstNonEmpty(challenge.StartMonth, req.StartMonth)
 		endMonth := firstNonEmpty(challenge.EndMonth, req.EndMonth)
 		body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
@@ -415,7 +416,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 			ChallengeID:              challenge.ChallengeID,
 			ChallengePayload:         challenge.Payload,
 			ChallengeSignatureBase64: signResult.ChallengeSignatureBase64,
-			FacilityCode:             req.FacilityCode,
+			FacilityCode:             facilityCode,
 			StartMonth:               startMonth,
 			EndMonth:                 endMonth,
 			Mode:                     syncMode,
@@ -860,11 +861,12 @@ type gatewayRequest struct {
 }
 
 type challengeResponse struct {
-	ChallengeID string `json:"challengeId"`
-	Payload     string `json:"payload"`
-	SyncMode    string `json:"syncMode,omitempty"`
-	StartMonth  string `json:"startMonth,omitempty"`
-	EndMonth    string `json:"endMonth,omitempty"`
+	ChallengeID  string `json:"challengeId"`
+	Payload      string `json:"payload"`
+	SyncMode     string `json:"syncMode,omitempty"`
+	FacilityCode string `json:"facilityCode,omitempty"`
+	StartMonth   string `json:"startMonth,omitempty"`
+	EndMonth     string `json:"endMonth,omitempty"`
 }
 
 func (h httpGatewayExecutor) createChallenge(ctx context.Context, req GatewayChallengeRequest) (challengeResponse, error) {
