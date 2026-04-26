@@ -1372,6 +1372,7 @@ impl AppService {
             )
             .await?;
         let slug = require_non_empty("slug", &input.slug)?;
+        let slug_changed = existing.slug != slug;
         let client = Client {
             id: existing.id,
             organization_id: existing.organization_id,
@@ -1385,7 +1386,7 @@ impl AppService {
             active: input.active,
             created_by_user_id: existing.created_by_user_id,
         };
-        self.db.update_client(&client).await?;
+        self.db.update_client(&client, slug_changed).await?;
         Ok(client)
     }
 
@@ -2184,13 +2185,24 @@ impl AppService {
             return Ok(());
         }
 
-        let source_path = Path::new(&doc.source_path);
+        let source_path = Path::new(document_source_path(doc)?);
         self.artifacts
             .put_file(object_key, source_path, content_type)
             .await
             .with_context(|| format!("upload document {}", doc.file_name))?;
         Ok(())
     }
+}
+
+fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
+    let source_path = doc.source_path.trim();
+    if source_path.is_empty() {
+        return Err(bad_request_error(format!(
+            "document {} has no contentBase64 and no sourcePath",
+            doc.file_name
+        )));
+    }
+    Ok(source_path)
 }
 
 fn normalize_active_organization(
@@ -2861,7 +2873,7 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
-        estimated_base64_decoded_len, normalize_optional_text,
+        document_source_path, estimated_base64_decoded_len, normalize_optional_text,
         require_local_execution_document_contents, select_organization_business_no,
         validate_month_format,
     };
@@ -2977,6 +2989,19 @@ mod tests {
 
         require_local_execution_document_contents(&mut snapshot).expect("bounded document");
         assert_eq!(snapshot.documents[0].source_path, "");
+    }
+
+    #[test]
+    fn document_source_path_rejects_whitespace_only_fallbacks() {
+        let mut doc = fixture_document("permit.pdf", String::new());
+        doc.content_base64 = None;
+        doc.source_path = " \t\n ".to_owned();
+
+        let err = document_source_path(&doc).expect_err("blank source path");
+        assert!(
+            err.to_string()
+                .contains("document permit.pdf has no contentBase64 and no sourcePath")
+        );
     }
 
     fn encoded_len_for_decoded_bytes(decoded_bytes: usize) -> usize {

@@ -2077,44 +2077,63 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_client(&self, client: &Client) -> Result<()> {
+    pub async fn update_client(&self, client: &Client, slug_changed: bool) -> Result<()> {
         self.validate_client_references(client).await?;
         let now = now_string();
+        let stmt = if slug_changed {
+            "UPDATE clients
+             SET organization_id = $2,
+                 slug = $3,
+                 name = $4,
+                 description = $5,
+                 client_type = $6,
+                 app_type = $7,
+                 first_party = $8,
+                 consent_policy = $9,
+                 active = $10,
+                 created_by_user_id = $11,
+                 updated_at = $12
+             WHERE id = $1
+               AND NOT EXISTS (
+                   SELECT 1 FROM clients existing
+                   WHERE existing.slug = $13 AND existing.id != $14
+               )"
+        } else {
+            "UPDATE clients
+             SET organization_id = $2,
+                 slug = $3,
+                 name = $4,
+                 description = $5,
+                 client_type = $6,
+                 app_type = $7,
+                 first_party = $8,
+                 consent_policy = $9,
+                 active = $10,
+                 created_by_user_id = $11,
+                 updated_at = $12
+             WHERE id = $1"
+        };
+        let mut update_params = params!(
+            client.id.clone(),
+            client.organization_id.clone(),
+            client.slug.clone(),
+            client.name.clone(),
+            client.description.clone(),
+            client_type_str(&client.client_type),
+            client_app_type_str(&client.app_type),
+            if client.first_party { 1_i64 } else { 0_i64 },
+            client_consent_policy_str(&client.consent_policy),
+            if client.active { 1_i64 } else { 0_i64 },
+            client.created_by_user_id.clone(),
+            now
+        );
+        if slug_changed {
+            update_params.push(hiqlite::Param::from(client.slug.clone()));
+            update_params.push(hiqlite::Param::from(client.id.clone()));
+        }
         let updated = self
             .runtime
-            .execute(
-                "UPDATE clients
-                 SET organization_id = $2,
-                     slug = $3,
-                     name = $4,
-                     description = $5,
-                     client_type = $6,
-                     app_type = $7,
-                     first_party = $8,
-                     consent_policy = $9,
-                     active = $10,
-                     created_by_user_id = $11,
-                     updated_at = $12
-	                 WHERE id = $1
-	                   AND NOT EXISTS (
-	                       SELECT 1 FROM clients existing
-	                       WHERE existing.slug = $3 AND existing.id != $1
-	                   )",
-                params!(
-                    client.id.clone(),
-                    client.organization_id.clone(),
-                    client.slug.clone(),
-                    client.name.clone(),
-                    client.description.clone(),
-                    client_type_str(&client.client_type),
-                    client_app_type_str(&client.app_type),
-                    if client.first_party { 1_i64 } else { 0_i64 },
-                    client_consent_policy_str(&client.consent_policy),
-                    if client.active { 1_i64 } else { 0_i64 },
-                    client.created_by_user_id.clone(),
-                    now
-                ),
-            )
+            .execute(stmt, update_params)
             .await
             .context("update client")?;
         if updated == 0 {
@@ -2125,13 +2144,8 @@ impl Database {
             {
                 return Err(anyhow!("client not found: {}", client.id));
             }
-            if let Some(conflicting) = self
-                .find_client_by_slug_with_consistency(&client.slug, Some(ReadConsistency::Strong))
-                .await?
-            {
-                if conflicting.id != client.id {
-                    return Err(anyhow!("client slug already exists: {}", client.slug));
-                }
+            if slug_changed {
+                return Err(anyhow!("client slug already exists: {}", client.slug));
             }
         }
         Ok(())

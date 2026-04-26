@@ -7,6 +7,7 @@ use infra::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -145,9 +146,8 @@ fn embed_document_contents(snapshot: &mut BridgeSnapshot, document_root: &Path) 
                 MAX_TOTAL_DOCUMENT_BYTES
             );
         }
-        let bytes = std::fs::read(&document_path)
+        let (content_base64, sha256) = encode_document_base64_and_sha256(&document_path)
             .with_context(|| format!("read local document {}", doc.source_path))?;
-        let sha256 = sha256_hex(&bytes);
         if doc
             .source_sha256
             .as_deref()
@@ -166,11 +166,39 @@ fn embed_document_contents(snapshot: &mut BridgeSnapshot, document_root: &Path) 
         {
             doc.output_sha256 = Some(sha256);
         }
-        doc.content_base64 = Some(STANDARD.encode(bytes));
+        doc.content_base64 = Some(content_base64);
         doc.content_type = Some("application/pdf".to_owned());
         doc.source_path.clear();
     }
     Ok(())
+}
+
+fn encode_document_base64_and_sha256(path: &Path) -> Result<(String, String)> {
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut encoded = Vec::new();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    {
+        let mut encoder = base64::write::EncoderWriter::new(&mut encoded, &STANDARD);
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("read {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            encoder
+                .write_all(&buffer[..read])
+                .with_context(|| format!("encode {}", path.display()))?;
+        }
+        encoder
+            .finish()
+            .with_context(|| format!("finish base64 {}", path.display()))?;
+    }
+    let content_base64 =
+        String::from_utf8(encoded).context("base64 encoder emitted non-utf8 output")?;
+    Ok((content_base64, hex_lower(&hasher.finalize())))
 }
 
 fn resolve_local_document_path(document_root: &Path, source_path: &str) -> Result<PathBuf> {
@@ -182,12 +210,6 @@ fn resolve_local_document_path(document_root: &Path, source_path: &str) -> Resul
         bail!("local document {source_path} is outside the collector workspace");
     }
     Ok(path)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex_lower(&hasher.finalize())
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -424,6 +446,41 @@ mod tests {
             .expect("serialize result");
         assert!(!json.contains(path.to_string_lossy().as_ref()));
         assert!(json.contains("contentBase64"));
+    }
+
+    #[test]
+    fn embed_document_contents_streams_multichunk_documents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("permit.pdf");
+        let bytes: Vec<u8> = (0..(70 * 1024)).map(|idx| (idx % 251) as u8).collect();
+        std::fs::write(&path, &bytes).expect("write multichunk fixture document");
+        let expected_sha256 = hex_lower(&Sha256::digest(&bytes));
+        let expected_base64 = STANDARD.encode(&bytes);
+
+        let mut snapshot = fixture_snapshot();
+        snapshot.documents.push(BridgeDocument {
+            attachment_code: "ATT-1".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: "permit.pdf".to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: path.to_string_lossy().into_owned(),
+            source_sha256: Some(expected_sha256.clone()),
+            output_sha256: None,
+            content_base64: None,
+            content_type: None,
+        });
+
+        embed_document_contents(&mut snapshot, dir.path()).expect("embed document");
+        let doc = &snapshot.documents[0];
+        assert_eq!(doc.source_path, "");
+        assert_eq!(doc.source_sha256.as_deref(), Some(expected_sha256.as_str()));
+        assert_eq!(doc.output_sha256.as_deref(), Some(expected_sha256.as_str()));
+        assert_eq!(
+            doc.content_base64.as_deref(),
+            Some(expected_base64.as_str())
+        );
     }
 
     #[test]
