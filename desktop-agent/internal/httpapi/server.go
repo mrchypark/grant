@@ -399,8 +399,8 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	switch action {
 	case "ephemeral":
 		localPassword := string(decision.Password)
-		syncMode := firstNonEmpty(challenge.SyncMode, req.Mode)
-		facilityCode := firstNonEmpty(challenge.FacilityCode, req.FacilityCode)
+		syncMode := strings.TrimSpace(challenge.SyncMode)
+		facilityCode := strings.TrimSpace(challenge.FacilityCode)
 		startMonth, endMonth := challengeMonthBounds(challenge.StartMonth, challenge.EndMonth)
 		body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
 			BaseURL:                  gatewayBaseURL,

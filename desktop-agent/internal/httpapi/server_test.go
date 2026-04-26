@@ -625,6 +625,68 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	}
 }
 
+func TestServerApproveEphemeralRunDoesNotFallbackToRequestScopeWhenChallengeOmitsScope(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-unscoped",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	local := &stubLocalExecutor{}
+	npkiSvc := &stubNPKIService{
+		certificates: []npki.CertificateMetadata{{
+			ID:                "cert-1",
+			CommonName:        "Test Certificate",
+			BusinessNo:        "2768603291",
+			NotAfter:          time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			SignCertSHA256Hex: "sha256-cert-1",
+		}},
+	}
+	handler := newTestHandler(
+		npkiSvc,
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291",
+		"bearerToken":"token-1",
+		"activeOrganizationId":"org-1",
+		"facilityCode":"FAC-CALLER",
+		"startMonth":"2026-01",
+		"endMonth":"2026-03",
+		"mode":"delta"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if gateway.lastChallenge.FacilityCode != "FAC-CALLER" {
+		t.Fatalf("challenge facilityCode = %q, want FAC-CALLER", gateway.lastChallenge.FacilityCode)
+	}
+	if gateway.lastChallenge.SyncMode != "delta" {
+		t.Fatalf("challenge syncMode = %q, want delta", gateway.lastChallenge.SyncMode)
+	}
+	if local.lastEphemeral.FacilityCode != "" {
+		t.Fatalf("facilityCode = %q, want empty challenge-authorized scope", local.lastEphemeral.FacilityCode)
+	}
+	if local.lastEphemeral.Mode != "" {
+		t.Fatalf("mode = %q, want empty challenge-authorized scope", local.lastEphemeral.Mode)
+	}
+}
+
 func TestServerApproveEphemeralRunAllowsMissingBusinessNumberWhenCertificateProvidesIt(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{
