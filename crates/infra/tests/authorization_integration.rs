@@ -2566,6 +2566,48 @@ async fn get_plant_by_facility_code_returns_structured_not_found() {
 }
 
 #[tokio::test]
+async fn sync_run_audit_resolves_facility_through_internal_plant_id() {
+    let (_service, db, _db_dir, _artifacts_dir) = build_service().await;
+    let plant = domain::Plant {
+        id: "plant-audit-internal".to_owned(),
+        facility_code: "FAC-AUDIT-INTERNAL".to_owned(),
+        name: "Audit Plant".to_owned(),
+        owner_organization_id: "bootstrap-user".to_owned(),
+        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        contract_no: "CN-AUDIT-INTERNAL".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert audit plant");
+    let run = db
+        .start_sync_run("bootstrap-user", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start sync run with internal plant id");
+    db.finish_sync_run(
+        &run.id,
+        "failed",
+        42,
+        Some("partial materialization failure"),
+    )
+    .await
+    .expect("finish sync run without sync item");
+
+    let audit = db
+        .get_latest_sync_run_audit_for_facility("FAC-AUDIT-INTERNAL")
+        .await
+        .expect("load audit through facility code");
+
+    assert_eq!(audit.run_status, "failed");
+    assert_eq!(
+        audit.run_error_message.as_deref(),
+        Some("partial materialization failure")
+    );
+    assert!(audit.item_status.is_none());
+}
+
+#[tokio::test]
 async fn gateway_sync_scope_lists_executable_facilities_in_one_query_shape() {
     let (_service, db, _db_dir, _artifacts_dir) = build_service().await;
     seed_gateway_scope_fixture(&db).await;

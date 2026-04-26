@@ -5550,16 +5550,18 @@ impl Database {
             .query_rows_with(
                 self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
                 "SELECT sr.status AS run_status,
-                        sri.status AS item_status,
-                        sr.error_message AS run_error_message,
-                        sri.error_message AS item_error_message
-                 FROM sync_runs sr
-                 LEFT JOIN sync_run_items sri
-                   ON sri.sync_run_id = sr.id
-                  AND sri.facility_code = $1
-                 WHERE sr.plant_id = $1 OR sri.facility_code = $1
-                 ORDER BY sr.started_at DESC, sr.id DESC
-                 LIMIT 1",
+	                        sri.status AS item_status,
+	                        sr.error_message AS run_error_message,
+	                        sri.error_message AS item_error_message
+	                 FROM sync_runs sr
+	                 LEFT JOIN plants p
+	                   ON p.id = sr.plant_id
+	                 LEFT JOIN sync_run_items sri
+	                   ON sri.sync_run_id = sr.id
+	                  AND sri.facility_code = $1
+	                 WHERE p.facility_code = $1 OR sri.facility_code = $1
+	                 ORDER BY sr.started_at DESC, sr.id DESC
+	                 LIMIT 1",
                 params!(facility_code.to_owned()),
                 "latest sync run audit for facility",
             )
