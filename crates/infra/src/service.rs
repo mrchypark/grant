@@ -236,6 +236,7 @@ pub struct IngestLocalExecutionResultInput {
 
 struct ChallengeBindingExpectations<'a> {
     sign_cert_der: &'a [u8],
+    require_origin: bool,
     business_no: Option<&'a str>,
     sync_mode: Option<&'a str>,
     facility_code: Option<&'a str>,
@@ -249,6 +250,9 @@ struct ChallengeBindingExpectations<'a> {
 struct ChallengePayloadBinding {
     organization_id: String,
     mode: String,
+    nonce: String,
+    origin: Option<String>,
+    expires_at: String,
     business_no: Option<String>,
     sync_mode: Option<String>,
     facility_code: Option<String>,
@@ -478,7 +482,20 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
-        let mut facility_code = trim_optional(input.facility_code.as_deref()).map(str::to_owned);
+        let origin = input
+            .origin
+            .as_deref()
+            .and_then(|value| trim_optional(Some(value)))
+            .map(|value| {
+                validate_challenge_origin(value)?;
+                Ok::<_, anyhow::Error>(value.to_owned())
+            })
+            .transpose()?;
+        let mut facility_code = input
+            .facility_code
+            .as_deref()
+            .map(|value| require_safe_facility_code("facilityCode", value))
+            .transpose()?;
         let (sync_mode, start_month, end_month) = if mode == "ephemeral" {
             if facility_code.is_some() {
                 facility_code = self
@@ -521,7 +538,7 @@ impl AppService {
             &organization_id,
             &mode,
             &nonce,
-            input.origin.as_deref(),
+            origin.as_deref(),
             input.business_no.as_deref(),
             sync_mode.as_deref(),
             facility_code.as_deref(),
@@ -570,6 +587,7 @@ impl AppService {
             &organization_id,
             ChallengeBindingExpectations {
                 sign_cert_der: &input.bundle.sign_cert_der,
+                require_origin: false,
                 business_no: Some(&business_no),
                 sync_mode: None,
                 facility_code: None,
@@ -623,6 +641,7 @@ impl AppService {
             &organization_id,
             ChallengeBindingExpectations {
                 sign_cert_der: &input.bundle.sign_cert_der,
+                require_origin: false,
                 business_no: Some(&business_no),
                 sync_mode: Some(sync_mode_label(&input.mode)),
                 facility_code: input.facility_code.as_deref(),
@@ -662,7 +681,8 @@ impl AppService {
                 "local execution result business number mismatch",
             ));
         }
-        let facility_code = require_non_empty("facilityCode", &input.snapshot.facility.code)?;
+        let facility_code =
+            require_safe_facility_code("facilityCode", &input.snapshot.facility.code)?;
         input.snapshot.facility.code = facility_code.clone();
         require_local_execution_document_contents(&mut input.snapshot)?;
         self.consume_valid_challenge(
@@ -673,6 +693,7 @@ impl AppService {
             &organization_id,
             ChallengeBindingExpectations {
                 sign_cert_der: &input.sign_cert_der,
+                require_origin: true,
                 business_no: Some(&business_no),
                 sync_mode: Some(sync_mode_label(&input.mode)),
                 facility_code: Some(facility_code.as_str()),
@@ -786,10 +807,10 @@ impl AppService {
         organization_id: &str,
         facility_code: Option<&str>,
     ) -> Result<Option<String>> {
-        match facility_code
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        let facility_code = facility_code
+            .map(|value| require_safe_facility_code("facilityCode", value))
+            .transpose()?;
+        match facility_code.as_deref() {
             Some(facility_code) => match self.db.get_plant_by_facility_code(facility_code).await {
                 Ok(_) => {
                     self.authorize_sync(user_id, organization_id, Some(facility_code))
@@ -1917,6 +1938,9 @@ impl AppService {
         started: std::time::Instant,
         persist_documents: bool,
     ) -> Result<SyncRun> {
+        let mut snapshot = snapshot;
+        let facility_code = require_safe_facility_code("facilityCode", &snapshot.facility.code)?;
+        snapshot.facility.code = facility_code;
         let plant = Plant {
             id: snapshot.facility.code.clone(),
             facility_code: snapshot.facility.code.clone(),
@@ -2081,6 +2105,7 @@ impl AppService {
         }
         validate_challenge_payload_bindings(
             challenge_payload,
+            &challenge,
             organization_id,
             expected_mode,
             &bindings,
@@ -2189,6 +2214,19 @@ fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
         return Err(bad_request_error(format!("{field_name} must not be empty")));
     }
     Ok(trimmed.to_owned())
+}
+
+fn require_safe_facility_code(field_name: &str, value: &str) -> Result<String> {
+    let value = require_non_empty(field_name, value)?;
+    let is_safe = value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !is_safe || value == "." || value == ".." || value.len() > 128 {
+        return Err(bad_request_error(format!(
+            "{field_name} contains unsupported characters"
+        )));
+    }
+    Ok(value)
 }
 
 fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapshot) -> Result<()> {
@@ -2412,6 +2450,7 @@ fn build_challenge_payload(
 
 fn validate_challenge_payload_bindings(
     challenge_payload: &str,
+    challenge: &crate::database::CertGatewayChallenge,
     organization_id: &str,
     expected_mode: &str,
     expected: &ChallengeBindingExpectations<'_>,
@@ -2426,6 +2465,25 @@ fn validate_challenge_payload_bindings(
         return Err(bad_request_error(
             "cert gateway challenge payload mode mismatch",
         ));
+    }
+    if payload.nonce != challenge.nonce {
+        return Err(bad_request_error(
+            "cert gateway challenge payload nonce mismatch",
+        ));
+    }
+    if payload.expires_at != challenge.expires_at {
+        return Err(bad_request_error(
+            "cert gateway challenge payload expiry mismatch",
+        ));
+    }
+    match trim_optional(payload.origin.as_deref()) {
+        Some(origin) => validate_challenge_origin(origin)?,
+        None if expected.require_origin => {
+            return Err(bad_request_error(
+                "cert gateway challenge payload origin is required",
+            ));
+        }
+        None => {}
     }
     if let Some(bound_fingerprint) = trim_optional(payload.sign_cert_sha256_hex.as_deref()) {
         let actual_fingerprint = hash_bytes_hex(expected.sign_cert_der);
@@ -2472,6 +2530,24 @@ fn validate_challenge_payload_bindings(
             expected.snapshot,
             false,
         )?;
+    }
+    Ok(())
+}
+
+fn validate_challenge_origin(origin: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(origin)
+        .map_err(|_| bad_request_error("cert gateway challenge payload origin is invalid"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(bad_request_error(
+            "cert gateway challenge payload origin is invalid",
+        ));
     }
     Ok(())
 }

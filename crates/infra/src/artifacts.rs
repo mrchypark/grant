@@ -98,6 +98,7 @@ impl ArtifactStore {
         path: P,
         content_type: &str,
     ) -> Result<ArtifactObject> {
+        validate_object_key(&object_key)?;
         match self {
             Self::FileSystem { root_dir } => {
                 let dest = root_dir.join(&object_key);
@@ -143,6 +144,7 @@ impl ArtifactStore {
         bytes: Bytes,
         content_type: &str,
     ) -> Result<ArtifactObject> {
+        validate_object_key(&object_key)?;
         match self {
             Self::FileSystem { root_dir } => {
                 let dest = root_dir.join(&object_key);
@@ -180,6 +182,7 @@ impl ArtifactStore {
     }
 
     pub async fn get_bytes(&self, object_key: &str) -> Result<Bytes> {
+        validate_object_key(object_key)?;
         match self {
             Self::FileSystem { root_dir } => fs::read(root_dir.join(object_key))
                 .await
@@ -204,6 +207,7 @@ impl ArtifactStore {
     }
 
     pub async fn delete_object(&self, object_key: &str) -> Result<()> {
+        validate_object_key(object_key)?;
         match self {
             Self::FileSystem { root_dir } => {
                 let path = root_dir.join(object_key);
@@ -229,6 +233,7 @@ impl ArtifactStore {
     }
 
     pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>> {
+        validate_object_key_prefix(prefix)?;
         match self {
             Self::FileSystem { root_dir } => list_fs_keys(root_dir, prefix).await,
             Self::S3 { client, bucket } => {
@@ -247,6 +252,41 @@ impl ArtifactStore {
             }
         }
     }
+}
+
+fn validate_object_key(object_key: &str) -> Result<()> {
+    validate_object_key_inner(object_key, false)
+}
+
+fn validate_object_key_prefix(prefix: &str) -> Result<()> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    validate_object_key_inner(prefix, true)
+}
+
+fn validate_object_key_inner(value: &str, allow_trailing_slash: bool) -> Result<()> {
+    if value.is_empty() || value.starts_with('/') || value.starts_with('\\') {
+        anyhow::bail!("artifact object key must be a relative path");
+    }
+    if value.contains('\\') || value.chars().any(char::is_control) {
+        anyhow::bail!("artifact object key contains unsupported characters");
+    }
+    if !allow_trailing_slash && value.ends_with('/') {
+        anyhow::bail!("artifact object key must name an object");
+    }
+    for (index, segment) in value.split('/').enumerate() {
+        if segment.is_empty() {
+            if allow_trailing_slash && value.ends_with('/') && index == value.matches('/').count() {
+                continue;
+            }
+            anyhow::bail!("artifact object key contains an empty path segment");
+        }
+        if segment == "." || segment == ".." {
+            anyhow::bail!("artifact object key contains a traversal segment");
+        }
+    }
+    Ok(())
 }
 
 async fn list_fs_keys(root_dir: &Path, prefix: &str) -> Result<Vec<String>> {
@@ -283,4 +323,23 @@ async fn list_fs_keys(root_dir: &Path, prefix: &str) -> Result<Vec<String>> {
     }
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_object_key_rejects_traversal_segments() {
+        assert!(validate_object_key("../escape.pdf").is_err());
+        assert!(validate_object_key("org/../escape.pdf").is_err());
+        assert!(validate_object_key("/absolute.pdf").is_err());
+        assert!(validate_object_key(r"org\escape.pdf").is_err());
+    }
+
+    #[test]
+    fn validate_object_key_accepts_canonical_storage_keys() {
+        validate_object_key("bootstrap-user/FAC-DOC/document-1.pdf").expect("valid object key");
+        validate_object_key_prefix("bootstrap-user/FAC-DOC/").expect("valid object key prefix");
+    }
 }

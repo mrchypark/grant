@@ -716,7 +716,11 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "ephemeral", "facilityCode": "FAC-004" }),
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-004"
+            }),
         ))
         .await
         .expect("local result challenge");
@@ -758,7 +762,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "ephemeral", "syncMode": "delta", "facilityCode": "FAC-004" }),
+            json!({
+                "mode": "ephemeral",
+                "syncMode": "delta",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-004"
+            }),
         ))
         .await
         .expect("local delta challenge");
@@ -781,7 +790,11 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "ephemeral", "facilityCode": "FAC-DOC" }),
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-DOC"
+            }),
         ))
         .await
         .expect("local document challenge");
@@ -835,7 +848,11 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "ephemeral", "facilityCode": "FAC-SOURCE" }),
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-SOURCE"
+            }),
         ))
         .await
         .expect("local document challenge");
@@ -884,6 +901,87 @@ async fn local_execution_result_rejects_document_source_path_fallback() {
 }
 
 #[tokio::test]
+async fn local_execution_result_requires_origin_bound_challenge_payload() {
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+
+    let challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "facilityCode": "FAC-NO-ORIGIN" }),
+        ))
+        .await
+        .expect("local challenge");
+    assert_eq!(challenge.status(), StatusCode::CREATED);
+    let challenge_json = json_body(challenge).await;
+    let payload = challenge_json["payload"]
+        .as_str()
+        .expect("local challenge payload");
+    let (bundle, signature) = signed_proof_bundle(payload);
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": challenge_json["challengeId"],
+                "challengePayload": challenge_json["payload"],
+                "challengeSignatureBase64": signature,
+                "signCertDerBase64": bundle["signCertDerBase64"],
+                "mode": challenge_json["syncMode"],
+                "snapshot": local_execution_snapshot("FAC-NO-ORIGIN")
+            }),
+        ))
+        .await
+        .expect("local result response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("origin"),
+        "body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn cert_gateway_challenge_rejects_unsafe_facility_code_segments() {
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "../FAC-ESCAPE"
+            }),
+        ))
+        .await
+        .expect("challenge response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("facilityCode"),
+        "body = {body}"
+    );
+}
+
+#[tokio::test]
 async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismatch() {
     let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
     let material = proof_material();
@@ -897,6 +995,7 @@ async fn local_execution_result_rejects_challenge_certificate_fingerprint_mismat
             "bootstrap-user",
             json!({
                 "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
                 "facilityCode": "FAC-004",
                 "signCertSha256Hex": "0000000000000000000000000000000000000000000000000000000000000000"
             }),
@@ -942,7 +1041,11 @@ async fn local_execution_result_persists_normalized_facility_code() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "ephemeral", "facilityCode": "FAC-TRIM" }),
+            json!({
+                "mode": "ephemeral",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-TRIM"
+            }),
         ))
         .await
         .expect("challenge");
