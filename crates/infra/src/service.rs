@@ -2001,6 +2001,12 @@ impl AppService {
         let mut snapshot = snapshot;
         let facility_code = require_safe_facility_code("facilityCode", &snapshot.facility.code)?;
         snapshot.facility.code = facility_code;
+        if effective_mode != SyncMode::Full && !snapshot.documents.is_empty() {
+            return Err(bad_request_error("document upload requires full sync"));
+        }
+        if effective_mode == SyncMode::Full && persist_documents {
+            validate_document_payloads(&snapshot.documents)?;
+        }
         let (owner_organization_id, created_by_organization_id) = match self
             .db
             .get_plant_by_facility_code(&snapshot.facility.code)
@@ -2047,10 +2053,6 @@ impl AppService {
             .collect();
         let rates: Vec<StoredRateRecord> = snapshot.rates.iter().map(map_rate_record).collect();
         let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
-
-        if effective_mode != SyncMode::Full && !snapshot.documents.is_empty() {
-            return Err(bad_request_error("document upload requires full sync"));
-        }
 
         if effective_mode == SyncMode::Full {
             info!(
@@ -2300,6 +2302,24 @@ fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
         )));
     }
     Ok(source_path)
+}
+
+fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
+    for doc in docs {
+        document_content_type(doc)?;
+        if let Some(content_base64) = doc
+            .content_base64
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let _decoded = decode_content_base64_to_tempfile(content_base64)
+                .with_context(|| format!("decode document {}", doc.file_name))?;
+            continue;
+        }
+        document_source_path(doc)?;
+    }
+    Ok(())
 }
 
 fn normalize_active_organization(

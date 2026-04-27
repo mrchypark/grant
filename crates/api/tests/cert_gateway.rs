@@ -10,8 +10,8 @@ use base64::{
 };
 use chrono::Utc;
 use domain::{
-    Agreement, AgreementStatus, AgreementType, Plant, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType,
+    Agreement, AgreementStatus, AgreementType, GenerationRecord, Plant, Role, RoleBinding,
+    RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -1234,7 +1234,34 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
 
 #[tokio::test]
 async fn local_execution_result_rejects_untrusted_document_content_type() {
-    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+    let (app, db, _db_dir, _artifacts_dir) = build_app().await;
+    db.upsert_plant(&Plant {
+        id: "FAC-BAD-CTYPE".to_owned(),
+        facility_code: "FAC-BAD-CTYPE".to_owned(),
+        name: "Existing Bad Content Type Plant".to_owned(),
+        owner_organization_id: "bootstrap-user".to_owned(),
+        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        contract_no: "CONTRACT-EXISTING".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.5,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("seed existing plant");
+    db.upsert_generation_records(
+        "FAC-BAD-CTYPE",
+        &[GenerationRecord {
+            month: "2026-02".to_owned(),
+            generation_kwh: 12.0,
+            self_consumption_kwh: Some(2.0),
+            supply_kwh: 10.0,
+            application_deadline: Some("2026-03-10".to_owned()),
+        }],
+    )
+    .await
+    .expect("seed existing generation");
+    grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-BAD-CTYPE").await;
 
     let challenge = app
         .clone()
@@ -1245,6 +1272,7 @@ async fn local_execution_result_rejects_untrusted_document_content_type() {
             "bootstrap-user",
             json!({
                 "mode": "ephemeral",
+                "syncMode": "full",
                 "origin": "http://127.0.0.1:4173",
                 "facilityCode": "FAC-BAD-CTYPE"
             }),
@@ -1297,6 +1325,13 @@ async fn local_execution_result_rejects_untrusted_document_content_type() {
             .contains("unsupported contentType"),
         "body = {body}"
     );
+    let generation = db
+        .list_generation("FAC-BAD-CTYPE")
+        .await
+        .expect("generation after rejected local document result");
+    assert_eq!(generation.len(), 1);
+    assert_eq!(generation[0].month, "2026-02");
+    assert_eq!(generation[0].generation_kwh, 12.0);
 }
 
 #[tokio::test]
