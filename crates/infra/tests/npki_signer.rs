@@ -188,6 +188,7 @@ fn validate_certificate_bundle_accepts_direct_pkcs8_private_keys() {
             certificate_chain_der: Vec::new(),
         },
         true,
+        None,
     )
     .expect("validate direct private key bundle");
 }
@@ -210,10 +211,40 @@ fn validate_certificate_bundle_rejects_untrusted_self_signed_certificates_by_def
             certificate_chain_der: Vec::new(),
         },
         false,
+        None,
     )
     .expect_err("self-signed fixture must not validate against system trust");
 
     assert!(err.to_string().contains("signCert.der is not trusted"));
+}
+
+#[test]
+fn validate_certificate_bundle_accepts_configured_trust_bundle() {
+    let (sign_certificate, sign_private_key) = test_certificate_and_key();
+    let trust_bundle = tempfile::NamedTempFile::new().expect("trust bundle tempfile");
+    std::fs::write(
+        trust_bundle.path(),
+        sign_certificate.to_pem().expect("sign certificate pem"),
+    )
+    .expect("write trust bundle");
+
+    validate_certificate_bundle(
+        &CertificateBundle {
+            business_no: "2768603291".to_owned(),
+            password: "unused-password".to_owned(),
+            common_name: "Configured Trust Test".to_owned(),
+            sign_cert_der: sign_certificate.to_der().expect("sign certificate der"),
+            sign_pri_key: sign_private_key
+                .private_key_to_pkcs8()
+                .expect("sign key pkcs8"),
+            km_cert_der: None,
+            km_pri_key: None,
+            certificate_chain_der: Vec::new(),
+        },
+        false,
+        Some(trust_bundle.path()),
+    )
+    .expect("configured trust bundle should trust self-signed fixture");
 }
 
 #[test]

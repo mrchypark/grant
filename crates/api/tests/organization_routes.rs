@@ -71,6 +71,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
             allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),

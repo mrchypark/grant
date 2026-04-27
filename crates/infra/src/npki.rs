@@ -195,6 +195,7 @@ pub fn sign_message_base64(bundle: &CertificateBundle, message: &[u8]) -> Result
 pub fn validate_certificate_bundle(
     bundle: &CertificateBundle,
     allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
 ) -> Result<()> {
     validate_key_pair(
         &bundle.sign_cert_der,
@@ -215,19 +216,25 @@ pub fn validate_certificate_bundle(
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
     }
     if !allow_untrusted {
-        let store = default_trust_store()?;
+        let explicit_store = certificate_trust_bundle_path
+            .map(trust_store_from_ca_bundle)
+            .transpose()?;
+        let store = match explicit_store.as_ref() {
+            Some(store) => store.as_ref(),
+            None => default_trust_store()?,
+        };
         validate_certificate_trust_with_store(
             &bundle.sign_cert_der,
             "signCert.der",
             &bundle.certificate_chain_der,
-            &store,
+            store,
         )?;
         if let Some(km_cert_der) = &bundle.km_cert_der {
             validate_certificate_trust_with_store(
                 km_cert_der,
                 "kmCert.der",
                 &bundle.certificate_chain_der,
-                &store,
+                store,
             )?;
         }
     }
@@ -381,6 +388,27 @@ fn default_trust_store() -> Result<&'static openssl::x509::store::X509Store> {
         Ok(store) => Ok(store),
         Err(message) => bail!("{message}"),
     }
+}
+
+fn trust_store_from_ca_bundle(path: &Path) -> Result<openssl::x509::store::X509Store> {
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read X509 trust bundle {}", path.display()))?;
+    let certs = X509::stack_from_pem(&pem)
+        .with_context(|| format!("parse X509 trust bundle {}", path.display()))?;
+    if certs.is_empty() {
+        bail!(
+            "X509 trust bundle {} contains no certificates",
+            path.display()
+        );
+    }
+    let mut store_builder =
+        X509StoreBuilder::new().context("create configured X509 trust store")?;
+    for cert in certs {
+        store_builder.add_cert(cert).with_context(|| {
+            format!("add certificate from X509 trust bundle {}", path.display())
+        })?;
+    }
+    Ok(store_builder.build())
 }
 
 fn validate_certificate_trust_with_store(

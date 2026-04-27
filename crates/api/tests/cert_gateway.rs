@@ -94,6 +94,7 @@ async fn build_app() -> (axum::Router, Database, TempDir, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
             allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -365,7 +366,7 @@ fn local_execution_snapshot_with_document(facility_code: &str) -> Value {
         "required": true,
         "category": "permit",
         "sourcePath": "",
-        "sourceSha256": "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69",
+        "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "outputSha256": "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69",
         "contentBase64": STANDARD.encode(b"PDF-CONTENT"),
         "contentType": "application/pdf"
@@ -1253,7 +1254,7 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
 async fn local_execution_result_rejects_untrusted_document_content_type() {
     let (app, db, _db_dir, _artifacts_dir) = build_app().await;
     db.upsert_plant(&Plant {
-        id: "FAC-BAD-CTYPE".to_owned(),
+        id: "plant-existing-bad-ctype".to_owned(),
         facility_code: "FAC-BAD-CTYPE".to_owned(),
         name: "Existing Bad Content Type Plant".to_owned(),
         owner_organization_id: "bootstrap-user".to_owned(),
@@ -1349,6 +1350,19 @@ async fn local_execution_result_rejects_untrusted_document_content_type() {
     assert_eq!(generation.len(), 1);
     assert_eq!(generation[0].month, "2026-02");
     assert_eq!(generation[0].generation_kwh, 12.0);
+    let audit = db
+        .get_latest_sync_run_audit_for_facility("FAC-BAD-CTYPE")
+        .await
+        .expect("failed local execution audit");
+    assert_eq!(audit.run_status, "failed");
+    assert_eq!(audit.item_status.as_deref(), Some("failed"));
+    assert!(
+        audit
+            .item_error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported contentType")
+    );
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ pub struct SecurityConfig {
     pub bootstrap_user_id: String,
     pub bootstrap_user_name: String,
     pub allow_untrusted_certificates: bool,
+    pub certificate_trust_bundle_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,7 @@ impl AppConfig {
             bootstrap_user_id: env_or("CERTD_BOOTSTRAP_USER_ID", "conalog-account"),
             bootstrap_user_name: env_or("CERTD_BOOTSTRAP_USER_NAME", "Conalog Account"),
             allow_untrusted_certificates: env_bool("CERTD_ALLOW_UNTRUSTED_CERTIFICATES", false),
+            certificate_trust_bundle_path: optional_path_env("CERTD_CERT_TRUST_BUNDLE_PATH"),
         };
         Ok(Self {
             server: ServerConfig {
@@ -258,6 +260,14 @@ fn required_env(key: &str) -> Result<String> {
         anyhow::bail!("{key} must not be empty");
     }
     Ok(value)
+}
+
+fn optional_path_env(key: &str) -> Option<PathBuf> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn env_or_fallback(primary: &str, fallback: &str, default: &str) -> String {

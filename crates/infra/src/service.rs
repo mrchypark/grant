@@ -796,11 +796,30 @@ impl AppService {
             .consume_cert_gateway_challenge(&input.challenge_id)
             .await?;
 
+        let requested_plant_id = match self
+            .db
+            .get_plant_by_facility_code_with_consistency(
+                &facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(plant) => Some(plant.id),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                None
+            }
+            Err(err) => return Err(err),
+        };
         let run = self
             .db
             .start_sync_run(
                 &organization_id,
-                Some(facility_code.as_str()),
+                requested_plant_id.as_deref(),
                 input.mode.clone(),
             )
             .await?;
@@ -832,10 +851,14 @@ impl AppService {
                     error = %message,
                     "local execution ingest failed"
                 );
-                let _ = self
-                    .db
-                    .finish_sync_run(&run_id, "failed", duration_ms, Some(&message))
-                    .await;
+                self.finish_failed_sync_run(
+                    &run_id,
+                    duration_ms,
+                    Some(facility_code.as_str()),
+                    None,
+                    &message,
+                )
+                .await;
                 Err(err)
             }
         }
@@ -2458,7 +2481,11 @@ impl AppService {
                 return Err(bad_request_error("certificate business number mismatch"));
             }
         }
-        validate_certificate_bundle(bundle, self.cfg.security.allow_untrusted_certificates)?;
+        validate_certificate_bundle(
+            bundle,
+            self.cfg.security.allow_untrusted_certificates,
+            self.cfg.security.certificate_trust_bundle_path.as_deref(),
+        )?;
         Ok(business_no)
     }
 
@@ -2839,22 +2866,15 @@ impl AppService {
                 }
             };
             let uploaded_sha256 = &upload.uploaded_sha256;
-            for (field_name, expected_sha256) in [
-                ("outputSha256", doc.output_sha256.as_deref()),
-                ("sourceSha256", doc.source_sha256.as_deref()),
-            ] {
-                let Some(expected_sha256) = expected_sha256 else {
-                    continue;
-                };
-                if expected_sha256 == uploaded_sha256 {
-                    continue;
+            if let Some(expected_sha256) = doc.output_sha256.as_deref() {
+                if expected_sha256 != uploaded_sha256 {
+                    self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                        .await;
+                    return Err(bad_request_error(format!(
+                        "document {} outputSha256 mismatch: expected {}, got {}",
+                        doc.file_name, expected_sha256, uploaded_sha256
+                    )));
                 }
-                self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
-                    .await;
-                return Err(bad_request_error(format!(
-                    "document {} {} mismatch: expected {}, got {}",
-                    doc.file_name, field_name, expected_sha256, uploaded_sha256
-                )));
             }
             let source_sha256 = doc
                 .source_sha256

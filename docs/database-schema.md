@@ -621,7 +621,7 @@
 - 한국 공동인증서를 저장하면 한국 RPS `certificate` credential도 `auth_credentials`에 함께 기록하고, registry account가 확인되는 시점에 `credential_bindings`로 연결한다.
 - registry project가 특정 account에 묶인 뒤에는 저장형 KR RPS credential 사용도 해당 account의 `credential_bindings`를 통과해야 한다.
 - 공동인증서 subject에 사업자번호가 없으면 이미 연결된 legal party나 명시적으로 검증된 조직 business number만 사용할 수 있다. 요청 payload의 `business_no`만으로 새 legal party를 bootstrap하지 않는다.
-- self-signed/test 인증서는 기본 운영 설정에서 `auth_credentials`로 저장하지 않는다. 기본 설정은 proof bundle의 intermediate DER chain과 시스템 X.509 trust store 기준으로 인증서 체인을 검증하며, local/test fixture만 `allow_untrusted_certificates` 설정을 명시적으로 켠다.
+- self-signed/test 인증서는 기본 운영 설정에서 `auth_credentials`로 저장하지 않는다. 기본 설정은 proof bundle의 intermediate DER chain과 `CERTD_CERT_TRUST_BUNDLE_PATH`로 지정된 PEM CA bundle 또는 시스템 X.509 trust store 기준으로 인증서 체인을 검증하며, local/test fixture만 `allow_untrusted_certificates` 설정을 명시적으로 켠다.
 - 저장형 인증서, 일회성 증명 challenge, 저장형 작업 토큰은 수명과 보안 성격이 다르다.
 - `certificates`는 한국 공동인증서 호환 경로의 장기 보관 대상이고 암호화 저장이 필요하다.
 - `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다. payload hash는 사용자가 승인한 origin/scope/certificate fingerprint가 서명 대상과 분리되지 않도록 묶는다.

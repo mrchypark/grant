@@ -155,6 +155,7 @@ fn test_config(artifacts_root: &Path) -> AppConfig {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
             allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: AuthConfig {
             trailbase: TrailbaseAuthConfig {
