@@ -402,14 +402,8 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
-        if mode == "stored"
-            && input
-                .facility_code
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_some()
-        {
+        let facility_code = normalize_optional_text(input.facility_code);
+        if mode == "stored" && facility_code.is_some() {
             return Err(bad_request_error(
                 "stored certificate challenges cannot be facility-scoped",
             ));
@@ -420,7 +414,7 @@ impl AppService {
             &organization_id,
             &mode,
             &nonce,
-            input.facility_code.as_deref(),
+            facility_code.as_deref(),
             &expires_at,
         );
         let challenge = self
@@ -430,7 +424,7 @@ impl AppService {
                 mode,
                 &nonce,
                 &hash_hex(&payload),
-                input.facility_code.as_deref(),
+                facility_code.as_deref(),
                 &expires_at,
                 &created_by_user_id,
             )

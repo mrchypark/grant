@@ -969,6 +969,35 @@ async fn stored_certificate_challenge_rejects_facility_scope_at_creation() {
 }
 
 #[tokio::test]
+async fn stored_certificate_challenge_normalizes_blank_facility_scope_at_creation() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            facility_code: Some("   ".to_owned()),
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("blank facility scope should be treated as unscoped");
+
+    let stored = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("stored challenge");
+    assert!(stored.facility_code.is_none());
+    assert_eq!(
+        challenge.payload,
+        format!(
+            "cert-gateway:bootstrap-user:stored::{}:{}",
+            challenge.nonce, challenge.expires_at
+        )
+    );
+}
+
+#[tokio::test]
 async fn full_sync_rejects_bounded_month_range() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
