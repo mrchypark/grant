@@ -502,6 +502,7 @@ impl AppService {
                 Ok::<_, anyhow::Error>(value.to_owned())
             })
             .transpose()?;
+        let business_no = normalize_optional_business_no(input.business_no.as_deref())?;
         let mut facility_code = input
             .facility_code
             .as_deref()
@@ -551,7 +552,7 @@ impl AppService {
             &mode,
             &nonce,
             origin.as_deref(),
-            input.business_no.as_deref(),
+            business_no.as_deref(),
             sync_mode.as_deref(),
             facility_code.as_deref(),
             start_month.as_deref(),
@@ -2858,6 +2859,12 @@ fn snapshot_record_months(snapshot: &bridge::BridgeSnapshot) -> Vec<&str> {
 
 fn trim_optional(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalize_optional_business_no(value: Option<&str>) -> Result<Option<String>> {
+    trim_optional(value)
+        .map(|value| normalize_business_no(value).map_err(|err| bad_request_error(err.to_string())))
+        .transpose()
 }
 
 fn insert_trimmed(

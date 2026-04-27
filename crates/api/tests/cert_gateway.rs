@@ -624,7 +624,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             json!({
                 "mode": "stored",
                 "origin": "http://127.0.0.1:4173",
-                "businessNo": "2768603291",
+                "businessNo": "276-86-03291",
                 "facilityCode": "FAC-001",
                 "startMonth": "2026-01",
                 "endMonth": "2026-03",
@@ -1704,6 +1704,26 @@ async fn create_cert_gateway_challenge_rejects_unsupported_mode() {
 
     let body = json_body(response).await;
     assert_eq!(body["error"], "unsupported cert gateway mode: store");
+}
+
+#[tokio::test]
+async fn create_cert_gateway_challenge_rejects_malformed_business_number() {
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "stored", "businessNo": "not-a-business-number" }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = json_body(response).await;
+    assert_eq!(body["error"], "businessNo must normalize to 10 digits");
 }
 
 #[tokio::test]
