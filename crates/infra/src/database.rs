@@ -6201,20 +6201,25 @@ impl Database {
         self.validate_role_binding_refs(binding).await?;
         self.runtime
             .execute(
-                "INSERT INTO role_bindings (
-                    id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
-                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                 ON CONFLICT(id) DO UPDATE SET
-                    subject_type = excluded.subject_type,
-                    subject_id = excluded.subject_id,
-                    subject_organization_id = excluded.subject_organization_id,
-                    resource_type = excluded.resource_type,
-                    resource_id = excluded.resource_id,
-                    role_id = excluded.role_id,
-                    agreement_id = excluded.agreement_id,
-                    state = excluded.state,
-                    updated_at = excluded.updated_at",
+	                "INSERT INTO role_bindings (
+	                    id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+	                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+	                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	                 ON CONFLICT(id) DO UPDATE SET
+	                    subject_type = excluded.subject_type,
+	                    subject_id = excluded.subject_id,
+	                    subject_organization_id = excluded.subject_organization_id,
+	                    resource_type = excluded.resource_type,
+	                    resource_id = excluded.resource_id,
+	                    role_id = excluded.role_id,
+	                    agreement_id = excluded.agreement_id,
+	                    state = excluded.state,
+	                    updated_at = excluded.updated_at
+	                 ON CONFLICT(subject_type, subject_id, subject_organization_id, resource_type, resource_id, role_id)
+	                 DO UPDATE SET
+	                    agreement_id = excluded.agreement_id,
+	                    state = excluded.state,
+	                    updated_at = excluded.updated_at",
                 params!(
                     binding.id.clone(),
                     role_binding_subject_type_str(&binding.subject_type),

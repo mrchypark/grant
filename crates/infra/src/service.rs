@@ -942,15 +942,25 @@ impl AppService {
             "starting sync"
         );
         let requested_plant_id = match input.facility_code.as_deref() {
-            Some(facility_code) => self
+            Some(facility_code) => match self
                 .db
                 .get_plant_by_facility_code_with_consistency(
                     facility_code,
                     Some(ReadConsistency::Strong),
                 )
                 .await
-                .ok()
-                .map(|plant| plant.id),
+            {
+                Ok(plant) => Some(plant.id),
+                Err(err)
+                    if matches!(
+                        err.downcast_ref::<DatabaseLookupError>(),
+                        Some(DatabaseLookupError::PlantNotFound)
+                    ) =>
+                {
+                    None
+                }
+                Err(err) => return Err(err),
+            },
             None => None,
         };
         let run = self

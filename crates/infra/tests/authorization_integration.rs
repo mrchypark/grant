@@ -3164,6 +3164,79 @@ async fn rebuild_keeps_existing_visibility_readable_during_save_role_binding() {
     );
 }
 
+#[tokio::test]
+async fn save_role_binding_is_idempotent_for_logical_duplicate() {
+    let (_service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    db.upsert_plant(&domain::Plant {
+        id: "plant-logical-binding".to_owned(),
+        facility_code: "FAC-LOGICAL-BINDING".to_owned(),
+        name: "Logical Binding Plant".to_owned(),
+        owner_organization_id: "bootstrap-user".to_owned(),
+        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        contract_no: "CN-LOGICAL-BINDING".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert plant");
+    db.upsert_role(&Role {
+        id: "role-logical-binding-reader".to_owned(),
+        organization_id: None,
+        code: "logical.binding.reader".to_owned(),
+        name: "Logical Binding Reader".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert role");
+    db.upsert_role_action("role-logical-binding-reader", "plant.profile.read")
+        .await
+        .expect("upsert role action");
+
+    let mut binding = RoleBinding {
+        id: "binding-logical-first".to_owned(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-logical-binding".to_owned(),
+        role_id: "role-logical-binding-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    };
+    db.save_role_binding(&binding)
+        .await
+        .expect("save initial logical binding");
+
+    binding.id = "binding-logical-second".to_owned();
+    binding.updated_at = "2026-04-03T00:01:00Z".to_owned();
+    db.save_role_binding(&binding)
+        .await
+        .expect("resave duplicate logical binding");
+
+    let bindings = db
+        .list_role_bindings_for_resource(RoleBindingResourceType::Plant, "plant-logical-binding")
+        .await
+        .expect("list plant bindings");
+    let matching: Vec<_> = bindings
+        .iter()
+        .filter(|binding| {
+            binding.subject_type == RoleBindingSubjectType::User
+                && binding.subject_id == "bootstrap-user"
+                && binding.subject_organization_id == "bootstrap-user"
+                && binding.role_id == "role-logical-binding-reader"
+        })
+        .collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].id, "binding-logical-first");
+    assert_eq!(matching[0].updated_at, "2026-04-03T00:01:00Z");
+}
+
 fn sqlite_db_path(root: &std::path::Path) -> PathBuf {
     root.join("state_machine").join("db").join("test.sqlite")
 }
