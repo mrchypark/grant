@@ -6,7 +6,7 @@
 
 - `organization`이 테넌트 겸 권한 평가의 기본 단위다.
 - `plant_id`가 내부 canonical 식별자다.
-- `facility_code`는 외부 RPS 설비 식별자다.
+- `facility_code`는 외부 RPS 설비 식별자이며 현재 RPS 연동에서는 전역 고유 키로 취급한다.
 - 권한 원본과 조회 최적화 결과를 분리한다.
 - 공동인증서 작업 경계는 일반 로그인과 분리한다.
 - SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.
@@ -181,8 +181,8 @@
 - `organization_id` > 요청 조직 ID
 - `mode` > `stored` 또는 `ephemeral`
 - `nonce` > 서명 대상 nonce
-- `payload_hash` > challenge payload 해시
-- `facility_code` > 현재는 선택 입력, 향후 메타/스코프용
+- `payload_hash` > `cert-gateway:` payload 원문 SHA-256 해시. payload는 canonical JSON을 URL-safe base64로 감싼 값이며 `organizationId`, `mode`, `nonce`, `expiresAt`를 기본으로 포함하고, 요청에 있으면 `origin`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶는다. `businessNo`는 요청값 또는 조직에 연결된 법인 사업자번호가 있으면 정규화해 함께 묶는다.
+- `facility_code` > challenge가 특정 발전소 실행 스코프에 묶인 경우의 발전소 코드
 - `expires_at` > 만료 시각
 - `consumed_at` > 1회 사용 완료 시각
 - `created_by_user_id` > 요청 사용자 ID
@@ -336,8 +336,9 @@
 ### 2. `plant_id`와 `facility_code`를 분리한 이유
 
 - `plant_id`는 내부 비즈니스 로직과 권한 모델이 의존하는 canonical ID다.
-- `facility_code`는 RPS 외부 시스템과 연동할 때 쓰는 외부 키다.
-- 외부 설비 코드 변경, 중복 이슈, 소스별 키 차이를 내부 식별자에 전파하지 않기 위해 분리한다.
+- `facility_code`는 RPS 외부 시스템과 연동할 때 쓰는 외부 키이며, 현재 스키마는 `UNIQUE`로 전역 고유성을 강제한다.
+- 같은 `facility_code`가 다른 조직에서 들어오면 기존 plant 소유권을 덮어쓰지 않고 거부한다.
+- 외부 설비 코드 변경이나 소스별 키 차이를 내부 식별자 의미에 전파하지 않기 위해 두 개념을 분리한다.
 - 따라서 `sync_runs`, 레코드, 문서는 계속 `plant_id`에 연결하는 것이 맞다.
 
 ### 3. 권한 원본과 전개 테이블을 분리한 이유
@@ -357,7 +358,7 @@
 
 - 저장형 인증서, 일회성 증명 challenge, 저장형 작업 토큰은 수명과 보안 성격이 다르다.
 - `certificates`는 장기 보관 대상이고 암호화 저장이 필요하다.
-- `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다.
+- `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다. payload hash는 사용자가 승인한 origin/scope/certificate fingerprint가 서명 대상과 분리되지 않도록 묶는다.
 - `crawl_task_tokens`는 저장형 인증서로 작업을 위임할 때만 쓰는 짧은 수명 capability다.
 - 이 셋을 분리해야 만료, 재사용 방지, 감사 추적을 명확히 할 수 있다.
 

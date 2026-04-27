@@ -19,10 +19,10 @@ use openssl::{
 
 #[test]
 fn load_bundle_from_directory_reads_all_files() {
-    let bundle = NpkiBundle::from_directory(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert"),
-    )
-    .expect("load bundle from secrets/cert");
+    let Some(cert_dir) = live_cert_dir() else {
+        return;
+    };
+    let bundle = NpkiBundle::from_directory(cert_dir).expect("load bundle from secrets/cert");
 
     assert!(!bundle.sign_cert_der.is_empty());
     assert!(!bundle.sign_pri_key.is_empty());
@@ -32,12 +32,12 @@ fn load_bundle_from_directory_reads_all_files() {
 
 #[test]
 fn signer_loads_certificate_and_builds_payloads() {
+    let Some(cert_dir) = live_cert_dir() else {
+        return;
+    };
     let password =
         std::env::var("RPS_TEST_CERT_PASSWORD").unwrap_or_else(|_| "jmztnti132!".to_owned());
-    let bundle = NpkiBundle::from_directory(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert"),
-    )
-    .expect("load bundle from secrets/cert");
+    let bundle = NpkiBundle::from_directory(cert_dir).expect("load bundle from secrets/cert");
 
     let signer = NpkiSigner::new(&bundle, &password).expect("build signer");
 
@@ -56,6 +56,22 @@ fn signer_loads_certificate_and_builds_payloads() {
         )
         .expect("envelop business number");
     assert!(enveloped.contains("BEGIN PKCS7"));
+}
+
+fn live_cert_dir() -> Option<PathBuf> {
+    let cert_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert");
+    let live_enabled = std::env::var("LIVE_TEST")
+        .ok()
+        .or_else(|| std::env::var("RUN_EXPENSIVE").ok())
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    if live_enabled {
+        return Some(cert_dir);
+    }
+    eprintln!(
+        "skipping live NPKI fixture test; set LIVE_TEST=1 or RUN_EXPENSIVE=1 and provide {}",
+        cert_dir.display()
+    );
+    None
 }
 
 #[test]

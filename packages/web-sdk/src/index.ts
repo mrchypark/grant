@@ -201,9 +201,15 @@ export class WebSdk {
     organizationId: string,
     input: BrowserEscrowEphemeralRunInput,
   ): Promise<SyncRun> {
+    const requestedSyncMode = trimOptional(input.mode) as SyncMode | undefined;
     const challenge = await this.createChallenge(organizationId, {
       mode: "ephemeral",
+      syncMode: requestedSyncMode,
+      origin: currentOrigin(),
+      businessNo: trimOptional(input.businessNo),
       facilityCode: trimOptional(input.facilityCode),
+      startMonth: trimOptional(input.startMonth),
+      endMonth: trimOptional(input.endMonth),
       ttlSeconds: input.challengeTtlSeconds,
     });
     const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
@@ -216,10 +222,10 @@ export class WebSdk {
       challengePayload: challenge.payload,
       challengeSignatureBase64: proof.challengeSignatureBase64,
       bundle: proof.bundle,
-      facilityCode: trimOptional(input.facilityCode),
-      startMonth: trimOptional(input.startMonth),
-      endMonth: trimOptional(input.endMonth),
-      mode: trimOptional(input.mode),
+      facilityCode: trimOptional(challenge.facilityCode) ?? trimOptional(input.facilityCode),
+      startMonth: trimOptional(challenge.startMonth),
+      endMonth: trimOptional(challenge.endMonth),
+      mode: (trimOptional(challenge.syncMode) as SyncMode | undefined) ?? requestedSyncMode,
     });
   }
 
@@ -239,6 +245,8 @@ export class WebSdk {
   ): Promise<StoredCertificate> {
     const challenge = await this.createChallenge(organizationId, {
       mode: "stored",
+      origin: currentOrigin(),
+      businessNo: trimOptional(input.businessNo),
       ttlSeconds: input.challengeTtlSeconds,
     });
     const proof = await prepareHtml5ChallengeProof(challenge.payload, input.certificateFiles, {
@@ -260,6 +268,8 @@ export class WebSdk {
   ): Promise<BrowserSignedChallengeProof> {
     const challenge = await this.createChallenge(organizationId, {
       mode: input.mode,
+      origin: currentOrigin(),
+      businessNo: trimOptional(input.businessNo),
       facilityCode: input.mode === "ephemeral" ? trimOptional(input.facilityCode) : undefined,
       ttlSeconds: input.challengeTtlSeconds,
     });
@@ -298,7 +308,7 @@ function approvalRequestFrom(
     const facilityCode = trimOptional(input.facilityCode);
     const startMonth = trimOptional(input.startMonth);
     const endMonth = trimOptional(input.endMonth);
-    const mode = trimOptional(input.mode);
+    const mode = trimOptional(input.mode) as SyncMode | undefined;
     if (facilityCode) {
       request.facilityCode = facilityCode;
     }
@@ -335,6 +345,11 @@ function trimOptional(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function currentOrigin(): string | undefined {
+  const origin = globalThis.location?.origin;
+  return typeof origin === "string" && origin ? origin : undefined;
+}
+
 function assertExplicitEscrow(
   input: BrowserCertificateInput,
   methodName: string,
@@ -347,22 +362,6 @@ function assertExplicitEscrow(
   );
 }
 
-export type {
-  AgentCapabilities,
-  BrowserCertificateInput,
-  BrowserChallengeProofInput,
-  BrowserEscrowCertificateInput,
-  BrowserEscrowEphemeralRunInput,
-  BrowserEphemeralRunInput,
-  BrowserSignedChallengeProof,
-  Challenge,
-  CreateChallengeInput,
-  ProofBundle,
-  EscrowProofBundle,
-  StoredCertificate,
-  SyncRun,
-};
-
 export { DesktopAgentClient, GatewayClient };
 export {
   configureHtml5CertificateInput,
@@ -374,22 +373,32 @@ export {
 };
 export type { AgentApprovalRequest, AgentSession } from "./agent.ts";
 export type {
+  Challenge,
   CrawlTaskToken,
   ChallengeMode,
+  CreateChallengeInput,
+  EscrowProofBundle,
   ExecuteEphemeralExecutionInput,
   IssueCrawlTaskTokenInput,
+  IngestLocalExecutionResultInput,
+  LocalExecutionSnapshot,
+  ProofBundle,
   RegisterStoredCertificateInput,
+  StoredCertificate,
   SyncMode,
+  SyncRun,
 } from "./client.ts";
 export type {
   Html5CertificateBundleInput,
   Html5CertificateFileKey,
   Html5CertificateInputMode,
   Html5CertificateSelection,
+  PreparedHtml5CertificateBundle,
+} from "./html5.ts";
+export type {
   PreparedHtml5ChallengeProof,
   PreparedHtml5SignedChallengeProof,
-  PreparedHtml5CertificateBundle,
-};
+} from "./npki-browser.ts";
 
 export { WebSdk as CertdWebSdk };
 export type { WebSdkOptions as CertdWebSdkOptions };

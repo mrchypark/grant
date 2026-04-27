@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -19,8 +19,8 @@ use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{
     artifacts::ArtifactStore,
     bridge::{
-        BridgeFacility, BridgeGenerationRecord, BridgeRateRecord, BridgeRecRecord, BridgeRun,
-        BridgeSnapshot,
+        BridgeFacility, BridgeGenerationRecord, BridgeOptions, BridgeRateRecord, BridgeRecRecord,
+        BridgeRun, BridgeSnapshot,
     },
     config::{
         AppConfig, ArtifactBackendConfig, ArtifactConfig, AuthConfig, HiqliteConfig, KmsConfig,
@@ -40,9 +40,11 @@ use openssl::{
     hash::MessageDigest,
     pkey::{PKey, Private},
     rsa::Rsa,
+    sha::sha256,
     sign::Signer,
     x509::{X509, X509NameBuilder},
 };
+use serde_json::Value;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -175,6 +177,16 @@ fn test_config(artifacts_root: &Path) -> AppConfig {
 }
 
 async fn build_service() -> (AppService, Database, TempDir, TempDir) {
+    build_service_with_collector(mock_collect_snapshot).await
+}
+
+async fn build_service_with_collector<F, Fut>(
+    collector: F,
+) -> (AppService, Database, TempDir, TempDir)
+where
+    F: Fn(BridgeOptions) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<BridgeRun>> + Send + 'static,
+{
     let (runtime, db_dir) = test_runtime().await;
     let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
     let cfg = test_config(artifacts_dir.path());
@@ -188,7 +200,7 @@ async fn build_service() -> (AppService, Database, TempDir, TempDir) {
     let artifacts = ArtifactStore::new(&cfg.artifacts)
         .await
         .expect("artifact store");
-    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, mock_collect_snapshot);
+    let service = AppService::new_with_collector(cfg, db.clone(), artifacts, collector);
     service.initialize().await.expect("initialize service");
     db.upsert_organization_identity(&bootstrap_user_id, Some("2768603291"), &bootstrap_user_name)
         .await
@@ -201,6 +213,10 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
         .facility_code
         .clone()
         .unwrap_or_else(|| "FAC-MOCK".to_owned());
+    let month = opts
+        .start_month
+        .clone()
+        .unwrap_or_else(|| "2026-03".to_owned());
     Ok(BridgeRun {
         temp_dir: tempfile::tempdir().expect("collector tempdir"),
         snapshot: BridgeSnapshot {
@@ -216,14 +232,14 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
                 confirm_issued: "Y".to_owned(),
             },
             generation: vec![BridgeGenerationRecord {
-                month: "2026-03".to_owned(),
+                month: month.clone(),
                 generation_kwh: 1000.0,
                 self_consumption_kwh: Some(100.0),
                 supply_kwh: 900.0,
                 application_deadline: Some("2026-04-15".to_owned()),
             }],
             rates: vec![BridgeRateRecord {
-                month: "2026-03".to_owned(),
+                month: month.clone(),
                 self_rate: Some(110.0),
                 national_average: Some(120.0),
                 nearby_average: Some(118.0),
@@ -232,7 +248,7 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
                 source_control_flag: Some("mock".to_owned()),
             }],
             rec: vec![BridgeRecRecord {
-                month: "2026-03".to_owned(),
+                month,
                 application_no: "APP-001".to_owned(),
                 supply_kwh: 900,
                 rec_quantity: 1,
@@ -251,22 +267,31 @@ async fn mock_collect_snapshot(opts: infra::bridge::BridgeOptions) -> anyhow::Re
 fn fake_bundle_and_signature(challenge_payload: &str) -> (CertificateBundle, String) {
     let key = PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key");
     let cert_der = create_sign_cert_der(&key);
+    let bundle = fake_bundle_with_sign_material(&key, cert_der);
+    let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
+    (bundle, challenge_signature_base64)
+}
+
+fn fake_bundle_with_sign_material(key: &PKey<Private>, cert_der: Vec<u8>) -> CertificateBundle {
     let km_key =
         PKey::from_rsa(Rsa::generate(2048).expect("generate km rsa key")).expect("wrap km key");
     let km_cert_der = create_sign_cert_der_for_common_name(&km_key, "KM Test Certificate");
-    let challenge_signature_base64 = sign_challenge(&key, challenge_payload);
-    (
-        CertificateBundle {
-            business_no: "2768603291".to_owned(),
-            password: "secret-password".to_owned(),
-            common_name: "Test Certificate".to_owned(),
-            sign_cert_der: cert_der,
-            sign_pri_key: direct_private_key_der(&key),
-            km_cert_der: Some(km_cert_der),
-            km_pri_key: Some(direct_private_key_der(&km_key)),
-        },
-        challenge_signature_base64,
-    )
+    CertificateBundle {
+        business_no: "2768603291".to_owned(),
+        password: "secret-password".to_owned(),
+        common_name: "Test Certificate".to_owned(),
+        sign_cert_der: cert_der,
+        sign_pri_key: direct_private_key_der(key),
+        km_cert_der: Some(km_cert_der),
+        km_pri_key: Some(direct_private_key_der(&km_key)),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    sha256(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn create_sign_cert_der(key: &PKey<Private>) -> Vec<u8> {
@@ -358,6 +383,45 @@ fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {
     STANDARD.encode(signer.sign_to_vec().expect("signature"))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn assert_challenge_payload_binds_context(
+    challenge_payload: &str,
+    organization_id: &str,
+    mode: &str,
+    origin: &str,
+    business_no: &str,
+    facility_code: &str,
+    start_month: &str,
+    end_month: &str,
+    sign_cert_sha256_hex: &str,
+) {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .expect("challenge payload prefix");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode challenge payload");
+    let payload: Value = serde_json::from_slice(&raw).expect("challenge payload json");
+    assert_eq!(payload["organizationId"], organization_id);
+    assert_eq!(payload["mode"], mode);
+    assert_eq!(payload["origin"], origin);
+    assert_eq!(payload["businessNo"], business_no);
+    assert_eq!(payload["facilityCode"], facility_code);
+    assert_eq!(payload["startMonth"], start_month);
+    assert_eq!(payload["endMonth"], end_month);
+    assert_eq!(payload["signCertSha256Hex"], sign_cert_sha256_hex);
+}
+
+fn decode_challenge_payload_json(challenge_payload: &str) -> Value {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .expect("challenge payload prefix");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode challenge payload");
+    serde_json::from_slice(&raw).expect("challenge payload json")
+}
+
 async fn seed_gateway_scope_fixture(db: &Database) {
     db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
@@ -443,6 +507,14 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
     db.upsert_organization_with_owner("dealer-org", "Dealer Org", None, "Dealer Org")
         .await
         .expect("upsert dealer org");
+    db.upsert_organization_with_owner(
+        "distributor-org",
+        "Distributor Org",
+        None,
+        "Distributor Org",
+    )
+    .await
+    .expect("upsert distributor org");
 
     runtime
         .execute(
@@ -474,6 +546,36 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         )
         .await
         .expect("insert membership");
+    runtime
+        .execute(
+            "INSERT INTO users (id, email, display_name, active, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+            vec![
+                "dist-user".into(),
+                "dist-user@example.com".into(),
+                "Distributor User".into(),
+                1_i64.into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert distributor user");
+    runtime
+        .execute(
+            "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "membership-dist-user".into(),
+                "distributor-org".into(),
+                "dist-user".into(),
+                "member".into(),
+                "active".into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert distributor membership");
     runtime
         .execute(
             "INSERT INTO groups (id, organization_id, name, description, created_at, updated_at)
@@ -596,6 +698,23 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
     })
     .await
     .expect("save distributor org role binding");
+
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "dist-user".to_owned(),
+        subject_organization_id: "distributor-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "plant-1".to_owned(),
+        role_id: "role-plant-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save distributor user role binding");
 
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
@@ -808,7 +927,13 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: -60,
         })
@@ -827,17 +952,39 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .expect_err("expired challenge should be rejected");
     assert!(err.to_string().contains("expired"));
 
+    let stored_key =
+        PKey::from_rsa(Rsa::generate(2048).expect("generate stored rsa key")).expect("wrap key");
+    let stored_cert_der = create_sign_cert_der(&stored_key);
+    let stored_sign_cert_sha256_hex = sha256_hex(&stored_cert_der);
+    let stored_bundle = fake_bundle_with_sign_material(&stored_key, stored_cert_der);
     let stored = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: Some("http://127.0.0.1:4173".to_owned()),
+            business_no: Some("2768603291".to_owned()),
             facility_code: Some("FAC-001".to_owned()),
+            start_month: Some("2026-01".to_owned()),
+            end_month: Some("2026-03".to_owned()),
+            sign_cert_sha256_hex: Some(stored_sign_cert_sha256_hex.clone()),
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
         .await
         .expect("create stored challenge");
-    let (stored_bundle, stored_signature) = fake_bundle_and_signature(&stored.payload);
+    assert_challenge_payload_binds_context(
+        &stored.payload,
+        "bootstrap-user",
+        "stored",
+        "http://127.0.0.1:4173",
+        "2768603291",
+        "FAC-001",
+        "2026-01",
+        "2026-03",
+        &stored_sign_cert_sha256_hex,
+    );
+    let stored_signature = sign_challenge(&stored_key, &stored.payload);
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: "bootstrap-user".to_owned(),
@@ -867,7 +1014,13 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "ephemeral".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-002".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -882,9 +1035,9 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
             challenge_signature_base64: ephemeral_signature,
             bundle: ephemeral_bundle,
             facility_code: Some("FAC-002".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Full,
         })
         .await
         .expect("execute ephemeral crawl");
@@ -948,7 +1101,13 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -982,7 +1141,13 @@ async fn certificate_gateway_rejects_expired_sign_certificate_and_extracts_commo
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1021,7 +1186,13 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-010".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1055,7 +1226,13 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "ephemeral".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-011".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1082,9 +1259,9 @@ async fn certificate_gateway_accepts_proof_bundles_without_km_material() {
                 km_pri_key: None,
             },
             facility_code: Some("FAC-011".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Full,
         })
         .await
         .expect("execute ephemeral crawl without km");
@@ -1100,7 +1277,13 @@ async fn certificate_gateway_accepts_certificate_without_subject_business_no() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1142,7 +1325,13 @@ async fn certificate_gateway_rejects_stored_proof_when_certificate_business_no_m
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1190,7 +1379,13 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "ephemeral".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-013".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1237,15 +1432,21 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
 #[tokio::test]
 async fn certificate_gateway_links_unlinked_organization_by_business_no_on_save() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_with_owner("pending-org", "Pending Org", None, "Pending Org")
+    db.upsert_organization_identity("pending-org", Some("2768603291"), "Pending Org")
         .await
-        .expect("seed unlinked organization");
+        .expect("seed pending organization identity");
 
     let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "pending-org".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-012".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1290,7 +1491,13 @@ async fn crawl_task_token_start_rejects_inactive_organization_without_consuming_
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-005".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1358,7 +1565,13 @@ async fn issue_crawl_task_token_rejects_inactive_certificate() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-006".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1380,7 +1593,13 @@ async fn issue_crawl_task_token_rejects_inactive_certificate() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-006".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1422,7 +1641,13 @@ async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-007".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1458,7 +1683,13 @@ async fn crawl_task_token_start_rejects_inactive_certificate_without_consuming_t
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
             facility_code: Some("FAC-007".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
             ttl_seconds: 120,
         })
@@ -1505,6 +1736,266 @@ async fn gateway_sync_scope_requires_permission_for_existing_plant() {
         .await
         .expect_err("existing plant should require plant sync execute permission");
     assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn cert_gateway_challenge_requires_scope_authorization_before_sync_planning() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+    seed_gateway_scope_fixture(&db).await;
+
+    let err = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "operator-org".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("delta".to_owned()),
+            origin: Some("https://app.example".to_owned()),
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some(" FAC-SYNC-001 ".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("unauthorized facility challenge should fail before planning");
+
+    assert!(err.to_string().contains("cannot execute sync"));
+}
+
+#[tokio::test]
+async fn ephemeral_execution_uses_challenge_bound_month_window() {
+    let observed = Arc::new(Mutex::new(Vec::<BridgeOptions>::new()));
+    let observed_collector = observed.clone();
+    let (service, db, _db_dir, _artifacts_dir) =
+        build_service_with_collector(move |opts: BridgeOptions| {
+            let observed = observed_collector.clone();
+            async move {
+                observed.lock().expect("collector log").push(opts.clone());
+                mock_collect_snapshot(opts).await
+            }
+        })
+        .await;
+
+    let seed_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("full".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("seed challenge");
+    let (seed_bundle, seed_signature) = fake_bundle_and_signature(&seed_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: seed_challenge.id,
+            challenge_payload: seed_challenge.payload,
+            challenge_signature_base64: seed_signature,
+            bundle: seed_bundle,
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: seed_challenge.start_month,
+            end_month: seed_challenge.end_month,
+            mode: SyncMode::Full,
+        })
+        .await
+        .expect("seed execution");
+    db.upsert_role(&Role {
+        id: "role-test-plant-sync-execute".to_owned(),
+        organization_id: None,
+        code: "plant.sync.execute".to_owned(),
+        name: "Plant Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert test sync role");
+    db.upsert_role_action("role-test-plant-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert test sync role action");
+    db.upsert_role(&Role {
+        id: "role-test-plant-profile-read".to_owned(),
+        organization_id: None,
+        code: "plant.profile.read".to_owned(),
+        name: "Plant Profile Read".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert test profile role");
+    db.upsert_role_action("role-test-plant-profile-read", "plant.profile.read")
+        .await
+        .expect("upsert test profile role action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant organization sync access for seeded plant");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-profile-read".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant organization profile access for seeded plant");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant user sync access for seeded plant");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "FAC-BOUND".to_owned(),
+        role_id: "role-test-plant-profile-read".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant user profile access for seeded plant");
+
+    let auto_scoped_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("delta".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("auto scoped delta challenge");
+    assert_eq!(auto_scoped_challenge.sync_mode.as_deref(), Some("delta"));
+    assert_eq!(
+        auto_scoped_challenge.start_month.as_deref(),
+        Some("2026-03")
+    );
+    let auto_payload = decode_challenge_payload_json(&auto_scoped_challenge.payload);
+    assert_eq!(auto_payload["facilityCode"], "FAC-BOUND");
+
+    let delta_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("delta".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("delta challenge");
+    assert_eq!(delta_challenge.sync_mode.as_deref(), Some("delta"));
+    assert_eq!(delta_challenge.start_month.as_deref(), Some("2026-03"));
+
+    let newer_challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: Some("full".to_owned()),
+            origin: None,
+            business_no: Some("2768603291".to_owned()),
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: Some("2026-04".to_owned()),
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("newer challenge");
+    let (newer_bundle, newer_signature) = fake_bundle_and_signature(&newer_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: newer_challenge.id,
+            challenge_payload: newer_challenge.payload,
+            challenge_signature_base64: newer_signature,
+            bundle: newer_bundle,
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: newer_challenge.start_month,
+            end_month: newer_challenge.end_month,
+            mode: SyncMode::Full,
+        })
+        .await
+        .expect("newer execution");
+
+    let (delta_bundle, delta_signature) = fake_bundle_and_signature(&delta_challenge.payload);
+    service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            challenge_id: delta_challenge.id,
+            challenge_payload: delta_challenge.payload,
+            challenge_signature_base64: delta_signature,
+            bundle: delta_bundle,
+            facility_code: Some("FAC-BOUND".to_owned()),
+            start_month: delta_challenge.start_month,
+            end_month: delta_challenge.end_month,
+            mode: SyncMode::Delta,
+        })
+        .await
+        .expect("delta execution");
+
+    let calls = observed.lock().expect("collector log");
+    let final_bound_call = calls
+        .iter()
+        .rev()
+        .find(|call| call.facility_code.as_deref() == Some("FAC-BOUND"))
+        .expect("FAC-BOUND collector call");
+    assert_eq!(final_bound_call.start_month.as_deref(), Some("2026-03"));
+    assert!(final_bound_call.skip_documents);
 }
 
 #[tokio::test]

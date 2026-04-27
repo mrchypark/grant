@@ -7,9 +7,10 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Utc};
 use chrono_tz::Asia::Seoul;
 use curl::easy::{Easy, List};
 use regex::Regex;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -36,7 +37,8 @@ pub struct BridgeRun {
     pub snapshot: BridgeSnapshot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeFacility {
     pub code: String,
     pub name: String,
@@ -48,7 +50,8 @@ pub struct BridgeFacility {
     pub confirm_issued: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeGenerationRecord {
     pub month: String,
     pub generation_kwh: f64,
@@ -57,7 +60,8 @@ pub struct BridgeGenerationRecord {
     pub application_deadline: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeRateRecord {
     pub month: String,
     pub self_rate: Option<f64>,
@@ -68,7 +72,8 @@ pub struct BridgeRateRecord {
     pub source_control_flag: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeRecRecord {
     pub month: String,
     pub application_no: String,
@@ -82,7 +87,8 @@ pub struct BridgeRecRecord {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeDocument {
     pub attachment_code: String,
     pub file_class: String,
@@ -93,9 +99,14 @@ pub struct BridgeDocument {
     pub source_path: String,
     pub source_sha256: Option<String>,
     pub output_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BridgeSnapshot {
     pub collected_at: DateTime<FixedOffset>,
     pub facility: BridgeFacility,
@@ -592,7 +603,10 @@ impl Collector {
         facility: &FacilityRecord,
         completions: &[CompletionRecord],
     ) -> Result<Vec<BridgeDocument>> {
-        let download_root = root_dir.join("downloads").join("live").join(&facility.code);
+        let download_root = root_dir
+            .join("downloads")
+            .join("live")
+            .join(safe_download_segment("facilityCode", &facility.code)?);
         if download_root.exists() {
             std::fs::remove_dir_all(&download_root)
                 .with_context(|| format!("reset {}", download_root.display()))?;
@@ -628,6 +642,8 @@ impl Collector {
                     source_path,
                     source_sha256: None,
                     output_sha256: None,
+                    content_base64: None,
+                    content_type: None,
                 });
             }
         }
@@ -1304,13 +1320,41 @@ fn write_downloaded_file(
     file_name: &str,
     content: &[u8],
 ) -> Result<String> {
-    let dir = root.join(application_no);
+    std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+    let root =
+        std::fs::canonicalize(root).with_context(|| format!("resolve {}", root.display()))?;
+    let dir = root.join(safe_download_segment("applicationNo", application_no)?);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let dir = std::fs::canonicalize(&dir).with_context(|| format!("resolve {}", dir.display()))?;
+    if !dir.starts_with(&root) {
+        bail!("download directory escaped collector workspace");
+    }
 
-    let target = unique_path(dir.join(Path::new(file_name).file_name().unwrap_or_default()));
+    let target = unique_path(dir.join(safe_download_segment("fileName", file_name)?));
     std::fs::write(&target, content)
         .with_context(|| format!("write downloaded file {}", target.display()))?;
     Ok(target.to_string_lossy().into_owned())
+}
+
+fn safe_download_segment(field_name: &str, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("{field_name} must not be empty");
+    }
+    if trimmed != "." && trimmed != ".." && trimmed.bytes().all(is_safe_path_segment_byte) {
+        return Ok(trimmed.to_owned());
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(trimmed.as_bytes());
+    Ok(format!(
+        "{field_name}-{}",
+        hex::encode(&hasher.finalize()[..8])
+    ))
+}
+
+fn is_safe_path_segment_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
 }
 
 fn unique_path(path: PathBuf) -> PathBuf {
@@ -1408,6 +1452,31 @@ mod tests {
     fn extract_ente_id_reads_main_page_script() {
         let ente_id = extract_ente_id(r#"obj["P_ENTE_ID"] = '175858';"#).expect("extract ente id");
         assert_eq!(ente_id, "175858");
+    }
+
+    #[test]
+    fn write_downloaded_file_keeps_unsafe_segments_under_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("downloads");
+        let source_path = write_downloaded_file(&root, "../outside", "../../permit.pdf", b"PDF")
+            .expect("write downloaded file");
+        let source_path = std::fs::canonicalize(source_path).expect("canonical source path");
+        let root = std::fs::canonicalize(root).expect("canonical root");
+
+        assert!(source_path.starts_with(&root));
+        assert_eq!(
+            std::fs::read(source_path).expect("read downloaded file"),
+            b"PDF"
+        );
+        assert!(!dir.path().join("outside").exists());
+    }
+
+    #[test]
+    fn safe_download_segment_preserves_simple_ascii_segments() {
+        assert_eq!(
+            safe_download_segment("facilityCode", "FAC-001_2.3").expect("safe segment"),
+            "FAC-001_2.3"
+        );
     }
 
     #[test]

@@ -80,6 +80,8 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
       jsonResponse({
         challengeId: "challenge-1",
         mode: "ephemeral",
+        facilityCode: "FAC-BOUND",
+        businessNo: "2768603291",
         nonce: "nonce-1",
         payload: "payload-1",
         expiresAt: "2026-04-09T00:00:00Z",
@@ -93,13 +95,56 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
     });
     const challenge = await sdk.createChallenge("org-1", {
       mode: "ephemeral",
+      origin: "http://127.0.0.1:4173",
+      businessNo: "2768603291",
+      facilityCode: "FAC-001",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      signCertSha256Hex: "sha256-cert-1",
     });
 
     assert.equal(challenge.challengeId, "challenge-1");
+    assert.equal(challenge.facilityCode, "FAC-BOUND");
+    assert.equal(challenge.businessNo, "2768603291");
     assert.equal(mock.calls.length, 1);
     assert.equal(
       String(mock.calls[0].input),
       "https://gateway.local/api/v1/organizations/org-1/cert-gateway/challenges",
+    );
+    assert.deepEqual(JSON.parse(String(mock.calls[0].init?.body)), {
+      mode: "ephemeral",
+      origin: "http://127.0.0.1:4173",
+      businessNo: "2768603291",
+      facilityCode: "FAC-001",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      signCertSha256Hex: "sha256-cert-1",
+    });
+  } finally {
+    mock.restore();
+  }
+});
+
+test("gateway paths escape organization and certificate identifiers", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        crawlTaskToken: "token-1",
+        expiresAt: "2026-04-09T00:01:00Z",
+      }, 201),
+  ]);
+
+  try {
+    const sdk = new WebSdk({
+      gatewayBaseUrl: "https://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+    });
+
+    await sdk.raw.gateway.issueCrawlTaskToken("org/../evil", "cert/../evil");
+
+    assert.equal(
+      String(mock.calls[0].input),
+      "https://gateway.local/api/v1/organizations/org%2F..%2Fevil/certificates/cert%2F..%2Fevil/crawl-tokens",
     );
   } finally {
     mock.restore();
@@ -886,8 +931,12 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
       jsonResponse({
         challengeId: "browser-challenge-1",
         mode: "ephemeral",
+        syncMode: "delta",
+        facilityCode: "FAC-BOUND",
         nonce: "nonce-browser-1",
         payload: "cert-gateway:test",
+        startMonth: "2026-02",
+        endMonth: "2026-04",
         expiresAt: "2026-04-20T00:00:00Z",
       }, 201),
     ({ init }) => {
@@ -896,6 +945,10 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
       assert.equal(body.bundle.commonName, "Fixture Certificate");
       assert.equal(body.bundle.businessNo, "2768603291");
       assert.equal(body.bundle.password, "test-password");
+      assert.equal(body.mode, "delta");
+      assert.equal(body.facilityCode, "FAC-BOUND");
+      assert.equal(body.startMonth, "2026-02");
+      assert.equal(body.endMonth, "2026-04");
       return jsonResponse({
         id: "browser-sync-1",
         organizationId: "org-1",
@@ -933,6 +986,7 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
 
     assert.equal(run.id, "browser-sync-1");
     assert.equal(mock.calls.length, 2);
+    assert.equal(JSON.parse(String(mock.calls[0].init?.body)).syncMode, "full");
     assert.equal(
       String(mock.calls[0].input),
       "https://gateway.local/api/v1/organizations/org-1/cert-gateway/challenges",
@@ -941,6 +995,67 @@ test("runEphemeralWithEscrowedBrowserCertificate() creates a challenge and execu
       String(mock.calls[1].input),
       "https://gateway.local/api/v1/organizations/org-1/cert-gateway/ephemeral-executions",
     );
+  } finally {
+    mock.restore();
+  }
+});
+
+test("runEphemeralWithEscrowedBrowserCertificate() does not reuse caller months after full challenge resolution", async () => {
+  const mock = installFetchMock([
+    () =>
+      jsonResponse({
+        challengeId: "browser-challenge-full-1",
+        mode: "ephemeral",
+        syncMode: "full",
+        facilityCode: "FAC-BOUND",
+        nonce: "nonce-browser-full-1",
+        payload: "cert-gateway:test",
+        expiresAt: "2026-04-20T00:00:00Z",
+      }, 201),
+    ({ init }) => {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.mode, "full");
+      assert.equal(body.facilityCode, "FAC-BOUND");
+      assert.equal("startMonth" in body, false);
+      assert.equal("endMonth" in body, false);
+      return jsonResponse({
+        id: "browser-sync-full-1",
+        organizationId: "org-1",
+        plantId: "FAC-101",
+        mode: "full",
+        status: "completed",
+        startedAt: null,
+        finishedAt: null,
+        durationMs: 777,
+      }, 202);
+    },
+  ]);
+
+  try {
+    const sdk = new WebSdk({
+      gatewayBaseUrl: "https://gateway.local",
+      agentBaseUrl: "http://127.0.0.1:8765",
+      activeOrganizationId: "org-1",
+    });
+
+    await sdk.runEphemeralWithEscrowedBrowserCertificate("org-1", {
+      certificateFiles: [
+        fileWithBytes("signCert.der", base64Bytes(FIXTURE_SIGN_CERT_DER_BASE64)),
+        fileWithBytes("signPri.key", base64Bytes(FIXTURE_SIGN_PRI_BASE64)),
+        fileWithBytes("kmCert.der", Uint8Array.of(4, 5, 6)),
+        fileWithBytes("kmPri.key", Uint8Array.of(7, 8, 9)),
+      ],
+      businessNo: "1111111111",
+      password: "test-password",
+      facilityCode: " FAC-101 ",
+      startMonth: "2026-01",
+      endMonth: "2026-03",
+      mode: "delta",
+      escrow: true,
+    });
+
+    assert.equal(mock.calls.length, 2);
+    assert.equal(JSON.parse(String(mock.calls[0].init?.body)).syncMode, "delta");
   } finally {
     mock.restore();
   }

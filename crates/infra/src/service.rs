@@ -15,9 +15,10 @@ use crate::{
         StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
-    npki::{validate_certificate_bundle, verify_challenge_signature},
+    npki::{validate_certificate_bundle, verify_challenge_signature, verify_message_signature},
 };
 use anyhow::{Context, Result, anyhow};
+use base64::Engine;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Seoul;
 use domain::{
@@ -29,7 +30,13 @@ use domain::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap, error::Error as StdError, fmt, future::Future, path::Path, pin::Pin,
+    collections::{BTreeMap, BTreeSet},
+    error::Error as StdError,
+    fmt,
+    future::Future,
+    io::{self, Write},
+    path::Path,
+    pin::Pin,
     sync::Arc,
 };
 use tracing::{error, info, warn};
@@ -38,6 +45,8 @@ use uuid::Uuid;
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
 const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
+const MAX_LOCAL_EXECUTION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -176,7 +185,13 @@ pub struct CurrentUserView {
 pub struct CreateCertGatewayChallengeInput {
     pub organization_id: String,
     pub mode: String,
+    pub sync_mode: Option<String>,
+    pub origin: Option<String>,
+    pub business_no: Option<String>,
     pub facility_code: Option<String>,
+    pub start_month: Option<String>,
+    pub end_month: Option<String>,
+    pub sign_cert_sha256_hex: Option<String>,
     pub created_by_user_id: String,
     pub ttl_seconds: i64,
 }
@@ -185,8 +200,13 @@ pub struct CreateCertGatewayChallengeInput {
 pub struct CertGatewayChallengeView {
     pub id: String,
     pub mode: String,
+    pub sync_mode: Option<String>,
+    pub facility_code: Option<String>,
+    pub business_no: Option<String>,
     pub nonce: String,
     pub payload: String,
+    pub start_month: Option<String>,
+    pub end_month: Option<String>,
     pub expires_at: String,
 }
 
@@ -210,6 +230,47 @@ pub struct ExecuteEphemeralCrawlInput {
     pub start_month: Option<String>,
     pub end_month: Option<String>,
     pub mode: SyncMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct IngestLocalExecutionResultInput {
+    pub organization_id: String,
+    pub challenge_id: String,
+    pub challenge_payload: String,
+    pub challenge_signature_base64: String,
+    pub result_signature_base64: String,
+    pub sign_cert_der: Vec<u8>,
+    pub snapshot: bridge::BridgeSnapshot,
+    pub mode: SyncMode,
+}
+
+struct ChallengeBindingExpectations<'a> {
+    sign_cert_der: &'a [u8],
+    require_origin: bool,
+    business_no: Option<&'a str>,
+    sync_mode: Option<&'a str>,
+    facility_code: Option<&'a str>,
+    start_month: Option<&'a str>,
+    end_month: Option<&'a str>,
+    snapshot: Option<&'a bridge::BridgeSnapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengePayloadBinding {
+    organization_id: String,
+    mode: String,
+    nonce: String,
+    origin: Option<String>,
+    expires_at: String,
+    business_no: Option<String>,
+    sync_mode: Option<String>,
+    facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    sign_cert_sha256_hex: Option<String>,
+    #[serde(skip)]
+    legacy_plaintext: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -433,13 +494,73 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let mode = parse_cert_gateway_mode(&input.mode)?;
         let created_by_user_id = require_non_empty("createdByUserId", &input.created_by_user_id)?;
+        let origin = input
+            .origin
+            .as_deref()
+            .and_then(|value| trim_optional(Some(value)))
+            .map(|value| {
+                validate_challenge_origin(value)?;
+                Ok::<_, anyhow::Error>(value.to_owned())
+            })
+            .transpose()?;
+        let business_no = self
+            .challenge_business_no(&organization_id, input.business_no.as_deref())
+            .await?;
+        let mut facility_code = input
+            .facility_code
+            .as_deref()
+            .map(|value| require_safe_facility_code("facilityCode", value))
+            .transpose()?;
+        let (sync_mode, start_month, end_month) = if mode == "ephemeral" {
+            if facility_code.is_some() {
+                facility_code = self
+                    .authorize_gateway_sync_scope(
+                        &created_by_user_id,
+                        &organization_id,
+                        facility_code.as_deref(),
+                    )
+                    .await?;
+            } else {
+                facility_code = self
+                    .authorize_gateway_sync_scope(&created_by_user_id, &organization_id, None)
+                    .await?;
+            }
+            let requested_mode = input
+                .sync_mode
+                .as_deref()
+                .map(parse_sync_mode)
+                .transpose()?
+                .unwrap_or(SyncMode::Delta);
+            let sync_input = SyncInput {
+                organization_id: organization_id.clone(),
+                facility_code: facility_code.clone(),
+                start_month: input.start_month.clone(),
+                end_month: input.end_month.clone(),
+                mode: requested_mode,
+            };
+            let (effective_mode, start_month, end_month, _skip_documents) =
+                self.resolve_sync_plan(&sync_input).await?;
+            (
+                Some(sync_mode_label(&effective_mode).to_owned()),
+                start_month,
+                end_month,
+            )
+        } else {
+            (None, input.start_month.clone(), input.end_month.clone())
+        };
         let nonce = Uuid::new_v4().simple().to_string();
         let expires_at = (Utc::now() + ChronoDuration::seconds(input.ttl_seconds)).to_rfc3339();
         let payload = build_challenge_payload(
             &organization_id,
             &mode,
             &nonce,
-            input.facility_code.as_deref(),
+            origin.as_deref(),
+            business_no.as_deref(),
+            sync_mode.as_deref(),
+            facility_code.as_deref(),
+            start_month.as_deref(),
+            end_month.as_deref(),
+            input.sign_cert_sha256_hex.as_deref(),
             &expires_at,
         );
         let challenge = self
@@ -449,7 +570,7 @@ impl AppService {
                 mode,
                 &nonce,
                 &hash_hex(&payload),
-                input.facility_code.as_deref(),
+                facility_code.as_deref(),
                 &expires_at,
                 &created_by_user_id,
             )
@@ -457,8 +578,13 @@ impl AppService {
         Ok(CertGatewayChallengeView {
             id: challenge.id,
             mode: challenge.mode,
+            sync_mode,
+            facility_code,
+            business_no,
             nonce: challenge.nonce,
             payload,
+            start_month,
+            end_month,
             expires_at: challenge.expires_at,
         })
     }
@@ -475,9 +601,18 @@ impl AppService {
             &input.challenge_id,
             &input.challenge_payload,
             &input.challenge_signature_base64,
-            &input.bundle.sign_cert_der,
             "stored",
             &organization_id,
+            ChallengeBindingExpectations {
+                sign_cert_der: &input.bundle.sign_cert_der,
+                require_origin: false,
+                business_no: Some(&business_no),
+                sync_mode: None,
+                facility_code: None,
+                start_month: None,
+                end_month: None,
+                snapshot: None,
+            },
         )
         .await?;
         self.store_certificate_bundle(&organization_id, business_no, input.bundle)
@@ -520,13 +655,23 @@ impl AppService {
             &input.challenge_id,
             &input.challenge_payload,
             &input.challenge_signature_base64,
-            &input.bundle.sign_cert_der,
             "ephemeral",
             &organization_id,
+            ChallengeBindingExpectations {
+                sign_cert_der: &input.bundle.sign_cert_der,
+                require_origin: false,
+                business_no: Some(&business_no),
+                sync_mode: Some(sync_mode_label(&input.mode)),
+                facility_code: input.facility_code.as_deref(),
+                start_month: input.start_month.as_deref(),
+                end_month: input.end_month.as_deref(),
+                snapshot: None,
+            },
         )
         .await?;
 
-        self.run_sync_with_bundle(
+        let skip_documents = matches!(input.mode, SyncMode::Delta);
+        self.run_sync_with_resolved_plan(
             &organization_id,
             business_no,
             input.bundle,
@@ -534,8 +679,104 @@ impl AppService {
             input.start_month,
             input.end_month,
             input.mode,
+            skip_documents,
         )
         .await
+    }
+
+    pub async fn ingest_local_execution_result(
+        &self,
+        mut input: IngestLocalExecutionResultInput,
+    ) -> Result<SyncRun> {
+        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let business_no = self
+            .validate_sign_cert_for_organization(&organization_id, None, &input.sign_cert_der)
+            .await?;
+        let snapshot_business_no =
+            require_non_empty("facilityBusinessNo", &input.snapshot.facility.business_no)?;
+        if snapshot_business_no != business_no {
+            return Err(bad_request_error(
+                "local execution result business number mismatch",
+            ));
+        }
+        let result_signature_base64 =
+            require_non_empty("resultSignatureBase64", &input.result_signature_base64)?;
+        let result_signature_payload = local_execution_result_signature_payload(
+            &input.challenge_id,
+            &input.challenge_payload,
+            sync_mode_label(&input.mode),
+            &input.snapshot,
+        )?;
+        verify_message_signature(
+            &input.sign_cert_der,
+            &result_signature_payload,
+            &result_signature_base64,
+            "resultSignatureBase64",
+        )
+        .map_err(|err| bad_request_error(err.to_string()))?;
+        let facility_code =
+            require_safe_facility_code("facilityCode", &input.snapshot.facility.code)?;
+        input.snapshot.facility.code = facility_code.clone();
+        require_local_execution_document_contents(&mut input.snapshot)?;
+        self.consume_valid_challenge(
+            &input.challenge_id,
+            &input.challenge_payload,
+            &input.challenge_signature_base64,
+            "ephemeral",
+            &organization_id,
+            ChallengeBindingExpectations {
+                sign_cert_der: &input.sign_cert_der,
+                require_origin: true,
+                business_no: Some(&business_no),
+                sync_mode: Some(sync_mode_label(&input.mode)),
+                facility_code: Some(facility_code.as_str()),
+                start_month: None,
+                end_month: None,
+                snapshot: Some(&input.snapshot),
+            },
+        )
+        .await?;
+
+        let run = self
+            .db
+            .start_sync_run(
+                &organization_id,
+                Some(facility_code.as_str()),
+                input.mode.clone(),
+            )
+            .await?;
+        let run_id = run.id.clone();
+        let started = std::time::Instant::now();
+        match self
+            .persist_successful_snapshot(
+                &organization_id,
+                business_no.clone(),
+                run,
+                input.mode,
+                input.snapshot,
+                started,
+                true,
+            )
+            .await
+        {
+            Ok(run) => Ok(run),
+            Err(err) => {
+                let duration_ms = started.elapsed().as_millis() as i64;
+                let message = format!("{err:#}");
+                error!(
+                    business_no,
+                    facility_code,
+                    duration_ms,
+                    error = %message,
+                    "local execution ingest failed"
+                );
+                let _ = self
+                    .db
+                    .finish_sync_run(&run_id, "failed", duration_ms, Some(&message))
+                    .await;
+                Err(err)
+            }
+        }
     }
 
     pub async fn issue_crawl_task_token(
@@ -599,10 +840,10 @@ impl AppService {
         organization_id: &str,
         facility_code: Option<&str>,
     ) -> Result<Option<String>> {
-        match facility_code
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        let facility_code = facility_code
+            .map(|value| require_safe_facility_code("facilityCode", value))
+            .transpose()?;
+        match facility_code.as_deref() {
             Some(facility_code) => match self.db.get_plant_by_facility_code(facility_code).await {
                 Ok(_) => {
                     self.authorize_sync(user_id, organization_id, Some(facility_code))
@@ -780,9 +1021,33 @@ impl AppService {
 
         let (effective_mode, start_month, end_month, skip_documents) =
             self.resolve_sync_plan(&input).await?;
+        self.run_sync_with_resolved_plan(
+            organization_id,
+            business_no,
+            bundle,
+            input.facility_code,
+            start_month,
+            end_month,
+            effective_mode,
+            skip_documents,
+        )
+        .await
+    }
+
+    async fn run_sync_with_resolved_plan(
+        &self,
+        organization_id: &str,
+        business_no: String,
+        bundle: CertificateBundle,
+        facility_code: Option<String>,
+        start_month: Option<String>,
+        end_month: Option<String>,
+        effective_mode: SyncMode,
+        skip_documents: bool,
+    ) -> Result<SyncRun> {
         info!(
             business_no,
-            facility_code = input.facility_code.as_deref().unwrap_or(""),
+            facility_code = facility_code.as_deref().unwrap_or(""),
             mode = ?effective_mode,
             start_month = start_month.as_deref().unwrap_or(""),
             end_month = end_month.as_deref().unwrap_or(""),
@@ -793,7 +1058,7 @@ impl AppService {
             .db
             .start_sync_run(
                 &organization_id,
-                input.facility_code.as_deref(),
+                facility_code.as_deref(),
                 effective_mode.clone(),
             )
             .await?;
@@ -802,7 +1067,7 @@ impl AppService {
         let collect = self
             .collect_snapshot(
                 business_no.clone(),
-                input.facility_code.clone(),
+                facility_code.clone(),
                 start_month.clone(),
                 end_month.clone(),
                 skip_documents,
@@ -822,113 +1087,23 @@ impl AppService {
                     document_count = snapshot.documents.len(),
                     "collector finished"
                 );
-                let plant = Plant {
-                    id: snapshot.facility.code.clone(),
-                    facility_code: snapshot.facility.code.clone(),
-                    name: snapshot.facility.name.clone(),
-                    owner_organization_id: organization_id.to_owned(),
-                    created_by_organization_id: None,
-                    contract_no: snapshot.facility.contract_no.clone(),
-                    address: snapshot.facility.address.clone(),
-                    installed_kw: snapshot.facility.installed_kw,
-                    rec_start_date: snapshot.facility.rec_start_date.clone(),
-                    confirm_issued: snapshot.facility.confirm_issued.clone(),
-                };
-                self.db.upsert_plant(&plant).await?;
-
-                let generation: Vec<GenerationRecord> = snapshot
-                    .generation
-                    .iter()
-                    .map(|row| GenerationRecord {
-                        month: row.month.clone(),
-                        generation_kwh: row.generation_kwh,
-                        self_consumption_kwh: row.self_consumption_kwh,
-                        supply_kwh: row.supply_kwh,
-                        application_deadline: row.application_deadline.clone(),
-                    })
-                    .collect();
-                let rates: Vec<StoredRateRecord> =
-                    snapshot.rates.iter().map(map_rate_record).collect();
-                let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
-
-                if effective_mode == SyncMode::Full {
-                    info!(
-                        plant_code = plant.facility_code,
-                        "replacing canonical full records"
-                    );
-                    self.db
-                        .replace_full_records(&plant.facility_code, &generation, &rates, &rec)
-                        .await?;
-                    info!(
-                        plant_code = plant.facility_code,
-                        "listing stale document objects"
-                    );
-                    let existing_objects =
-                        self.db.list_document_objects(&plant.facility_code).await?;
-                    for object_key in existing_objects {
-                        if let Err(err) = self.artifacts.delete_object(&object_key).await {
-                            warn!("delete stale object {} failed: {}", object_key, err);
-                        }
-                    }
-                    info!(
-                        plant_code = plant.facility_code,
-                        document_count = snapshot.documents.len(),
-                        "persisting documents to object storage"
-                    );
-                    let persisted_docs = self
-                        .persist_documents(
-                            organization_id,
-                            &plant.facility_code,
-                            &snapshot.documents,
-                        )
-                        .await?;
-                    info!(
-                        plant_code = plant.facility_code,
-                        document_count = persisted_docs.len(),
-                        "writing document rows"
-                    );
-                    self.db
-                        .replace_documents(&plant.facility_code, &persisted_docs)
-                        .await?;
-                } else {
-                    info!(plant_code = plant.facility_code, "upserting delta records");
-                    self.db
-                        .upsert_generation_records(&plant.facility_code, &generation)
-                        .await?;
-                    self.db
-                        .upsert_rate_records(&plant.facility_code, &rates)
-                        .await?;
-                    self.db
-                        .upsert_rec_records(&plant.facility_code, &rec)
-                        .await?;
-                }
-
-                let duration_ms = started.elapsed().as_millis() as i64;
-                self.db
-                    .finish_sync_run(&run.id, "completed", duration_ms, None)
-                    .await?;
-                info!(
-                    "sync completed organization={} plant={} mode={:?} duration_ms={}",
-                    organization_id, plant.facility_code, effective_mode, duration_ms
-                );
-
-                Ok(SyncRun {
-                    id: run.id,
-                    organization_id: organization_id.to_owned(),
-                    plant_id: Some(plant.facility_code),
-                    mode: effective_mode,
-                    status: "completed".to_owned(),
-                    started_at: run.started_at,
-                    finished_at: Some(now_string()),
-                    duration_ms,
-                })
+                self.persist_successful_snapshot(
+                    organization_id,
+                    business_no,
+                    run,
+                    effective_mode,
+                    snapshot,
+                    started,
+                    true,
+                )
+                .await
             }
             Err(err) => {
                 let duration_ms = started.elapsed().as_millis() as i64;
                 let message = format!("{err:#}");
                 error!(
                     business_no,
-                    facility_code = input.facility_code.as_deref().unwrap_or(""),
+                    facility_code = facility_code.as_deref().unwrap_or(""),
                     mode = ?effective_mode,
                     duration_ms,
                     error = %message,
@@ -1225,6 +1400,7 @@ impl AppService {
             )
             .await?;
         let slug = require_non_empty("slug", &input.slug)?;
+        let slug_changed = existing.slug != slug;
         let client = Client {
             id: existing.id,
             organization_id: existing.organization_id,
@@ -1238,7 +1414,7 @@ impl AppService {
             active: input.active,
             created_by_user_id: existing.created_by_user_id,
         };
-        self.db.update_client(&client).await?;
+        self.db.update_client(&client, slug_changed).await?;
         Ok(client)
     }
 
@@ -1749,6 +1925,31 @@ impl AppService {
         )?)
     }
 
+    async fn challenge_business_no(
+        &self,
+        organization_id: &str,
+        requested_business_no: Option<&str>,
+    ) -> Result<Option<String>> {
+        let requested_business_no = normalize_optional_business_no(requested_business_no)?;
+        let linked_business_no = self
+            .db
+            .get_organization_business_no(organization_id)
+            .await?
+            .map(|business_no| {
+                normalize_business_no(&business_no)
+                    .map_err(|err| bad_request_error(err.to_string()))
+            })
+            .transpose()?;
+        if let (Some(requested), Some(linked)) = (&requested_business_no, &linked_business_no) {
+            if requested != linked {
+                return Err(bad_request_error(
+                    "cert gateway challenge business number mismatch",
+                ));
+            }
+        }
+        Ok(linked_business_no.or(requested_business_no))
+    }
+
     async fn validate_bundle_for_organization(
         &self,
         organization_id: &str,
@@ -1768,6 +1969,166 @@ impl AppService {
         }
         validate_certificate_bundle(bundle)?;
         Ok(business_no)
+    }
+
+    async fn validate_sign_cert_for_organization(
+        &self,
+        organization_id: &str,
+        requested_business_no: Option<&str>,
+        sign_cert_der: &[u8],
+    ) -> Result<String> {
+        let business_no = self
+            .resolve_organization_business_no(organization_id, requested_business_no)
+            .await?;
+        if let Some(cert_business_no) = extract_business_no(sign_cert_der)? {
+            if cert_business_no != business_no {
+                return Err(bad_request_error("certificate business number mismatch"));
+            }
+        }
+        Ok(business_no)
+    }
+
+    async fn persist_successful_snapshot(
+        &self,
+        organization_id: &str,
+        business_no: String,
+        run: SyncRun,
+        effective_mode: SyncMode,
+        snapshot: bridge::BridgeSnapshot,
+        started: std::time::Instant,
+        persist_documents: bool,
+    ) -> Result<SyncRun> {
+        let mut snapshot = snapshot;
+        let facility_code = require_safe_facility_code("facilityCode", &snapshot.facility.code)?;
+        snapshot.facility.code = facility_code;
+        if effective_mode != SyncMode::Full && !snapshot.documents.is_empty() {
+            return Err(bad_request_error("document upload requires full sync"));
+        }
+        if effective_mode == SyncMode::Full && persist_documents {
+            validate_document_payloads(&snapshot.documents)?;
+        }
+        let (owner_organization_id, created_by_organization_id) = match self
+            .db
+            .get_plant_by_facility_code(&snapshot.facility.code)
+            .await
+        {
+            Ok(existing) => (
+                existing.owner_organization_id,
+                existing.created_by_organization_id,
+            ),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                (organization_id.to_owned(), None)
+            }
+            Err(err) => return Err(err),
+        };
+        let plant = Plant {
+            id: snapshot.facility.code.clone(),
+            facility_code: snapshot.facility.code.clone(),
+            name: snapshot.facility.name.clone(),
+            owner_organization_id,
+            created_by_organization_id,
+            contract_no: snapshot.facility.contract_no.clone(),
+            address: snapshot.facility.address.clone(),
+            installed_kw: snapshot.facility.installed_kw,
+            rec_start_date: snapshot.facility.rec_start_date.clone(),
+            confirm_issued: snapshot.facility.confirm_issued.clone(),
+        };
+        self.db.upsert_plant(&plant).await?;
+
+        let generation: Vec<GenerationRecord> = snapshot
+            .generation
+            .iter()
+            .map(|row| GenerationRecord {
+                month: row.month.clone(),
+                generation_kwh: row.generation_kwh,
+                self_consumption_kwh: row.self_consumption_kwh,
+                supply_kwh: row.supply_kwh,
+                application_deadline: row.application_deadline.clone(),
+            })
+            .collect();
+        let rates: Vec<StoredRateRecord> = snapshot.rates.iter().map(map_rate_record).collect();
+        let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
+
+        if effective_mode == SyncMode::Full {
+            info!(
+                plant_code = plant.facility_code,
+                "replacing canonical full records"
+            );
+            self.db
+                .replace_full_records(&plant.facility_code, &generation, &rates, &rec)
+                .await?;
+            if persist_documents {
+                info!(
+                    plant_code = plant.facility_code,
+                    "listing stale document objects"
+                );
+                let existing_objects = self.db.list_document_objects(&plant.facility_code).await?;
+                info!(
+                    plant_code = plant.facility_code,
+                    document_count = snapshot.documents.len(),
+                    "persisting documents to object storage"
+                );
+                let persisted_docs = self
+                    .persist_documents(organization_id, &plant.facility_code, &snapshot.documents)
+                    .await?;
+                info!(
+                    plant_code = plant.facility_code,
+                    document_count = persisted_docs.len(),
+                    "writing document rows"
+                );
+                self.db
+                    .replace_documents(&plant.facility_code, &persisted_docs)
+                    .await?;
+                let active_objects: BTreeSet<&str> = persisted_docs
+                    .iter()
+                    .map(|doc| doc.object_key.as_str())
+                    .collect();
+                for object_key in existing_objects {
+                    if active_objects.contains(object_key.as_str()) {
+                        continue;
+                    }
+                    if let Err(err) = self.artifacts.delete_object(&object_key).await {
+                        warn!("delete stale object {} failed: {}", object_key, err);
+                    }
+                }
+            }
+        } else {
+            info!(plant_code = plant.facility_code, "upserting delta records");
+            self.db
+                .upsert_generation_records(&plant.facility_code, &generation)
+                .await?;
+            self.db
+                .upsert_rate_records(&plant.facility_code, &rates)
+                .await?;
+            self.db
+                .upsert_rec_records(&plant.facility_code, &rec)
+                .await?;
+        }
+
+        let duration_ms = started.elapsed().as_millis() as i64;
+        self.db
+            .finish_sync_run(&run.id, "completed", duration_ms, None)
+            .await?;
+        info!(
+            "sync completed organization={} business_no={} plant={} mode={:?} duration_ms={}",
+            organization_id, business_no, plant.facility_code, effective_mode, duration_ms
+        );
+
+        Ok(SyncRun {
+            id: run.id,
+            organization_id: organization_id.to_owned(),
+            plant_id: Some(plant.facility_code),
+            mode: effective_mode,
+            status: "completed".to_owned(),
+            started_at: run.started_at,
+            finished_at: Some(now_string()),
+            duration_ms,
+        })
     }
 
     async fn store_certificate_bundle(
@@ -1801,9 +2162,9 @@ impl AppService {
         challenge_id: &str,
         challenge_payload: &str,
         challenge_signature_base64: &str,
-        sign_cert_der: &[u8],
         expected_mode: &str,
         organization_id: &str,
+        bindings: ChallengeBindingExpectations<'_>,
     ) -> Result<()> {
         let challenge = self
             .db
@@ -1830,10 +2191,17 @@ impl AppService {
         if hash_hex(challenge_payload) != challenge.payload_hash {
             return Err(bad_request_error("cert gateway challenge payload mismatch"));
         }
+        validate_challenge_payload_bindings(
+            challenge_payload,
+            &challenge,
+            organization_id,
+            expected_mode,
+            &bindings,
+        )?;
         let challenge_signature_base64 =
             require_non_empty("challengeSignatureBase64", challenge_signature_base64)?;
         verify_challenge_signature(
-            sign_cert_der,
+            bindings.sign_cert_der,
             challenge_payload,
             &challenge_signature_base64,
         )
@@ -1853,17 +2221,13 @@ impl AppService {
             let id = stable_document_id(organization_id, plant_code, doc);
             let category = resolved_document_category(doc);
             let object_key = format!("{organization_id}/{plant_code}/{id}.pdf");
-            let source_path = Path::new(&doc.source_path);
             info!(
                 plant_code,
                 file_name = doc.file_name.as_str(),
                 object_key = object_key.as_str(),
                 "uploading document"
             );
-            self.artifacts
-                .put_file(object_key.clone(), source_path, "application/pdf")
-                .await
-                .with_context(|| format!("upload document {}", doc.file_name))?;
+            self.persist_document(object_key.clone(), doc).await?;
             persisted.push(PersistedDocument {
                 id,
                 category,
@@ -1878,11 +2242,84 @@ impl AppService {
                     .clone()
                     .or_else(|| doc.source_sha256.clone()),
                 object_key,
-                content_type: "application/pdf".to_owned(),
+                content_type: document_content_type(doc)?.to_owned(),
             });
         }
         Ok(persisted)
     }
+
+    async fn persist_document(&self, object_key: String, doc: &BridgeDocument) -> Result<()> {
+        let content_type = document_content_type(doc)?;
+        if let Some(content_base64) = doc
+            .content_base64
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let decoded = decode_content_base64_to_tempfile(content_base64)
+                .with_context(|| format!("decode document {}", doc.file_name))?;
+            self.artifacts
+                .put_file(object_key, decoded.path(), content_type)
+                .await
+                .with_context(|| format!("upload document {}", doc.file_name))?;
+            return Ok(());
+        }
+
+        let source_path = Path::new(document_source_path(doc)?);
+        self.artifacts
+            .put_file(object_key, source_path, content_type)
+            .await
+            .with_context(|| format!("upload document {}", doc.file_name))?;
+        Ok(())
+    }
+}
+
+fn decode_content_base64_to_tempfile(content_base64: &str) -> Result<tempfile::NamedTempFile> {
+    let mut decoder = base64::read::DecoderReader::new(
+        content_base64.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    let mut output = tempfile::NamedTempFile::new().context("create document decode tempfile")?;
+    io::copy(&mut decoder, &mut output)
+        .map_err(|err| {
+            if err.kind() == io::ErrorKind::InvalidData {
+                bad_request_error("document contentBase64 is not valid base64")
+            } else {
+                anyhow!(err)
+            }
+        })
+        .context("decode document contentBase64")?;
+    output.flush().context("flush document decode tempfile")?;
+    Ok(output)
+}
+
+fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
+    let source_path = doc.source_path.trim();
+    if source_path.is_empty() {
+        return Err(bad_request_error(format!(
+            "document {} has no contentBase64 and no sourcePath",
+            doc.file_name
+        )));
+    }
+    Ok(source_path)
+}
+
+fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
+    for doc in docs {
+        document_content_type(doc)?;
+        if let Some(content_base64) = doc
+            .content_base64
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let _decoded = decode_content_base64_to_tempfile(content_base64)
+                .with_context(|| format!("decode document {}", doc.file_name))?;
+            continue;
+        }
+        document_source_path(doc)?;
+    }
+    Ok(())
 }
 
 fn normalize_active_organization(
@@ -1913,17 +2350,104 @@ fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+fn require_safe_facility_code(field_name: &str, value: &str) -> Result<String> {
+    let value = require_non_empty(field_name, value)?;
+    let is_safe = value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !is_safe || value == "." || value == ".." || value.len() > 128 {
+        return Err(bad_request_error(format!(
+            "{field_name} contains unsupported characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapshot) -> Result<()> {
+    let mut total_content_bytes = 0_usize;
+    for doc in &mut snapshot.documents {
+        let Some(content_base64) = doc
+            .content_base64
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(bad_request_error(
+                "local execution documents require contentBase64",
+            ));
+        };
+        let decoded_len = estimated_base64_decoded_len(content_base64)?;
+        if decoded_len > MAX_LOCAL_EXECUTION_DOCUMENT_BYTES {
+            return Err(bad_request_error(format!(
+                "local execution document {} exceeds {} bytes",
+                doc.file_name, MAX_LOCAL_EXECUTION_DOCUMENT_BYTES
+            )));
+        }
+        total_content_bytes = total_content_bytes
+            .checked_add(decoded_len)
+            .ok_or_else(|| bad_request_error("local execution document content is too large"))?;
+        if total_content_bytes > MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES {
+            return Err(bad_request_error(format!(
+                "local execution documents exceed {} bytes",
+                MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES
+            )));
+        }
+        doc.source_path.clear();
+    }
+    Ok(())
+}
+
+fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(0);
+    }
+    let padding = value
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    let groups = value
+        .len()
+        .checked_add(3)
+        .and_then(|len| len.checked_div(4))
+        .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+    Ok(groups
+        .checked_mul(3)
+        .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?
+        .saturating_sub(padding))
+}
+
 fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocument) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(organization_id.as_bytes());
-    hasher.update(b":");
-    hasher.update(plant_code.as_bytes());
-    hasher.update(b":");
-    hasher.update(doc.attachment_code.as_bytes());
-    hasher.update(b":");
-    hasher.update(doc.file_name.as_bytes());
+    update_hash_component(&mut hasher, organization_id);
+    update_hash_component(&mut hasher, plant_code);
+    update_hash_component(&mut hasher, &doc.attachment_code);
+    update_hash_component(&mut hasher, &doc.file_name);
     let digest = hasher.finalize();
     hex::encode(&digest[..16])
+}
+
+fn update_hash_component(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn document_content_type(doc: &BridgeDocument) -> Result<&str> {
+    let content_type = doc
+        .content_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/pdf");
+    if content_type != "application/pdf" {
+        return Err(bad_request_error(format!(
+            "document {} has unsupported contentType",
+            doc.file_name
+        )));
+    }
+    Ok(content_type)
 }
 
 fn map_rate_record(row: &BridgeRateRecord) -> StoredRateRecord {
@@ -2079,18 +2603,338 @@ fn build_challenge_payload(
     organization_id: &str,
     mode: &str,
     nonce: &str,
+    origin: Option<&str>,
+    business_no: Option<&str>,
+    sync_mode: Option<&str>,
     facility_code: Option<&str>,
+    start_month: Option<&str>,
+    end_month: Option<&str>,
+    sign_cert_sha256_hex: Option<&str>,
     expires_at: &str,
 ) -> String {
-    format!(
-        "cert-gateway:{organization_id}:{mode}:{}:{nonce}:{expires_at}",
-        facility_code.unwrap_or("")
-    )
+    let mut payload = BTreeMap::new();
+    payload.insert("expiresAt", expires_at.to_owned());
+    payload.insert("mode", mode.to_owned());
+    payload.insert("nonce", nonce.to_owned());
+    payload.insert("organizationId", organization_id.to_owned());
+    insert_trimmed(&mut payload, "origin", origin);
+    insert_trimmed(&mut payload, "businessNo", business_no);
+    insert_trimmed(&mut payload, "syncMode", sync_mode);
+    insert_trimmed(&mut payload, "facilityCode", facility_code);
+    insert_trimmed(&mut payload, "startMonth", start_month);
+    insert_trimmed(&mut payload, "endMonth", end_month);
+    insert_trimmed(&mut payload, "signCertSha256Hex", sign_cert_sha256_hex);
+
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).expect("challenge payload map serializes"));
+    format!("cert-gateway:{encoded}")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalExecutionResultSignaturePayload<'a> {
+    challenge_id: &'a str,
+    challenge_payload: &'a str,
+    mode: &'a str,
+    snapshot: &'a bridge::BridgeSnapshot,
+}
+
+pub fn local_execution_result_signature_payload(
+    challenge_id: &str,
+    challenge_payload: &str,
+    mode: &str,
+    snapshot: &bridge::BridgeSnapshot,
+) -> Result<Vec<u8>> {
+    serde_json::to_vec(&LocalExecutionResultSignaturePayload {
+        challenge_id,
+        challenge_payload,
+        mode,
+        snapshot,
+    })
+    .context("encode local execution result signature payload")
+}
+
+fn validate_challenge_payload_bindings(
+    challenge_payload: &str,
+    challenge: &crate::database::CertGatewayChallenge,
+    organization_id: &str,
+    expected_mode: &str,
+    expected: &ChallengeBindingExpectations<'_>,
+) -> Result<()> {
+    let payload = decode_challenge_payload(challenge_payload)?;
+    if payload.organization_id != organization_id {
+        return Err(bad_request_error(
+            "cert gateway challenge payload organization mismatch",
+        ));
+    }
+    if payload.mode != expected_mode {
+        return Err(bad_request_error(
+            "cert gateway challenge payload mode mismatch",
+        ));
+    }
+    if payload.nonce != challenge.nonce {
+        return Err(bad_request_error(
+            "cert gateway challenge payload nonce mismatch",
+        ));
+    }
+    if payload.expires_at != challenge.expires_at {
+        return Err(bad_request_error(
+            "cert gateway challenge payload expiry mismatch",
+        ));
+    }
+    match trim_optional(payload.origin.as_deref()) {
+        Some(origin) => validate_challenge_origin(origin)?,
+        None if expected.require_origin && !payload.legacy_plaintext => {
+            return Err(bad_request_error(
+                "cert gateway challenge payload origin is required",
+            ));
+        }
+        None => {}
+    }
+    if let Some(bound_fingerprint) = trim_optional(payload.sign_cert_sha256_hex.as_deref()) {
+        let actual_fingerprint = hash_bytes_hex(expected.sign_cert_der);
+        if !bound_fingerprint.eq_ignore_ascii_case(&actual_fingerprint) {
+            return Err(bad_request_error(
+                "cert gateway challenge certificate fingerprint mismatch",
+            ));
+        }
+    }
+    if let Some(bound_business_no) = trim_optional(payload.business_no.as_deref()) {
+        let expected_business_no = expected
+            .business_no
+            .and_then(|value| normalize_business_no(value).ok())
+            .ok_or_else(|| bad_request_error("cert gateway challenge business number mismatch"))?;
+        let bound_business_no = normalize_business_no(bound_business_no)?;
+        if bound_business_no != expected_business_no {
+            return Err(bad_request_error(
+                "cert gateway challenge business number mismatch",
+            ));
+        }
+    }
+    if expected_mode == "ephemeral" {
+        validate_optional_binding(
+            "sync mode",
+            payload.sync_mode.as_deref(),
+            expected.sync_mode,
+        )?;
+        validate_optional_binding(
+            "facility code",
+            payload.facility_code.as_deref(),
+            expected.facility_code,
+        )?;
+        validate_month_binding(
+            "start month",
+            payload.start_month.as_deref(),
+            expected.start_month,
+            expected.snapshot,
+            true,
+        )?;
+        validate_month_binding(
+            "end month",
+            payload.end_month.as_deref(),
+            expected.end_month,
+            expected.snapshot,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_challenge_origin(origin: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(origin)
+        .map_err(|_| bad_request_error("cert gateway challenge payload origin is invalid"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(bad_request_error(
+            "cert gateway challenge payload origin is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_challenge_payload(challenge_payload: &str) -> Result<ChallengePayloadBinding> {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .ok_or_else(|| bad_request_error("cert gateway challenge payload prefix mismatch"))?;
+    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) {
+        Ok(raw) => serde_json::from_slice(&raw)
+            .map_err(|_| bad_request_error("cert gateway challenge payload is not json")),
+        Err(_) => decode_legacy_challenge_payload(encoded),
+    }
+}
+
+fn decode_legacy_challenge_payload(encoded: &str) -> Result<ChallengePayloadBinding> {
+    let mut parts = encoded.splitn(3, ':');
+    let organization_id = parts.next().unwrap_or_default();
+    let mode = parts.next().unwrap_or_default();
+    let scope = parts.next().unwrap_or_default();
+    let (facility_code, nonce, expires_at) = decode_legacy_challenge_scope(scope)?;
+    if organization_id.is_empty() || mode.is_empty() || nonce.is_empty() || expires_at.is_empty() {
+        return Err(bad_request_error(
+            "cert gateway challenge payload is not base64",
+        ));
+    }
+    Ok(ChallengePayloadBinding {
+        organization_id: organization_id.to_owned(),
+        mode: mode.to_owned(),
+        nonce: nonce.to_owned(),
+        origin: None,
+        expires_at: expires_at.to_owned(),
+        business_no: None,
+        sync_mode: None,
+        facility_code: trim_optional(Some(facility_code)).map(ToOwned::to_owned),
+        start_month: None,
+        end_month: None,
+        sign_cert_sha256_hex: None,
+        legacy_plaintext: true,
+    })
+}
+
+fn decode_legacy_challenge_scope(scope: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = scope.splitn(3, ':');
+    let facility_code = parts.next().unwrap_or_default();
+    let nonce = parts.next().unwrap_or_default();
+    let expires_at = parts.next().unwrap_or_default();
+    if nonce.is_empty()
+        || expires_at.is_empty()
+        || DateTime::parse_from_rfc3339(expires_at).is_err()
+    {
+        return Err(bad_request_error(
+            "cert gateway challenge payload is not base64",
+        ));
+    }
+    Ok((facility_code, nonce, expires_at))
+}
+
+fn validate_optional_binding(
+    field: &str,
+    bound: Option<&str>,
+    expected: Option<&str>,
+) -> Result<()> {
+    let Some(bound) = trim_optional(bound) else {
+        return Ok(());
+    };
+    let Some(expected) = expected.and_then(|value| trim_optional(Some(value))) else {
+        return Err(bad_request_error(format!(
+            "cert gateway challenge {field} mismatch"
+        )));
+    };
+    if bound != expected {
+        return Err(bad_request_error(format!(
+            "cert gateway challenge {field} mismatch"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_month_binding(
+    field: &str,
+    bound: Option<&str>,
+    expected: Option<&str>,
+    snapshot: Option<&bridge::BridgeSnapshot>,
+    is_start: bool,
+) -> Result<()> {
+    let Some(bound) = trim_optional(bound) else {
+        return Ok(());
+    };
+    validate_month_format(field, bound)?;
+    if let Some(expected) = expected.and_then(|value| trim_optional(Some(value))) {
+        validate_month_format(field, expected)?;
+        if bound != expected {
+            return Err(bad_request_error(format!(
+                "cert gateway challenge {field} mismatch"
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(snapshot) = snapshot {
+        for month in snapshot_record_months(snapshot) {
+            validate_month_format("snapshot month", month)?;
+            let outside_range = if is_start {
+                month < bound
+            } else {
+                month > bound
+            };
+            if outside_range {
+                return Err(bad_request_error(format!(
+                    "cert gateway challenge {field} mismatch"
+                )));
+            }
+        }
+        return Ok(());
+    }
+    Err(bad_request_error(format!(
+        "cert gateway challenge {field} mismatch"
+    )))
+}
+
+fn validate_month_format(field: &str, value: &str) -> Result<()> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 7
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..].iter().all(u8::is_ascii_digit);
+    if !valid {
+        return Err(bad_request_error(format!(
+            "{field} must use YYYY-MM format"
+        )));
+    }
+    let month: u8 = value[5..7]
+        .parse()
+        .map_err(|_| bad_request_error(format!("{field} must use YYYY-MM format")))?;
+    if !(1..=12).contains(&month) {
+        return Err(bad_request_error(format!(
+            "{field} must use YYYY-MM format"
+        )));
+    }
+    Ok(())
+}
+
+fn snapshot_record_months(snapshot: &bridge::BridgeSnapshot) -> Vec<&str> {
+    snapshot
+        .generation
+        .iter()
+        .map(|record| record.month.as_str())
+        .chain(snapshot.rates.iter().map(|record| record.month.as_str()))
+        .chain(snapshot.rec.iter().map(|record| record.month.as_str()))
+        .collect()
+}
+
+fn trim_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalize_optional_business_no(value: Option<&str>) -> Result<Option<String>> {
+    trim_optional(value)
+        .map(|value| normalize_business_no(value).map_err(|err| bad_request_error(err.to_string())))
+        .transpose()
+}
+
+fn insert_trimmed(
+    map: &mut BTreeMap<&'static str, String>,
+    key: &'static str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        map.insert(key, value.to_owned());
+    }
 }
 
 fn hash_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn hash_bytes_hex(value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value);
     hex::encode(hasher.finalize())
 }
 
@@ -2209,9 +3053,9 @@ fn select_organization_business_no<'a>(
     if let Some(business_no) = linked_business_no {
         return Ok(business_no);
     }
-    Err(anyhow!(
+    Err(bad_request_error(format!(
         "organization missing linked legal party business number: {organization_id}"
-    ))
+    )))
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -2227,7 +3071,15 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_optional_text, select_organization_business_no};
+    use super::{
+        MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
+        decode_challenge_payload, decode_content_base64_to_tempfile, document_content_type,
+        document_source_path, estimated_base64_decoded_len, normalize_optional_text,
+        require_local_execution_document_contents, select_organization_business_no,
+        stable_document_id, validate_month_format,
+    };
+    use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
+    use chrono::{DateTime, FixedOffset};
 
     #[test]
     fn requested_business_number_wins() {
@@ -2269,5 +3121,208 @@ mod tests {
             normalize_optional_text(Some("  hello  ".to_owned())).as_deref(),
             Some("hello")
         );
+    }
+
+    #[test]
+    fn challenge_month_binding_requires_zero_padded_months() {
+        assert!(validate_month_format("start month", "2026-03").is_ok());
+        for invalid in ["2026-3", "2026-00", "2026-13", "26-03", "2026/03"] {
+            assert!(
+                validate_month_format("start month", invalid).is_err(),
+                "{invalid} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn challenge_payload_decoder_accepts_legacy_plaintext_payloads() {
+        let payload = decode_challenge_payload(
+            "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z",
+        )
+        .expect("legacy payload");
+
+        assert_eq!(payload.organization_id, "org-1");
+        assert_eq!(payload.mode, "ephemeral");
+        assert_eq!(payload.facility_code.as_deref(), Some("FAC-001"));
+        assert_eq!(payload.nonce, "nonce-1");
+        assert_eq!(payload.expires_at, "2026-04-12T00:00:00Z");
+        assert!(payload.legacy_plaintext);
+    }
+
+    #[test]
+    fn challenge_payload_decoder_rejects_legacy_facility_codes_with_colons() {
+        let err = match decode_challenge_payload(
+            "cert-gateway:org-1:ephemeral:FAC:001:nonce-1:2026-04-12T00:00:00Z",
+        ) {
+            Ok(_) => panic!("colon-delimited legacy payload must be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("cert gateway challenge payload is not base64")
+        );
+    }
+
+    #[test]
+    fn base64_decoded_length_estimate_counts_padding() {
+        assert_eq!(
+            estimated_base64_decoded_len("UERGLUNPTlRFTlQ=").expect("estimate"),
+            11
+        );
+    }
+
+    #[test]
+    fn content_base64_decoder_streams_to_tempfile() {
+        let file = decode_content_base64_to_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
+        let contents = std::fs::read(file.path()).expect("read decoded tempfile");
+        assert_eq!(contents, b"PDF-CONTENT");
+    }
+
+    #[test]
+    fn content_base64_decoder_rejects_invalid_base64() {
+        let err =
+            decode_content_base64_to_tempfile("not valid base64").expect_err("invalid base64");
+        assert!(err.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("document contentBase64 is not valid base64")
+        }));
+    }
+
+    #[test]
+    fn local_execution_document_contents_rejects_oversized_document_payloads() {
+        let mut snapshot = fixture_snapshot(vec![fixture_document(
+            "large.pdf",
+            "A".repeat(encoded_len_for_decoded_bytes(
+                MAX_LOCAL_EXECUTION_DOCUMENT_BYTES + 1,
+            )),
+        )]);
+
+        let err = require_local_execution_document_contents(&mut snapshot)
+            .expect_err("oversized document");
+        assert!(err.to_string().contains("document large.pdf exceeds"));
+        assert_eq!(snapshot.documents[0].source_path, "/tmp/source.pdf");
+    }
+
+    #[test]
+    fn local_execution_document_contents_rejects_oversized_document_sets() {
+        let per_document_len = MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES / 3 + 1;
+        let mut snapshot = fixture_snapshot(vec![
+            fixture_document(
+                "first.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_len)),
+            ),
+            fixture_document(
+                "second.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_len)),
+            ),
+            fixture_document(
+                "third.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_len)),
+            ),
+        ]);
+
+        let err = require_local_execution_document_contents(&mut snapshot)
+            .expect_err("oversized document set");
+        assert!(err.to_string().contains("documents exceed"));
+        assert_eq!(snapshot.documents[2].source_path, "/tmp/source.pdf");
+    }
+
+    #[test]
+    fn local_execution_document_contents_clears_source_paths_for_bounded_payloads() {
+        let mut snapshot = fixture_snapshot(vec![fixture_document(
+            "permit.pdf",
+            "UERGLUNPTlRFTlQ=".to_owned(),
+        )]);
+
+        require_local_execution_document_contents(&mut snapshot).expect("bounded document");
+        assert_eq!(snapshot.documents[0].source_path, "");
+    }
+
+    #[test]
+    fn stable_document_id_disambiguates_colon_delimited_components() {
+        let mut first = fixture_document("permit.pdf", "UERGLUNPTlRFTlQ=".to_owned());
+        first.attachment_code = "C".to_owned();
+        let mut second = first.clone();
+        second.attachment_code = "B:C".to_owned();
+
+        assert_ne!(
+            stable_document_id("org-1", "A:B", &first),
+            stable_document_id("org-1", "A", &second)
+        );
+    }
+
+    #[test]
+    fn document_source_path_rejects_whitespace_only_fallbacks() {
+        let mut doc = fixture_document("permit.pdf", String::new());
+        doc.content_base64 = None;
+        doc.source_path = " \t\n ".to_owned();
+
+        let err = document_source_path(&doc).expect_err("blank source path");
+        assert!(
+            err.to_string()
+                .contains("document permit.pdf has no contentBase64 and no sourcePath")
+        );
+    }
+
+    #[test]
+    fn document_content_type_rejects_untrusted_values() {
+        let mut doc = fixture_document("permit.pdf", "UERGLUNPTlRFTlQ=".to_owned());
+        doc.content_type = Some("application/pdf\r\nx-evil: 1".to_owned());
+
+        let err = document_content_type(&doc).expect_err("invalid content type");
+        assert!(
+            err.to_string()
+                .contains("document permit.pdf has unsupported contentType")
+        );
+
+        doc.content_type = Some(" application/pdf ".to_owned());
+        assert_eq!(
+            document_content_type(&doc).expect("pdf content type"),
+            "application/pdf"
+        );
+    }
+
+    fn encoded_len_for_decoded_bytes(decoded_bytes: usize) -> usize {
+        decoded_bytes.div_ceil(3) * 4
+    }
+
+    fn fixture_snapshot(documents: Vec<BridgeDocument>) -> BridgeSnapshot {
+        BridgeSnapshot {
+            collected_at: DateTime::parse_from_rfc3339("2026-04-09T12:00:00+09:00")
+                .expect("date")
+                .with_timezone(&FixedOffset::east_opt(9 * 3600).expect("offset")),
+            facility: BridgeFacility {
+                code: "FAC-001".to_owned(),
+                name: "Plant FAC-001".to_owned(),
+                business_no: "2768603291".to_owned(),
+                contract_no: "CONTRACT-1".to_owned(),
+                address: "Seoul".to_owned(),
+                installed_kw: 100.5,
+                rec_start_date: "2026-01-01".to_owned(),
+                confirm_issued: "Y".to_owned(),
+            },
+            generation: Vec::new(),
+            rates: Vec::new(),
+            rec: Vec::new(),
+            documents,
+        }
+    }
+
+    fn fixture_document(file_name: &str, content_base64: String) -> BridgeDocument {
+        BridgeDocument {
+            attachment_code: "ATT-1".to_owned(),
+            file_class: "permit".to_owned(),
+            file_sec_name: "permit".to_owned(),
+            file_name: file_name.to_owned(),
+            required: true,
+            category: "permit".to_owned(),
+            source_path: "/tmp/source.pdf".to_owned(),
+            source_sha256: None,
+            output_sha256: None,
+            content_base64: Some(content_base64),
+            content_type: None,
+        }
     }
 }

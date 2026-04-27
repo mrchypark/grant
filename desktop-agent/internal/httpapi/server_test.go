@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -27,14 +29,15 @@ import (
 
 var testServerConfig = Config{
 	AllowedOrigins: []string{"http://127.0.0.1:4173"},
-	GatewayBaseURL: "http://gateway.local",
+	GatewayBaseURL: "https://gateway.local",
 	SessionTTL:     5 * time.Minute,
 	SessionSecret:  []byte("0123456789abcdef0123456789abcdef"),
 }
 
 type stubNPKIService struct {
-	certificates []npki.CertificateMetadata
-	lastSignReq  npki.SignRequest
+	certificates     []npki.CertificateMetadata
+	signedBusinessNo *string
+	lastSignReq      npki.SignRequest
 }
 
 func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateMetadata, error) {
@@ -44,12 +47,16 @@ func (s *stubNPKIService) ListCertificates(context.Context) ([]npki.CertificateM
 func (s *stubNPKIService) Sign(_ context.Context, req npki.SignRequest) (npki.SignResult, error) {
 	req.PasswordBytes = append([]byte(nil), req.PasswordBytes...)
 	s.lastSignReq = req
+	businessNo := "2768603291"
+	if s.signedBusinessNo != nil {
+		businessNo = *s.signedBusinessNo
+	}
 	return npki.SignResult{
 		CertificateID:            "cert-1",
 		Challenge:                req.Challenge,
 		ChallengeSignatureBase64: "c2lnbmF0dXJl",
 		Bundle: npki.ProofBundle{
-			BusinessNo:        "2768603291",
+			BusinessNo:        businessNo,
 			CommonName:        "Test Certificate",
 			SignCertDerBase64: "AQID",
 			SignPriKeyBase64:  "BAUG",
@@ -75,8 +82,13 @@ type stubGateway struct {
 	mu                 sync.Mutex
 	challenge          challengeResponse
 	lastChallenge      GatewayChallengeRequest
-	lastEphemeral      GatewayEphemeralRequest
 	lastStoredRegister GatewayStoredRegistrationRequest
+}
+
+type stubLocalExecutor struct {
+	mu            sync.Mutex
+	lastEphemeral LocalEphemeralRequest
+	err           error
 }
 
 type httpPKCS12Fixture struct {
@@ -96,22 +108,6 @@ func (s *stubGateway) CreateChallenge(_ context.Context, req GatewayChallengeReq
 	}, nil
 }
 
-func (s *stubGateway) RunEphemeral(_ context.Context, req GatewayEphemeralRequest) (map[string]any, error) {
-	s.mu.Lock()
-	s.lastEphemeral = req
-	s.mu.Unlock()
-	return map[string]any{
-		"id":             "sync-ephemeral-1",
-		"organizationId": "org-1",
-		"plantId":        "FAC-001",
-		"mode":           "full",
-		"status":         "completed",
-		"startedAt":      nil,
-		"finishedAt":     nil,
-		"durationMs":     42,
-	}, nil
-}
-
 func (s *stubGateway) RegisterStored(_ context.Context, req GatewayStoredRegistrationRequest) (map[string]any, error) {
 	s.mu.Lock()
 	s.lastStoredRegister = req
@@ -121,6 +117,25 @@ func (s *stubGateway) RegisterStored(_ context.Context, req GatewayStoredRegistr
 		"organizationId": "org-1",
 		"businessNo":     "2768603291",
 		"commonName":     "Stored Certificate",
+	}, nil
+}
+
+func (s *stubLocalExecutor) RunEphemeral(_ context.Context, req LocalEphemeralRequest) (map[string]any, error) {
+	s.mu.Lock()
+	s.lastEphemeral = req
+	s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	return map[string]any{
+		"id":             "sync-local-ephemeral-1",
+		"organizationId": "org-1",
+		"plantId":        "FAC-001",
+		"mode":           "full",
+		"status":         "completed",
+		"startedAt":      nil,
+		"finishedAt":     nil,
+		"durationMs":     42,
 	}, nil
 }
 
@@ -292,6 +307,7 @@ func TestServerRejectsInvalidSignRequests(t *testing.T) {
 		{name: "missing password", body: `{"challenge":"nonce-1","certificateId":"cert-1"}`},
 		{name: "missing challenge", body: `{"password":"secret","certificateId":"cert-1"}`},
 		{name: "whitespace only password", body: `{"challenge":"nonce-1","certificateId":"cert-1","password":"   "}`},
+		{name: "non gateway challenge", body: `{"challenge":"login:attacker","certificateId":"cert-1","password":"secret"}`},
 	}
 
 	for _, tc := range testCases {
@@ -310,12 +326,12 @@ func TestServerRejectsInvalidSignRequests(t *testing.T) {
 	}
 }
 
-func TestServerReturnsBundleOnSign(t *testing.T) {
+func TestServerReturnsSignatureOnlyOnSign(t *testing.T) {
 	handler := newTestHandler(&stubNPKIService{}, stubApprover{})
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
-		"challenge":"challenge-1",
+		"challenge":"cert-gateway:challenge-1",
 		"certificateId":"cert-1",
 		"password":"secret-password"
 	}`))
@@ -330,10 +346,17 @@ func TestServerReturnsBundleOnSign(t *testing.T) {
 	}
 
 	var got struct {
-		CertificateID string `json:"certificateId"`
-		Bundle        struct {
-			BusinessNo string `json:"businessNo"`
-		} `json:"bundle"`
+		CertificateID            string `json:"certificateId"`
+		ChallengeSignatureBase64 string `json:"challengeSignatureBase64"`
+		Bundle                   any    `json:"bundle"`
+		Password                 string `json:"password"`
+		SignPriKeyBase64         string `json:"signPriKeyBase64"`
+		KMPriKeyBase64           string `json:"kmPriKeyBase64"`
+		Certificate              struct {
+			BusinessNo        string `json:"businessNo"`
+			CommonName        string `json:"commonName"`
+			SignCertDerBase64 string `json:"signCertDerBase64"`
+		} `json:"certificate"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
@@ -341,12 +364,18 @@ func TestServerReturnsBundleOnSign(t *testing.T) {
 	if got.CertificateID != "cert-1" {
 		t.Fatalf("certificateId = %q, want cert-1", got.CertificateID)
 	}
-	if got.Bundle.BusinessNo != "2768603291" {
-		t.Fatalf("businessNo = %q, want 2768603291", got.Bundle.BusinessNo)
+	if got.ChallengeSignatureBase64 == "" {
+		t.Fatal("challengeSignatureBase64 is empty")
+	}
+	if got.Bundle != nil || got.Password != "" || got.SignPriKeyBase64 != "" || got.KMPriKeyBase64 != "" {
+		t.Fatalf("sign response leaked secret fields: %s", rec.Body.String())
+	}
+	if got.Certificate.BusinessNo != "2768603291" {
+		t.Fatalf("businessNo = %q, want 2768603291", got.Certificate.BusinessNo)
 	}
 }
 
-func TestServerReturnsBundleOnPKCS12Sign(t *testing.T) {
+func TestServerReturnsSignatureOnlyOnPKCS12Sign(t *testing.T) {
 	root := t.TempDir()
 	fixture := writeHTTPPKCS12Fixture(t, root, "protected.p12", "Protected PKCS12 Certificate", "secret-password")
 	handler := newTestHandler(
@@ -356,7 +385,7 @@ func TestServerReturnsBundleOnPKCS12Sign(t *testing.T) {
 	sessionToken := openSession(t, handler)
 
 	body, err := json.Marshal(map[string]string{
-		"challenge":     "challenge-1",
+		"challenge":     "cert-gateway:challenge-1",
 		"certificateId": httpPKCS12CertificateID(fixture.path),
 		"password":      "secret-password",
 	})
@@ -378,13 +407,11 @@ func TestServerReturnsBundleOnPKCS12Sign(t *testing.T) {
 	var got struct {
 		CertificateID            string `json:"certificateId"`
 		ChallengeSignatureBase64 string `json:"challengeSignatureBase64"`
-		Bundle                   struct {
+		Bundle                   any    `json:"bundle"`
+		Certificate              struct {
 			CommonName        string `json:"commonName"`
 			SignCertDerBase64 string `json:"signCertDerBase64"`
-			SignPriKeyBase64  string `json:"signPriKeyBase64"`
-			KMCertDerBase64   string `json:"kmCertDerBase64"`
-			KMPriKeyBase64    string `json:"kmPriKeyBase64"`
-		} `json:"bundle"`
+		} `json:"certificate"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
@@ -395,17 +422,17 @@ func TestServerReturnsBundleOnPKCS12Sign(t *testing.T) {
 	if got.ChallengeSignatureBase64 == "" {
 		t.Fatal("challengeSignatureBase64 is empty")
 	}
-	if got.Bundle.SignCertDerBase64 == "" || got.Bundle.SignPriKeyBase64 == "" {
-		t.Fatalf("bundle = %#v, want sign fields populated", got.Bundle)
+	if got.Bundle != nil {
+		t.Fatalf("bundle leaked in sign response: %#v", got.Bundle)
 	}
-	if got.Bundle.KMCertDerBase64 != "" || got.Bundle.KMPriKeyBase64 != "" {
-		t.Fatalf("bundle km fields = %#v, want empty", got.Bundle)
+	if got.Certificate.SignCertDerBase64 == "" {
+		t.Fatal("certificate sign cert is empty")
 	}
-	if got.Bundle.CommonName != "Protected PKCS12 Certificate" {
-		t.Fatalf("commonName = %q, want Protected PKCS12 Certificate", got.Bundle.CommonName)
+	if got.Certificate.CommonName != "Protected PKCS12 Certificate" {
+		t.Fatalf("commonName = %q, want Protected PKCS12 Certificate", got.Certificate.CommonName)
 	}
 
-	signCertDER, err := base64.StdEncoding.DecodeString(got.Bundle.SignCertDerBase64)
+	signCertDER, err := base64.StdEncoding.DecodeString(got.Certificate.SignCertDerBase64)
 	if err != nil {
 		t.Fatalf("decode sign cert: %v", err)
 	}
@@ -417,7 +444,7 @@ func TestServerReturnsBundleOnPKCS12Sign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode challenge signature: %v", err)
 	}
-	digest := sha256.Sum256([]byte("challenge-1"))
+	digest := sha256.Sum256([]byte("cert-gateway:challenge-1"))
 	if err := rsa.VerifyPKCS1v15(signCert.PublicKey.(*rsa.PublicKey), crypto.SHA256, digest[:], signature); err != nil {
 		t.Fatalf("verify challenge signature: %v", err)
 	}
@@ -429,7 +456,7 @@ func TestServerPreservesPasswordWhitespaceOnSign(t *testing.T) {
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
-		"challenge":"challenge-1",
+		"challenge":"cert-gateway:challenge-1",
 		"certificateId":"cert-1",
 		"password":"  secret-password  "
 	}`))
@@ -453,7 +480,7 @@ func TestServerRejectsOversizedSignBody(t *testing.T) {
 	oversizedPassword := strings.Repeat("x", int(maxJSONBodyBytes)+1)
 
 	req := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{
-		"challenge":"challenge-1",
+		"challenge":"cert-gateway:challenge-1",
 		"certificateId":"cert-1",
 		"password":"`+oversizedPassword+`"
 	}`))
@@ -488,19 +515,31 @@ func TestSummarizeGatewayErrorValueDropsNonJSONValues(t *testing.T) {
 	}
 }
 
+func TestChallengeMonthBoundsPreservesChallengeValuesForFullSync(t *testing.T) {
+	startMonth, endMonth := challengeMonthBounds(" 2026-02 ", " 2026-04 ")
+
+	if startMonth != "2026-02" || endMonth != "2026-04" {
+		t.Fatalf("bounds = %q/%q, want 2026-02/2026-04", startMonth, endMonth)
+	}
+}
+
 func TestServerApproveEphemeralRun(t *testing.T) {
 	gateway := &stubGateway{
 		challenge: challengeResponse{
-			ChallengeID: "challenge-ephemeral-1",
-			Payload:     "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z",
+			ChallengeID:  "challenge-ephemeral-1",
+			Payload:      "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z",
+			SyncMode:     "full",
+			FacilityCode: "FAC-BOUND",
 		},
 	}
+	local := &stubLocalExecutor{}
 	npkiSvc := &stubNPKIService{
 		certificates: []npki.CertificateMetadata{{
-			ID:         "cert-1",
-			CommonName: "Test Certificate",
-			BusinessNo: "2768603291",
-			NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			ID:                "cert-1",
+			CommonName:        "Test Certificate",
+			BusinessNo:        "2768603291",
+			NotAfter:          time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			SignCertSHA256Hex: "sha256-cert-1",
 		}},
 	}
 	handler := newTestHandler(
@@ -510,11 +549,12 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 			Password:      []byte("secret-password"),
 		}},
 		gateway,
+		local,
 	)
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
-		"gatewayBaseUrl":"http://gateway.local",
+		"gatewayBaseUrl":"https://gateway.local",
 		"organizationId":"org-1",
 		"businessNo":"2768603291",
 		"bearerToken":"token-1",
@@ -540,38 +580,115 @@ func TestServerApproveEphemeralRun(t *testing.T) {
 	if got["status"] != "completed" {
 		t.Fatalf("status = %v, want completed", got["status"])
 	}
-	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
+	if npkiSvc.lastSignReq.Challenge != "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z" {
 		t.Fatalf("challenge = %q", npkiSvc.lastSignReq.Challenge)
 	}
 	if string(npkiSvc.lastSignReq.PasswordBytes) != "secret-password" {
 		t.Fatalf("passwordBytes = %q, want secret-password", npkiSvc.lastSignReq.PasswordBytes)
 	}
-	if gateway.lastEphemeral.Password != "secret-password" {
-		t.Fatalf("password = %q, want secret-password", gateway.lastEphemeral.Password)
+	if local.lastEphemeral.Password != "secret-password" {
+		t.Fatalf("local password = %q, want secret-password", local.lastEphemeral.Password)
 	}
-	if gateway.lastEphemeral.ChallengeID != "challenge-ephemeral-1" {
-		t.Fatalf("challengeId = %q, want challenge-ephemeral-1", gateway.lastEphemeral.ChallengeID)
+	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-1" {
+		t.Fatalf("challengeId = %q, want challenge-ephemeral-1", local.lastEphemeral.ChallengeID)
 	}
-	if gateway.lastEphemeral.ChallengePayload != "cert-gateway:org-1:ephemeral:FAC-001:nonce-1:2026-04-12T00:00:00Z" {
-		t.Fatalf("challengePayload = %q", gateway.lastEphemeral.ChallengePayload)
+	if local.lastEphemeral.ChallengePayload != "cert-gateway:org-1:ephemeral:FAC-BOUND:nonce-1:2026-04-12T00:00:00Z" {
+		t.Fatalf("challengePayload = %q", local.lastEphemeral.ChallengePayload)
 	}
-	if gateway.lastEphemeral.ChallengeSignatureBase64 == "" {
+	if local.lastEphemeral.ChallengeSignatureBase64 == "" {
 		t.Fatal("challengeSignatureBase64 is empty")
 	}
 	if gateway.lastChallenge.FacilityCode != "FAC-001" {
 		t.Fatalf("challenge facilityCode = %q, want FAC-001", gateway.lastChallenge.FacilityCode)
 	}
-	if gateway.lastEphemeral.FacilityCode != "FAC-001" {
-		t.Fatalf("facilityCode = %q, want FAC-001", gateway.lastEphemeral.FacilityCode)
+	if gateway.lastChallenge.Origin != "http://127.0.0.1:4173" {
+		t.Fatalf("challenge origin = %q", gateway.lastChallenge.Origin)
 	}
-	if gateway.lastEphemeral.StartMonth != "2026-01" {
-		t.Fatalf("startMonth = %q, want 2026-01", gateway.lastEphemeral.StartMonth)
+	if gateway.lastChallenge.BusinessNo != "2768603291" {
+		t.Fatalf("challenge businessNo = %q", gateway.lastChallenge.BusinessNo)
 	}
-	if gateway.lastEphemeral.EndMonth != "2026-03" {
-		t.Fatalf("endMonth = %q, want 2026-03", gateway.lastEphemeral.EndMonth)
+	if gateway.lastChallenge.SyncMode != "delta" {
+		t.Fatalf("challenge syncMode = %q, want delta", gateway.lastChallenge.SyncMode)
 	}
-	if gateway.lastEphemeral.Mode != "delta" {
-		t.Fatalf("mode = %q, want delta", gateway.lastEphemeral.Mode)
+	if gateway.lastChallenge.StartMonth != "2026-01" || gateway.lastChallenge.EndMonth != "2026-03" {
+		t.Fatalf("challenge date range = %q/%q", gateway.lastChallenge.StartMonth, gateway.lastChallenge.EndMonth)
+	}
+	if gateway.lastChallenge.SignCertSHA256Hex != "sha256-cert-1" {
+		t.Fatalf("challenge sign cert fingerprint = %q", gateway.lastChallenge.SignCertSHA256Hex)
+	}
+	if local.lastEphemeral.FacilityCode != "FAC-BOUND" {
+		t.Fatalf("facilityCode = %q, want FAC-BOUND", local.lastEphemeral.FacilityCode)
+	}
+	if local.lastEphemeral.StartMonth != "" {
+		t.Fatalf("startMonth = %q, want empty for challenge full sync", local.lastEphemeral.StartMonth)
+	}
+	if local.lastEphemeral.EndMonth != "" {
+		t.Fatalf("endMonth = %q, want empty for challenge full sync", local.lastEphemeral.EndMonth)
+	}
+	if local.lastEphemeral.Mode != "full" {
+		t.Fatalf("mode = %q, want full", local.lastEphemeral.Mode)
+	}
+}
+
+func TestServerApproveEphemeralRunDoesNotFallbackToRequestScopeWhenChallengeOmitsScope(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-unscoped",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	local := &stubLocalExecutor{}
+	npkiSvc := &stubNPKIService{
+		certificates: []npki.CertificateMetadata{{
+			ID:                "cert-1",
+			CommonName:        "Test Certificate",
+			BusinessNo:        "2768603291",
+			NotAfter:          time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			SignCertSHA256Hex: "sha256-cert-1",
+		}},
+	}
+	handler := newTestHandler(
+		npkiSvc,
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291",
+		"bearerToken":"token-1",
+		"activeOrganizationId":"org-1",
+		"facilityCode":"FAC-CALLER",
+		"startMonth":"2026-01",
+		"endMonth":"2026-03",
+		"mode":"delta"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if gateway.lastChallenge.FacilityCode != "FAC-CALLER" {
+		t.Fatalf("challenge facilityCode = %q, want FAC-CALLER", gateway.lastChallenge.FacilityCode)
+	}
+	if gateway.lastChallenge.SyncMode != "delta" {
+		t.Fatalf("challenge syncMode = %q, want delta", gateway.lastChallenge.SyncMode)
+	}
+	if local.lastEphemeral.FacilityCode != "" {
+		t.Fatalf("facilityCode = %q, want empty challenge-authorized scope", local.lastEphemeral.FacilityCode)
+	}
+	if local.lastEphemeral.Mode != "" {
+		t.Fatalf("mode = %q, want empty challenge-authorized scope", local.lastEphemeral.Mode)
 	}
 }
 
@@ -597,11 +714,12 @@ func TestServerApproveEphemeralRunAllowsMissingBusinessNumberWhenCertificateProv
 			Password:      []byte("secret-password"),
 		}},
 		gateway,
+		&stubLocalExecutor{},
 	)
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
-		"gatewayBaseUrl":"http://gateway.local",
+		"gatewayBaseUrl":"https://gateway.local",
 		"organizationId":"org-1"
 	}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -616,11 +734,349 @@ func TestServerApproveEphemeralRunAllowsMissingBusinessNumberWhenCertificateProv
 	if npkiSvc.lastSignReq.BusinessNo != "" {
 		t.Fatalf("sign businessNo = %q, want empty when request omits it", npkiSvc.lastSignReq.BusinessNo)
 	}
-	if gateway.lastEphemeral.BusinessNo != "" {
-		t.Fatalf("gateway businessNo = %q, want empty when request omits it", gateway.lastEphemeral.BusinessNo)
+}
+
+func TestServerApproveEphemeralRunRejectsCertificateBusinessNumberMismatch(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-cert-business-mismatch",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
 	}
-	if gateway.lastEphemeral.Bundle.BusinessNo != "2768603291" {
-		t.Fatalf("bundle businessNo = %q, want 2768603291 from certificate metadata", gateway.lastEphemeral.Bundle.BusinessNo)
+	local := &stubLocalExecutor{}
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "2768603291",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"123-45-67890"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if gateway.lastChallenge.OrganizationID != "" {
+		t.Fatalf("gateway challenge was created for organization %q", gateway.lastChallenge.OrganizationID)
+	}
+	if local.lastEphemeral.ChallengeID != "" {
+		t.Fatalf("local executor was called with challenge %q", local.lastEphemeral.ChallengeID)
+	}
+}
+
+func TestServerApproveEphemeralRunAllowsMissingCertificateMetadataBusinessNumberWhenSignedBundleMatches(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-cert-business-missing",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	local := &stubLocalExecutor{}
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-cert-business-missing" {
+		t.Fatalf("local executor challenge = %q, want challenge-ephemeral-cert-business-missing", local.lastEphemeral.ChallengeID)
+	}
+}
+
+func TestServerApproveEphemeralRunAllowsMissingSignedBundleBusinessNumber(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-signed-business-missing",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+			BusinessNo:  "2768603291",
+		},
+	}
+	local := &stubLocalExecutor{}
+	emptySignedBusinessNo := ""
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+			signedBusinessNo: &emptySignedBusinessNo,
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if local.lastEphemeral.ChallengeID != "challenge-ephemeral-signed-business-missing" {
+		t.Fatalf("local executor challenge = %q, want challenge-ephemeral-signed-business-missing", local.lastEphemeral.ChallengeID)
+	}
+	if local.lastEphemeral.Bundle.BusinessNo != "" {
+		t.Fatalf("signed bundle businessNo = %q, want empty", local.lastEphemeral.Bundle.BusinessNo)
+	}
+	if local.lastEphemeral.BusinessNo != "2768603291" {
+		t.Fatalf("local businessNo = %q, want challenge-bound businessNo", local.lastEphemeral.BusinessNo)
+	}
+}
+
+func TestServerApproveEphemeralRunUsesChallengeBusinessNoWhenRequestOmitsIt(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-linked-business",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+			BusinessNo:  "2768603291",
+		},
+	}
+	local := &stubLocalExecutor{}
+	emptySignedBusinessNo := ""
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+			signedBusinessNo: &emptySignedBusinessNo,
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if gateway.lastChallenge.BusinessNo != "" {
+		t.Fatalf("challenge request businessNo = %q, want omitted", gateway.lastChallenge.BusinessNo)
+	}
+	if local.lastEphemeral.BusinessNo != "2768603291" {
+		t.Fatalf("local businessNo = %q, want challenge-bound businessNo", local.lastEphemeral.BusinessNo)
+	}
+	if local.lastEphemeral.Bundle.BusinessNo != "" {
+		t.Fatalf("signed bundle businessNo = %q, want empty", local.lastEphemeral.Bundle.BusinessNo)
+	}
+}
+
+func TestServerApproveEphemeralRunRejectsChallengeBusinessNoMismatch(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-wrong-business",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+			BusinessNo:  "1111111111",
+		},
+	}
+	local := &stubLocalExecutor{}
+	emptySignedBusinessNo := ""
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+			signedBusinessNo: &emptySignedBusinessNo,
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if local.lastEphemeral.ChallengeID != "" {
+		t.Fatalf("local executor should not run, got challenge %q", local.lastEphemeral.ChallengeID)
+	}
+}
+
+func TestServerApproveEphemeralRunRejectsSelectedCertificateMismatchBeforeSigning(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-linked-business",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+			BusinessNo:  "2768603291",
+		},
+	}
+	local := &stubLocalExecutor{}
+	npkiSvc := &stubNPKIService{
+		certificates: []npki.CertificateMetadata{{
+			ID:         "cert-1",
+			CommonName: "Wrong Business Certificate",
+			BusinessNo: "1111111111",
+			NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	handler := newTestHandler(
+		npkiSvc,
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if npkiSvc.lastSignReq.Challenge != "" {
+		t.Fatalf("sign should not run, got challenge %q", npkiSvc.lastSignReq.Challenge)
+	}
+	if local.lastEphemeral.ChallengeID != "" {
+		t.Fatalf("local executor should not run, got challenge %q", local.lastEphemeral.ChallengeID)
+	}
+}
+
+func TestServerApproveEphemeralRunRejectsMalformedSignedBundleBusinessNumber(t *testing.T) {
+	gateway := &stubGateway{
+		challenge: challengeResponse{
+			ChallengeID: "challenge-ephemeral-signed-business-malformed",
+			Payload:     "cert-gateway:org-1:ephemeral::nonce-1:2026-04-12T00:00:00Z",
+		},
+	}
+	local := &stubLocalExecutor{}
+	malformedSignedBusinessNo := "biz:2768603291"
+	handler := newTestHandler(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+			signedBusinessNo: &malformedSignedBusinessNo,
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		gateway,
+		local,
+	)
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"https://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if local.lastEphemeral.ChallengeID != "" {
+		t.Fatalf("local executor was called with challenge %q", local.lastEphemeral.ChallengeID)
 	}
 }
 
@@ -650,7 +1106,7 @@ func TestServerApproveStoredRegistration(t *testing.T) {
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-stored-registration", strings.NewReader(`{
-		"gatewayBaseUrl":"http://gateway.local",
+		"gatewayBaseUrl":"https://gateway.local",
 		"organizationId":"org-1",
 		"businessNo":"2768603291",
 		"bearerToken":"token-1",
@@ -702,7 +1158,7 @@ func TestServerRejectsGatewayBaseURLMismatch(t *testing.T) {
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
-		"gatewayBaseUrl":"http://attacker.example",
+		"gatewayBaseUrl":"https://attacker.example",
 		"organizationId":"org-1",
 		"businessNo":"2768603291",
 		"bearerToken":"token-1",
@@ -722,6 +1178,103 @@ func TestServerRejectsGatewayBaseURLMismatch(t *testing.T) {
 	}
 }
 
+func TestServerRejectsNonLoopbackHTTPGatewayBaseURL(t *testing.T) {
+	cfg := testServerConfig
+	cfg.GatewayBaseURL = "http://gateway.local"
+	handler := NewServer(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "2768603291",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		&stubGateway{},
+		&stubLocalExecutor{},
+		cfg,
+	).Handler()
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"http://gateway.local",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "https") {
+		t.Fatalf("body = %q, want https requirement", rec.Body.String())
+	}
+}
+
+func TestServerAcceptsLoopbackHTTPGatewayBaseURL(t *testing.T) {
+	cfg := testServerConfig
+	cfg.GatewayBaseURL = "http://127.0.0.1:18080"
+	handler := NewServer(
+		&stubNPKIService{
+			certificates: []npki.CertificateMetadata{{
+				ID:         "cert-1",
+				CommonName: "Test Certificate",
+				BusinessNo: "2768603291",
+				NotAfter:   time.Date(2027, 4, 9, 0, 0, 0, 0, time.UTC),
+			}},
+		},
+		stubApprover{decision: ApprovalDecision{
+			CertificateID: "cert-1",
+			Password:      []byte("secret-password"),
+		}},
+		&stubGateway{},
+		&stubLocalExecutor{},
+		cfg,
+	).Handler()
+	sessionToken := openSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
+		"gatewayBaseUrl":"http://127.0.0.1:18080",
+		"organizationId":"org-1",
+		"businessNo":"2768603291"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:4173")
+	req.Header.Set("X-Agent-Session", sessionToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
+func TestNormalizeTrustedGatewayBaseURLPreservesEncodedPath(t *testing.T) {
+	normalized, err := normalizeTrustedGatewayBaseURL("https://gateway.local/base%2Ftenant/")
+	if err != nil {
+		t.Fatalf("normalizeTrustedGatewayBaseURL: %v", err)
+	}
+	if normalized != "https://gateway.local/base%2Ftenant" {
+		t.Fatalf("normalized = %q, want encoded path preserved", normalized)
+	}
+
+	normalized, err = normalizeTrustedGatewayBaseURL("https://gateway.local/base%2Ftenant/%2F/")
+	if err != nil {
+		t.Fatalf("normalizeTrustedGatewayBaseURL with raw path: %v", err)
+	}
+	if normalized != "https://gateway.local/base%2Ftenant/%2F" {
+		t.Fatalf("normalized = %q, want escaped path and raw path kept in sync", normalized)
+	}
+}
+
 func TestServerRejectsOversizedApprovalBody(t *testing.T) {
 	handler := newTestHandler(
 		&stubNPKIService{},
@@ -735,7 +1288,7 @@ func TestServerRejectsOversizedApprovalBody(t *testing.T) {
 	oversizedBusinessNo := strings.Repeat("1", int(maxJSONBodyBytes)+1)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
-		"gatewayBaseUrl":"http://gateway.local",
+		"gatewayBaseUrl":"https://gateway.local",
 		"organizationId":"org-1",
 		"businessNo":"`+oversizedBusinessNo+`"
 	}`))
@@ -784,7 +1337,7 @@ func TestServerApproveEphemeralRunRequiresSession(t *testing.T) {
 	)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
-		"gatewayBaseUrl":"http://gateway.local",
+		"gatewayBaseUrl":"https://gateway.local",
 		"organizationId":"org-1",
 		"businessNo":"2768603291"
 	}`))
@@ -803,7 +1356,7 @@ func TestServerApproveEphemeralRunHandlesUserRejection(t *testing.T) {
 	sessionToken := openSession(t, handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/approve-ephemeral-run", strings.NewReader(`{
-		"gatewayBaseUrl":"http://gateway.local",
+		"gatewayBaseUrl":"https://gateway.local",
 		"organizationId":"org-1",
 		"businessNo":"2768603291"
 	}`))
@@ -887,6 +1440,52 @@ func TestHTTPGatewayExecutorIncludesErrorBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid challenge payload") {
 		t.Fatalf("error = %q, want response body context included", err)
+	}
+}
+
+func TestHTTPGatewayExecutorEscapesOrganizationIDInPaths(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"challengeId":"challenge-1","payload":"payload-1","facilityCode":"FAC-BOUND"}`))
+	}))
+	defer backend.Close()
+
+	executor := httpGatewayExecutor{client: backend.Client()}
+	challenge, err := executor.CreateChallenge(context.Background(), GatewayChallengeRequest{
+		BaseURL:           backend.URL,
+		OrganizationID:    "org/../evil",
+		Mode:              "ephemeral",
+		SyncMode:          "delta",
+		Origin:            "http://127.0.0.1:4173",
+		BusinessNo:        "2768603291",
+		FacilityCode:      "FAC-001",
+		StartMonth:        "2026-01",
+		EndMonth:          "2026-03",
+		SignCertSHA256Hex: "sha256-cert-1",
+	})
+	if err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+	if challenge.FacilityCode != "FAC-BOUND" {
+		t.Fatalf("challenge facilityCode = %q, want FAC-BOUND", challenge.FacilityCode)
+	}
+	if gotPath != "/api/v1/organizations/org%2F..%2Fevil/cert-gateway/challenges" {
+		t.Fatalf("path = %q, want escaped organization id", gotPath)
+	}
+	if gotBody["origin"] != "http://127.0.0.1:4173" ||
+		gotBody["businessNo"] != "2768603291" ||
+		gotBody["syncMode"] != "delta" ||
+		gotBody["facilityCode"] != "FAC-001" ||
+		gotBody["startMonth"] != "2026-01" ||
+		gotBody["endMonth"] != "2026-03" ||
+		gotBody["signCertSha256Hex"] != "sha256-cert-1" {
+		t.Fatalf("challenge body = %#v", gotBody)
 	}
 }
 
@@ -983,12 +1582,54 @@ func TestNewHTTPGatewayExecutorUsesLongRunningRequestTimeout(t *testing.T) {
 	}
 }
 
-func newTestHandler(npkiSvc npkiService, approver stubApprover, gateways ...*stubGateway) http.Handler {
-	gateway := &stubGateway{}
-	if len(gateways) > 0 && gateways[0] != nil {
-		gateway = gateways[0]
+func TestLimitedBufferWriterCapsOutputAndRecordsTruncation(t *testing.T) {
+	var buf bytes.Buffer
+	writer := &limitedBufferWriter{w: &buf, limit: 4}
+
+	n, err := writer.Write([]byte("abcdef"))
+	if err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	return NewServer(npkiSvc, approver, gateway, testServerConfig).Handler()
+	if n != 6 {
+		t.Fatalf("n = %d, want 6", n)
+	}
+	if got := buf.String(); got != "abcd" {
+		t.Fatalf("buffer = %q, want abcd", got)
+	}
+	if !writer.truncated {
+		t.Fatal("writer.truncated = false, want true")
+	}
+}
+
+func TestLocalExecutorRunErrorReportsTruncatedStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	limit := &limitedBufferWriter{w: &stderr, limit: maxLocalExecutorStderr, truncated: true}
+
+	err := localExecutorRunError(errors.New("exit status 1"), &stderr, limit)
+	if !strings.Contains(err.Error(), "local executor stderr exceeds") {
+		t.Fatalf("error = %q, want stderr truncation failure", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("error = %q, want original command error", err)
+	}
+}
+
+func newTestHandler(npkiSvc npkiService, approver stubApprover, opts ...any) http.Handler {
+	gateway := &stubGateway{}
+	local := &stubLocalExecutor{}
+	for _, opt := range opts {
+		switch value := opt.(type) {
+		case *stubGateway:
+			if value != nil {
+				gateway = value
+			}
+		case *stubLocalExecutor:
+			if value != nil {
+				local = value
+			}
+		}
+	}
+	return NewServer(npkiSvc, approver, gateway, local, testServerConfig).Handler()
 }
 
 func openSession(t *testing.T, handler http.Handler) string {

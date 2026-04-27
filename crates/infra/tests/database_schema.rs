@@ -42,6 +42,34 @@ impl From<&mut Row<'_>> for IndexRow {
     }
 }
 
+#[derive(Debug)]
+struct IndexListRow {
+    name: String,
+    is_unique: i64,
+}
+
+impl From<&mut Row<'_>> for IndexListRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            is_unique: row.get("is_unique"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IndexColumnRow {
+    name: String,
+}
+
+impl From<&mut Row<'_>> for IndexColumnRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+        }
+    }
+}
+
 fn free_local_addr() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local addr");
@@ -484,4 +512,35 @@ async fn ensure_schema_creates_authorization_tables() {
     ] {
         assert!(index_names.contains(index), "missing index {index}");
     }
+
+    let client_indexes: Vec<IndexListRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name, \"unique\" as is_unique FROM pragma_index_list('clients')",
+            vec![],
+        )
+        .await
+        .expect("clients indexes");
+    let mut has_unique_slug_index = false;
+    for index in client_indexes {
+        if index.is_unique != 1 {
+            continue;
+        }
+        let index_sql = format!(
+            "SELECT name FROM pragma_index_info('{}') ORDER BY seqno ASC",
+            index.name.replace('\'', "''")
+        );
+        let columns: Vec<IndexColumnRow> = runtime
+            .query_rows(ReadConsistency::Local, index_sql, vec![])
+            .await
+            .expect("client index columns");
+        if columns.len() == 1 && columns[0].name == "slug" {
+            has_unique_slug_index = true;
+            break;
+        }
+    }
+    assert!(
+        has_unique_slug_index,
+        "clients.slug must have a unique index"
+    );
 }
