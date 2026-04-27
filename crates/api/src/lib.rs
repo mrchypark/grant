@@ -269,6 +269,8 @@ struct CertGatewayChallengeResponse {
     sync_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     facility_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    business_no: Option<String>,
     nonce: String,
     payload: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -719,6 +721,7 @@ async fn create_cert_gateway_challenge(
             mode: challenge.mode,
             sync_mode: challenge.sync_mode,
             facility_code: challenge.facility_code,
+            business_no: challenge.business_no,
             nonce: challenge.nonce,
             payload: challenge.payload,
             start_month: challenge.start_month,

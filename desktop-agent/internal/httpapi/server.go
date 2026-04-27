@@ -386,16 +386,23 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 	if err != nil {
 		return nil, 0, err
 	}
+	effectiveBusinessNo, err := effectiveChallengeBusinessNo(req.BusinessNo, challenge.BusinessNo)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := validateCertificateBusinessNo(effectiveBusinessNo, selectedCertificate.BusinessNo); err != nil {
+		return nil, 0, err
+	}
 	signResult, err := s.npki.Sign(r.Context(), npki.SignRequest{
 		CertificateID: decision.CertificateID,
 		Challenge:     challenge.Payload,
 		PasswordBytes: decision.Password,
-		BusinessNo:    req.BusinessNo,
+		BusinessNo:    effectiveBusinessNo,
 	})
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := validateCertificateBusinessNo(req.BusinessNo, signResult.Bundle.BusinessNo); err != nil {
+	if err := validateCertificateBusinessNo(effectiveBusinessNo, signResult.Bundle.BusinessNo); err != nil {
 		return nil, 0, err
 	}
 
@@ -408,7 +415,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		body, err := s.local.RunEphemeral(r.Context(), LocalEphemeralRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
-			BusinessNo:               req.BusinessNo,
+			BusinessNo:               effectiveBusinessNo,
 			Password:                 localPassword,
 			BearerToken:              req.BearerToken,
 			ActiveOrganizationID:     req.ActiveOrganizationID,
@@ -427,7 +434,7 @@ func (s *Server) handleApprovedAction(r *http.Request, action string) (map[strin
 		body, err := s.gateway.RegisterStored(r.Context(), GatewayStoredRegistrationRequest{
 			BaseURL:                  gatewayBaseURL,
 			OrganizationID:           req.OrganizationID,
-			BusinessNo:               req.BusinessNo,
+			BusinessNo:               effectiveBusinessNo,
 			Password:                 gatewayPassword,
 			BearerToken:              req.BearerToken,
 			ActiveOrganizationID:     req.ActiveOrganizationID,
@@ -882,6 +889,7 @@ type challengeResponse struct {
 	Payload      string `json:"payload"`
 	SyncMode     string `json:"syncMode,omitempty"`
 	FacilityCode string `json:"facilityCode,omitempty"`
+	BusinessNo   string `json:"businessNo,omitempty"`
 	StartMonth   string `json:"startMonth,omitempty"`
 	EndMonth     string `json:"endMonth,omitempty"`
 }
@@ -1011,6 +1019,39 @@ func validateCertificateBusinessNo(requested string, certificateBusinessNo strin
 		return nil
 	}
 	return newHTTPStatusError(http.StatusBadRequest, "selected certificate businessNo does not match request")
+}
+
+func effectiveChallengeBusinessNo(requested string, challengeBusinessNo string) (string, error) {
+	requestedDigits, err := normalizeApprovalBusinessNo("request businessNo", requested)
+	if err != nil {
+		return "", err
+	}
+	challengeDigits, err := normalizeApprovalBusinessNo("gateway challenge businessNo", challengeBusinessNo)
+	if err != nil {
+		return "", err
+	}
+	if requestedDigits != "" && challengeDigits != "" && requestedDigits != challengeDigits {
+		return "", newHTTPStatusError(http.StatusBadGateway, "gateway challenge businessNo does not match request")
+	}
+	if challengeDigits != "" {
+		return challengeDigits, nil
+	}
+	return requestedDigits, nil
+}
+
+func normalizeApprovalBusinessNo(field string, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if !isBusinessNoPresentation(value) {
+		return "", newHTTPStatusError(http.StatusBadRequest, field+" must normalize to 10 digits")
+	}
+	digits := digitsOnly(value)
+	if len(digits) != 10 {
+		return "", newHTTPStatusError(http.StatusBadRequest, field+" must normalize to 10 digits")
+	}
+	return digits, nil
 }
 
 func isBusinessNoPresentation(value string) bool {

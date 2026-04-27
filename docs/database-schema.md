@@ -181,7 +181,7 @@
 - `organization_id` > 요청 조직 ID
 - `mode` > `stored` 또는 `ephemeral`
 - `nonce` > 서명 대상 nonce
-- `payload_hash` > `cert-gateway:` payload 원문 SHA-256 해시. payload는 canonical JSON을 URL-safe base64로 감싼 값이며 `organizationId`, `mode`, `nonce`, `expiresAt`를 기본으로 포함하고, 요청에 있으면 `origin`, `businessNo`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶는다.
+- `payload_hash` > `cert-gateway:` payload 원문 SHA-256 해시. payload는 canonical JSON을 URL-safe base64로 감싼 값이며 `organizationId`, `mode`, `nonce`, `expiresAt`를 기본으로 포함하고, 요청에 있으면 `origin`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶는다. `businessNo`는 요청값 또는 조직에 연결된 법인 사업자번호가 있으면 정규화해 함께 묶는다.
 - `facility_code` > challenge가 특정 발전소 실행 스코프에 묶인 경우의 발전소 코드
 - `expires_at` > 만료 시각
 - `consumed_at` > 1회 사용 완료 시각

@@ -81,6 +81,7 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
         challengeId: "challenge-1",
         mode: "ephemeral",
         facilityCode: "FAC-BOUND",
+        businessNo: "2768603291",
         nonce: "nonce-1",
         payload: "payload-1",
         expiresAt: "2026-04-09T00:00:00Z",
@@ -104,6 +105,7 @@ test("createChallenge() calls the gateway challenge endpoint", async () => {
 
     assert.equal(challenge.challengeId, "challenge-1");
     assert.equal(challenge.facilityCode, "FAC-BOUND");
+    assert.equal(challenge.businessNo, "2768603291");
     assert.equal(mock.calls.length, 1);
     assert.equal(
       String(mock.calls[0].input),

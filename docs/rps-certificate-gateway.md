@@ -160,7 +160,7 @@ Content-Type: application/json
 ```
 
 `payload`는 `cert-gateway:` prefix 뒤에 canonical JSON을 URL-safe base64로 인코딩한 opaque 문자열이다.
-서버는 이 payload hash를 저장하므로 challenge는 최소한 `organizationId`, `mode`, `nonce`, `expiresAt`에 묶이고, 제공된 경우 `origin`, `businessNo`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶인다. desktop agent는 native approval에서 선택된 인증서의 `signCertSha256Hex`와 사용자가 승인한 origin/scope를 challenge 발급 요청에 포함한다.
+서버는 이 payload hash를 저장하므로 challenge는 최소한 `organizationId`, `mode`, `nonce`, `expiresAt`에 묶이고, 제공된 경우 `origin`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶인다. `businessNo`는 요청값이 있으면 정규화된 요청값으로, 요청값이 없고 조직에 연결된 법인 사업자번호가 있으면 그 값으로 payload와 응답에 묶인다. 요청값과 조직 연결값이 둘 다 있고 서로 다르면 challenge 발급은 거부된다. desktop agent는 native approval에서 선택된 인증서의 `signCertSha256Hex`와 사용자가 승인한 origin/scope를 challenge 발급 요청에 포함한다.
 
 응답:
 
@@ -170,6 +170,7 @@ Content-Type: application/json
   "mode": "ephemeral",
   "syncMode": "delta",
   "facilityCode": "FAC-001",
+  "businessNo": "2768603291",
   "startMonth": "2026-01",
   "endMonth": "2026-03",
   "nonce": "nonce-1",
@@ -178,7 +179,7 @@ Content-Type: application/json
 }
 ```
 
-ephemeral challenge 응답의 `facilityCode`, `syncMode`, `startMonth`, `endMonth`는 서버가 권한과 sync planning을 적용한 최종 실행 범위다. 로컬 실행형 클라이언트는 요청값이 아니라 이 응답값을 로컬 워커/실행 요청에 전달해야 challenge에 묶인 범위와 실제 수집 범위가 어긋나지 않는다.
+ephemeral challenge 응답의 `businessNo`, `facilityCode`, `syncMode`, `startMonth`, `endMonth`는 서버가 조직 연결, 권한, sync planning을 적용한 최종 실행 범위다. 로컬 실행형 클라이언트는 요청값이 아니라 이 응답값을 로컬 워커/실행 요청에 전달해야 challenge에 묶인 범위와 실제 수집 범위가 어긋나지 않는다.
 
 ### Escrowed ephemeral 실행
 

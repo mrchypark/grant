@@ -608,6 +608,16 @@ async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("json body")
 }
 
+fn decode_challenge_payload_json(challenge_payload: &str) -> Value {
+    let encoded = challenge_payload
+        .strip_prefix("cert-gateway:")
+        .expect("challenge payload prefix");
+    let raw = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("decode challenge payload");
+    serde_json::from_slice(&raw).expect("challenge payload json")
+}
+
 #[tokio::test]
 async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let (app, db, _db_dir, artifacts_dir) = build_app().await;
@@ -644,6 +654,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .expect("challenge payload")
         .to_owned();
     assert_eq!(challenge_json["facilityCode"], "FAC-001");
+    assert_eq!(challenge_json["businessNo"], "2768603291");
     assert_challenge_payload_binds_context(
         &challenge_payload,
         "bootstrap-user",
@@ -777,6 +788,13 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let ephemeral_challenge_json = json_body(ephemeral_challenge).await;
     assert_eq!(ephemeral_challenge_json["syncMode"], "full");
     assert_eq!(ephemeral_challenge_json["facilityCode"], "FAC-002");
+    assert_eq!(ephemeral_challenge_json["businessNo"], "2768603291");
+    let ephemeral_payload = decode_challenge_payload_json(
+        ephemeral_challenge_json["payload"]
+            .as_str()
+            .expect("ephemeral challenge payload"),
+    );
+    assert_eq!(ephemeral_payload["businessNo"], "2768603291");
 
     let ephemeral_response = app
         .clone()
@@ -1724,6 +1742,29 @@ async fn create_cert_gateway_challenge_rejects_malformed_business_number() {
 
     let body = json_body(response).await;
     assert_eq!(body["error"], "businessNo must normalize to 10 digits");
+}
+
+#[tokio::test]
+async fn create_cert_gateway_challenge_rejects_mismatched_organization_business_number() {
+    let (app, _db, _db_dir, _artifacts_dir) = build_app().await;
+
+    let response = app
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({ "mode": "ephemeral", "businessNo": "1111111111" }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"],
+        "cert gateway challenge business number mismatch"
+    );
 }
 
 #[tokio::test]

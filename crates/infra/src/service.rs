@@ -202,6 +202,7 @@ pub struct CertGatewayChallengeView {
     pub mode: String,
     pub sync_mode: Option<String>,
     pub facility_code: Option<String>,
+    pub business_no: Option<String>,
     pub nonce: String,
     pub payload: String,
     pub start_month: Option<String>,
@@ -502,7 +503,9 @@ impl AppService {
                 Ok::<_, anyhow::Error>(value.to_owned())
             })
             .transpose()?;
-        let business_no = normalize_optional_business_no(input.business_no.as_deref())?;
+        let business_no = self
+            .challenge_business_no(&organization_id, input.business_no.as_deref())
+            .await?;
         let mut facility_code = input
             .facility_code
             .as_deref()
@@ -577,6 +580,7 @@ impl AppService {
             mode: challenge.mode,
             sync_mode,
             facility_code,
+            business_no,
             nonce: challenge.nonce,
             payload,
             start_month,
@@ -1919,6 +1923,31 @@ impl AppService {
             requested_business_no,
             linked_business_no.as_deref(),
         )?)
+    }
+
+    async fn challenge_business_no(
+        &self,
+        organization_id: &str,
+        requested_business_no: Option<&str>,
+    ) -> Result<Option<String>> {
+        let requested_business_no = normalize_optional_business_no(requested_business_no)?;
+        let linked_business_no = self
+            .db
+            .get_organization_business_no(organization_id)
+            .await?
+            .map(|business_no| {
+                normalize_business_no(&business_no)
+                    .map_err(|err| bad_request_error(err.to_string()))
+            })
+            .transpose()?;
+        if let (Some(requested), Some(linked)) = (&requested_business_no, &linked_business_no) {
+            if requested != linked {
+                return Err(bad_request_error(
+                    "cert gateway challenge business number mismatch",
+                ));
+            }
+        }
+        Ok(linked_business_no.or(requested_business_no))
     }
 
     async fn validate_bundle_for_organization(

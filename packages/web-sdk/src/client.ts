@@ -14,6 +14,7 @@ export type Challenge = {
   mode: ChallengeMode;
   syncMode?: SyncMode;
   facilityCode?: string;
+  businessNo?: string;
   nonce: string;
   payload: string;
   startMonth?: string;
