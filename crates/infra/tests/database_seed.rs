@@ -1391,6 +1391,7 @@ async fn kr_rps_full_sync_replaces_canonical_rate_data() {
         plant: &plant,
         registry_account_organization_id: Some("conalog-account"),
         business_no: Some("2768603291"),
+        bootstrap_created_plant: None,
         mode: &SyncMode::Full,
         generation: &[],
         rates: &first_rates,
@@ -1451,7 +1452,7 @@ async fn kr_rps_full_sync_replaces_canonical_rate_data() {
                 "2026-03-01".into(),
                 "2026-05-01".into(),
                 "self_rate".into(),
-                109.0.into(),
+                "109.0".into(),
                 "KRW/kWh".into(),
                 "KRW".into(),
                 "published".into(),
@@ -1483,6 +1484,7 @@ async fn kr_rps_full_sync_replaces_canonical_rate_data() {
         plant: &plant,
         registry_account_organization_id: Some("conalog-account"),
         business_no: Some("2768603291"),
+        bootstrap_created_plant: None,
         mode: &SyncMode::Full,
         generation: &[],
         rates: &second_rates,
@@ -1573,6 +1575,12 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
             .any(|action| action.code == "organization.plant.create"),
         "organization.plant.create action must exist"
     );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.code == "organization.credential.use"),
+        "organization.credential.use action must exist"
+    );
 
     let roles: Vec<RoleRow> = runtime
         .query_rows(
@@ -1606,6 +1614,7 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
         })
         .collect();
     assert!(seeded_actions.contains(&"organization.plant.create".to_owned()));
+    assert!(seeded_actions.contains(&"organization.credential.use".to_owned()));
 
     let bindings: Vec<RoleBindingRow> = runtime
         .query_rows(

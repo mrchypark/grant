@@ -111,12 +111,20 @@ pub struct KrRpsSyncMaterialization<'a> {
     pub plant: &'a Plant,
     pub registry_account_organization_id: Option<&'a str>,
     pub business_no: Option<&'a str>,
+    pub bootstrap_created_plant: Option<CreatedPlantBootstrap<'a>>,
     pub mode: &'a SyncMode,
     pub generation: &'a [GenerationRecord],
     pub rates: &'a [StoredRateRecord],
     pub rec: &'a [RecRecord],
     pub documents: &'a [PersistedDocument],
     pub duration_ms: i64,
+}
+
+pub struct CreatedPlantBootstrap<'a> {
+    pub user_id: &'a str,
+    pub creator_organization_id: &'a str,
+    pub owner_organization_id: &'a str,
+    pub creator_agreement_id: Option<&'a str>,
 }
 
 struct KrRpsProjectionContext {
@@ -1007,7 +1015,7 @@ impl Database {
                     period_start TEXT NOT NULL,
                     period_end TEXT NOT NULL,
                     metric_type TEXT NOT NULL,
-                    value REAL NOT NULL,
+                    value TEXT NOT NULL,
                     unit TEXT NOT NULL,
                     quality TEXT NOT NULL,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -1353,6 +1361,7 @@ impl Database {
         for action in [
             "organization.plant.create",
             "organization.plant.create_for_owner",
+            "organization.credential.use",
             "organization.client.manage",
             "organization.member.manage",
             "organization.group.manage",
@@ -1392,6 +1401,13 @@ impl Database {
                 "organization.plant.create_for_owner",
                 "Create Plant For Owner",
                 "high",
+                0_i64,
+                0_i64,
+            ),
+            (
+                "organization.credential.use",
+                "Use Organization Credential",
+                "critical",
                 0_i64,
                 0_i64,
             ),
@@ -4149,7 +4165,7 @@ impl Database {
                         period_start.clone(),
                         period_end.clone(),
                         metric_type.to_owned(),
-                        value,
+                        format_rate_value(value),
                         "KRW/kWh".to_owned(),
                         Some("KRW".to_owned()),
                         quality.to_owned(),
@@ -4335,11 +4351,180 @@ impl Database {
             None,
             &now,
         );
+        if let Some(bootstrap) = input.bootstrap_created_plant.as_ref() {
+            Self::push_created_plant_bootstrap_binding_queries(
+                &mut queries,
+                bootstrap,
+                input.plant,
+                &projection.asset_id,
+                &now,
+            );
+        }
+        let rebuild_authorization = input.bootstrap_created_plant.is_some();
         self.runtime
             .transaction(queries)
             .await
             .context("materialize KR RPS sync transaction")?;
+        if rebuild_authorization {
+            self.rebuild_organization_expansion().await?;
+        }
         Ok(projection.asset_id)
+    }
+
+    fn push_created_plant_bootstrap_binding_queries(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        bootstrap: &CreatedPlantBootstrap<'_>,
+        plant: &Plant,
+        asset_id: &str,
+        now: &str,
+    ) {
+        Self::push_role_binding_upsert_query(
+            queries,
+            &RoleBinding {
+                id: Uuid::new_v4().simple().to_string(),
+                subject_type: RoleBindingSubjectType::Organization,
+                subject_id: bootstrap.owner_organization_id.to_owned(),
+                subject_organization_id: bootstrap.owner_organization_id.to_owned(),
+                resource_type: RoleBindingResourceType::Plant,
+                resource_id: plant.id.clone(),
+                role_id: "role-system-plant-owner".to_owned(),
+                agreement_id: None,
+                state: RoleBindingState::Active,
+                created_by_user_id: bootstrap.user_id.to_owned(),
+                created_at: now.to_owned(),
+                updated_at: now.to_owned(),
+            },
+        );
+        Self::push_role_binding_upsert_query(
+            queries,
+            &RoleBinding {
+                id: Uuid::new_v4().simple().to_string(),
+                subject_type: RoleBindingSubjectType::Organization,
+                subject_id: bootstrap.owner_organization_id.to_owned(),
+                subject_organization_id: bootstrap.owner_organization_id.to_owned(),
+                resource_type: RoleBindingResourceType::Asset,
+                resource_id: asset_id.to_owned(),
+                role_id: "role-system-asset-owner".to_owned(),
+                agreement_id: None,
+                state: RoleBindingState::Active,
+                created_by_user_id: bootstrap.user_id.to_owned(),
+                created_at: now.to_owned(),
+                updated_at: now.to_owned(),
+            },
+        );
+        if bootstrap.creator_organization_id != bootstrap.owner_organization_id {
+            Self::push_role_binding_upsert_query(
+                queries,
+                &RoleBinding {
+                    id: Uuid::new_v4().simple().to_string(),
+                    subject_type: RoleBindingSubjectType::Organization,
+                    subject_id: bootstrap.creator_organization_id.to_owned(),
+                    subject_organization_id: bootstrap.creator_organization_id.to_owned(),
+                    resource_type: RoleBindingResourceType::Plant,
+                    resource_id: plant.id.clone(),
+                    role_id: "role-system-plant-creator".to_owned(),
+                    agreement_id: bootstrap.creator_agreement_id.map(ToOwned::to_owned),
+                    state: RoleBindingState::Active,
+                    created_by_user_id: bootstrap.user_id.to_owned(),
+                    created_at: now.to_owned(),
+                    updated_at: now.to_owned(),
+                },
+            );
+            Self::push_role_binding_upsert_query(
+                queries,
+                &RoleBinding {
+                    id: Uuid::new_v4().simple().to_string(),
+                    subject_type: RoleBindingSubjectType::Organization,
+                    subject_id: bootstrap.creator_organization_id.to_owned(),
+                    subject_organization_id: bootstrap.creator_organization_id.to_owned(),
+                    resource_type: RoleBindingResourceType::Asset,
+                    resource_id: asset_id.to_owned(),
+                    role_id: "role-system-asset-creator".to_owned(),
+                    agreement_id: bootstrap.creator_agreement_id.map(ToOwned::to_owned),
+                    state: RoleBindingState::Active,
+                    created_by_user_id: bootstrap.user_id.to_owned(),
+                    created_at: now.to_owned(),
+                    updated_at: now.to_owned(),
+                },
+            );
+        }
+        Self::push_role_binding_upsert_query(
+            queries,
+            &RoleBinding {
+                id: Uuid::new_v4().simple().to_string(),
+                subject_type: RoleBindingSubjectType::User,
+                subject_id: bootstrap.user_id.to_owned(),
+                subject_organization_id: bootstrap.creator_organization_id.to_owned(),
+                resource_type: RoleBindingResourceType::Plant,
+                resource_id: plant.id.clone(),
+                role_id: "role-system-plant-creator".to_owned(),
+                agreement_id: None,
+                state: RoleBindingState::Active,
+                created_by_user_id: bootstrap.user_id.to_owned(),
+                created_at: now.to_owned(),
+                updated_at: now.to_owned(),
+            },
+        );
+        Self::push_role_binding_upsert_query(
+            queries,
+            &RoleBinding {
+                id: Uuid::new_v4().simple().to_string(),
+                subject_type: RoleBindingSubjectType::User,
+                subject_id: bootstrap.user_id.to_owned(),
+                subject_organization_id: bootstrap.creator_organization_id.to_owned(),
+                resource_type: RoleBindingResourceType::Asset,
+                resource_id: asset_id.to_owned(),
+                role_id: "role-system-asset-creator".to_owned(),
+                agreement_id: None,
+                state: RoleBindingState::Active,
+                created_by_user_id: bootstrap.user_id.to_owned(),
+                created_at: now.to_owned(),
+                updated_at: now.to_owned(),
+            },
+        );
+    }
+
+    fn push_role_binding_upsert_query(
+        queries: &mut Vec<(String, Vec<hiqlite::Param>)>,
+        binding: &RoleBinding,
+    ) {
+        validate_role_binding(binding).expect("valid system role binding");
+        queries.push((
+            "INSERT INTO role_bindings (
+                id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             ON CONFLICT(id) DO UPDATE SET
+                subject_type = excluded.subject_type,
+                subject_id = excluded.subject_id,
+                subject_organization_id = excluded.subject_organization_id,
+                resource_type = excluded.resource_type,
+                resource_id = excluded.resource_id,
+                role_id = excluded.role_id,
+                agreement_id = excluded.agreement_id,
+                state = excluded.state,
+                updated_at = excluded.updated_at
+             ON CONFLICT(subject_type, subject_id, subject_organization_id, resource_type, resource_id, role_id)
+             DO UPDATE SET
+                agreement_id = excluded.agreement_id,
+                state = excluded.state,
+                updated_at = excluded.updated_at"
+                .to_owned(),
+            params!(
+                binding.id.clone(),
+                role_binding_subject_type_str(&binding.subject_type),
+                binding.subject_id.clone(),
+                binding.subject_organization_id.clone(),
+                role_binding_resource_type_str(&binding.resource_type),
+                binding.resource_id.clone(),
+                binding.role_id.clone(),
+                binding.agreement_id.clone(),
+                role_binding_state_str(&binding.state),
+                binding.created_by_user_id.clone(),
+                binding.created_at.clone(),
+                binding.updated_at.clone()
+            ),
+        ));
     }
 
     fn push_update_sync_run_target_query(
@@ -7149,6 +7334,10 @@ fn stable_scoped_id(scope: &str, value: &str) -> String {
         scope.replace(':', "-"),
         hex::encode(&hasher.finalize()[..8])
     )
+}
+
+fn format_rate_value(value: f64) -> String {
+    value.to_string()
 }
 
 fn kr_rps_plant_action_to_asset_action_id(action_id: &str) -> Option<&'static str> {

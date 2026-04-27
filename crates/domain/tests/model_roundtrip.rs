@@ -224,7 +224,7 @@ fn serializes_core_models() {
         period_start: "2026-02-01T00:00:00+09:00".into(),
         period_end: "2026-03-01T00:00:00+09:00".into(),
         metric_type: "self_rate".into(),
-        value: 110.0,
+        value: "110.0".into(),
         unit: "KRW/kWh".into(),
         currency: Some("KRW".into()),
         quality: "published".into(),

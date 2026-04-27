@@ -451,7 +451,7 @@ pub struct RateDatum {
     pub period_start: String,
     pub period_end: String,
     pub metric_type: String,
-    pub value: f64,
+    pub value: String,
     pub unit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,

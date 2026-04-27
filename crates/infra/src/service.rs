@@ -10,8 +10,9 @@ use crate::{
         extract_common_name, generate_data_encryption_key, normalize_business_no,
     },
     database::{
-        CertGatewayChallenge, Database, DatabaseLookupError, KrRpsSyncMaterialization,
-        PersistedDocument, PlantSummary, StoredCertificate, StoredDocument, StoredRateRecord,
+        CertGatewayChallenge, CreatedPlantBootstrap, Database, DatabaseLookupError,
+        KrRpsSyncMaterialization, PersistedDocument, PlantSummary, StoredCertificate,
+        StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
     npki::{validate_certificate_bundle, verify_challenge_signature, verify_message_signature},
@@ -1466,6 +1467,15 @@ impl AppService {
                     Some(DatabaseLookupError::PlantNotFound)
                 ) =>
             {
+                self.authorize_organization_action(
+                    user_id,
+                    organization_id,
+                    organization_id,
+                    "organization.credential.use",
+                    &format!("use stored credential for new plant {}", facility_code),
+                    Some(ReadConsistency::Strong),
+                )
+                .await?;
                 Ok(())
             }
             Err(err) => Err(err),
@@ -2234,15 +2244,7 @@ impl AppService {
         }
     }
 
-    async fn bootstrap_created_plant_bindings(
-        &self,
-        user_id: &str,
-        creator_organization_id: &str,
-        owner_organization_id: &str,
-        creator_agreement_id: Option<&str>,
-        plant: &Plant,
-        asset_id: &str,
-    ) -> Result<()> {
+    async fn ensure_created_plant_bootstrap_roles(&self) -> Result<()> {
         self.ensure_system_role(
             "role-system-plant-owner",
             "system.plant.owner",
@@ -2286,6 +2288,19 @@ impl AppService {
             ],
         )
         .await?;
+        Ok(())
+    }
+
+    async fn bootstrap_created_plant_bindings(
+        &self,
+        user_id: &str,
+        creator_organization_id: &str,
+        owner_organization_id: &str,
+        creator_agreement_id: Option<&str>,
+        plant: &Plant,
+        asset_id: &str,
+    ) -> Result<()> {
+        self.ensure_created_plant_bootstrap_roles().await?;
 
         let now = Utc::now().to_rfc3339();
         self.db
@@ -2658,7 +2673,26 @@ impl AppService {
             };
 
         let duration_ms = started.elapsed().as_millis() as i64;
-        let asset_id = match self
+        let bootstrap_created_plant = if existing_plant.is_none() {
+            if let Some(created_by_user_id) = created_by_user_id.as_deref() {
+                if plant.owner_organization_id == organization_id {
+                    self.ensure_created_plant_bootstrap_roles().await?;
+                    Some(CreatedPlantBootstrap {
+                        user_id: created_by_user_id,
+                        creator_organization_id: organization_id,
+                        owner_organization_id: &plant.owner_organization_id,
+                        creator_agreement_id: None,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let _asset_id = match self
             .db
             .materialize_kr_rps_sync(KrRpsSyncMaterialization {
                 run_id: &run.id,
@@ -2666,6 +2700,7 @@ impl AppService {
                 registry_account_organization_id: registry_account_scope
                     .map(|(organization_id, _)| organization_id),
                 business_no: registry_account_scope.map(|(_, business_no)| business_no),
+                bootstrap_created_plant,
                 mode: &effective_mode,
                 generation: &generation,
                 rates: &rates,
@@ -2686,25 +2721,6 @@ impl AppService {
                 return Err(err);
             }
         };
-        if existing_plant.is_none() {
-            if let Some(created_by_user_id) = created_by_user_id {
-                let persisted_plant = self
-                    .db
-                    .get_plant_by_id_with_consistency(&plant.id, Some(ReadConsistency::Strong))
-                    .await?;
-                if persisted_plant.owner_organization_id == organization_id {
-                    self.bootstrap_created_plant_bindings(
-                        created_by_user_id,
-                        organization_id,
-                        &persisted_plant.owner_organization_id,
-                        None,
-                        &persisted_plant,
-                        &asset_id,
-                    )
-                    .await?;
-                }
-            }
-        }
         if effective_mode == SyncMode::Full && persist_documents {
             let current_objects: BTreeSet<&str> = persisted_docs
                 .iter()

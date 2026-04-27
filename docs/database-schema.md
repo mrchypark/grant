@@ -288,7 +288,7 @@
 - `period_start` > 적용 구간 시작
 - `period_end` > 적용 구간 종료
 - `metric_type` > 요율/가격 metric 종류 (`self_rate`, `national_average`, `nearby_average`, `nearby_highest`, `ppa_price`, `fit_rate`, `utility_tariff` 등)
-- `value` > metric 값
+- `value` > decimal 문자열로 저장하는 metric 값. 요율/가격 정밀도를 보존하기 위해 DB 타입도 `TEXT`를 사용한다.
 - `unit` > 단위 (`KRW/kWh`, `USD/MWh` 등)
 - `currency` > 통화 코드
 - `quality` > 데이터 품질/상태 (`published`, `unpublished` 등)
@@ -639,7 +639,7 @@
 - `assets`는 현재 상태의 물리 설비 마스터 정보다.
 - `asset_profiles`/`registry_projects`는 외부 시스템별 등록 상태다.
 - `sync_runs`는 수집 실행 이력이다.
-- `generation_data`, `rate_data`, `energy_certificates`는 글로벌 canonical 데이터다.
+- `generation_data`, `rate_data`, `energy_certificates`는 글로벌 canonical 데이터다. `rate_data.value`는 통화/요율 계산의 부동소수점 반올림을 피하기 위해 decimal 문자열로 저장한다.
 - `generation_data`는 `asset_id + source_id + metric_type + period` 기준으로 유일하다. 국가별 adapter가 여러 발전량 metric을 제공하면 같은 source/period에 여러 row로 저장한다.
 - `generation_records`, `rate_records`, `rec_records`, `documents`는 한국 RPS 호환 조회용 materialized state다. 이 테이블의 `plant_id`는 모두 내부 `plants.id`를 가리키며 `facility_code`를 대체 key로 쓰지 않는다.
 - full sync는 한국 RPS 호환 테이블뿐 아니라 해당 `data_source`/`registry_project` 범위의 `generation_data`, `rate_data`, `energy_certificates`도 replace한다.

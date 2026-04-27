@@ -1217,6 +1217,95 @@ async fn issue_crawl_task_token_requires_created_by_user_scope_authorization() {
 }
 
 #[tokio::test]
+async fn stored_certificate_new_facility_requires_organization_credential_use() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    db.upsert_organization_with_owner(
+        "limited-org",
+        "Limited Organization",
+        Some("2768603291"),
+        "Limited Organization",
+    )
+    .await
+    .expect("limited organization");
+    db.upsert_role(&Role {
+        id: "role-limited-plant-create".to_owned(),
+        organization_id: Some("limited-org".to_owned()),
+        code: "limited.plant.create".to_owned(),
+        name: "Limited Plant Creator".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert limited create role");
+    db.upsert_role_action("role-limited-plant-create", "organization.plant.create")
+        .await
+        .expect("upsert limited create action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "limited-org".to_owned(),
+        resource_type: RoleBindingResourceType::Organization,
+        resource_id: "limited-org".to_owned(),
+        role_id: "role-limited-plant-create".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-25T00:00:00Z".to_owned(),
+        updated_at: "2026-04-25T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save limited create binding");
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "limited-org".to_owned(),
+            mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
+            facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+    let cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "limited-org".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+        })
+        .await
+        .expect("register certificate");
+
+    let err = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "limited-org".to_owned(),
+            certificate_id: cert.id,
+            facility_code: Some("FAC-LIMITED-NEW".to_owned()),
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Full,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err(
+            "new facility stored credential use requires organization credential permission",
+        );
+
+    assert!(err.to_string().contains("stored credential for new plant"));
+}
+
+#[tokio::test]
 async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 

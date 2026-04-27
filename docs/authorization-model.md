@@ -22,7 +22,7 @@
 
 - `organization.*`
   - 조직 스코프 권한이다.
-  - 예: `organization.plant.create`
+  - 예: `organization.plant.create`, `organization.credential.use`
   - 전개 테이블이 아니라 런타임 직접 평가로 처리한다.
 - `plant.*`
   - 한국 RPS 호환 경로의 특정 발전소 권한이다.
@@ -79,7 +79,7 @@
 - ephemeral crawl은 signed challenge의 `facility_code`를 권위 있는 scope로 사용한다. 요청 body의 `facilityCode`가 challenge scope와 다르거나, facility 없는 challenge를 요청 body facility로 재바인딩하려 하면 service layer에서 거부한다. facility가 생략됐지만 단일 실행 가능 plant가 명확하면 service가 해석한 facility scope를 token 저장과 sync 실행에 그대로 전달한다.
 - ephemeral crawl 실행 요청자는 challenge를 만든 사용자와 같아야 한다. 라우트는 `ctx.user_id`를 service로 전달하고, service는 challenge creator와 requester 불일치를 거부한다.
 - 저장형 인증서 등록도 challenge를 만든 사용자와 실제 등록 요청자가 같아야 한다. 저장형 인증서는 registry account/organization credential이므로 facility-scoped stored challenge는 생성 시점부터 거부하고, facility scope는 ephemeral sync 또는 crawl task token scope에서만 사용한다.
-- collector가 최종 facility를 반환한 뒤에는 그 resolved facility를 다시 권한 검사한다. 기존 plant면 `plant.sync.execute`가 필요하고, 저장형 인증서 경로는 추가로 `asset.credential.use`와 registry account credential binding을 요구한다. 새 plant면 `organization.plant.create`가 필요하다.
+- collector가 최종 facility를 반환한 뒤에는 그 resolved facility를 다시 권한 검사한다. 기존 plant면 `plant.sync.execute`가 필요하고, 저장형 인증서 경로는 추가로 `asset.credential.use`와 registry account credential binding을 요구한다. 새 plant면 `organization.plant.create`와 `organization.credential.use`가 모두 필요하다.
 - 법적 조직 identity는 request payload나 self-signed 인증서 subject만으로 bootstrap하지 않는다. 조직에 이미 연결된 business number 또는 별도 검증된 조직 business number가 있어야 저장형 인증서 등록이 가능하다.
 - 인증서 proof는 운영 기본값에서 X.509 trust store 기준 체인 검증을 통과해야 한다. `CERTD_CERT_TRUST_BUNDLE_PATH`가 설정되면 해당 PEM CA bundle을 trust anchor로 사용하고, 없으면 시스템 기본 trust store를 사용한다. 요청 bundle은 leaf 외 intermediate DER 목록을 `certificateChainDerBase64`로 전달할 수 있고, 서버는 이 chain을 trust store 검증에 사용한다. `CERTD_ALLOW_UNTRUSTED_CERTIFICATES=true`는 local/test fixture 전용 예외다.
 - sync가 새 plant/asset을 최초 materialize하면, route에서 검증된 initiating user 기준으로 owner/creator plant 및 asset binding을 bootstrap한다. 이 경로가 없으면 첫 수집 직후 생성자가 자신이 만든 asset을 다시 읽거나 재수집할 수 없다.
