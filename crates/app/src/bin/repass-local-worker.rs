@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use infra::{
     bridge::{self, BridgeOptions, BridgeSnapshot},
-    crypto::CertificateBundle,
+    crypto::{CertificateBundle, normalize_business_no},
     npki::sign_message_base64,
     service::local_execution_result_signature_payload,
 };
@@ -75,13 +75,7 @@ async fn run() -> Result<()> {
         serde_json::from_str(&raw).context("decode local execution request")?;
     normalize_gateway_base_url(&req.gateway_base_url)?;
     let bundle = certificate_bundle(&req)?;
-    let business_no = req
-        .business_no
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(req.bundle.business_no.as_str())
-        .to_owned();
+    let business_no = local_business_no(&req)?;
 
     let run = bridge::collect_snapshot(BridgeOptions {
         business_no,
@@ -130,6 +124,21 @@ fn should_collect_documents(mode: Option<&str>) -> bool {
     mode.map(str::trim)
         .map(|value| value.eq_ignore_ascii_case("full"))
         .unwrap_or(false)
+}
+
+fn local_business_no(req: &LocalEphemeralRequest) -> Result<String> {
+    let business_no = req
+        .business_no
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let value = req.bundle.business_no.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .ok_or_else(|| anyhow!("businessNo is required for local execution"))?;
+
+    normalize_business_no(business_no).context("normalize local execution businessNo")
 }
 
 fn embed_document_contents(snapshot: &mut BridgeSnapshot, document_root: &Path) -> Result<()> {
@@ -505,6 +514,44 @@ mod tests {
         let input = vec![b'a'; (MAX_STDIN_BYTES + 1) as usize];
         let err = read_limited_stdin(input.as_slice()).expect_err("oversized stdin");
         assert!(err.to_string().contains("request exceeds"));
+    }
+
+    #[test]
+    fn local_business_no_prefers_request_value_and_normalizes_digits() {
+        let mut req = fixture_request();
+        req.business_no = Some(" 276-86-03291 ".to_owned());
+        req.bundle.business_no = "1111111111".to_owned();
+
+        assert_eq!(local_business_no(&req).expect("businessNo"), "2768603291");
+    }
+
+    #[test]
+    fn local_business_no_falls_back_to_bundle_business_no() {
+        let mut req = fixture_request();
+        req.business_no = Some("   ".to_owned());
+        req.bundle.business_no = "276-86-03291".to_owned();
+
+        assert_eq!(local_business_no(&req).expect("businessNo"), "2768603291");
+    }
+
+    #[test]
+    fn local_business_no_rejects_missing_business_no_before_collecting() {
+        let mut req = fixture_request();
+        req.business_no = None;
+        req.bundle.business_no.clear();
+
+        let err = local_business_no(&req).expect_err("missing businessNo");
+        assert!(err.to_string().contains("businessNo is required"));
+    }
+
+    #[test]
+    fn local_business_no_rejects_malformed_business_no_before_collecting() {
+        let mut req = fixture_request();
+        req.business_no = None;
+        req.bundle.business_no = "123".to_owned();
+
+        let err = local_business_no(&req).expect_err("malformed businessNo");
+        assert!(format!("{err:#}").contains("businessNo must normalize"));
     }
 
     #[test]
