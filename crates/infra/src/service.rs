@@ -1202,20 +1202,14 @@ impl AppService {
                             if current_objects.contains(object_key.as_str()) {
                                 continue;
                             }
-                            if active_deletes >= STALE_OBJECT_DELETE_CONCURRENCY {
-                                if let Some(result) = stale_deletes.join_next().await {
-                                    active_deletes = active_deletes.saturating_sub(1);
-                                    match result {
-                                        Ok((_, Ok(()))) => {}
-                                        Ok((object_key, Err(err))) => {
-                                            warn!(
-                                                "delete stale object {} failed: {}",
-                                                object_key, err
-                                            );
-                                        }
-                                        Err(err) => {
-                                            warn!("delete stale object task failed: {}", err)
-                                        }
+                            while active_deletes >= STALE_OBJECT_DELETE_CONCURRENCY {
+                                match stale_deletes.join_next().await {
+                                    Some(result) => {
+                                        active_deletes = active_deletes.saturating_sub(1);
+                                        log_stale_delete_result(result);
+                                    }
+                                    None => {
+                                        active_deletes = 0;
                                     }
                                 }
                             }
@@ -1227,13 +1221,7 @@ impl AppService {
                             active_deletes += 1;
                         }
                         while let Some(result) = stale_deletes.join_next().await {
-                            match result {
-                                Ok((_, Ok(()))) => {}
-                                Ok((object_key, Err(err))) => {
-                                    warn!("delete stale object {} failed: {}", object_key, err);
-                                }
-                                Err(err) => warn!("delete stale object task failed: {}", err),
-                            }
+                            log_stale_delete_result(result);
                         }
                     }
                     let duration_ms = started.elapsed().as_millis() as i64;
@@ -2570,12 +2558,36 @@ impl AppService {
 }
 
 async fn sha256_file_hex(path: &Path) -> Result<String> {
-    let bytes = tokio::fs::read(path)
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path)
         .await
-        .with_context(|| format!("read document {}", path.display()))?;
+        .with_context(|| format!("open document {}", path.display()))?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("read document {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn log_stale_delete_result(
+    result: std::result::Result<(String, Result<()>), tokio::task::JoinError>,
+) {
+    match result {
+        Ok((_, Ok(()))) => {}
+        Ok((object_key, Err(err))) => {
+            warn!("delete stale object {} failed: {}", object_key, err);
+        }
+        Err(err) => warn!("delete stale object task failed: {}", err),
+    }
 }
 
 fn normalize_active_organization(
