@@ -41,7 +41,7 @@ use openssl::{
     x509::{X509, X509NameBuilder},
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -280,28 +280,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn stable_document_id(
-    organization_id: &str,
-    plant_code: &str,
-    attachment_code: &str,
-    file_name: &str,
-) -> String {
-    let mut input = Vec::new();
-    push_hash_component(&mut input, organization_id);
-    push_hash_component(&mut input, plant_code);
-    push_hash_component(&mut input, attachment_code);
-    push_hash_component(&mut input, file_name);
-    sha256(&input)[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn push_hash_component(input: &mut Vec<u8>, value: &str) {
-    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    input.extend_from_slice(value.as_bytes());
-}
-
 fn signed_proof_bundle_without_km(challenge_payload: &str) -> (Value, String) {
     let (bundle, challenge_signature_base64) = signed_proof_bundle(challenge_payload);
     let mut bundle = bundle.as_object().expect("bundle object").clone();
@@ -387,12 +365,28 @@ fn local_execution_snapshot_with_document(facility_code: &str) -> Value {
         "required": true,
         "category": "permit",
         "sourcePath": "",
-        "sourceSha256": "sha-local",
-        "outputSha256": "sha-local",
+        "sourceSha256": "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69",
+        "outputSha256": "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69",
         "contentBase64": STANDARD.encode(b"PDF-CONTENT"),
         "contentType": "application/pdf"
     }]);
     snapshot
+}
+
+fn find_artifact_with_bytes(root: &Path, expected: &[u8]) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            if let Some(found) = find_artifact_with_bytes(&path, expected) {
+                return Some(found);
+            }
+            continue;
+        }
+        if std::fs::read(&path).ok()?.as_slice() == expected {
+            return Some(path);
+        }
+    }
+    None
 }
 
 async fn grant_test_sync_access(
@@ -401,6 +395,10 @@ async fn grant_test_sync_access(
     user_id: &str,
     facility_code: &str,
 ) {
+    let plant = db
+        .get_plant_by_facility_code(facility_code)
+        .await
+        .expect("load plant for sync grant");
     db.upsert_role(&Role {
         id: "role-test-plant-sync-execute".to_owned(),
         organization_id: None,
@@ -419,7 +417,7 @@ async fn grant_test_sync_access(
         subject_id: organization_id.to_owned(),
         subject_organization_id: organization_id.to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: facility_code.to_owned(),
+        resource_id: plant.id.clone(),
         role_id: "role-test-plant-sync-execute".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -435,7 +433,7 @@ async fn grant_test_sync_access(
         subject_id: user_id.to_owned(),
         subject_organization_id: organization_id.to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: facility_code.to_owned(),
+        resource_id: plant.id,
         role_id: "role-test-plant-sync-execute".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -889,7 +887,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(local_result_response.status(), StatusCode::ACCEPTED);
     let local_result_json = json_body(local_result_response).await;
     assert_eq!(local_result_json["status"], "completed");
-    assert_eq!(local_result_json["plantId"], "FAC-004");
+    assert!(
+        local_result_json["plantId"]
+            .as_str()
+            .expect("local result plant id")
+            .starts_with("plant-")
+    );
     grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-004").await;
 
     let local_delta_challenge = app
@@ -971,15 +974,15 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .await
         .expect("local document result response");
     assert_eq!(local_doc_result.status(), StatusCode::ACCEPTED);
+    let local_doc_result_json = json_body(local_doc_result).await;
+    let local_doc_plant_id = local_doc_result_json["plantId"]
+        .as_str()
+        .expect("local document result plant id");
 
-    let doc_id = stable_document_id("bootstrap-user", "FAC-DOC", "ATT-LOCAL-1", "permit.pdf");
-    let stored_bytes = std::fs::read(
-        artifacts_dir
-            .path()
-            .join(format!("bootstrap-user/FAC-DOC/{doc_id}.pdf")),
-    )
-    .expect("local execution document artifact");
-    assert_eq!(stored_bytes.as_slice(), b"PDF-CONTENT");
+    assert!(
+        find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT").is_some(),
+        "local execution document artifact should be persisted for {local_doc_plant_id}"
+    );
 }
 
 #[tokio::test]
@@ -1554,7 +1557,13 @@ async fn local_execution_result_persists_normalized_facility_code() {
     let status = response.status();
     let body = json_body(response).await;
     assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
-    assert_eq!(body["plantId"], "FAC-TRIM");
+    assert!(
+        body["plantId"]
+            .as_str()
+            .expect("plant id")
+            .starts_with("plant-"),
+        "body = {body}"
+    );
 }
 
 #[tokio::test]

@@ -34,7 +34,7 @@ use std::{
     fmt,
     future::Future,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
@@ -47,6 +47,25 @@ const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
 const STALE_OBJECT_DELETE_CONCURRENCY: usize = 8;
 const MAX_LOCAL_EXECUTION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+
+struct PreparedDocumentUpload {
+    uploaded_sha256: String,
+    content: PreparedDocumentContent,
+}
+
+enum PreparedDocumentContent {
+    DecodedTemp(tempfile::NamedTempFile),
+    SourcePath(PathBuf),
+}
+
+impl PreparedDocumentUpload {
+    fn path(&self) -> &Path {
+        match &self.content {
+            PreparedDocumentContent::DecodedTemp(file) => file.path(),
+            PreparedDocumentContent::SourcePath(path) => path.as_path(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -1230,6 +1249,7 @@ impl AppService {
                 effective_mode.clone(),
             )
             .await?;
+        let run_id = run.id.clone();
 
         let started = std::time::Instant::now();
         let collect = self
@@ -1255,19 +1275,44 @@ impl AppService {
                     document_count = snapshot.documents.len(),
                     "collector finished"
                 );
-                self.persist_successful_snapshot(
-                    organization_id,
-                    business_no,
-                    run,
-                    effective_mode,
-                    snapshot,
-                    started,
-                    facility_code.as_deref(),
-                    created_by_user_id,
-                    requires_stored_credential,
-                    true,
-                )
-                .await
+                match self
+                    .persist_successful_snapshot(
+                        organization_id,
+                        business_no.clone(),
+                        run,
+                        effective_mode.clone(),
+                        snapshot,
+                        started,
+                        facility_code.as_deref(),
+                        created_by_user_id,
+                        requires_stored_credential,
+                        true,
+                    )
+                    .await
+                {
+                    Ok(run) => Ok(run),
+                    Err(err) => {
+                        let duration_ms = started.elapsed().as_millis() as i64;
+                        let message = format!("{err:#}");
+                        error!(
+                            business_no,
+                            facility_code = facility_code.as_deref().unwrap_or(""),
+                            mode = ?effective_mode,
+                            duration_ms,
+                            error = %message,
+                            "sync materialization failed"
+                        );
+                        self.finish_failed_sync_run(
+                            &run_id,
+                            duration_ms,
+                            facility_code.as_deref(),
+                            None,
+                            &message,
+                        )
+                        .await;
+                        Err(err)
+                    }
+                }
             }
             Err(err) => {
                 let duration_ms = started.elapsed().as_millis() as i64;
@@ -2785,14 +2830,15 @@ impl AppService {
         for doc in docs {
             let id = stable_document_id(organization_id, plant_code, doc);
             let category = resolved_document_category(doc);
-            let uploaded_sha256 = match document_uploaded_sha256(doc).await {
+            let upload = match prepare_document_upload(doc).await {
                 Ok(value) => value,
                 Err(err) => {
                     self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
                         .await;
-                    return Err(err).with_context(|| format!("hash document {}", doc.file_name));
+                    return Err(err).with_context(|| format!("prepare document {}", doc.file_name));
                 }
             };
+            let uploaded_sha256 = &upload.uploaded_sha256;
             for (field_name, expected_sha256) in [
                 ("outputSha256", doc.output_sha256.as_deref()),
                 ("sourceSha256", doc.source_sha256.as_deref()),
@@ -2813,11 +2859,11 @@ impl AppService {
             let source_sha256 = doc
                 .source_sha256
                 .clone()
-                .unwrap_or_else(|| uploaded_sha256.clone());
+                .unwrap_or_else(|| uploaded_sha256.to_owned());
             let output_sha256 = doc
                 .output_sha256
                 .clone()
-                .unwrap_or_else(|| uploaded_sha256.clone());
+                .unwrap_or_else(|| uploaded_sha256.to_owned());
             let object_version = uploaded_sha256.chars().take(16).collect::<String>();
             let object_key = format!("{organization_id}/{plant_code}/{id}-{object_version}.pdf");
             info!(
@@ -2826,7 +2872,10 @@ impl AppService {
                 object_key = object_key.as_str(),
                 "uploading document"
             );
-            if let Err(err) = self.persist_document(object_key.clone(), doc).await {
+            if let Err(err) = self
+                .persist_document(object_key.clone(), doc, &upload)
+                .await
+            {
                 self.delete_unmaterialized_object(&object_key, existing_object_keys)
                     .await;
                 self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
@@ -2878,33 +2927,22 @@ impl AppService {
         }
     }
 
-    async fn persist_document(&self, object_key: String, doc: &BridgeDocument) -> Result<()> {
+    async fn persist_document(
+        &self,
+        object_key: String,
+        doc: &BridgeDocument,
+        upload: &PreparedDocumentUpload,
+    ) -> Result<()> {
         let content_type = document_content_type(doc)?;
-        if let Some(content_base64) = doc
-            .content_base64
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let decoded = decode_content_base64_to_tempfile(content_base64)
-                .with_context(|| format!("decode document {}", doc.file_name))?;
-            self.artifacts
-                .put_file(object_key, decoded.path(), content_type)
-                .await
-                .with_context(|| format!("upload document {}", doc.file_name))?;
-            return Ok(());
-        }
-
-        let source_path = Path::new(document_source_path(doc)?);
         self.artifacts
-            .put_file(object_key, source_path, content_type)
+            .put_file(object_key, upload.path(), content_type)
             .await
             .with_context(|| format!("upload document {}", doc.file_name))?;
         Ok(())
     }
 }
 
-async fn document_uploaded_sha256(doc: &BridgeDocument) -> Result<String> {
+async fn prepare_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumentUpload> {
     if let Some(content_base64) = doc
         .content_base64
         .as_deref()
@@ -2913,10 +2951,19 @@ async fn document_uploaded_sha256(doc: &BridgeDocument) -> Result<String> {
     {
         let decoded = decode_content_base64_to_tempfile(content_base64)
             .with_context(|| format!("decode document {}", doc.file_name))?;
-        return sha256_file_hex(decoded.path()).await;
+        let uploaded_sha256 = sha256_file_hex(decoded.path()).await?;
+        return Ok(PreparedDocumentUpload {
+            uploaded_sha256,
+            content: PreparedDocumentContent::DecodedTemp(decoded),
+        });
     }
 
-    sha256_file_hex(Path::new(document_source_path(doc)?)).await
+    let source_path = PathBuf::from(document_source_path(doc)?);
+    let uploaded_sha256 = sha256_file_hex(&source_path).await?;
+    Ok(PreparedDocumentUpload {
+        uploaded_sha256,
+        content: PreparedDocumentContent::SourcePath(source_path),
+    })
 }
 
 async fn sha256_file_hex(path: &Path) -> Result<String> {
@@ -2991,8 +3038,8 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let _decoded = decode_content_base64_to_tempfile(content_base64)
-                .with_context(|| format!("decode document {}", doc.file_name))?;
+            estimated_base64_decoded_len(content_base64)
+                .with_context(|| format!("validate document {}", doc.file_name))?;
             continue;
         }
         document_source_path(doc)?;

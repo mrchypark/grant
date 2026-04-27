@@ -29,6 +29,8 @@ use infra::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+const MAX_CERTIFICATE_CHAIN_DER_ENTRIES: usize = 8;
+
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
         .route(
@@ -1227,6 +1229,13 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         )));
     }
 
+    if body.certificate_chain_der_base64.len() > MAX_CERTIFICATE_CHAIN_DER_ENTRIES {
+        return Err(ApiError::bad_request(anyhow!(
+            "certificateChainDerBase64 must contain at most {} entries",
+            MAX_CERTIFICATE_CHAIN_DER_ENTRIES
+        )));
+    }
+
     let certificate_chain_der = body
         .certificate_chain_der_base64
         .iter()
@@ -1601,8 +1610,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiError, ProofBundleRequest, decode_base64_field, ensure_active_organization_path_matches,
-        map_certificate, map_proof_bundle,
+        ApiError, MAX_CERTIFICATE_CHAIN_DER_ENTRIES, ProofBundleRequest, decode_base64_field,
+        ensure_active_organization_path_matches, map_certificate, map_proof_bundle,
     };
     use anyhow::anyhow;
     use axum::http::StatusCode;
@@ -1685,6 +1694,30 @@ mod tests {
         assert_eq!(
             bundle.certificate_chain_der,
             vec![vec![7, 8, 9], vec![10, 11, 12]]
+        );
+    }
+
+    #[test]
+    fn proof_bundle_rejects_too_many_certificate_chain_entries() {
+        let err = map_proof_bundle(ProofBundleRequest {
+            business_no: "2768603291".to_owned(),
+            common_name: "Test Certificate".to_owned(),
+            password: "password".to_owned(),
+            sign_cert_der_base64: "AQID".to_owned(),
+            sign_pri_key_base64: "BAUG".to_owned(),
+            km_cert_der_base64: None,
+            km_pri_key_base64: None,
+            certificate_chain_der_base64: vec![
+                "BwgJ".to_owned();
+                MAX_CERTIFICATE_CHAIN_DER_ENTRIES + 1
+            ],
+        })
+        .expect_err("oversized certificate chain should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message
+                .contains("certificateChainDerBase64 must contain at most")
         );
     }
 

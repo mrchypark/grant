@@ -269,19 +269,3 @@ fn test_certificate_and_key() -> (X509, PKey<Private>) {
         .expect("sign certificate");
     (builder.build(), private_key)
 }
-
-fn local_secret_cert_dir() -> Option<PathBuf> {
-    if std::env::var("RUN_SECRET_CERT_TESTS").ok().as_deref() != Some("1") {
-        eprintln!("skipping local secrets/cert test; set RUN_SECRET_CERT_TESTS=1 to enable");
-        return None;
-    }
-    let cert_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../secrets/cert");
-    if !cert_dir.join("signCert.der").exists() {
-        eprintln!(
-            "skipping local secrets/cert test; missing {}",
-            cert_dir.display()
-        );
-        return None;
-    }
-    Some(cert_dir)
-}

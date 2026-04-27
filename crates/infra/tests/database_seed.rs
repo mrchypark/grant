@@ -719,9 +719,14 @@ async fn kr_rps_projection_conflict_preserves_first_claimed_owner_and_account() 
         created_by_organization_id: Some("operator-org".to_owned()),
         ..owner_plant.clone()
     };
-    db.upsert_plant(&operator_plant)
+    let err = db
+        .upsert_plant(&operator_plant)
         .await
-        .expect("operator conflicting plant");
+        .expect_err("operator conflicting plant must not overwrite plant owner");
+    assert!(
+        err.to_string()
+            .contains("plant already belongs to another organization")
+    );
     db.upsert_kr_rps_asset_projection(
         &operator_plant,
         Some("operator-org"),

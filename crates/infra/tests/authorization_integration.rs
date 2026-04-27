@@ -49,6 +49,14 @@ use serde_json::Value;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+fn challenge_sync_mode(sync_mode: Option<&str>) -> SyncMode {
+    match sync_mode {
+        Some("full") => SyncMode::Full,
+        Some("delta") => SyncMode::Delta,
+        other => panic!("unexpected challenge sync mode: {other:?}"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OrganizationPlantActionRow {
     organization_id: String,
@@ -534,9 +542,9 @@ async fn sync_rejects_collector_facility_mismatch_before_writing_rows() {
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-REQUESTED".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect_err("collector returning another facility must be rejected");
@@ -685,9 +693,9 @@ async fn delegated_sync_preserves_existing_asset_and_plant_owner() {
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-OWNER-001".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect("execute delegated sync");
@@ -819,9 +827,9 @@ async fn delegated_first_sync_does_not_attach_operator_registry_account_to_owner
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-FIRST-DELEGATED".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect("execute delegated sync");
@@ -865,9 +873,9 @@ async fn sync_created_plant_bootstraps_creator_asset_permissions() {
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-SYNC-CREATED".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect("execute first sync");
@@ -943,9 +951,9 @@ async fn delta_sync_uses_internal_plant_id_for_latest_generation_baseline() {
             challenge_signature_base64: first_signature,
             bundle: first_bundle,
             facility_code: Some("FAC-DELTA-ID".to_owned()),
-            start_month: None,
-            end_month: None,
-            mode: SyncMode::Delta,
+            start_month: first_challenge.start_month.clone(),
+            end_month: first_challenge.end_month.clone(),
+            mode: challenge_sync_mode(first_challenge.sync_mode.as_deref()),
         })
         .await
         .expect("first delta falls back to full sync");
@@ -982,9 +990,9 @@ async fn delta_sync_uses_internal_plant_id_for_latest_generation_baseline() {
             challenge_signature_base64: second_signature,
             bundle: second_bundle,
             facility_code: Some("FAC-DELTA-ID".to_owned()),
-            start_month: None,
-            end_month: None,
-            mode: SyncMode::Delta,
+            start_month: second_challenge.start_month.clone(),
+            end_month: second_challenge.end_month.clone(),
+            mode: challenge_sync_mode(second_challenge.sync_mode.as_deref()),
         })
         .await
         .expect("second delta uses existing generation baseline");
@@ -1040,10 +1048,10 @@ async fn stored_certificate_registration_rejects_requester_different_from_challe
 }
 
 #[tokio::test]
-async fn stored_certificate_challenge_rejects_facility_scope_at_creation() {
-    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+async fn stored_certificate_challenge_binds_facility_scope_at_creation() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 
-    let err = service
+    let challenge = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
@@ -1058,23 +1066,20 @@ async fn stored_certificate_challenge_rejects_facility_scope_at_creation() {
             ttl_seconds: 120,
         })
         .await
-        .expect_err("stored challenge must not accept facility scope");
+        .expect("stored challenge accepts facility scope");
 
-    assert!(
-        err.to_string()
-            .contains("stored certificate challenges cannot be facility-scoped")
-    );
-    assert_eq!(
-        err.downcast_ref::<ServiceError>().map(ServiceError::kind),
-        Some(ServiceErrorKind::BadRequest)
-    );
+    let stored = db
+        .get_cert_gateway_challenge(&challenge.id)
+        .await
+        .expect("stored challenge");
+    assert_eq!(stored.facility_code.as_deref(), Some("FAC-STORED-SCOPE"));
 }
 
 #[tokio::test]
-async fn stored_certificate_challenge_normalizes_blank_facility_scope_at_creation() {
-    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+async fn stored_certificate_challenge_rejects_blank_facility_scope_at_creation() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
 
-    let challenge = service
+    let err = service
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "stored".to_owned(),
@@ -1089,19 +1094,12 @@ async fn stored_certificate_challenge_normalizes_blank_facility_scope_at_creatio
             ttl_seconds: 120,
         })
         .await
-        .expect("blank facility scope should be treated as unscoped");
+        .expect_err("blank facility scope should be rejected");
 
-    let stored = db
-        .get_cert_gateway_challenge(&challenge.id)
-        .await
-        .expect("stored challenge");
-    assert!(stored.facility_code.is_none());
+    assert!(err.to_string().contains("facilityCode must not be empty"));
     assert_eq!(
-        challenge.payload,
-        format!(
-            "cert-gateway:bootstrap-user:stored::{}:{}",
-            challenge.nonce, challenge.expires_at
-        )
+        err.downcast_ref::<ServiceError>().map(ServiceError::kind),
+        Some(ServiceErrorKind::BadRequest)
     );
 }
 
@@ -1248,13 +1246,13 @@ async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope(
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-OTHER".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect_err("challenge scope must be authoritative");
-    assert!(err.to_string().contains("challenge facilityCode mismatch"));
+    assert!(err.to_string().contains("challenge facility code mismatch"));
     let challenge = db
         .get_cert_gateway_challenge(&challenge.id)
         .await
@@ -1293,9 +1291,9 @@ async fn ephemeral_crawl_normalizes_blank_requested_facility_scope() {
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("   ".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-02".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect("blank requested facility scope should be treated as unscoped");
@@ -1334,9 +1332,9 @@ async fn ephemeral_crawl_rejects_binding_unscoped_challenge_to_request_facility(
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-OTHER".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect_err("unscoped challenge must not be rebound to a facility");
@@ -1379,9 +1377,9 @@ async fn ephemeral_crawl_rejects_requester_different_from_challenge_creator() {
             challenge_signature_base64: signature,
             bundle,
             facility_code: Some("FAC-REQUESTER-MISMATCH".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
         })
         .await
         .expect_err("requester must match challenge creator");
@@ -1432,20 +1430,6 @@ async fn requires_explicit_contract_backed_access_for_each_organization() {
         )
         .await
         .expect("insert user");
-    runtime
-        .execute(
-            "INSERT INTO users (id, email, display_name, active, created_at)
-             VALUES ($1, $2, $3, $4, $5)",
-            vec![
-                "dist-user".into(),
-                "dist@example.com".into(),
-                "Distributor User".into(),
-                1_i64.into(),
-                "2026-04-03T00:00:00Z".into(),
-            ],
-        )
-        .await
-        .expect("insert distributor user");
     runtime
         .execute(
             "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
@@ -2032,10 +2016,10 @@ async fn certificate_gateway_service_flows_enforce_expiry_reuse_and_single_use_t
             challenge_payload: implicit_ephemeral.payload,
             challenge_signature_base64: implicit_signature,
             bundle: implicit_bundle,
-            facility_code: None,
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            facility_code: implicit_ephemeral.facility_code.clone(),
+            start_month: implicit_ephemeral.start_month.clone(),
+            end_month: implicit_ephemeral.end_month.clone(),
+            mode: challenge_sync_mode(implicit_ephemeral.sync_mode.as_deref()),
         })
         .await
         .expect("execute implicit facility ephemeral crawl");
@@ -2557,9 +2541,9 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
                 certificate_chain_der: Vec::new(),
             },
             facility_code: Some("FAC-013".to_owned()),
-            start_month: Some("2026-01".to_owned()),
-            end_month: Some("2026-03".to_owned()),
-            mode: SyncMode::Delta,
+            start_month: ephemeral.start_month.clone(),
+            end_month: ephemeral.end_month.clone(),
+            mode: challenge_sync_mode(ephemeral.sync_mode.as_deref()),
         })
         .await
         .expect_err("mismatched business number should be rejected");
@@ -2573,7 +2557,7 @@ async fn certificate_gateway_rejects_ephemeral_proof_when_certificate_business_n
 #[tokio::test]
 async fn certificate_gateway_rejects_subject_business_number_for_unlinked_organization() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
-    db.upsert_organization_identity("pending-org", Some("2768603291"), "Pending Org")
+    db.upsert_organization_identity("pending-org", None, "Pending Org")
         .await
         .expect("seed pending organization identity");
 
@@ -3049,7 +3033,7 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id: "bootstrap-user".to_owned(),
             mode: "ephemeral".to_owned(),
-            sync_mode: Some("full".to_owned()),
+            sync_mode: Some("delta".to_owned()),
             origin: None,
             business_no: Some("2768603291".to_owned()),
             facility_code: Some("FAC-BOUND".to_owned()),
@@ -3077,6 +3061,10 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
         })
         .await
         .expect("seed execution");
+    let seeded_plant = db
+        .get_plant_by_facility_code("FAC-BOUND")
+        .await
+        .expect("seeded plant");
     db.upsert_role(&Role {
         id: "role-test-plant-sync-execute".to_owned(),
         organization_id: None,
@@ -3107,7 +3095,7 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
         subject_id: "bootstrap-user".to_owned(),
         subject_organization_id: "bootstrap-user".to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: "FAC-BOUND".to_owned(),
+        resource_id: seeded_plant.id.clone(),
         role_id: "role-test-plant-sync-execute".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -3123,7 +3111,7 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
         subject_id: "bootstrap-user".to_owned(),
         subject_organization_id: "bootstrap-user".to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: "FAC-BOUND".to_owned(),
+        resource_id: seeded_plant.id.clone(),
         role_id: "role-test-plant-profile-read".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -3139,7 +3127,7 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
         subject_id: "bootstrap-user".to_owned(),
         subject_organization_id: "bootstrap-user".to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: "FAC-BOUND".to_owned(),
+        resource_id: seeded_plant.id.clone(),
         role_id: "role-test-plant-sync-execute".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -3155,7 +3143,7 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
         subject_id: "bootstrap-user".to_owned(),
         subject_organization_id: "bootstrap-user".to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: "FAC-BOUND".to_owned(),
+        resource_id: seeded_plant.id.clone(),
         role_id: "role-test-plant-profile-read".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -3217,7 +3205,7 @@ async fn ephemeral_execution_uses_challenge_bound_month_window() {
             origin: None,
             business_no: Some("2768603291".to_owned()),
             facility_code: Some("FAC-BOUND".to_owned()),
-            start_month: Some("2026-04".to_owned()),
+            start_month: None,
             end_month: None,
             sign_cert_sha256_hex: None,
             created_by_user_id: "bootstrap-user".to_owned(),
