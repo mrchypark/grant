@@ -538,9 +538,10 @@ impl AppService {
                 );
             }
         }
+        let requested_facility_code = normalize_optional_text(input.facility_code);
         let effective_facility_code = match (
             challenge.facility_code.as_deref(),
-            input.facility_code.as_deref(),
+            requested_facility_code.as_deref(),
         ) {
             (None, Some(requested_facility_code)) => {
                 anyhow::bail!(
@@ -621,27 +622,21 @@ impl AppService {
             input.start_month.as_deref(),
             input.end_month.as_deref(),
         )?;
+        let requested_facility_code = normalize_optional_text(input.facility_code);
         let authorized_facility_code = self
             .authorize_gateway_sync_scope(
                 &created_by_user_id,
                 &organization_id,
-                input.facility_code.as_deref(),
+                requested_facility_code.as_deref(),
             )
             .await?;
         if let Some(facility_code) = authorized_facility_code.as_deref() {
-            if self
-                .db
-                .get_plant_by_facility_code(facility_code)
-                .await
-                .is_ok()
-            {
-                self.authorize_stored_certificate_use_for_sync(
-                    &created_by_user_id,
-                    &organization_id,
-                    facility_code,
-                )
-                .await?;
-            }
+            self.authorize_stored_certificate_use_for_existing_facility(
+                &created_by_user_id,
+                &organization_id,
+                facility_code,
+            )
+            .await?;
         }
 
         let scope = CrawlTaskScope {
@@ -786,19 +781,12 @@ impl AppService {
             )
             .await?;
         if let Some(facility_code) = authorized_facility_code.as_deref() {
-            if self
-                .db
-                .get_plant_by_facility_code(facility_code)
-                .await
-                .is_ok()
-            {
-                self.authorize_stored_certificate_use_for_sync(
-                    &issued.created_by_user_id,
-                    &organization_id,
-                    facility_code,
-                )
-                .await?;
-            }
+            self.authorize_stored_certificate_use_for_existing_facility(
+                &issued.created_by_user_id,
+                &organization_id,
+                facility_code,
+            )
+            .await?;
         }
         let certificate = if let Some(certificate_id) = issued.certificate_id.as_deref() {
             let certificate = self
@@ -1381,6 +1369,33 @@ impl AppService {
             );
         }
         Ok(())
+    }
+
+    async fn authorize_stored_certificate_use_for_existing_facility(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: &str,
+    ) -> Result<()> {
+        match self.db.get_plant_by_facility_code(facility_code).await {
+            Ok(_) => {
+                self.authorize_stored_certificate_use_for_sync(
+                    user_id,
+                    organization_id,
+                    facility_code,
+                )
+                .await
+            }
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn list_visible_plants(
