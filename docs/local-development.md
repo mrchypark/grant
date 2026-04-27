@@ -81,7 +81,9 @@ export FACILITY_CODE=PV15-R-090795
 export CERT_PASSWORD='...'
 ```
 
-### 1. 인증서 업로드
+### 1. 저장형 인증서 업로드 (escrow)
+
+이 예시는 서버 저장형 인증서 smoke test다. 로컬 실행형 `runEphemeral()` 검증에 이 요청을 사용하면 안 된다.
 
 ```bash
 SIGN_CERT=$(base64 < ./secrets/cert/signCert.der | tr -d '\n')

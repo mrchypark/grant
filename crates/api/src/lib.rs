@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
+    extract::DefaultBodyLimit,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
@@ -14,14 +15,15 @@ use domain::{
     User,
 };
 use infra::{
+    bridge::BridgeSnapshot,
     config::ReadConsistency,
     crypto::CertificateBundle,
     database::StoredCertificate,
     service::{
         AppService, BackupInfo, CreateCertGatewayChallengeInput, CreateClientInput,
-        CreatePlantInput, ExecuteEphemeralCrawlInput, IssueCrawlTaskTokenInput, PlantView,
-        RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
-        StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
+        CreatePlantInput, ExecuteEphemeralCrawlInput, IngestLocalExecutionResultInput,
+        IssueCrawlTaskTokenInput, PlantView, RegisterCertificateFromProofInput, ServiceError,
+        ServiceErrorKind, StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,10 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/organizations/{organizationId}/cert-gateway/ephemeral-executions",
             post(execute_ephemeral_crawl),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/cert-gateway/local-execution-results",
+            post(ingest_local_execution_result).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route(
             "/api/v1/organizations/{organizationId}/certificates",
@@ -113,6 +119,10 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
         )
         .route(
             "/api/v1/organizations/{organizationId}/cert-gateway/ephemeral-executions",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/organizations/{organizationId}/cert-gateway/local-execution-results",
             any(requires_voter_node),
         )
         .route(
@@ -220,7 +230,13 @@ struct SyncRequest {
 #[serde(rename_all = "camelCase")]
 struct CreateCertGatewayChallengeRequest {
     mode: String,
+    sync_mode: Option<String>,
+    origin: Option<String>,
+    business_no: Option<String>,
     facility_code: Option<String>,
+    start_month: Option<String>,
+    end_month: Option<String>,
+    sign_cert_sha256_hex: Option<String>,
     ttl_seconds: Option<i64>,
 }
 
@@ -229,8 +245,18 @@ struct CreateCertGatewayChallengeRequest {
 struct CertGatewayChallengeResponse {
     challenge_id: String,
     mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sync_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    facility_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    business_no: Option<String>,
     nonce: String,
     payload: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_month: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_month: Option<String>,
     expires_at: String,
 }
 
@@ -267,6 +293,18 @@ struct ExecuteEphemeralCrawlRequest {
     facility_code: Option<String>,
     start_month: Option<String>,
     end_month: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IngestLocalExecutionResultRequest {
+    challenge_id: String,
+    challenge_payload: String,
+    challenge_signature_base64: String,
+    result_signature_base64: String,
+    sign_cert_der_base64: String,
+    snapshot: BridgeSnapshot,
     mode: Option<String>,
 }
 
@@ -626,7 +664,13 @@ async fn create_cert_gateway_challenge(
         .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
             organization_id,
             mode: body.mode,
+            sync_mode: body.sync_mode,
+            origin: body.origin,
+            business_no: body.business_no,
             facility_code: body.facility_code,
+            start_month: body.start_month,
+            end_month: body.end_month,
+            sign_cert_sha256_hex: body.sign_cert_sha256_hex,
             created_by_user_id: ctx.user_id,
             ttl_seconds: body.ttl_seconds.unwrap_or(120),
         })
@@ -637,8 +681,13 @@ async fn create_cert_gateway_challenge(
         Json(CertGatewayChallengeResponse {
             challenge_id: challenge.id,
             mode: challenge.mode,
+            sync_mode: challenge.sync_mode,
+            facility_code: challenge.facility_code,
+            business_no: challenge.business_no,
             nonce: challenge.nonce,
             payload: challenge.payload,
+            start_month: challenge.start_month,
+            end_month: challenge.end_month,
             expires_at: challenge.expires_at,
         }),
     ))
@@ -663,6 +712,38 @@ async fn execute_ephemeral_crawl(
             facility_code: body.facility_code,
             start_month: body.start_month,
             end_month: body.end_month,
+            mode: parse_sync_mode(body.mode.as_deref())?,
+        })
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::ACCEPTED, Json(map_sync(run))))
+}
+
+async fn ingest_local_execution_result(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<IngestLocalExecutionResultRequest>,
+) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
+    service
+        .authorize_gateway_sync_scope(
+            &ctx.user_id,
+            &organization_id,
+            Some(body.snapshot.facility.code.as_str()),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    let run = service
+        .ingest_local_execution_result(IngestLocalExecutionResultInput {
+            organization_id,
+            challenge_id: body.challenge_id,
+            challenge_payload: body.challenge_payload,
+            challenge_signature_base64: body.challenge_signature_base64,
+            result_signature_base64: body.result_signature_base64,
+            sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
+            snapshot: body.snapshot,
             mode: parse_sync_mode(body.mode.as_deref())?,
         })
         .await

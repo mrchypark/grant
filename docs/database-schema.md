@@ -8,6 +8,8 @@
 - `asset_id`가 물리 발전 설비의 내부 canonical 식별자다.
 - `plant`는 한국 RPS 호환 계층의 명칭이며, `plants.id`는 내부 호환 row ID다. KR RPS 외부 설비 코드는 `facility_code`에만 둔다.
 - `facility_code`는 한국 RPS 외부 설비 식별자이며 `asset_profiles`/`registry_projects`의 외부 ID로 다룬다.
+- `plants.id`는 한국 RPS 호환 row ID이고, 신규 글로벌 모델의 canonical 식별자는 `asset_id`다.
+- `facility_code`는 한국 RPS 외부 설비 식별자이며 `asset_profiles`/`registry_projects`의 외부 ID로 다룬다.
 - 권한 원본과 조회 최적화 결과를 분리한다.
 - 공동인증서, OAuth, API key, 로그인 credential은 `auth_credentials` 추상화로 수용한다.
 - SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.
@@ -362,8 +364,8 @@
 - `organization_id` > 요청 조직 ID
 - `mode` > `stored` 또는 `ephemeral`
 - `nonce` > 서명 대상 nonce
-- `payload_hash` > challenge payload 해시
-- `facility_code` > ephemeral sync challenge의 signed facility scope. 저장형 인증서 등록 challenge에서는 사용하지 않으며, service layer가 facility-scoped stored challenge를 생성 시점부터 거부한다.
+- `payload_hash` > `cert-gateway:` payload 원문 SHA-256 해시. payload는 canonical JSON을 URL-safe base64로 감싼 값이며 `organizationId`, `mode`, `nonce`, `expiresAt`를 기본으로 포함하고, 요청에 있으면 `origin`, `facilityCode`, `startMonth`, `endMonth`, `signCertSha256Hex`까지 함께 묶는다. `businessNo`는 요청값 또는 조직에 연결된 법인 사업자번호가 있으면 정규화해 함께 묶는다.
+- `facility_code` > challenge가 특정 발전소 실행 스코프에 묶인 경우의 발전소 코드
 - `expires_at` > 만료 시각
 - `consumed_at` > 1회 사용 완료 시각
 - `created_by_user_id` > 요청 사용자 ID
@@ -576,6 +578,8 @@
 - 새 `asset_id`는 KR RPS `facility_code` 원문을 ID로 사용하지 않는다. KR RPS 경로는 기존 `asset_profiles`/`registry_projects` 매핑을 먼저 해석하고, 없으면 동일 facility의 동시 최초 sync가 같은 asset으로 수렴하도록 provider-scoped opaque ID를 발급한다. 호환 `plants.id`도 같은 이유로 짧은 외부 ID가 아니라 32 hex prefix 이상의 deterministic opaque key를 쓴다.
 - 국가/시장별 외부 ID는 `asset_profiles.external_id` 또는 `registry_projects.external_project_id`에 저장한다.
 - 기존 `plants`/`plant_id`는 한국 RPS 호환 경로로 남아 있지만 `facility_code`와 같은 값으로 취급하지 않는다. 글로벌 권한과 신규 데이터 모델의 기준은 `asset_id`다.
+- 같은 `plants.id`가 다른 조직에서 들어오면 기존 plant 소유권을 덮어쓰지 않고 거부한다.
+- `sync_runs`, 레코드, 문서는 호환 `plant_id`에 연결하고, 글로벌 권한과 신규 데이터 모델은 `asset_id`를 기준으로 전개한다.
 
 ### 3. 권한 원본과 전개 테이블을 분리한 이유
 
@@ -620,7 +624,7 @@
 - self-signed/test 인증서는 기본 운영 설정에서 `auth_credentials`로 저장하지 않는다. 기본 설정은 proof bundle의 intermediate DER chain과 시스템 X.509 trust store 기준으로 인증서 체인을 검증하며, local/test fixture만 `allow_untrusted_certificates` 설정을 명시적으로 켠다.
 - 저장형 인증서, 일회성 증명 challenge, 저장형 작업 토큰은 수명과 보안 성격이 다르다.
 - `certificates`는 한국 공동인증서 호환 경로의 장기 보관 대상이고 암호화 저장이 필요하다.
-- `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다.
+- `cert_gateway_challenges`는 아주 짧은 수명과 1회 사용이 핵심이다. payload hash는 사용자가 승인한 origin/scope/certificate fingerprint가 서명 대상과 분리되지 않도록 묶는다.
 - `crawl_task_tokens`는 저장형 인증서로 작업을 위임할 때만 쓰는 짧은 수명 capability다.
 - 이 셋을 분리해야 만료, 재사용 방지, 감사 추적을 명확히 할 수 있다.
 

@@ -12,8 +12,13 @@ export type GatewayClientOptions = {
 export type Challenge = {
   challengeId: string;
   mode: ChallengeMode;
+  syncMode?: SyncMode;
+  facilityCode?: string;
+  businessNo?: string;
   nonce: string;
   payload: string;
+  startMonth?: string;
+  endMonth?: string;
   expiresAt: string;
 };
 
@@ -27,7 +32,13 @@ export type ProofBundle = Omit<AgentProofBundle, "password">;
 
 export type CreateChallengeInput = {
   mode: ChallengeMode;
+  syncMode?: SyncMode;
+  origin?: string;
+  businessNo?: string;
   facilityCode?: string;
+  startMonth?: string;
+  endMonth?: string;
+  signCertSha256Hex?: string;
   ttlSeconds?: number;
 };
 
@@ -69,6 +80,71 @@ export type ExecuteEphemeralExecutionInput = {
   mode?: SyncMode;
 };
 
+export type LocalExecutionSnapshot = {
+  collectedAt: string;
+  facility: {
+    code: string;
+    name: string;
+    businessNo: string;
+    contractNo: string;
+    address: string;
+    installedKw: number;
+    recStartDate: string;
+    confirmIssued: string;
+  };
+  generation: Array<{
+    month: string;
+    generationKwh: number;
+    selfConsumptionKwh?: number | null;
+    supplyKwh: number;
+    applicationDeadline?: string | null;
+  }>;
+  rates: Array<{
+    month: string;
+    selfRate?: number | null;
+    nationalAverage?: number | null;
+    nearbyAverage?: number | null;
+    nearbyHighest?: number | null;
+    published: boolean;
+    sourceControlFlag?: string | null;
+  }>;
+  rec: Array<{
+    month: string;
+    applicationNo: string;
+    supplyKwh: number;
+    recQuantity: number;
+    feeKrw: number;
+    issuedDate: string;
+    expiryDate: string;
+    virtualAccount?: string | null;
+    bankName?: string | null;
+    status?: string | null;
+  }>;
+  documents: Array<{
+    attachmentCode: string;
+    fileClass: string;
+    fileSecName: string;
+    fileName: string;
+    required: boolean;
+    category: string;
+    sourcePath: string;
+    sourceSha256?: string | null;
+    outputSha256?: string | null;
+    contentBase64?: string | null;
+    contentType?: string | null;
+  }>;
+};
+
+export type IngestLocalExecutionResultInput = {
+  challengeId: string;
+  challengePayload: string;
+  challengeSignatureBase64: string;
+  resultSignatureBase64: string;
+  signCertDerBase64: string;
+  snapshot: LocalExecutionSnapshot;
+  mode?: SyncMode;
+};
+
 export type RegisterStoredCertificateInput = {
   challengeId: string;
   challengePayload: string;
@@ -89,7 +165,7 @@ export class GatewayClient {
 
   async createChallenge(organizationId: string, input: CreateChallengeInput): Promise<Challenge> {
     return this.post<Challenge>(
-      `/api/v1/organizations/${organizationId}/cert-gateway/challenges`,
+      `/api/v1/organizations/${pathSegment(organizationId)}/cert-gateway/challenges`,
       input,
     );
   }
@@ -99,7 +175,17 @@ export class GatewayClient {
     input: ExecuteEphemeralExecutionInput,
   ): Promise<SyncRun> {
     return this.post<SyncRun>(
-      `/api/v1/organizations/${organizationId}/cert-gateway/ephemeral-executions`,
+      `/api/v1/organizations/${pathSegment(organizationId)}/cert-gateway/ephemeral-executions`,
+      input,
+    );
+  }
+
+  async ingestLocalExecutionResult(
+    organizationId: string,
+    input: IngestLocalExecutionResultInput,
+  ): Promise<SyncRun> {
+    return this.post<SyncRun>(
+      `/api/v1/organizations/${pathSegment(organizationId)}/cert-gateway/local-execution-results`,
       input,
     );
   }
@@ -108,11 +194,11 @@ export class GatewayClient {
     organizationId: string,
     input: RegisterStoredCertificateInput,
   ): Promise<StoredCertificate> {
-    return this.post<StoredCertificate>(`/api/v1/organizations/${organizationId}/certificates`, input);
+    return this.post<StoredCertificate>(`/api/v1/organizations/${pathSegment(organizationId)}/certificates`, input);
   }
 
   async listStoredCertificates(organizationId: string): Promise<StoredCertificate[]> {
-    return this.get<StoredCertificate[]>(`/api/v1/organizations/${organizationId}/certificates`);
+    return this.get<StoredCertificate[]>(`/api/v1/organizations/${pathSegment(organizationId)}/certificates`);
   }
 
   async issueCrawlTaskToken(
@@ -121,13 +207,13 @@ export class GatewayClient {
     input: IssueCrawlTaskTokenInput = {},
   ): Promise<CrawlTaskToken> {
     return this.post<CrawlTaskToken>(
-      `/api/v1/organizations/${organizationId}/certificates/${certificateId}/crawl-tokens`,
+      `/api/v1/organizations/${pathSegment(organizationId)}/certificates/${pathSegment(certificateId)}/crawl-tokens`,
       input,
     );
   }
 
   async startCrawl(organizationId: string, crawlTaskToken: string): Promise<SyncRun> {
-    const response = await fetch(this.url(`/api/v1/organizations/${organizationId}/crawls`), {
+    const response = await fetch(this.url(`/api/v1/organizations/${pathSegment(organizationId)}/crawls`), {
       method: "POST",
       headers: {
         authorization: `Bearer ${crawlTaskToken}`,
@@ -181,6 +267,10 @@ export class GatewayClient {
     }
     return headers;
   }
+}
+
+function pathSegment(value: string): string {
+  return encodeURIComponent(value);
 }
 
 function resolveSecureGatewayUrl(baseUrl: string, path: string): URL {
