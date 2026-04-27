@@ -1452,7 +1452,14 @@ impl AppService {
         organization_id: &str,
         facility_code: &str,
     ) -> Result<()> {
-        match self.db.get_plant_by_facility_code(facility_code).await {
+        match self
+            .db
+            .get_plant_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
             Ok(_) => {
                 self.authorize_stored_certificate_use_for_sync(
                     user_id,
