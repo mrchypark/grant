@@ -2371,15 +2371,17 @@ fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
 
 fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocument) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(organization_id.as_bytes());
-    hasher.update(b":");
-    hasher.update(plant_code.as_bytes());
-    hasher.update(b":");
-    hasher.update(doc.attachment_code.as_bytes());
-    hasher.update(b":");
-    hasher.update(doc.file_name.as_bytes());
+    update_hash_component(&mut hasher, organization_id);
+    update_hash_component(&mut hasher, plant_code);
+    update_hash_component(&mut hasher, &doc.attachment_code);
+    update_hash_component(&mut hasher, &doc.file_name);
     let digest = hasher.finalize();
     hex::encode(&digest[..16])
+}
+
+fn update_hash_component(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn document_content_type(doc: &BridgeDocument) -> Result<&str> {
@@ -3018,7 +3020,7 @@ mod tests {
         decode_challenge_payload, decode_content_base64_to_tempfile, document_content_type,
         document_source_path, estimated_base64_decoded_len, normalize_optional_text,
         require_local_execution_document_contents, select_organization_business_no,
-        validate_month_format,
+        stable_document_id, validate_month_format,
     };
     use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
     use chrono::{DateTime, FixedOffset};
@@ -3180,6 +3182,19 @@ mod tests {
 
         require_local_execution_document_contents(&mut snapshot).expect("bounded document");
         assert_eq!(snapshot.documents[0].source_path, "");
+    }
+
+    #[test]
+    fn stable_document_id_disambiguates_colon_delimited_components() {
+        let mut first = fixture_document("permit.pdf", "UERGLUNPTlRFTlQ=".to_owned());
+        first.attachment_code = "C".to_owned();
+        let mut second = first.clone();
+        second.attachment_code = "B:C".to_owned();
+
+        assert_ne!(
+            stable_document_id("org-1", "A:B", &first),
+            stable_document_id("org-1", "A", &second)
+        );
     }
 
     #[test]

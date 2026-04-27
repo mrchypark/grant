@@ -284,17 +284,19 @@ fn stable_document_id(
     file_name: &str,
 ) -> String {
     let mut input = Vec::new();
-    input.extend_from_slice(organization_id.as_bytes());
-    input.extend_from_slice(b":");
-    input.extend_from_slice(plant_code.as_bytes());
-    input.extend_from_slice(b":");
-    input.extend_from_slice(attachment_code.as_bytes());
-    input.extend_from_slice(b":");
-    input.extend_from_slice(file_name.as_bytes());
+    push_hash_component(&mut input, organization_id);
+    push_hash_component(&mut input, plant_code);
+    push_hash_component(&mut input, attachment_code);
+    push_hash_component(&mut input, file_name);
     sha256(&input)[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn push_hash_component(input: &mut Vec<u8>, value: &str) {
+    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    input.extend_from_slice(value.as_bytes());
 }
 
 fn signed_proof_bundle_without_km(challenge_payload: &str) -> (Value, String) {

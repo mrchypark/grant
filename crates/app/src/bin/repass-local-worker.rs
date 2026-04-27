@@ -406,8 +406,16 @@ fn local_result_body(
         result_signature_base64,
         sign_cert_der_base64: req.bundle.sign_cert_der_base64.clone(),
         snapshot,
-        mode: req.mode.clone(),
+        mode: local_result_mode(req),
     }
+}
+
+fn local_result_mode(req: &LocalEphemeralRequest) -> Option<String> {
+    req.mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
 }
 
 fn sign_local_result(
@@ -415,12 +423,7 @@ fn sign_local_result(
     bundle: &CertificateBundle,
     snapshot: &BridgeSnapshot,
 ) -> Result<String> {
-    let mode = req
-        .mode
-        .as_deref()
-        .unwrap_or("delta")
-        .trim()
-        .to_ascii_lowercase();
+    let mode = local_result_mode(req).unwrap_or_else(|| "delta".to_owned());
     let payload = local_execution_result_signature_payload(
         &req.challenge_id,
         &req.challenge_payload,
@@ -500,6 +503,18 @@ mod tests {
                 "local result body leaked {forbidden}: {json}"
             );
         }
+    }
+
+    #[test]
+    fn local_result_body_omits_blank_mode_and_normalizes_nonblank_mode() {
+        let mut req = fixture_request();
+        req.mode = Some(" \t\n ".to_owned());
+        let blank_body = local_result_body(&req, fixture_snapshot(), "RESULT_SIGNATURE".to_owned());
+        assert_eq!(blank_body.mode, None);
+
+        req.mode = Some(" FULL ".to_owned());
+        let full_body = local_result_body(&req, fixture_snapshot(), "RESULT_SIGNATURE".to_owned());
+        assert_eq!(full_body.mode.as_deref(), Some("full"));
     }
 
     #[test]
