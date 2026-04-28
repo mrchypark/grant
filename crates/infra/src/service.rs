@@ -617,11 +617,10 @@ impl AppService {
             .transpose()?
         {
             if requested_by_user_id != challenge.created_by_user_id {
-                anyhow::bail!(
+                return Err(forbidden_error(format!(
                     "forbidden: challenge creator {} does not match requester {}",
-                    challenge.created_by_user_id,
-                    requested_by_user_id
-                );
+                    challenge.created_by_user_id, requested_by_user_id
+                )));
             }
         }
         self.db
@@ -689,11 +688,10 @@ impl AppService {
             .await?;
         if let Some(requested_by_user_id) = requested_by_user_id {
             if requested_by_user_id != challenge.created_by_user_id {
-                anyhow::bail!(
+                return Err(forbidden_error(format!(
                     "forbidden: challenge creator {} does not match requester {}",
-                    challenge.created_by_user_id,
-                    requested_by_user_id
-                );
+                    challenge.created_by_user_id, requested_by_user_id
+                )));
             }
         }
         let requested_facility_code = normalize_optional_text(input.facility_code);
@@ -702,19 +700,18 @@ impl AppService {
             requested_facility_code.as_deref(),
         ) {
             (None, Some(requested_facility_code)) => {
-                anyhow::bail!(
+                return Err(bad_request_error(format!(
                     "challenge facilityCode mismatch: signed <none>, requested {}",
                     requested_facility_code
-                );
+                )));
             }
             (Some(challenge_facility_code), Some(requested_facility_code))
                 if challenge_facility_code != requested_facility_code =>
             {
-                anyhow::bail!(
+                return Err(bad_request_error(format!(
                     "challenge facilityCode mismatch: signed {}, requested {}",
-                    challenge_facility_code,
-                    requested_facility_code
-                );
+                    challenge_facility_code, requested_facility_code
+                )));
             }
             (Some(challenge_facility_code), _) => Some(challenge_facility_code.to_owned()),
             (None, None) => None,
@@ -1025,7 +1022,7 @@ impl AppService {
             )));
         }
         if issued.used_at.is_some() {
-            anyhow::bail!("crawl task token already used");
+            return Err(bad_request_error("crawl task token already used"));
         }
         let organization = self.db.get_organization(&organization_id).await?;
         if organization.inactivated_at.is_some() {

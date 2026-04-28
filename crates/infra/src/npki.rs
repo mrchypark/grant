@@ -19,7 +19,11 @@ use openssl::{
 };
 use sha1::{Digest, Sha1};
 use simple_asn1::{ASN1Block, ASN1Class, BigUint, OID, from_der};
-use std::{path::Path, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 const OID_NPKI_SEED_CBC: &[u64] = &[1, 2, 410, 200004, 1, 4];
 const OID_NPKI_SEED_CBC_WITH_SHA1: &[u64] = &[1, 2, 410, 200004, 1, 15];
@@ -197,19 +201,10 @@ pub fn validate_certificate_bundle(
     allow_untrusted: bool,
     certificate_trust_bundle_path: Option<&Path>,
 ) -> Result<()> {
-    let explicit_trust_bundle = certificate_trust_bundle_path
-        .map(|path| {
-            std::fs::read(path)
-                .with_context(|| format!("read X509 trust bundle {}", path.display()))
-                .map(|pem| (path, pem))
-        })
-        .transpose()?;
-    validate_certificate_bundle_with_trust_bundle_pem(
+    validate_certificate_bundle_with_trust_bundle_path(
         bundle,
         allow_untrusted,
-        explicit_trust_bundle
-            .as_ref()
-            .map(|(path, pem)| (*path, pem.as_slice())),
+        certificate_trust_bundle_path,
     )
 }
 
@@ -218,33 +213,23 @@ pub async fn validate_certificate_bundle_async(
     allow_untrusted: bool,
     certificate_trust_bundle_path: Option<&Path>,
 ) -> Result<()> {
-    let explicit_trust_bundle = match certificate_trust_bundle_path {
-        Some(path) => Some((
-            path.to_path_buf(),
-            tokio::fs::read(path)
-                .await
-                .with_context(|| format!("read X509 trust bundle {}", path.display()))?,
-        )),
-        None => None,
-    };
     let bundle = bundle.clone();
+    let certificate_trust_bundle_path = certificate_trust_bundle_path.map(Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
-        validate_certificate_bundle_with_trust_bundle_pem(
+        validate_certificate_bundle_with_trust_bundle_path(
             &bundle,
             allow_untrusted,
-            explicit_trust_bundle
-                .as_ref()
-                .map(|(path, pem)| (path.as_path(), pem.as_slice())),
+            certificate_trust_bundle_path.as_deref(),
         )
     })
     .await
     .context("join certificate validation task")?
 }
 
-fn validate_certificate_bundle_with_trust_bundle_pem(
+fn validate_certificate_bundle_with_trust_bundle_path(
     bundle: &CertificateBundle,
     allow_untrusted: bool,
-    certificate_trust_bundle: Option<(&Path, &[u8])>,
+    certificate_trust_bundle_path: Option<&Path>,
 ) -> Result<()> {
     validate_key_pair(
         &bundle.sign_cert_der,
@@ -265,11 +250,11 @@ fn validate_certificate_bundle_with_trust_bundle_pem(
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
     }
     if !allow_untrusted {
-        let explicit_store = certificate_trust_bundle
-            .map(|(path, pem)| trust_store_from_ca_bundle_pem(path, pem))
+        let explicit_store = certificate_trust_bundle_path
+            .map(configured_trust_store)
             .transpose()?;
         let store = match explicit_store.as_ref() {
-            Some(store) => store.as_ref(),
+            Some(store) => store.as_ref().as_ref(),
             None => default_trust_store()?,
         };
         validate_certificate_trust_with_store(
@@ -459,6 +444,33 @@ fn trust_store_from_ca_bundle_pem(
         })?;
     }
     Ok(store_builder.build())
+}
+
+fn configured_trust_store(path: &Path) -> Result<Arc<openssl::x509::store::X509Store>> {
+    static TRUST_STORES: OnceLock<Mutex<HashMap<PathBuf, Arc<openssl::x509::store::X509Store>>>> =
+        OnceLock::new();
+
+    let cache_key = path
+        .canonicalize()
+        .with_context(|| format!("resolve X509 trust bundle {}", path.display()))?;
+    let cache = TRUST_STORES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(store) = cache
+        .lock()
+        .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(store);
+    }
+
+    let pem = std::fs::read(&cache_key)
+        .with_context(|| format!("read X509 trust bundle {}", cache_key.display()))?;
+    let store = Arc::new(trust_store_from_ca_bundle_pem(&cache_key, &pem)?);
+    cache
+        .lock()
+        .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
+        .insert(cache_key, store.clone());
+    Ok(store)
 }
 
 fn validate_certificate_trust_with_store(
