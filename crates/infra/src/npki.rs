@@ -23,6 +23,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
+    time::SystemTime,
 };
 
 const OID_NPKI_SEED_CBC: &[u64] = &[1, 2, 410, 200004, 1, 4];
@@ -446,30 +447,51 @@ fn trust_store_from_ca_bundle_pem(
     Ok(store_builder.build())
 }
 
-fn configured_trust_store(path: &Path) -> Result<Arc<openssl::x509::store::X509Store>> {
-    static TRUST_STORES: OnceLock<Mutex<HashMap<PathBuf, Arc<openssl::x509::store::X509Store>>>> =
-        OnceLock::new();
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrustStoreFileState {
+    len: u64,
+    modified: Option<SystemTime>,
+}
 
-    let cache_key = path
-        .canonicalize()
-        .with_context(|| format!("resolve X509 trust bundle {}", path.display()))?;
+struct CachedTrustStore {
+    file_state: TrustStoreFileState,
+    store: Arc<openssl::x509::store::X509Store>,
+}
+
+fn configured_trust_store(path: &Path) -> Result<Arc<openssl::x509::store::X509Store>> {
+    static TRUST_STORES: OnceLock<Mutex<HashMap<PathBuf, CachedTrustStore>>> = OnceLock::new();
+
+    let cache_key = path.to_path_buf();
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("stat X509 trust bundle {}", path.display()))?;
+    let file_state = TrustStoreFileState {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    };
     let cache = TRUST_STORES.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(store) = cache
         .lock()
         .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
         .get(&cache_key)
-        .cloned()
+        .filter(|cached| cached.file_state == file_state)
+        .map(|cached| cached.store.clone())
     {
         return Ok(store);
     }
 
-    let pem = std::fs::read(&cache_key)
-        .with_context(|| format!("read X509 trust bundle {}", cache_key.display()))?;
-    let store = Arc::new(trust_store_from_ca_bundle_pem(&cache_key, &pem)?);
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read X509 trust bundle {}", path.display()))?;
+    let store = Arc::new(trust_store_from_ca_bundle_pem(path, &pem)?);
     cache
         .lock()
         .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
-        .insert(cache_key, store.clone());
+        .insert(
+            cache_key,
+            CachedTrustStore {
+                file_state,
+                store: store.clone(),
+            },
+        );
     Ok(store)
 }
 
