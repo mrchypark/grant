@@ -30,6 +30,36 @@ impl From<&mut Row<'_>> for ColumnRow {
 }
 
 #[derive(Debug)]
+struct ColumnTypeRow {
+    name: String,
+    type_name: String,
+}
+
+impl From<&mut Row<'_>> for ColumnTypeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            type_name: row.get("type"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TypeOfValueRow {
+    value_type: String,
+    value: String,
+}
+
+impl From<&mut Row<'_>> for TypeOfValueRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value_type: row.get("value_type"),
+            value: row.get("value"),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct IndexRow {
     name: String,
 }
@@ -409,6 +439,20 @@ async fn ensure_schema_creates_authorization_tables() {
         ]
     );
 
+    let rate_data_columns: Vec<ColumnTypeRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name, type FROM pragma_table_info('rate_data') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("rate_data columns");
+    let rate_value_column = rate_data_columns
+        .iter()
+        .find(|column| column.name == "value")
+        .expect("rate_data.value column");
+    assert_eq!(rate_value_column.type_name, "TEXT");
+
     let organization_columns: Vec<ColumnRow> = runtime
         .query_rows(
             ReadConsistency::Local,
@@ -644,4 +688,74 @@ async fn ensure_schema_creates_authorization_tables() {
         has_unique_slug_index,
         "clients.slug must have a unique index"
     );
+}
+
+#[tokio::test]
+async fn ensure_schema_migrates_rate_data_value_to_text() {
+    let (runtime, _dir) = test_runtime().await;
+    runtime
+        .batch(
+            r#"
+            CREATE TABLE rate_data (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                metric_type TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                currency TEXT,
+                quality TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                recorded_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
+            );
+            INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+            ) VALUES (
+                'rate-old', 'asset-old', 'source-old', '2026-03-01', '2026-04-01',
+                'self_rate', 109.25, 'KRW/kWh', 'KRW', 'published', '{}',
+                '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'
+            );
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed old rate_data schema");
+    let db = Database::new(
+        runtime.clone(),
+        format!("bootstrap-{}", Uuid::new_v4().simple()),
+        "Bootstrap User".to_owned(),
+    );
+
+    db.ensure_schema_only().await.expect("ensure schema only");
+
+    let rate_data_columns: Vec<ColumnTypeRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name, type FROM pragma_table_info('rate_data') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("rate_data columns");
+    let rate_value_column = rate_data_columns
+        .iter()
+        .find(|column| column.name == "value")
+        .expect("rate_data.value column");
+    assert_eq!(rate_value_column.type_name, "TEXT");
+
+    let rows: Vec<TypeOfValueRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT typeof(value) AS value_type, value FROM rate_data WHERE id = 'rate-old'",
+            vec![],
+        )
+        .await
+        .expect("migrated rate value");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value_type, "text");
+    assert_eq!(rows[0].value, "109.25");
 }

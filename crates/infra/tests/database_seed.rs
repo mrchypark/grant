@@ -1508,6 +1508,16 @@ async fn kr_rps_full_sync_replaces_canonical_rate_data() {
         .expect("remaining rate metrics");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].value, "self_rate");
+
+    let stored_value: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT typeof(value) || ':' || value AS value FROM rate_data WHERE metric_type = 'self_rate'",
+            vec![],
+        )
+        .await
+        .expect("stored rate value type");
+    assert_eq!(stored_value[0].value, "text:111");
 }
 
 #[tokio::test]

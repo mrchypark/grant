@@ -210,6 +210,21 @@ impl From<&mut Row<'_>> for TextValueRow {
 }
 
 #[derive(Debug, Clone)]
+struct TableInfoColumnRow {
+    name: String,
+    type_name: String,
+}
+
+impl From<&mut Row<'_>> for TableInfoColumnRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            type_name: row.get("type"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct MetricPeriodRow {
     metric_type: String,
     period_start: String,
@@ -1030,7 +1045,7 @@ impl Database {
                     period_start TEXT NOT NULL,
                     period_end TEXT NOT NULL,
                     metric_type TEXT NOT NULL,
-                    value REAL NOT NULL,
+                    value TEXT NOT NULL,
                     unit TEXT NOT NULL,
                     currency TEXT,
                     quality TEXT NOT NULL,
@@ -1275,6 +1290,65 @@ impl Database {
             )
             .await
             .context("create sync_runs plant index")?;
+        self.ensure_rate_data_value_text().await?;
+        Ok(())
+    }
+
+    async fn ensure_rate_data_value_text(&self) -> Result<()> {
+        let columns: Vec<TableInfoColumnRow> = self
+            .runtime
+            .query_rows(
+                ReadConsistency::Local,
+                "SELECT name, type FROM pragma_table_info('rate_data')",
+                params![],
+            )
+            .await
+            .context("inspect rate_data schema")?;
+        let Some(value_column) = columns.iter().find(|column| column.name == "value") else {
+            return Ok(());
+        };
+        if value_column.type_name.eq_ignore_ascii_case("TEXT") {
+            return Ok(());
+        }
+
+        self.runtime
+            .batch(
+                r#"
+                DROP INDEX IF EXISTS idx_rate_data_asset_source_metric_period;
+                ALTER TABLE rate_data RENAME TO rate_data_old_real_value;
+                CREATE TABLE rate_data (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    metric_type TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    unit TEXT NOT NULL,
+                    currency TEXT,
+                    quality TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    recorded_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
+                );
+                INSERT INTO rate_data (
+                    id, asset_id, source_id, period_start, period_end, metric_type, value,
+                    unit, currency, quality, metadata_json, recorded_at, updated_at
+                )
+                SELECT
+                    id, asset_id, source_id, period_start, period_end, metric_type,
+                    CAST(value AS TEXT), unit, currency, quality, metadata_json,
+                    recorded_at, updated_at
+                FROM rate_data_old_real_value;
+                DROP TABLE rate_data_old_real_value;
+                CREATE INDEX IF NOT EXISTS idx_rate_data_asset_source_metric_period
+                    ON rate_data (asset_id, source_id, metric_type, period_start, period_end);
+                "#
+                .to_owned(),
+            )
+            .await
+            .context("migrate rate_data.value to text")?;
         Ok(())
     }
 

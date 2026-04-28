@@ -639,7 +639,7 @@
 - `assets`는 현재 상태의 물리 설비 마스터 정보다.
 - `asset_profiles`/`registry_projects`는 외부 시스템별 등록 상태다.
 - `sync_runs`는 수집 실행 이력이다.
-- `generation_data`, `rate_data`, `energy_certificates`는 글로벌 canonical 데이터다. `rate_data.value`는 통화/요율 계산의 부동소수점 반올림을 피하기 위해 decimal 문자열로 저장한다.
+- `generation_data`, `rate_data`, `energy_certificates`는 글로벌 canonical 데이터다. `rate_data.value`는 통화/요율 계산의 부동소수점 반올림을 피하기 위해 `TEXT` 타입의 decimal 문자열로 저장하며, 기존 `REAL` 컬럼은 schema ensure 단계에서 `TEXT`로 보정한다.
 - `generation_data`는 `asset_id + source_id + metric_type + period` 기준으로 유일하다. 국가별 adapter가 여러 발전량 metric을 제공하면 같은 source/period에 여러 row로 저장한다.
 - `generation_records`, `rate_records`, `rec_records`, `documents`는 한국 RPS 호환 조회용 materialized state다. 이 테이블의 `plant_id`는 모두 내부 `plants.id`를 가리키며 `facility_code`를 대체 key로 쓰지 않는다.
 - full sync는 한국 RPS 호환 테이블뿐 아니라 해당 `data_source`/`registry_project` 범위의 `generation_data`, `rate_data`, `energy_certificates`도 replace한다.
