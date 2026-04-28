@@ -693,38 +693,7 @@ async fn ensure_schema_creates_authorization_tables() {
 #[tokio::test]
 async fn ensure_schema_migrates_rate_data_value_to_text() {
     let (runtime, _dir) = test_runtime().await;
-    runtime
-        .batch(
-            r#"
-            CREATE TABLE rate_data (
-                id TEXT PRIMARY KEY,
-                asset_id TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                period_start TEXT NOT NULL,
-                period_end TEXT NOT NULL,
-                metric_type TEXT NOT NULL,
-                value REAL NOT NULL,
-                unit TEXT NOT NULL,
-                currency TEXT,
-                quality TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                recorded_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
-            );
-            INSERT INTO rate_data (
-                id, asset_id, source_id, period_start, period_end, metric_type, value,
-                unit, currency, quality, metadata_json, recorded_at, updated_at
-            ) VALUES (
-                'rate-old', 'asset-old', 'source-old', '2026-03-01', '2026-04-01',
-                'self_rate', 109.25, 'KRW/kWh', 'KRW', 'published', '{}',
-                '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'
-            );
-            "#
-            .to_owned(),
-        )
-        .await
-        .expect("seed old rate_data schema");
+    seed_rate_data_real_value_schema(&runtime).await;
     let db = Database::new(
         runtime.clone(),
         format!("bootstrap-{}", Uuid::new_v4().simple()),
@@ -758,4 +727,39 @@ async fn ensure_schema_migrates_rate_data_value_to_text() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].value_type, "text");
     assert_eq!(rows[0].value, "109.25");
+}
+
+async fn seed_rate_data_real_value_schema(runtime: &HiqliteRuntime) {
+    runtime
+        .batch(
+            r#"
+            CREATE TABLE rate_data (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                metric_type TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                currency TEXT,
+                quality TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                recorded_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
+            );
+            INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+            ) VALUES (
+                'rate-old', 'asset-old', 'source-old', '2026-03-01', '2026-04-01',
+                'self_rate', 109.25, 'KRW/kWh', 'KRW', 'published', '{}',
+                '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'
+            );
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed old rate_data schema");
 }

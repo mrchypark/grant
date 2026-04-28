@@ -838,14 +838,13 @@ impl AppService {
         {
             Ok(run) => Ok(run),
             Err(err) => {
-                let message = format!("{err:#}");
-                let duration_ms = self
-                    .record_failed_sync_run(
+                let (message, duration_ms) = self
+                    .record_failed_sync_error(
                         &run_id,
                         started,
                         Some(facility_code.as_str()),
                         None,
-                        &message,
+                        &err,
                     )
                     .await;
                 error!(
@@ -1193,6 +1192,21 @@ impl AppService {
         duration_ms
     }
 
+    async fn record_failed_sync_error(
+        &self,
+        run_id: &str,
+        started: std::time::Instant,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        err: &anyhow::Error,
+    ) -> (String, i64) {
+        let message = format!("{err:#}");
+        let duration_ms = self
+            .record_failed_sync_run(run_id, started, facility_code, asset_id, &message)
+            .await;
+        (message, duration_ms)
+    }
+
     async fn get_existing_plant_by_facility_code_strong(
         &self,
         facility_code: &str,
@@ -1335,14 +1349,13 @@ impl AppService {
                 {
                     Ok(run) => Ok(run),
                     Err(err) => {
-                        let message = format!("{err:#}");
-                        let duration_ms = self
-                            .record_failed_sync_run(
+                        let (message, duration_ms) = self
+                            .record_failed_sync_error(
                                 &run_id,
                                 started,
                                 facility_code.as_deref(),
                                 None,
-                                &message,
+                                &err,
                             )
                             .await;
                         error!(
@@ -1358,14 +1371,13 @@ impl AppService {
                 }
             }
             Err(err) => {
-                let message = format!("{err:#}");
-                let duration_ms = self
-                    .record_failed_sync_run(
+                let (message, duration_ms) = self
+                    .record_failed_sync_error(
                         &run_id,
                         started,
                         facility_code.as_deref(),
                         None,
-                        &message,
+                        &err,
                     )
                     .await;
                 error!(
