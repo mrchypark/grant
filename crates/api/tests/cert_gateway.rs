@@ -933,6 +933,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "bootstrap-user",
             json!({
                 "mode": "ephemeral",
+                "syncMode": "full",
                 "origin": "http://127.0.0.1:4173",
                 "facilityCode": "FAC-DOC"
             }),
@@ -983,6 +984,70 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert!(
         find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT").is_some(),
         "local execution document artifact should be persisted for {local_doc_plant_id}"
+    );
+
+    let artifact_path = find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT")
+        .expect("persisted local execution document path");
+    std::fs::remove_file(&artifact_path).expect("remove persisted artifact");
+    grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-DOC").await;
+
+    let repair_challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "mode": "ephemeral",
+                "syncMode": "full",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-DOC"
+            }),
+        ))
+        .await
+        .expect("repair document challenge");
+    assert_eq!(repair_challenge.status(), StatusCode::CREATED);
+    let repair_challenge_json = json_body(repair_challenge).await;
+    let repair_payload = repair_challenge_json["payload"]
+        .as_str()
+        .expect("repair document challenge payload");
+    let repair_material = proof_material();
+    let (repair_bundle, repair_signature) =
+        signed_proof_bundle_from_material(&repair_material, repair_payload);
+    let repair_snapshot = local_execution_snapshot_with_document("FAC-DOC");
+    let repair_result_signature = sign_local_execution_result(
+        &repair_material.sign_key,
+        &repair_challenge_json["challengeId"],
+        &repair_challenge_json["payload"],
+        &Value::String("full".to_owned()),
+        &repair_snapshot,
+    );
+    let repair_result = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": repair_challenge_json["challengeId"],
+                "challengePayload": repair_challenge_json["payload"],
+                "challengeSignatureBase64": repair_signature,
+                "resultSignatureBase64": repair_result_signature,
+                "signCertDerBase64": repair_bundle["signCertDerBase64"],
+                "mode": "full",
+                "snapshot": repair_snapshot
+            }),
+        ))
+        .await
+        .expect("repair document result response");
+    let repair_status = repair_result.status();
+    let repair_body = json_body(repair_result).await;
+    assert_eq!(repair_status, StatusCode::ACCEPTED, "body = {repair_body}");
+    assert!(
+        find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT").is_some(),
+        "full sync should re-upload a document when the DB row exists but the artifact is missing"
     );
 }
 
@@ -1165,7 +1230,7 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
         facility_code: "FAC-CROSS".to_owned(),
         name: "Original Owner Plant".to_owned(),
         owner_organization_id: "owner-org".to_owned(),
-        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        created_by_organization_id: None,
         contract_no: "CONTRACT-ORIGINAL".to_owned(),
         address: "Busan".to_owned(),
         installed_kw: 80.0,
@@ -1242,10 +1307,7 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
         .await
         .expect("plant after authorized non-owner sync");
     assert_eq!(plant.owner_organization_id, "owner-org");
-    assert_eq!(
-        plant.created_by_organization_id.as_deref(),
-        Some("bootstrap-user")
-    );
+    assert_eq!(plant.created_by_organization_id, None);
     assert_eq!(plant.name, "Plant FAC-CROSS");
     assert_eq!(plant.contract_no, "CONTRACT-LOCAL");
 }

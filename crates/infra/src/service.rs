@@ -2688,10 +2688,10 @@ impl AppService {
                 .as_ref()
                 .map(|plant| plant.owner_organization_id.clone())
                 .unwrap_or_else(|| organization_id.to_owned()),
-            created_by_organization_id: existing_plant
-                .as_ref()
-                .and_then(|plant| plant.created_by_organization_id.clone())
-                .or_else(|| Some(organization_id.to_owned())),
+            created_by_organization_id: match existing_plant.as_ref() {
+                Some(plant) => plant.created_by_organization_id.clone(),
+                None => Some(organization_id.to_owned()),
+            },
             contract_no: snapshot.facility.contract_no.clone(),
             address: snapshot.facility.address.clone(),
             installed_kw: snapshot.facility.installed_kw,
@@ -2732,13 +2732,9 @@ impl AppService {
                 document_count = snapshot.documents.len(),
                 "persisting documents to object storage"
             );
+            let documents = std::mem::take(&mut snapshot.documents);
             let persisted_docs = self
-                .persist_documents(
-                    organization_id,
-                    &plant.id,
-                    &snapshot.documents,
-                    &existing_object_keys,
-                )
+                .persist_documents(organization_id, &plant.id, documents, &existing_object_keys)
                 .await?;
             info!(
                 plant_code = plant.facility_code,
@@ -2932,10 +2928,11 @@ impl AppService {
         &self,
         organization_id: &str,
         plant_code: &str,
-        docs: &[BridgeDocument],
+        docs: Vec<BridgeDocument>,
         existing_object_keys: &BTreeSet<String>,
     ) -> Result<Vec<PersistedDocument>> {
-        let results = stream::iter(docs.iter().cloned())
+        let doc_count = docs.len();
+        let results = stream::iter(docs.into_iter())
             .map(|doc| {
                 let organization_id = organization_id.to_owned();
                 let plant_code = plant_code.to_owned();
@@ -2952,7 +2949,7 @@ impl AppService {
             .buffered(DOCUMENT_UPLOAD_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
-        let mut persisted = Vec::with_capacity(docs.len());
+        let mut persisted = Vec::with_capacity(doc_count);
         let mut first_error = None;
         for result in results {
             match result {
@@ -3006,7 +3003,12 @@ impl AppService {
             object_key = object_key.as_str(),
             "uploading document"
         );
-        if !existing_object_keys.contains(object_key.as_str()) {
+        let object_exists = if existing_object_keys.contains(object_key.as_str()) {
+            self.artifacts.object_exists(&object_key).await?
+        } else {
+            false
+        };
+        if !object_exists {
             if let Err(err) = self
                 .persist_document(object_key.clone(), &doc, &upload)
                 .await

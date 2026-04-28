@@ -210,6 +210,40 @@ impl ArtifactStore {
         }
     }
 
+    pub async fn object_exists(&self, object_key: &str) -> Result<bool> {
+        validate_object_key(object_key)?;
+        match self {
+            Self::FileSystem { root_dir } => {
+                let path = root_dir.join(object_key);
+                match fs::metadata(&path).await {
+                    Ok(metadata) => Ok(metadata.is_file()),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(err) => Err(err).with_context(|| format!("stat object {}", path.display())),
+                }
+            }
+            Self::S3 { client, bucket } => match client
+                .head_object()
+                .bucket(bucket)
+                .key(object_key)
+                .send()
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(err) => {
+                    let text = err.to_string();
+                    if text.contains("NotFound")
+                        || text.contains("NoSuchKey")
+                        || text.contains("404")
+                    {
+                        Ok(false)
+                    } else {
+                        Err(err).with_context(|| format!("head object {object_key}"))
+                    }
+                }
+            },
+        }
+    }
+
     pub async fn delete_object(&self, object_key: &str) -> Result<()> {
         validate_object_key(object_key)?;
         match self {
