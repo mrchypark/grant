@@ -1,8 +1,9 @@
 use domain::{
     Agreement, AgreementDocument, AgreementDocumentType, AgreementStatus, AgreementType, Client,
     ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant, ClientGrantAction,
-    ClientGrantStatus, ClientType, GenerationRecord, Plant, RateRecord, RecRecord, Role,
-    RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
+    ClientGrantStatus, ClientType, DocumentCategory, GenerationRecord, Plant, RateRecord,
+    RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
+    RoleBindingSubjectType, SyncMode,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{
@@ -1518,6 +1519,109 @@ async fn kr_rps_full_sync_replaces_canonical_rate_data() {
         .await
         .expect("stored rate value type");
     assert_eq!(stored_value[0].value, "text:111");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kr_rps_full_sync_prunes_legacy_facility_code_document_rows() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("conalog-account", Some("2768603291"), "Conalog Account")
+        .await
+        .expect("organization identity");
+    let plant = Plant {
+        id: "plant-doc-canonical".to_owned(),
+        facility_code: "FAC-DOC-CANONICAL".to_owned(),
+        name: "Document Canonical Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-DOC-CANONICAL".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    runtime
+        .execute(
+            "INSERT INTO documents (
+                id, plant_id, category, attachment_code, file_class, file_sec_name,
+                file_name, required, source_sha256, output_sha256, object_key,
+                content_type, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                "legacy-doc".into(),
+                plant.facility_code.clone().into(),
+                "other".into(),
+                "ATT-OLD".into(),
+                "old".into(),
+                "old".into(),
+                "old.pdf".into(),
+                0_i64.into(),
+                "old-source".into(),
+                "old-output".into(),
+                "conalog-account/FAC-DOC-CANONICAL/old.pdf".into(),
+                "application/pdf".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert legacy document row");
+    let docs = vec![PersistedDocument {
+        id: "current-doc".to_owned(),
+        category: DocumentCategory::Other,
+        attachment_code: "ATT-NEW".to_owned(),
+        file_class: "new".to_owned(),
+        file_sec_name: "new".to_owned(),
+        file_name: "new.pdf".to_owned(),
+        required: false,
+        source_sha256: Some("new-source".to_owned()),
+        output_sha256: Some("new-output".to_owned()),
+        object_key: "conalog-account/plant-doc-canonical/new.pdf".to_owned(),
+        content_type: "application/pdf".to_owned(),
+    }];
+    let run = db
+        .start_sync_run("conalog-account", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start sync run");
+    db.materialize_kr_rps_sync(KrRpsSyncMaterialization {
+        run_id: &run.id,
+        plant: &plant,
+        registry_account_organization_id: Some("conalog-account"),
+        business_no: Some("2768603291"),
+        bootstrap_created_plant: None,
+        mode: &SyncMode::Full,
+        generation: &[],
+        rates: &[],
+        rec: &[],
+        documents: &docs,
+        duration_ms: 1,
+    })
+    .await
+    .expect("materialize full sync");
+
+    let legacy_count: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count FROM documents WHERE plant_id = $1",
+            vec![plant.facility_code.into()],
+        )
+        .await
+        .expect("legacy document count");
+    assert_eq!(legacy_count[0].count, 0);
+
+    let current_count: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count FROM documents WHERE plant_id = $1",
+            vec![plant.id.into()],
+        )
+        .await
+        .expect("current document count");
+    assert_eq!(current_count[0].count, 1);
 }
 
 #[tokio::test]

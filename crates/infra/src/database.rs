@@ -4402,6 +4402,15 @@ impl Database {
                 &now,
             )
             .await?;
+            if input.plant.id != input.plant.facility_code {
+                Self::push_delete_not_in_query(
+                    &mut queries,
+                    "documents",
+                    "id",
+                    &input.plant.facility_code,
+                    Vec::new(),
+                );
+            }
         }
         Self::push_update_sync_run_target_query(&mut queries, input.run_id, Some(&input.plant.id));
         Self::push_upsert_sync_run_item_query(

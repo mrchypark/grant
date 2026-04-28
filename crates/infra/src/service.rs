@@ -49,8 +49,15 @@ type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRu
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
 const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
 const STALE_OBJECT_DELETE_CONCURRENCY: usize = 8;
+const DOCUMENT_UPLOAD_CONCURRENCY: usize = 8;
 const MAX_LOCAL_EXECUTION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug)]
+struct DecodedDocumentContent {
+    tempfile: tempfile::NamedTempFile,
+    sha256_hex: String,
+}
 
 struct PreparedDocumentUpload {
     uploaded_sha256: String,
@@ -2712,35 +2719,41 @@ impl AppService {
         } else {
             None
         };
-        let (existing_objects, persisted_docs) =
-            if effective_mode == SyncMode::Full && persist_documents {
-                let existing_objects = self.db.list_document_objects(&plant.id).await?;
-                let existing_object_keys = existing_objects.iter().map(String::as_str).collect();
-                info!(
-                    plant_code = plant.facility_code,
-                    document_count = snapshot.documents.len(),
-                    "persisting documents to object storage"
-                );
-                let persisted_docs = self
-                    .persist_documents(
-                        organization_id,
-                        &plant.id,
-                        &snapshot.documents,
-                        &existing_object_keys,
-                    )
-                    .await?;
-                info!(
-                    plant_code = plant.facility_code,
-                    document_count = persisted_docs.len(),
-                    "writing document rows"
-                );
-                (existing_objects, persisted_docs)
-            } else {
-                if effective_mode == SyncMode::Delta {
-                    info!(plant_code = plant.facility_code, "upserting delta records");
-                }
-                (Vec::new(), Vec::new())
-            };
+        let (existing_objects, persisted_docs) = if effective_mode == SyncMode::Full
+            && persist_documents
+        {
+            let mut existing_objects = self.db.list_document_objects(&plant.id).await?;
+            if plant.id != plant.facility_code {
+                existing_objects.extend(self.db.list_document_objects(&plant.facility_code).await?);
+                existing_objects.sort();
+                existing_objects.dedup();
+            }
+            let existing_object_keys = existing_objects.iter().map(String::as_str).collect();
+            info!(
+                plant_code = plant.facility_code,
+                document_count = snapshot.documents.len(),
+                "persisting documents to object storage"
+            );
+            let persisted_docs = self
+                .persist_documents(
+                    organization_id,
+                    &plant.id,
+                    &snapshot.documents,
+                    &existing_object_keys,
+                )
+                .await?;
+            info!(
+                plant_code = plant.facility_code,
+                document_count = persisted_docs.len(),
+                "writing document rows"
+            );
+            (existing_objects, persisted_docs)
+        } else {
+            if effective_mode == SyncMode::Delta {
+                info!(plant_code = plant.facility_code, "upserting delta records");
+            }
+            (Vec::new(), Vec::new())
+        };
 
         let duration_ms = started.elapsed().as_millis() as i64;
         let bootstrap_created_plant = if existing_plant.is_none() {
@@ -2925,72 +2938,95 @@ impl AppService {
         docs: &[BridgeDocument],
         existing_object_keys: &BTreeSet<&str>,
     ) -> Result<Vec<PersistedDocument>> {
+        let results = stream::iter(docs.iter())
+            .map(|doc| {
+                self.prepare_and_persist_document(
+                    organization_id,
+                    plant_code,
+                    doc,
+                    existing_object_keys,
+                )
+            })
+            .buffered(DOCUMENT_UPLOAD_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
         let mut persisted = Vec::with_capacity(docs.len());
-        for doc in docs {
-            let id = stable_document_id(organization_id, plant_code, doc);
-            let category = resolved_document_category(doc);
-            let upload = match prepare_document_upload(doc).await {
-                Ok(value) => value,
-                Err(err) => {
-                    self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
-                        .await;
-                    return Err(err).with_context(|| format!("prepare document {}", doc.file_name));
-                }
-            };
-            let uploaded_sha256 = &upload.uploaded_sha256;
-            if let Some(expected_sha256) = doc.output_sha256.as_deref() {
-                if expected_sha256 != uploaded_sha256 {
-                    self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
-                        .await;
-                    return Err(bad_request_error(format!(
-                        "document {} outputSha256 mismatch: expected {}, got {}",
-                        doc.file_name, expected_sha256, uploaded_sha256
-                    )));
-                }
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok(doc) => persisted.push(doc),
+                Err(err) if first_error.is_none() => first_error = Some(err),
+                Err(_) => {}
             }
-            let source_sha256 = doc
-                .source_sha256
-                .clone()
-                .unwrap_or_else(|| uploaded_sha256.to_owned());
-            let output_sha256 = doc
-                .output_sha256
-                .clone()
-                .unwrap_or_else(|| uploaded_sha256.to_owned());
-            let object_version = uploaded_sha256.chars().take(16).collect::<String>();
-            let object_key = format!("{organization_id}/{plant_code}/{id}-{object_version}.pdf");
-            info!(
-                plant_code,
-                file_name = doc.file_name.as_str(),
-                object_key = object_key.as_str(),
-                "uploading document"
-            );
-            if !existing_object_keys.contains(object_key.as_str()) {
-                if let Err(err) = self
-                    .persist_document(object_key.clone(), doc, &upload)
-                    .await
-                {
-                    self.delete_unmaterialized_object(&object_key, existing_object_keys)
-                        .await;
-                    self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
-                        .await;
-                    return Err(err);
-                }
-            }
-            persisted.push(PersistedDocument {
-                id,
-                category,
-                attachment_code: doc.attachment_code.clone(),
-                file_class: doc.file_class.clone(),
-                file_sec_name: doc.file_sec_name.clone(),
-                file_name: doc.file_name.clone(),
-                required: doc.required,
-                source_sha256: Some(source_sha256),
-                output_sha256: Some(output_sha256),
-                object_key,
-                content_type: document_content_type(doc)?.to_owned(),
-            });
+        }
+        if let Some(err) = first_error {
+            self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                .await;
+            return Err(err);
         }
         Ok(persisted)
+    }
+
+    async fn prepare_and_persist_document(
+        &self,
+        organization_id: &str,
+        plant_code: &str,
+        doc: &BridgeDocument,
+        existing_object_keys: &BTreeSet<&str>,
+    ) -> Result<PersistedDocument> {
+        let id = stable_document_id(organization_id, plant_code, doc);
+        let category = resolved_document_category(doc);
+        let upload = prepare_document_upload(doc)
+            .await
+            .with_context(|| format!("prepare document {}", doc.file_name))?;
+        let uploaded_sha256 = &upload.uploaded_sha256;
+        if let Some(expected_sha256) = doc.output_sha256.as_deref() {
+            if expected_sha256 != uploaded_sha256 {
+                return Err(bad_request_error(format!(
+                    "document {} outputSha256 mismatch: expected {}, got {}",
+                    doc.file_name, expected_sha256, uploaded_sha256
+                )));
+            }
+        }
+        let source_sha256 = doc
+            .source_sha256
+            .clone()
+            .unwrap_or_else(|| uploaded_sha256.to_owned());
+        let output_sha256 = doc
+            .output_sha256
+            .clone()
+            .unwrap_or_else(|| uploaded_sha256.to_owned());
+        let object_version = uploaded_sha256.chars().take(16).collect::<String>();
+        let object_key = format!("{organization_id}/{plant_code}/{id}-{object_version}.pdf");
+        info!(
+            plant_code,
+            file_name = doc.file_name.as_str(),
+            object_key = object_key.as_str(),
+            "uploading document"
+        );
+        if !existing_object_keys.contains(object_key.as_str()) {
+            if let Err(err) = self
+                .persist_document(object_key.clone(), doc, &upload)
+                .await
+            {
+                self.delete_unmaterialized_object(&object_key, existing_object_keys)
+                    .await;
+                return Err(err);
+            }
+        }
+        Ok(PersistedDocument {
+            id,
+            category,
+            attachment_code: doc.attachment_code.clone(),
+            file_class: doc.file_class.clone(),
+            file_sec_name: doc.file_sec_name.clone(),
+            file_name: doc.file_name.clone(),
+            required: doc.required,
+            source_sha256: Some(source_sha256),
+            output_sha256: Some(output_sha256),
+            object_key,
+            content_type: document_content_type(doc)?.to_owned(),
+        })
     }
 
     async fn cleanup_unmaterialized_documents(
@@ -3044,15 +3080,15 @@ async fn prepare_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumen
         .filter(|value| !value.is_empty())
     {
         let content_base64 = content_base64.to_owned();
-        let decoded =
-            tokio::task::spawn_blocking(move || decode_content_base64_to_tempfile(&content_base64))
-                .await
-                .context("join document decode task")?
-                .with_context(|| format!("decode document {}", doc.file_name))?;
-        let uploaded_sha256 = sha256_file_hex(decoded.path()).await?;
+        let decoded = tokio::task::spawn_blocking(move || {
+            decode_content_base64_to_hashed_tempfile(&content_base64)
+        })
+        .await
+        .context("join document decode task")?
+        .with_context(|| format!("decode document {}", doc.file_name))?;
         return Ok(PreparedDocumentUpload {
-            uploaded_sha256,
-            content: PreparedDocumentContent::DecodedTemp(decoded),
+            uploaded_sha256: decoded.sha256_hex,
+            content: PreparedDocumentContent::DecodedTemp(decoded.tempfile),
         });
     }
 
@@ -3085,23 +3121,42 @@ async fn sha256_file_hex(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn decode_content_base64_to_tempfile(content_base64: &str) -> Result<tempfile::NamedTempFile> {
+fn decode_content_base64_to_hashed_tempfile(
+    content_base64: &str,
+) -> Result<DecodedDocumentContent> {
+    use std::io::Read;
+
     let mut decoder = base64::read::DecoderReader::new(
         content_base64.as_bytes(),
         &base64::engine::general_purpose::STANDARD,
     );
     let mut output = tempfile::NamedTempFile::new().context("create document decode tempfile")?;
-    io::copy(&mut decoder, &mut output)
-        .map_err(|err| {
-            if err.kind() == io::ErrorKind::InvalidData {
-                bad_request_error("document contentBase64 is not valid base64")
-            } else {
-                anyhow!(err)
-            }
-        })
-        .context("decode document contentBase64")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = decoder
+            .read(&mut buffer)
+            .map_err(|err| {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    bad_request_error("document contentBase64 is not valid base64")
+                } else {
+                    anyhow!(err)
+                }
+            })
+            .context("decode document contentBase64")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .context("write document decode tempfile")?;
+    }
     output.flush().context("flush document decode tempfile")?;
-    Ok(output)
+    Ok(DecodedDocumentContent {
+        tempfile: output,
+        sha256_hex: hex::encode(hasher.finalize()),
+    })
 }
 
 fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
@@ -3919,7 +3974,7 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
-        decode_challenge_payload, decode_content_base64_to_tempfile, document_content_type,
+        decode_challenge_payload, decode_content_base64_to_hashed_tempfile, document_content_type,
         document_source_path, estimated_base64_decoded_len, normalize_optional_text,
         require_local_execution_document_contents, select_organization_business_no,
         stable_document_id, validate_month_format,
@@ -4039,15 +4094,20 @@ mod tests {
 
     #[test]
     fn content_base64_decoder_streams_to_tempfile() {
-        let file = decode_content_base64_to_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
-        let contents = std::fs::read(file.path()).expect("read decoded tempfile");
+        let decoded =
+            decode_content_base64_to_hashed_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
+        let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
         assert_eq!(contents, b"PDF-CONTENT");
+        assert_eq!(
+            decoded.sha256_hex,
+            "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69"
+        );
     }
 
     #[test]
     fn content_base64_decoder_rejects_invalid_base64() {
-        let err =
-            decode_content_base64_to_tempfile("not valid base64").expect_err("invalid base64");
+        let err = decode_content_base64_to_hashed_tempfile("not valid base64")
+            .expect_err("invalid base64");
         assert!(err.chain().any(|cause| {
             cause
                 .to_string()
