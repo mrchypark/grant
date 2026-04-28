@@ -1241,13 +1241,11 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         .iter()
         .enumerate()
         .map(|(idx, value)| {
-            base64::engine::general_purpose::STANDARD
-                .decode(value.trim())
-                .map_err(|_| {
-                    ApiError::bad_request(anyhow!(
-                        "invalid base64 for certificateChainDerBase64[{idx}]"
-                    ))
-                })
+            decode_base64_value(value).map_err(|_| {
+                ApiError::bad_request(anyhow!(
+                    "invalid base64 for certificateChainDerBase64[{idx}]"
+                ))
+            })
         })
         .collect::<ApiResult<Vec<_>>>()?;
 
@@ -1264,9 +1262,13 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
 }
 
 fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD
-        .decode(value.trim())
+    decode_base64_value(value)
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
+}
+
+fn decode_base64_value(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    let cleaned: String = value.chars().filter(|ch| !ch.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD.decode(cleaned.as_bytes())
 }
 
 fn decode_optional_base64_field(
@@ -1671,9 +1673,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_base64_field_trims_surrounding_whitespace() {
-        let decoded = decode_base64_field("signCertDerBase64", "  Zm9vYmFy\n")
-            .expect("trimmed base64 should decode");
+    fn decode_base64_field_ignores_ascii_whitespace() {
+        let decoded = decode_base64_field("signCertDerBase64", "  Zm9v\nYmFy\t")
+            .expect("base64 with whitespace should decode");
         assert_eq!(decoded, b"foobar");
     }
 
@@ -1687,7 +1689,7 @@ mod tests {
             sign_pri_key_base64: "BAUG".to_owned(),
             km_cert_der_base64: None,
             km_pri_key_base64: None,
-            certificate_chain_der_base64: vec!["BwgJ".to_owned(), "CgsM".to_owned()],
+            certificate_chain_der_base64: vec!["Bwg\nJ".to_owned(), "Cg sM".to_owned()],
         })
         .expect("proof bundle should decode certificate chain");
 
