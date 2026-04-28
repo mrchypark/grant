@@ -3084,8 +3084,6 @@ impl AppService {
                 .persist_document(object_key.clone(), &doc, &upload)
                 .await
             {
-                self.delete_unmaterialized_object(&object_key, existing_object_keys)
-                    .await;
                 return Err(err);
             }
         }
@@ -3109,25 +3107,14 @@ impl AppService {
         docs: &[PersistedDocument],
         existing_object_keys: &BTreeSet<String>,
     ) {
-        for doc in docs {
-            self.delete_unmaterialized_object(&doc.object_key, existing_object_keys)
-                .await;
-        }
-    }
-
-    async fn delete_unmaterialized_object(
-        &self,
-        object_key: &str,
-        existing_object_keys: &BTreeSet<String>,
-    ) {
-        if existing_object_keys.contains(object_key) {
-            return;
-        }
-        if let Err(err) = self.artifacts.delete_object(object_key).await {
+        let orphan_count = docs
+            .iter()
+            .filter(|doc| !existing_object_keys.contains(doc.object_key.as_str()))
+            .count();
+        if orphan_count > 0 {
             warn!(
-                object_key,
-                error = %err,
-                "failed to delete unmaterialized document object"
+                orphan_count,
+                "leaving unmaterialized document objects for full-sync stale cleanup"
             );
         }
     }
