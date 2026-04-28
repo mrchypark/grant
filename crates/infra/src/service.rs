@@ -807,25 +807,10 @@ impl AppService {
             .consume_cert_gateway_challenge(&input.challenge_id)
             .await?;
 
-        let requested_plant_id = match self
-            .db
-            .get_plant_by_facility_code_with_consistency(
-                &facility_code,
-                Some(ReadConsistency::Strong),
-            )
-            .await
-        {
-            Ok(plant) => Some(plant.id),
-            Err(err)
-                if matches!(
-                    err.downcast_ref::<DatabaseLookupError>(),
-                    Some(DatabaseLookupError::PlantNotFound)
-                ) =>
-            {
-                None
-            }
-            Err(err) => return Err(err),
-        };
+        let requested_plant_id = self
+            .get_existing_plant_by_facility_code_strong(&facility_code)
+            .await?
+            .map(|plant| plant.id);
         let run = self
             .db
             .start_sync_run(
@@ -853,8 +838,16 @@ impl AppService {
         {
             Ok(run) => Ok(run),
             Err(err) => {
-                let duration_ms = started.elapsed().as_millis() as i64;
                 let message = format!("{err:#}");
+                let duration_ms = self
+                    .record_failed_sync_run(
+                        &run_id,
+                        started,
+                        Some(facility_code.as_str()),
+                        None,
+                        &message,
+                    )
+                    .await;
                 error!(
                     business_no,
                     facility_code,
@@ -862,14 +855,6 @@ impl AppService {
                     error = %message,
                     "local execution ingest failed"
                 );
-                self.finish_failed_sync_run(
-                    &run_id,
-                    duration_ms,
-                    Some(facility_code.as_str()),
-                    None,
-                    &message,
-                )
-                .await;
                 Err(err)
             }
         }
@@ -1194,6 +1179,45 @@ impl AppService {
         }
     }
 
+    async fn record_failed_sync_run(
+        &self,
+        run_id: &str,
+        started: std::time::Instant,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        message: &str,
+    ) -> i64 {
+        let duration_ms = started.elapsed().as_millis() as i64;
+        self.finish_failed_sync_run(run_id, duration_ms, facility_code, asset_id, message)
+            .await;
+        duration_ms
+    }
+
+    async fn get_existing_plant_by_facility_code_strong(
+        &self,
+        facility_code: &str,
+    ) -> Result<Option<Plant>> {
+        match self
+            .db
+            .get_plant_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(plant) => Ok(Some(plant)),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn run_sync_with_bundle(
         &self,
         organization_id: &str,
@@ -1254,25 +1278,10 @@ impl AppService {
             "starting sync"
         );
         let requested_plant_id = match facility_code.as_deref() {
-            Some(facility_code) => match self
-                .db
-                .get_plant_by_facility_code_with_consistency(
-                    facility_code,
-                    Some(ReadConsistency::Strong),
-                )
-                .await
-            {
-                Ok(plant) => Some(plant.id),
-                Err(err)
-                    if matches!(
-                        err.downcast_ref::<DatabaseLookupError>(),
-                        Some(DatabaseLookupError::PlantNotFound)
-                    ) =>
-                {
-                    None
-                }
-                Err(err) => return Err(err),
-            },
+            Some(facility_code) => self
+                .get_existing_plant_by_facility_code_strong(facility_code)
+                .await?
+                .map(|plant| plant.id),
             None => None,
         };
         let run = self
@@ -1326,8 +1335,16 @@ impl AppService {
                 {
                     Ok(run) => Ok(run),
                     Err(err) => {
-                        let duration_ms = started.elapsed().as_millis() as i64;
                         let message = format!("{err:#}");
+                        let duration_ms = self
+                            .record_failed_sync_run(
+                                &run_id,
+                                started,
+                                facility_code.as_deref(),
+                                None,
+                                &message,
+                            )
+                            .await;
                         error!(
                             business_no,
                             facility_code = facility_code.as_deref().unwrap_or(""),
@@ -1336,21 +1353,21 @@ impl AppService {
                             error = %message,
                             "sync materialization failed"
                         );
-                        self.finish_failed_sync_run(
-                            &run_id,
-                            duration_ms,
-                            facility_code.as_deref(),
-                            None,
-                            &message,
-                        )
-                        .await;
                         Err(err)
                     }
                 }
             }
             Err(err) => {
-                let duration_ms = started.elapsed().as_millis() as i64;
                 let message = format!("{err:#}");
+                let duration_ms = self
+                    .record_failed_sync_run(
+                        &run_id,
+                        started,
+                        facility_code.as_deref(),
+                        None,
+                        &message,
+                    )
+                    .await;
                 error!(
                     business_no,
                     facility_code = facility_code.as_deref().unwrap_or(""),
@@ -1359,14 +1376,6 @@ impl AppService {
                     error = %message,
                     "sync failed"
                 );
-                self.finish_failed_sync_run(
-                    &run.id,
-                    duration_ms,
-                    facility_code.as_deref(),
-                    None,
-                    &message,
-                )
-                .await;
                 Err(err)
             }
         }
@@ -2615,25 +2624,9 @@ impl AppService {
         if effective_mode == SyncMode::Full && persist_documents {
             validate_document_payloads(&snapshot.documents)?;
         }
-        let existing_plant = match self
-            .db
-            .get_plant_by_facility_code_with_consistency(
-                &snapshot.facility.code,
-                Some(ReadConsistency::Strong),
-            )
-            .await
-        {
-            Ok(plant) => Some(plant),
-            Err(err)
-                if matches!(
-                    err.downcast_ref::<DatabaseLookupError>(),
-                    Some(DatabaseLookupError::PlantNotFound)
-                ) =>
-            {
-                None
-            }
-            Err(err) => return Err(err),
-        };
+        let existing_plant = self
+            .get_existing_plant_by_facility_code_strong(&snapshot.facility.code)
+            .await?;
         if let Some(created_by_user_id) = created_by_user_id {
             match existing_plant.as_ref() {
                 Some(_) => {
@@ -2728,7 +2721,7 @@ impl AppService {
                 existing_objects.sort();
                 existing_objects.dedup();
             }
-            let existing_object_keys = existing_objects.iter().map(String::as_str).collect();
+            let existing_object_keys = existing_objects.iter().cloned().collect();
             info!(
                 plant_code = plant.facility_code,
                 document_count = snapshot.documents.len(),
@@ -2796,8 +2789,7 @@ impl AppService {
             Ok(asset_id) => asset_id,
             Err(err) => {
                 if effective_mode == SyncMode::Full && persist_documents {
-                    let existing_object_keys =
-                        existing_objects.iter().map(String::as_str).collect();
+                    let existing_object_keys = existing_objects.iter().cloned().collect();
                     self.cleanup_unmaterialized_documents(&persisted_docs, &existing_object_keys)
                         .await;
                 }
@@ -2936,16 +2928,21 @@ impl AppService {
         organization_id: &str,
         plant_code: &str,
         docs: &[BridgeDocument],
-        existing_object_keys: &BTreeSet<&str>,
+        existing_object_keys: &BTreeSet<String>,
     ) -> Result<Vec<PersistedDocument>> {
-        let results = stream::iter(docs.iter())
+        let results = stream::iter(docs.iter().cloned())
             .map(|doc| {
-                self.prepare_and_persist_document(
-                    organization_id,
-                    plant_code,
-                    doc,
-                    existing_object_keys,
-                )
+                let organization_id = organization_id.to_owned();
+                let plant_code = plant_code.to_owned();
+                async move {
+                    self.prepare_and_persist_document(
+                        &organization_id,
+                        &plant_code,
+                        doc,
+                        existing_object_keys,
+                    )
+                    .await
+                }
             })
             .buffered(DOCUMENT_UPLOAD_CONCURRENCY)
             .collect::<Vec<_>>()
@@ -2971,12 +2968,12 @@ impl AppService {
         &self,
         organization_id: &str,
         plant_code: &str,
-        doc: &BridgeDocument,
-        existing_object_keys: &BTreeSet<&str>,
+        doc: BridgeDocument,
+        existing_object_keys: &BTreeSet<String>,
     ) -> Result<PersistedDocument> {
-        let id = stable_document_id(organization_id, plant_code, doc);
-        let category = resolved_document_category(doc);
-        let upload = prepare_document_upload(doc)
+        let id = stable_document_id(organization_id, plant_code, &doc);
+        let category = resolved_document_category(&doc);
+        let upload = prepare_document_upload(&doc)
             .await
             .with_context(|| format!("prepare document {}", doc.file_name))?;
         let uploaded_sha256 = &upload.uploaded_sha256;
@@ -3006,7 +3003,7 @@ impl AppService {
         );
         if !existing_object_keys.contains(object_key.as_str()) {
             if let Err(err) = self
-                .persist_document(object_key.clone(), doc, &upload)
+                .persist_document(object_key.clone(), &doc, &upload)
                 .await
             {
                 self.delete_unmaterialized_object(&object_key, existing_object_keys)
@@ -3025,14 +3022,14 @@ impl AppService {
             source_sha256: Some(source_sha256),
             output_sha256: Some(output_sha256),
             object_key,
-            content_type: document_content_type(doc)?.to_owned(),
+            content_type: document_content_type(&doc)?.to_owned(),
         })
     }
 
     async fn cleanup_unmaterialized_documents(
         &self,
         docs: &[PersistedDocument],
-        existing_object_keys: &BTreeSet<&str>,
+        existing_object_keys: &BTreeSet<String>,
     ) {
         for doc in docs {
             self.delete_unmaterialized_object(&doc.object_key, existing_object_keys)
@@ -3043,7 +3040,7 @@ impl AppService {
     async fn delete_unmaterialized_object(
         &self,
         object_key: &str,
-        existing_object_keys: &BTreeSet<&str>,
+        existing_object_keys: &BTreeSet<String>,
     ) {
         if existing_object_keys.contains(object_key) {
             return;

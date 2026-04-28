@@ -29,8 +29,6 @@ use infra::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-const MAX_CERTIFICATE_CHAIN_DER_ENTRIES: usize = 8;
-
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
         .route(
@@ -1217,6 +1215,8 @@ fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
         other => Err(ApiError::bad_request(anyhow!("invalid mode: {other}"))),
     }
 }
+
+const MAX_CERTIFICATE_CHAIN_DER_ENTRIES: usize = 8;
 
 fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
     let km_cert_der =
