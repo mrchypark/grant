@@ -1304,6 +1304,85 @@ async fn stored_certificate_new_facility_requires_organization_credential_use() 
 
     assert!(err.to_string().contains("stored credential for new plant"));
 
+    db.upsert_plant(&domain::Plant {
+        id: "limited-legacy-plant".to_owned(),
+        facility_code: "FAC-LIMITED-LEGACY".to_owned(),
+        name: "Limited Legacy Plant".to_owned(),
+        owner_organization_id: "limited-org".to_owned(),
+        created_by_organization_id: Some("limited-org".to_owned()),
+        contract_no: "CN-LIMITED-LEGACY".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("seed limited legacy plant");
+    db.upsert_role(&Role {
+        id: "role-limited-legacy-sync-execute".to_owned(),
+        organization_id: Some("limited-org".to_owned()),
+        code: "limited.legacy.sync.execute".to_owned(),
+        name: "Limited Legacy Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert limited legacy sync role");
+    db.upsert_role_action("role-limited-legacy-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert limited legacy sync action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "limited-org".to_owned(),
+        subject_organization_id: "limited-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "limited-legacy-plant".to_owned(),
+        role_id: "role-limited-legacy-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-25T00:00:00Z".to_owned(),
+        updated_at: "2026-04-25T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save limited legacy organization sync binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "limited-org".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "limited-legacy-plant".to_owned(),
+        role_id: "role-limited-legacy-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-25T00:00:00Z".to_owned(),
+        updated_at: "2026-04-25T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save limited legacy sync binding");
+
+    let err = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "limited-org".to_owned(),
+            certificate_id: cert.id.clone(),
+            facility_code: Some("FAC-LIMITED-LEGACY".to_owned()),
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Full,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect_err("legacy stored credential use requires organization credential permission");
+
+    assert!(
+        err.to_string()
+            .contains("stored credential for legacy plant"),
+        "{err:#}"
+    );
+
     let issued = service
         .issue_crawl_task_token(IssueCrawlTaskTokenInput {
             organization_id: "limited-org".to_owned(),

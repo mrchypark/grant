@@ -1435,6 +1435,7 @@ impl AppService {
             Some(allowed) => allowed,
             None => {
                 self.authorize_legacy_stored_certificate_use_for_sync(
+                    user_id,
                     organization_id,
                     facility_code,
                 )
@@ -1470,9 +1471,19 @@ impl AppService {
 
     async fn authorize_legacy_stored_certificate_use_for_sync(
         &self,
+        user_id: &str,
         organization_id: &str,
         facility_code: &str,
     ) -> Result<()> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.credential.use",
+            &format!("use stored credential for legacy plant {}", facility_code),
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
         self.db
             .get_plant_by_facility_code_with_consistency(
                 facility_code,
