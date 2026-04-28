@@ -3107,6 +3107,10 @@ impl AppService {
         docs: &[PersistedDocument],
         existing_object_keys: &BTreeSet<String>,
     ) {
+        // Do not delete here: concurrent full syncs can upload the same
+        // content-addressed key, and a failed run must not remove an object
+        // that another run may be about to materialize. The next successful
+        // full sync retries stale/orphan cleanup from the storage listing.
         let orphan_count = docs
             .iter()
             .filter(|doc| !existing_object_keys.contains(doc.object_key.as_str()))
