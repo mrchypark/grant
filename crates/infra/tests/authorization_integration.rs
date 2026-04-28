@@ -1306,6 +1306,136 @@ async fn stored_certificate_new_facility_requires_organization_credential_use() 
 }
 
 #[tokio::test]
+async fn stored_certificate_sync_allows_legacy_plant_without_asset_projection() {
+    let (service, db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "stored".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
+            facility_code: None,
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+    let cert = service
+        .register_certificate_from_proof(RegisterCertificateFromProofInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+        })
+        .await
+        .expect("register certificate");
+
+    db.upsert_plant(&domain::Plant {
+        id: "legacy-plant-stored-sync".to_owned(),
+        facility_code: "FAC-LEGACY-STORED".to_owned(),
+        name: "Legacy Stored Sync Plant".to_owned(),
+        owner_organization_id: "bootstrap-user".to_owned(),
+        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        contract_no: "CN-LEGACY-STORED".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert legacy plant without asset projection");
+    db.upsert_role(&Role {
+        id: "role-legacy-stored-sync-execute".to_owned(),
+        organization_id: None,
+        code: "legacy.stored.sync.execute".to_owned(),
+        name: "Legacy Stored Sync Execute".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert sync role");
+    db.upsert_role_action("role-legacy-stored-sync-execute", "plant.sync.execute")
+        .await
+        .expect("upsert sync action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "legacy-plant-stored-sync".to_owned(),
+        role_id: "role-legacy-stored-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-28T00:00:00Z".to_owned(),
+        updated_at: "2026-04-28T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant organization legacy plant sync access");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "bootstrap-user".to_owned(),
+        subject_organization_id: "bootstrap-user".to_owned(),
+        resource_type: RoleBindingResourceType::Plant,
+        resource_id: "legacy-plant-stored-sync".to_owned(),
+        role_id: "role-legacy-stored-sync-execute".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-28T00:00:00Z".to_owned(),
+        updated_at: "2026-04-28T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("grant legacy plant sync access");
+
+    db.get_kr_rps_asset_id_by_facility_code_with_consistency(
+        "FAC-LEGACY-STORED",
+        Some(ReadConsistency::Strong),
+    )
+    .await
+    .expect_err("legacy plant starts without asset projection");
+
+    let issued = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            certificate_id: cert.id,
+            facility_code: Some("FAC-LEGACY-STORED".to_owned()),
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Full,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("issue stored crawl token for legacy plant");
+    let run = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "bootstrap-user".to_owned(),
+            token: issued.token,
+        })
+        .await
+        .expect("consume stored crawl token for legacy plant");
+
+    assert_eq!(run.status, "completed");
+    assert_eq!(run.plant_id.as_deref(), Some("legacy-plant-stored-sync"));
+    db.get_kr_rps_asset_id_by_facility_code_with_consistency(
+        "FAC-LEGACY-STORED",
+        Some(ReadConsistency::Strong),
+    )
+    .await
+    .expect("stored sync materializes legacy asset projection");
+}
+
+#[tokio::test]
 async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope() {
     let (service, db, _db_dir, _artifacts_dir) = build_service().await;
 

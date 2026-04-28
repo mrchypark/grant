@@ -15,7 +15,9 @@ use crate::{
         StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
-    npki::{validate_certificate_bundle, verify_challenge_signature, verify_message_signature},
+    npki::{
+        validate_certificate_bundle_async, verify_challenge_signature, verify_message_signature,
+    },
 };
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
@@ -1403,13 +1405,30 @@ impl AppService {
         organization_id: &str,
         facility_code: &str,
     ) -> Result<()> {
-        let asset_id = self
+        let asset_id = match self
             .db
             .get_kr_rps_asset_id_by_facility_code_with_consistency(
                 facility_code,
                 Some(ReadConsistency::Strong),
             )
-            .await?;
+            .await
+        {
+            Ok(asset_id) => asset_id,
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                self.authorize_legacy_stored_certificate_use_for_sync(
+                    organization_id,
+                    facility_code,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         let allowed = self
             .db
             .has_user_asset_action_with_consistency(
@@ -1439,6 +1458,34 @@ impl AppService {
         if !has_credential {
             anyhow::bail!(
                 "forbidden: organization {} has no usable stored KR RPS credential for plant {}",
+                organization_id,
+                facility_code
+            );
+        }
+        Ok(())
+    }
+
+    async fn authorize_legacy_stored_certificate_use_for_sync(
+        &self,
+        organization_id: &str,
+        facility_code: &str,
+    ) -> Result<()> {
+        self.db
+            .get_plant_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        let has_credential = self
+            .db
+            .has_active_kr_rps_certificate_credential_with_consistency(
+                organization_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if !has_credential {
+            anyhow::bail!(
+                "forbidden: organization {} has no active stored KR RPS credential for legacy plant {}",
                 organization_id,
                 facility_code
             );
@@ -2503,11 +2550,12 @@ impl AppService {
                 return Err(bad_request_error("certificate business number mismatch"));
             }
         }
-        validate_certificate_bundle(
+        validate_certificate_bundle_async(
             bundle,
             self.cfg.security.allow_untrusted_certificates,
             self.cfg.security.certificate_trust_bundle_path.as_deref(),
-        )?;
+        )
+        .await?;
         Ok(business_no)
     }
 
@@ -2915,15 +2963,17 @@ impl AppService {
                 object_key = object_key.as_str(),
                 "uploading document"
             );
-            if let Err(err) = self
-                .persist_document(object_key.clone(), doc, &upload)
-                .await
-            {
-                self.delete_unmaterialized_object(&object_key, existing_object_keys)
-                    .await;
-                self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
-                    .await;
-                return Err(err);
+            if !existing_object_keys.contains(object_key.as_str()) {
+                if let Err(err) = self
+                    .persist_document(object_key.clone(), doc, &upload)
+                    .await
+                {
+                    self.delete_unmaterialized_object(&object_key, existing_object_keys)
+                        .await;
+                    self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                        .await;
+                    return Err(err);
+                }
             }
             persisted.push(PersistedDocument {
                 id,
@@ -2992,8 +3042,12 @@ async fn prepare_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumen
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let decoded = decode_content_base64_to_tempfile(content_base64)
-            .with_context(|| format!("decode document {}", doc.file_name))?;
+        let content_base64 = content_base64.to_owned();
+        let decoded =
+            tokio::task::spawn_blocking(move || decode_content_base64_to_tempfile(&content_base64))
+                .await
+                .context("join document decode task")?
+                .with_context(|| format!("decode document {}", doc.file_name))?;
         let uploaded_sha256 = sha256_file_hex(decoded.path()).await?;
         return Ok(PreparedDocumentUpload {
             uploaded_sha256,

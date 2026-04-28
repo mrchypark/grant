@@ -5691,6 +5691,27 @@ impl Database {
             > 0)
     }
 
+    pub async fn has_active_kr_rps_certificate_credential_with_consistency(
+        &self,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        Ok(self
+            .query_count(
+                self.default_read_consistency_with_override(consistency),
+                "SELECT COUNT(*) as count
+                 FROM auth_credentials
+                 WHERE organization_id = $1
+                   AND provider = 'korea_energy_rps'
+                   AND credential_type = 'certificate'
+                   AND active = 1",
+                params!(organization_id.to_owned()),
+                "active KR RPS certificate credential",
+            )
+            .await?
+            > 0)
+    }
+
     pub async fn get_kr_rps_asset_id_by_facility_code_with_consistency(
         &self,
         facility_code: &str,

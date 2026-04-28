@@ -197,6 +197,55 @@ pub fn validate_certificate_bundle(
     allow_untrusted: bool,
     certificate_trust_bundle_path: Option<&Path>,
 ) -> Result<()> {
+    let explicit_trust_bundle = certificate_trust_bundle_path
+        .map(|path| {
+            std::fs::read(path)
+                .with_context(|| format!("read X509 trust bundle {}", path.display()))
+                .map(|pem| (path, pem))
+        })
+        .transpose()?;
+    validate_certificate_bundle_with_trust_bundle_pem(
+        bundle,
+        allow_untrusted,
+        explicit_trust_bundle
+            .as_ref()
+            .map(|(path, pem)| (*path, pem.as_slice())),
+    )
+}
+
+pub async fn validate_certificate_bundle_async(
+    bundle: &CertificateBundle,
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    let explicit_trust_bundle = match certificate_trust_bundle_path {
+        Some(path) => Some((
+            path.to_path_buf(),
+            tokio::fs::read(path)
+                .await
+                .with_context(|| format!("read X509 trust bundle {}", path.display()))?,
+        )),
+        None => None,
+    };
+    let bundle = bundle.clone();
+    tokio::task::spawn_blocking(move || {
+        validate_certificate_bundle_with_trust_bundle_pem(
+            &bundle,
+            allow_untrusted,
+            explicit_trust_bundle
+                .as_ref()
+                .map(|(path, pem)| (path.as_path(), pem.as_slice())),
+        )
+    })
+    .await
+    .context("join certificate validation task")?
+}
+
+fn validate_certificate_bundle_with_trust_bundle_pem(
+    bundle: &CertificateBundle,
+    allow_untrusted: bool,
+    certificate_trust_bundle: Option<(&Path, &[u8])>,
+) -> Result<()> {
     validate_key_pair(
         &bundle.sign_cert_der,
         &bundle.sign_pri_key,
@@ -216,8 +265,8 @@ pub fn validate_certificate_bundle(
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
     }
     if !allow_untrusted {
-        let explicit_store = certificate_trust_bundle_path
-            .map(trust_store_from_ca_bundle)
+        let explicit_store = certificate_trust_bundle
+            .map(|(path, pem)| trust_store_from_ca_bundle_pem(path, pem))
             .transpose()?;
         let store = match explicit_store.as_ref() {
             Some(store) => store.as_ref(),
@@ -390,10 +439,11 @@ fn default_trust_store() -> Result<&'static openssl::x509::store::X509Store> {
     }
 }
 
-fn trust_store_from_ca_bundle(path: &Path) -> Result<openssl::x509::store::X509Store> {
-    let pem = std::fs::read(path)
-        .with_context(|| format!("read X509 trust bundle {}", path.display()))?;
-    let certs = X509::stack_from_pem(&pem)
+fn trust_store_from_ca_bundle_pem(
+    path: &Path,
+    pem: &[u8],
+) -> Result<openssl::x509::store::X509Store> {
+    let certs = X509::stack_from_pem(pem)
         .with_context(|| format!("parse X509 trust bundle {}", path.display()))?;
     if certs.is_empty() {
         bail!(
