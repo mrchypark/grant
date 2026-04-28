@@ -9,7 +9,6 @@
 - `plant`는 한국 RPS 호환 계층의 명칭이며, `plants.id`는 내부 호환 row ID다. KR RPS 외부 설비 코드는 `facility_code`에만 둔다.
 - `facility_code`는 한국 RPS 외부 설비 식별자이며 `asset_profiles`/`registry_projects`의 외부 ID로 다룬다.
 - `plants.id`는 한국 RPS 호환 row ID이고, 신규 글로벌 모델의 canonical 식별자는 `asset_id`다.
-- `facility_code`는 한국 RPS 외부 설비 식별자이며 `asset_profiles`/`registry_projects`의 외부 ID로 다룬다.
 - 권한 원본과 조회 최적화 결과를 분리한다.
 - 공동인증서, OAuth, API key, 로그인 credential은 `auth_credentials` 추상화로 수용한다.
 - SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.

@@ -1422,21 +1422,18 @@ impl AppService {
         organization_id: &str,
         facility_code: &str,
     ) -> Result<()> {
-        let asset_id = match self
-            .db
-            .get_kr_rps_asset_id_by_facility_code_with_consistency(
+        let allowed = match self
+            .has_user_kr_rps_asset_action_by_facility_code(
+                user_id,
+                organization_id,
                 facility_code,
+                "asset.credential.use",
                 Some(ReadConsistency::Strong),
             )
-            .await
+            .await?
         {
-            Ok(asset_id) => asset_id,
-            Err(err)
-                if matches!(
-                    err.downcast_ref::<DatabaseLookupError>(),
-                    Some(DatabaseLookupError::PlantNotFound)
-                ) =>
-            {
+            Some(allowed) => allowed,
+            None => {
                 self.authorize_legacy_stored_certificate_use_for_sync(
                     organization_id,
                     facility_code,
@@ -1444,18 +1441,7 @@ impl AppService {
                 .await?;
                 return Ok(());
             }
-            Err(err) => return Err(err),
         };
-        let allowed = self
-            .db
-            .has_user_asset_action_with_consistency(
-                user_id,
-                organization_id,
-                &asset_id,
-                "asset.credential.use",
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
         if !allowed {
             anyhow::bail!(
                 "forbidden: user {} in organization {} cannot use stored credential for plant {}",
@@ -2056,35 +2042,15 @@ impl AppService {
         }
         let asset_action_id = kr_rps_plant_action_to_asset_action(action_id);
         let asset_allowed = if let Some(asset_action_id) = asset_action_id {
-            match self
-                .db
-                .get_kr_rps_asset_id_by_facility_code_with_consistency(
-                    facility_code,
-                    read_consistency.clone(),
-                )
-                .await
-            {
-                Ok(asset_id) => {
-                    self.db
-                        .has_user_asset_action_with_consistency(
-                            user_id,
-                            organization_id,
-                            &asset_id,
-                            asset_action_id,
-                            read_consistency.clone(),
-                        )
-                        .await?
-                }
-                Err(err)
-                    if matches!(
-                        err.downcast_ref::<DatabaseLookupError>(),
-                        Some(DatabaseLookupError::PlantNotFound)
-                    ) =>
-                {
-                    false
-                }
-                Err(err) => return Err(err),
-            }
+            self.has_user_kr_rps_asset_action_by_facility_code(
+                user_id,
+                organization_id,
+                facility_code,
+                asset_action_id,
+                read_consistency.clone(),
+            )
+            .await?
+            .unwrap_or(false)
         } else {
             false
         };
@@ -2097,6 +2063,45 @@ impl AppService {
             );
         }
         Ok(plant)
+    }
+
+    async fn has_user_kr_rps_asset_action_by_facility_code(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: &str,
+        asset_action_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Option<bool>> {
+        match self
+            .db
+            .get_kr_rps_asset_id_by_facility_code_with_consistency(
+                facility_code,
+                read_consistency.clone(),
+            )
+            .await
+        {
+            Ok(asset_id) => Ok(Some(
+                self.db
+                    .has_user_asset_action_with_consistency(
+                        user_id,
+                        organization_id,
+                        &asset_id,
+                        asset_action_id,
+                        read_consistency,
+                    )
+                    .await?,
+            )),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn authorize_plant_action_by_id_with_asset_fallback(
