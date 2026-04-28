@@ -2723,9 +2723,23 @@ impl AppService {
             let mut existing_objects = self.db.list_document_objects(&plant.id).await?;
             if plant.id != plant.facility_code {
                 existing_objects.extend(self.db.list_document_objects(&plant.facility_code).await?);
-                existing_objects.sort();
-                existing_objects.dedup();
             }
+            self.extend_artifact_document_object_keys(
+                organization_id,
+                &plant.id,
+                &mut existing_objects,
+            )
+            .await;
+            if plant.id != plant.facility_code {
+                self.extend_artifact_document_object_keys(
+                    organization_id,
+                    &plant.facility_code,
+                    &mut existing_objects,
+                )
+                .await;
+            }
+            existing_objects.sort();
+            existing_objects.dedup();
             let existing_object_keys = existing_objects.iter().cloned().collect();
             info!(
                 plant_code = plant.facility_code,
@@ -2964,6 +2978,25 @@ impl AppService {
             return Err(err);
         }
         Ok(persisted)
+    }
+
+    async fn extend_artifact_document_object_keys(
+        &self,
+        organization_id: &str,
+        plant_code: &str,
+        object_keys: &mut Vec<String>,
+    ) {
+        let prefix = format!("{organization_id}/{plant_code}/");
+        match self.artifacts.list_keys(&prefix).await {
+            Ok(keys) => object_keys.extend(keys),
+            Err(err) => {
+                warn!(
+                    prefix = prefix.as_str(),
+                    error = %err,
+                    "failed to list document artifact keys for cleanup"
+                );
+            }
+        }
     }
 
     async fn prepare_and_persist_document(

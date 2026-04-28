@@ -989,6 +989,14 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     let artifact_path = find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT")
         .expect("persisted local execution document path");
     std::fs::remove_file(&artifact_path).expect("remove persisted artifact");
+    let orphan_path = artifacts_dir
+        .path()
+        .join("bootstrap-user")
+        .join(local_doc_plant_id)
+        .join("orphan.pdf");
+    std::fs::create_dir_all(orphan_path.parent().expect("orphan parent"))
+        .expect("create orphan parent");
+    std::fs::write(&orphan_path, b"ORPHAN").expect("write orphan artifact");
     grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-DOC").await;
 
     let repair_challenge = app
@@ -1048,6 +1056,10 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert!(
         find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT").is_some(),
         "full sync should re-upload a document when the DB row exists but the artifact is missing"
+    );
+    assert!(
+        !orphan_path.exists(),
+        "full sync should retry cleanup for orphaned document artifacts"
     );
 }
 
