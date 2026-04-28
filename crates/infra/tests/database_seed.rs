@@ -974,6 +974,7 @@ async fn failed_kr_rps_full_projection_preserves_existing_canonical_rows() {
             application_deadline: None,
         }],
         &[],
+        &[],
     )
     .await
     .expect_err("invalid full replacement should fail");
@@ -1282,8 +1283,8 @@ async fn kr_rps_full_projection_replace_removes_stale_canonical_rows() {
                     "FAC-FULL-001:2026-03:gross_generation_kwh",
                 )
                 .into(),
-                generation_scope.asset_id.into(),
-                generation_scope.source_id.into(),
+                generation_scope.asset_id.clone().into(),
+                generation_scope.source_id.clone().into(),
                 "2026-03-01".into(),
                 "2026-05-01".into(),
                 "gross_generation_kwh".into(),
@@ -1298,6 +1299,67 @@ async fn kr_rps_full_projection_replace_removes_stale_canonical_rows() {
         .await
         .expect("insert stale generation period end");
 
+    let rate_scope: Vec<GenerationScopeRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT asset_id, id AS source_id
+             FROM data_sources
+             WHERE asset_id = $1 AND unit = 'KRW/kWh'
+             LIMIT 1",
+            vec![generation_scope.asset_id.clone().into()],
+        )
+        .await
+        .expect("rate scope");
+    let rate_scope = rate_scope.into_iter().next().expect("rate scope row");
+    runtime
+        .execute(
+            "INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                "stale-rate-metric".into(),
+                rate_scope.asset_id.clone().into(),
+                rate_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-04-01".into(),
+                "nearby_highest".into(),
+                "130".into(),
+                "KRW/kWh".into(),
+                "KRW".into(),
+                "published".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale rate metric");
+    runtime
+        .execute(
+            "INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                "stale-rate-period".into(),
+                rate_scope.asset_id.clone().into(),
+                rate_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-05-01".into(),
+                "self_rate".into(),
+                "109".into(),
+                "KRW/kWh".into(),
+                "KRW".into(),
+                "published".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale rate period end");
+
     db.replace_kr_rps_asset_projection(
         &plant,
         Some("conalog-account"),
@@ -1308,6 +1370,17 @@ async fn kr_rps_full_projection_replace_removes_stale_canonical_rows() {
             self_consumption_kwh: None,
             supply_kwh: 1100.0,
             application_deadline: None,
+        }],
+        &[StoredRateRecord {
+            record: RateRecord {
+                month: "2026-03".to_owned(),
+                self_rate: Some(111.0),
+                national_average: None,
+                nearby_average: None,
+                nearby_highest: None,
+            },
+            published: true,
+            source_control_flag: Some("replace".to_owned()),
         }],
         &[RecRecord {
             month: "2026-03".to_owned(),
@@ -1330,6 +1403,7 @@ async fn kr_rps_full_projection_replace_removes_stale_canonical_rows() {
         .await
         .expect("projection counts");
     assert_eq!(counts.generation_data, 1);
+    assert_eq!(counts.rate_data, 1);
     assert_eq!(counts.energy_certificates, 1);
 
     let generation_metrics: Vec<RequiredTextRow> = runtime
@@ -1346,6 +1420,21 @@ async fn kr_rps_full_projection_replace_removes_stale_canonical_rows() {
             .map(|row| row.value)
             .collect::<Vec<_>>(),
         vec!["gross_generation_kwh"]
+    );
+    let rate_metrics: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT metric_type AS value FROM rate_data ORDER BY metric_type ASC",
+            vec![],
+        )
+        .await
+        .expect("rate metric semantics");
+    assert_eq!(
+        rate_metrics
+            .into_iter()
+            .map(|row| row.value)
+            .collect::<Vec<_>>(),
+        vec!["self_rate"]
     );
 }
 

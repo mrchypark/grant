@@ -5034,31 +5034,39 @@ impl Database {
         registry_account_organization_id: Option<&str>,
         business_no: Option<&str>,
         generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
         rec: &[RecRecord],
     ) -> Result<String> {
-        let data_source_id =
-            stable_scoped_id("data_source:kr_rps:generation", &plant.facility_code);
-        let registry_project_id = stable_scoped_id("registry_project:kr_rps", &plant.facility_code);
-
-        let asset_id = self
-            .upsert_kr_rps_asset_projection(
+        let now = now_string();
+        let mut queries = Vec::with_capacity(8 + generation.len() + rates.len() + rec.len());
+        let projection = self
+            .push_kr_rps_asset_projection_queries(
+                &mut queries,
                 plant,
                 registry_account_organization_id,
                 business_no,
                 generation,
+                rates,
                 rec,
+                &now,
             )
             .await?;
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("replace KR RPS asset projection transaction")?;
         self.prune_kr_rps_asset_projection_after_full(
             &plant.facility_code,
-            &asset_id,
-            &data_source_id,
-            &registry_project_id,
+            &projection.asset_id,
+            &projection.data_source_id,
+            &projection.rate_source_id,
+            &projection.registry_project_id,
             generation,
+            rates,
             rec,
         )
         .await?;
-        Ok(asset_id)
+        Ok(projection.asset_id)
     }
 
     async fn prune_kr_rps_asset_projection_after_full(
@@ -5066,8 +5074,10 @@ impl Database {
         facility_code: &str,
         asset_id: &str,
         data_source_id: &str,
+        rate_source_id: &str,
         registry_project_id: &str,
         generation: &[GenerationRecord],
+        rates: &[StoredRateRecord],
         rec: &[RecRecord],
     ) -> Result<()> {
         let expected_generation_pairs = generation
@@ -5114,6 +5124,59 @@ impl Database {
                 )
                 .await
                 .context("prune stale KR RPS generation data")?;
+        }
+
+        let mut expected_rate_pairs = BTreeSet::new();
+        for record in rates {
+            let period_start = month_start_date(&record.record.month)?;
+            let period_end = next_month_start_date(&record.record.month)?;
+            for (metric_type, value) in [
+                ("self_rate", record.record.self_rate),
+                ("national_average", record.record.national_average),
+                ("nearby_average", record.record.nearby_average),
+                ("nearby_highest", record.record.nearby_highest),
+            ] {
+                if value.is_some() {
+                    expected_rate_pairs.insert((
+                        metric_type.to_owned(),
+                        period_start.clone(),
+                        period_end.clone(),
+                    ));
+                }
+            }
+        }
+        let rate_rows: Vec<MetricPeriodRow> = self
+            .query_rows_with(
+                self.default_read_consistency_with_override(Some(ReadConsistency::Strong)),
+                "SELECT metric_type, period_start, period_end
+                 FROM rate_data
+                 WHERE asset_id = $1 AND source_id = $2",
+                params!(asset_id.to_owned(), rate_source_id.to_owned()),
+                "KR RPS rate data full prune candidates",
+            )
+            .await?;
+        for row in rate_rows {
+            if expected_rate_pairs.contains(&(
+                row.metric_type.clone(),
+                row.period_start.clone(),
+                row.period_end.clone(),
+            )) {
+                continue;
+            }
+            self.runtime
+                .execute(
+                    "DELETE FROM rate_data
+                     WHERE asset_id = $1 AND source_id = $2 AND metric_type = $3 AND period_start = $4 AND period_end = $5",
+                    params!(
+                        asset_id.to_owned(),
+                        rate_source_id.to_owned(),
+                        row.metric_type,
+                        row.period_start,
+                        row.period_end
+                    ),
+                )
+                .await
+                .context("prune stale KR RPS rate data")?;
         }
 
         let expected_serials = rec
