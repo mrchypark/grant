@@ -29,6 +29,7 @@ use domain::{
     Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
     SyncRun, User,
 };
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -2781,33 +2782,19 @@ impl AppService {
                 .iter()
                 .map(|doc| doc.object_key.as_str())
                 .collect();
-            let mut stale_deletes = tokio::task::JoinSet::new();
-            let mut active_deletes = 0usize;
-            for object_key in existing_objects {
-                if current_objects.contains(object_key.as_str()) {
-                    continue;
-                }
-                while active_deletes >= STALE_OBJECT_DELETE_CONCURRENCY {
-                    match stale_deletes.join_next().await {
-                        Some(result) => {
-                            active_deletes = active_deletes.saturating_sub(1);
-                            log_stale_delete_result(result);
-                        }
-                        None => {
-                            active_deletes = 0;
+            let stale_objects = existing_objects
+                .into_iter()
+                .filter(|object_key| !current_objects.contains(object_key.as_str()));
+            stream::iter(stale_objects)
+                .for_each_concurrent(STALE_OBJECT_DELETE_CONCURRENCY, |object_key| {
+                    let artifacts = self.artifacts.clone();
+                    async move {
+                        if let Err(err) = artifacts.delete_object(&object_key).await {
+                            warn!("delete stale object {} failed: {}", object_key, err);
                         }
                     }
-                }
-                let artifacts = self.artifacts.clone();
-                stale_deletes.spawn(async move {
-                    let result = artifacts.delete_object(&object_key).await;
-                    (object_key, result)
-                });
-                active_deletes += 1;
-            }
-            while let Some(result) = stale_deletes.join_next().await {
-                log_stale_delete_result(result);
-            }
+                })
+                .await;
         }
         let duration_ms = started.elapsed().as_millis() as i64;
         let finished_at = now_string();
@@ -3082,18 +3069,6 @@ async fn sha256_file_hex(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-fn log_stale_delete_result(
-    result: std::result::Result<(String, Result<()>), tokio::task::JoinError>,
-) {
-    match result {
-        Ok((_, Ok(()))) => {}
-        Ok((object_key, Err(err))) => {
-            warn!("delete stale object {} failed: {}", object_key, err);
-        }
-        Err(err) => warn!("delete stale object task failed: {}", err),
-    }
 }
 
 fn decode_content_base64_to_tempfile(content_base64: &str) -> Result<tempfile::NamedTempFile> {
