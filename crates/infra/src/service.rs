@@ -2655,6 +2655,20 @@ impl AppService {
                         Some(ReadConsistency::Strong),
                     )
                     .await?;
+                    if requires_stored_credential {
+                        self.authorize_organization_action(
+                            created_by_user_id,
+                            organization_id,
+                            organization_id,
+                            "organization.credential.use",
+                            &format!(
+                                "use stored credential for new plant {}",
+                                snapshot.facility.code
+                            ),
+                            Some(ReadConsistency::Strong),
+                        )
+                        .await?;
+                    }
                 }
             }
         }

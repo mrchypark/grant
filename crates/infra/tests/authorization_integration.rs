@@ -1289,7 +1289,7 @@ async fn stored_certificate_new_facility_requires_organization_credential_use() 
     let err = service
         .issue_crawl_task_token(IssueCrawlTaskTokenInput {
             organization_id: "limited-org".to_owned(),
-            certificate_id: cert.id,
+            certificate_id: cert.id.clone(),
             facility_code: Some("FAC-LIMITED-NEW".to_owned()),
             start_month: None,
             end_month: None,
@@ -1301,6 +1301,30 @@ async fn stored_certificate_new_facility_requires_organization_credential_use() 
         .expect_err(
             "new facility stored credential use requires organization credential permission",
         );
+
+    assert!(err.to_string().contains("stored credential for new plant"));
+
+    let issued = service
+        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
+            organization_id: "limited-org".to_owned(),
+            certificate_id: cert.id,
+            facility_code: None,
+            start_month: None,
+            end_month: None,
+            mode: SyncMode::Full,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("unscoped stored crawl token issuance only resolves plant create");
+
+    let err = service
+        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
+            organization_id: "limited-org".to_owned(),
+            token: issued.token,
+        })
+        .await
+        .expect_err("collector-discovered new plant still requires credential permission");
 
     assert!(err.to_string().contains("stored credential for new plant"));
 }
