@@ -230,10 +230,7 @@ impl ArtifactStore {
             {
                 Ok(_) => Ok(true),
                 Err(err) => {
-                    let text = err.to_string();
-                    if text.contains("NotFound")
-                        || text.contains("NoSuchKey")
-                        || text.contains("404")
+                    if matches!(err.as_service_error(), Some(service_err) if service_err.is_not_found())
                     {
                         Ok(false)
                     } else {

@@ -2735,10 +2735,12 @@ impl AppService {
             if plant.id != plant.facility_code {
                 existing_objects.extend(self.db.list_document_objects(&plant.facility_code).await?);
             }
+            let mut existing_storage_object_keys = BTreeSet::new();
             self.extend_artifact_document_object_keys(
                 organization_id,
                 &plant.id,
                 &mut existing_objects,
+                &mut existing_storage_object_keys,
             )
             .await;
             if plant.id != plant.facility_code {
@@ -2746,6 +2748,7 @@ impl AppService {
                     organization_id,
                     &plant.facility_code,
                     &mut existing_objects,
+                    &mut existing_storage_object_keys,
                 )
                 .await;
             }
@@ -2759,7 +2762,13 @@ impl AppService {
             );
             let documents = std::mem::take(&mut snapshot.documents);
             let persisted_docs = self
-                .persist_documents(organization_id, &plant.id, documents, &existing_object_keys)
+                .persist_documents(
+                    organization_id,
+                    &plant.id,
+                    documents,
+                    &existing_object_keys,
+                    &existing_storage_object_keys,
+                )
                 .await?;
             info!(
                 plant_code = plant.facility_code,
@@ -2955,6 +2964,7 @@ impl AppService {
         plant_code: &str,
         docs: Vec<BridgeDocument>,
         existing_object_keys: &BTreeSet<String>,
+        existing_storage_object_keys: &BTreeSet<String>,
     ) -> Result<Vec<PersistedDocument>> {
         let doc_count = docs.len();
         let results = stream::iter(docs.into_iter())
@@ -2967,6 +2977,7 @@ impl AppService {
                         &plant_code,
                         doc,
                         existing_object_keys,
+                        existing_storage_object_keys,
                     )
                     .await
                 }
@@ -2996,10 +3007,14 @@ impl AppService {
         organization_id: &str,
         plant_code: &str,
         object_keys: &mut Vec<String>,
+        storage_object_keys: &mut BTreeSet<String>,
     ) {
         let prefix = format!("{organization_id}/{plant_code}/");
         match self.artifacts.list_keys(&prefix).await {
-            Ok(keys) => object_keys.extend(keys),
+            Ok(keys) => {
+                storage_object_keys.extend(keys.iter().cloned());
+                object_keys.extend(keys);
+            }
             Err(err) => {
                 warn!(
                     prefix = prefix.as_str(),
@@ -3016,6 +3031,7 @@ impl AppService {
         plant_code: &str,
         doc: BridgeDocument,
         existing_object_keys: &BTreeSet<String>,
+        existing_storage_object_keys: &BTreeSet<String>,
     ) -> Result<PersistedDocument> {
         let id = stable_document_id(organization_id, plant_code, &doc);
         let category = resolved_document_category(&doc);
@@ -3039,7 +3055,7 @@ impl AppService {
             .output_sha256
             .clone()
             .unwrap_or_else(|| uploaded_sha256.to_owned());
-        let object_version = uploaded_sha256.chars().take(16).collect::<String>();
+        let object_version = uploaded_sha256.as_str();
         let object_key = format!("{organization_id}/{plant_code}/{id}-{object_version}.pdf");
         info!(
             plant_code,
@@ -3047,7 +3063,9 @@ impl AppService {
             object_key = object_key.as_str(),
             "uploading document"
         );
-        let object_exists = if existing_object_keys.contains(object_key.as_str()) {
+        let object_exists = if existing_storage_object_keys.contains(object_key.as_str()) {
+            true
+        } else if existing_object_keys.contains(object_key.as_str()) {
             self.artifacts.object_exists(&object_key).await?
         } else {
             false
