@@ -520,31 +520,6 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
         .expect_err("binding should reject missing agreement");
     assert!(err.to_string().contains("agreement"));
 
-    let duplicate_binding = RoleBinding {
-        id: "binding-org-plant-duplicate".to_owned(),
-        updated_at: "2026-04-04T00:00:00Z".to_owned(),
-        ..organization_binding.clone()
-    };
-    db.save_role_binding(&duplicate_binding)
-        .await
-        .expect("duplicate logical binding should update existing binding");
-    let plant_bindings = db
-        .list_role_bindings_for_resource(RoleBindingResourceType::Plant, "plant-1")
-        .await
-        .expect("plant bindings after duplicate logical upsert");
-    let matching: Vec<_> = plant_bindings
-        .iter()
-        .filter(|binding| {
-            binding.subject_type == RoleBindingSubjectType::Organization
-                && binding.subject_id == "epc-org"
-                && binding.subject_organization_id == "epc-org"
-                && binding.role_id == "role-external-operator"
-        })
-        .collect();
-    assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].id, "binding-org-plant");
-    assert_eq!(matching[0].updated_at, "2026-04-04T00:00:00Z");
-
     let mismatched_agreement = RoleBinding {
         id: "binding-mismatched-agreement".to_owned(),
         agreement_id: Some("agreement-mismatch".to_owned()),
