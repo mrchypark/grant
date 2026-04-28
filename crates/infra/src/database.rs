@@ -4366,7 +4366,12 @@ impl Database {
             .await
             .context("materialize KR RPS sync transaction")?;
         if rebuild_authorization {
-            self.rebuild_organization_expansion().await?;
+            if let Err(err) = self.rebuild_organization_expansion().await {
+                warn!(
+                    error = %err,
+                    "failed to rebuild organization authorization expansion after sync materialization commit"
+                );
+            }
         }
         Ok(projection.asset_id)
     }

@@ -7,7 +7,10 @@ use domain::{
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{
     config::ReadConsistency,
-    database::{Database, KrRpsSyncMaterialization, PersistedDocument, StoredRateRecord},
+    database::{
+        CreatedPlantBootstrap, Database, KrRpsSyncMaterialization, PersistedDocument,
+        StoredRateRecord,
+    },
     runtime::HiqliteRuntime,
 };
 use sha2::{Digest, Sha256};
@@ -1505,6 +1508,87 @@ async fn kr_rps_full_sync_replaces_canonical_rate_data() {
         .expect("remaining rate metrics");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].value, "self_rate");
+}
+
+#[tokio::test]
+async fn sync_materialization_ignores_post_commit_authorization_rebuild_failure() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("conalog-account", Some("2768603291"), "Conalog Account")
+        .await
+        .expect("organization identity");
+    runtime
+        .execute("DROP TABLE effective_user_plant_visibility", vec![])
+        .await
+        .expect("drop rebuild target table");
+
+    let plant = Plant {
+        id: "plant-post-commit-rebuild".to_owned(),
+        facility_code: "FAC-POST-COMMIT-REBUILD".to_owned(),
+        name: "Post Commit Rebuild Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-POST-COMMIT-REBUILD".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    let docs: Vec<PersistedDocument> = Vec::new();
+    let run = db
+        .start_sync_run("conalog-account", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start sync run");
+
+    let asset_id = db
+        .materialize_kr_rps_sync(KrRpsSyncMaterialization {
+            run_id: &run.id,
+            plant: &plant,
+            registry_account_organization_id: Some("conalog-account"),
+            business_no: Some("2768603291"),
+            bootstrap_created_plant: Some(CreatedPlantBootstrap {
+                user_id: "conalog-account",
+                creator_organization_id: "conalog-account",
+                owner_organization_id: "conalog-account",
+                creator_agreement_id: None,
+            }),
+            mode: &SyncMode::Full,
+            generation: &[],
+            rates: &[],
+            rec: &[],
+            documents: &docs,
+            duration_ms: 17,
+        })
+        .await
+        .expect("materialization result should survive post-commit rebuild failure");
+
+    assert!(!asset_id.is_empty());
+
+    let run_status: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT status AS value FROM sync_runs WHERE id = $1",
+            vec![run.id.clone().into()],
+        )
+        .await
+        .expect("sync run status");
+    assert_eq!(run_status[0].value, "completed");
+
+    let item_status: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT status AS value FROM sync_run_items WHERE sync_run_id = $1",
+            vec![run.id.into()],
+        )
+        .await
+        .expect("sync run item status");
+    assert_eq!(item_status[0].value, "completed");
 }
 
 #[tokio::test]
