@@ -3258,6 +3258,8 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
         {
             estimated_base64_decoded_len(content_base64)
                 .with_context(|| format!("validate document {}", doc.file_name))?;
+            validate_content_base64(content_base64)
+                .with_context(|| format!("validate document {}", doc.file_name))?;
             continue;
         }
         document_source_path(doc)?;
@@ -3341,18 +3343,20 @@ fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapsh
 }
 
 fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
-    let value = value.trim();
-    if value.is_empty() {
+    let value_len = value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .count();
+    if value_len == 0 {
         return Ok(0);
     }
     let padding = value
-        .as_bytes()
-        .iter()
+        .bytes()
         .rev()
-        .take_while(|byte| **byte == b'=')
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .take_while(|byte| *byte == b'=')
         .count();
-    let groups = value
-        .len()
+    let groups = value_len
         .checked_add(3)
         .and_then(|len| len.checked_div(4))
         .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
@@ -3360,6 +3364,30 @@ fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
         .checked_mul(3)
         .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?
         .saturating_sub(padding))
+}
+
+fn validate_content_base64(content_base64: &str) -> Result<()> {
+    use std::io::Read;
+
+    let filtered = AsciiWhitespaceFilteredReader::new(content_base64.as_bytes());
+    let mut decoder =
+        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = decoder
+            .read(&mut buffer)
+            .map_err(|err| {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    bad_request_error("document contentBase64 is not valid base64")
+                } else {
+                    anyhow!(err)
+                }
+            })
+            .context("decode document contentBase64")?;
+        if read == 0 {
+            return Ok(());
+        }
+    }
 }
 
 fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocument) -> String {
@@ -4086,7 +4114,7 @@ mod tests {
         decode_challenge_payload, decode_content_base64_to_hashed_tempfile, document_content_type,
         document_source_path, estimated_base64_decoded_len, normalize_optional_text,
         require_local_execution_document_contents, select_organization_business_no,
-        stable_document_id, validate_month_format,
+        stable_document_id, validate_document_payloads, validate_month_format,
     };
     use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
     use chrono::{DateTime, FixedOffset};
@@ -4229,6 +4257,20 @@ mod tests {
     fn content_base64_decoder_rejects_invalid_base64() {
         let err = decode_content_base64_to_hashed_tempfile("not valid base64")
             .expect_err("invalid base64");
+        assert!(err.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("document contentBase64 is not valid base64")
+        }));
+    }
+
+    #[test]
+    fn document_payload_validation_rejects_invalid_base64_before_upload() {
+        let docs = vec![fixture_document(
+            "invalid.pdf",
+            "not valid base64".to_owned(),
+        )];
+        let err = validate_document_payloads(&docs).expect_err("invalid base64");
         assert!(err.chain().any(|cause| {
             cause
                 .to_string()
