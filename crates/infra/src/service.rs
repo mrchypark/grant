@@ -4297,6 +4297,15 @@ mod tests {
     }
 
     #[test]
+    fn content_base64_decoder_does_not_end_on_large_whitespace_block() {
+        let mut encoded = " ".repeat(8192);
+        encoded.push_str("UERGLUNPTlRFTlQ=");
+        let decoded = decode_content_base64_to_hashed_tempfile(&encoded).expect("decoded tempfile");
+        let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
+        assert_eq!(contents, b"PDF-CONTENT");
+    }
+
+    #[test]
     fn content_base64_decoder_rejects_invalid_base64() {
         let err = decode_content_base64_to_hashed_tempfile("not valid base64")
             .expect_err("invalid base64");

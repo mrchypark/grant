@@ -18,12 +18,12 @@ use openssl::{
     },
 };
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use simple_asn1::{ASN1Block, ASN1Class, BigUint, OID, from_der};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::SystemTime,
 };
 
 const OID_NPKI_SEED_CBC: &[u64] = &[1, 2, 410, 200004, 1, 4];
@@ -450,7 +450,7 @@ fn trust_store_from_ca_bundle_pem(
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TrustStoreFileState {
     len: u64,
-    modified: Option<SystemTime>,
+    sha256: [u8; 32],
 }
 
 struct CachedTrustStore {
@@ -462,11 +462,11 @@ fn configured_trust_store(path: &Path) -> Result<Arc<openssl::x509::store::X509S
     static TRUST_STORES: OnceLock<Mutex<HashMap<PathBuf, CachedTrustStore>>> = OnceLock::new();
 
     let cache_key = path.to_path_buf();
-    let metadata = std::fs::metadata(path)
-        .with_context(|| format!("stat X509 trust bundle {}", path.display()))?;
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read X509 trust bundle {}", path.display()))?;
     let file_state = TrustStoreFileState {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
+        len: pem.len() as u64,
+        sha256: Sha256::digest(&pem).into(),
     };
     let cache = TRUST_STORES.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(store) = cache
@@ -479,8 +479,6 @@ fn configured_trust_store(path: &Path) -> Result<Arc<openssl::x509::store::X509S
         return Ok(store);
     }
 
-    let pem = std::fs::read(path)
-        .with_context(|| format!("read X509 trust bundle {}", path.display()))?;
     let store = Arc::new(trust_store_from_ca_bundle_pem(path, &pem)?);
     cache
         .lock()
