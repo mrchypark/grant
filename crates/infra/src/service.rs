@@ -768,24 +768,25 @@ impl AppService {
             require_safe_facility_code("facilityCode", &input.snapshot.facility.code)?;
         input.snapshot.facility.code = facility_code.clone();
         require_local_execution_document_contents(&mut input.snapshot)?;
-        self.validate_cert_gateway_challenge(
-            &input.challenge_id,
-            &input.challenge_payload,
-            &input.challenge_signature_base64,
-            "ephemeral",
-            &organization_id,
-            ChallengeBindingExpectations {
-                sign_cert_der: &input.sign_cert_der,
-                require_origin: true,
-                business_no: Some(&business_no),
-                sync_mode: Some(sync_mode_label(&input.mode)),
-                facility_code: Some(facility_code.as_str()),
-                start_month: None,
-                end_month: None,
-                snapshot: Some(&input.snapshot),
-            },
-        )
-        .await?;
+        let challenge = self
+            .validate_cert_gateway_challenge(
+                &input.challenge_id,
+                &input.challenge_payload,
+                &input.challenge_signature_base64,
+                "ephemeral",
+                &organization_id,
+                ChallengeBindingExpectations {
+                    sign_cert_der: &input.sign_cert_der,
+                    require_origin: true,
+                    business_no: Some(&business_no),
+                    sync_mode: Some(sync_mode_label(&input.mode)),
+                    facility_code: Some(facility_code.as_str()),
+                    start_month: None,
+                    end_month: None,
+                    snapshot: Some(&input.snapshot),
+                },
+            )
+            .await?;
         self.db
             .consume_cert_gateway_challenge(&input.challenge_id)
             .await?;
@@ -813,7 +814,7 @@ impl AppService {
                 input.snapshot,
                 started,
                 Some(facility_code.as_str()),
-                None,
+                Some(challenge.created_by_user_id.as_str()),
                 false,
                 true,
             )
@@ -3050,13 +3051,13 @@ impl AppService {
         &self,
         organization_id: &str,
         plant_code: &str,
-        doc: BridgeDocument,
+        mut doc: BridgeDocument,
         existing_object_keys: &BTreeSet<String>,
         existing_storage_object_keys: &BTreeSet<String>,
     ) -> Result<PersistedDocument> {
         let id = stable_document_id(organization_id, plant_code, &doc);
         let category = resolved_document_category(&doc);
-        let upload = prepare_document_upload(&doc)
+        let upload = prepare_document_upload(&mut doc)
             .await
             .with_context(|| format!("prepare document {}", doc.file_name))?;
         let uploaded_sha256 = &upload.uploaded_sha256;
@@ -3150,14 +3151,14 @@ impl AppService {
     }
 }
 
-async fn prepare_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumentUpload> {
-    if let Some(content_base64) = doc
-        .content_base64
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let content_base64 = content_base64.to_owned();
+async fn prepare_document_upload(doc: &mut BridgeDocument) -> Result<PreparedDocumentUpload> {
+    if let Some(content_base64) = doc.content_base64.take() {
+        if content_base64
+            .bytes()
+            .all(|byte| byte.is_ascii_whitespace())
+        {
+            return prepare_source_document_upload(doc).await;
+        }
         let decoded = tokio::task::spawn_blocking(move || {
             decode_content_base64_to_hashed_tempfile(&content_base64)
         })
@@ -3170,6 +3171,10 @@ async fn prepare_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumen
         });
     }
 
+    prepare_source_document_upload(doc).await
+}
+
+async fn prepare_source_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumentUpload> {
     let source_path = PathBuf::from(document_source_path(doc)?);
     let uploaded_sha256 = sha256_file_hex(&source_path).await?;
     Ok(PreparedDocumentUpload {
