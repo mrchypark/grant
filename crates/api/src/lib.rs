@@ -738,6 +738,7 @@ async fn ingest_local_execution_result(
     let run = service
         .ingest_local_execution_result(IngestLocalExecutionResultInput {
             organization_id,
+            requested_by_user_id: Some(ctx.user_id),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,

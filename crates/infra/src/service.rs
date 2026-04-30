@@ -256,6 +256,7 @@ pub struct ExecuteEphemeralCrawlInput {
 #[derive(Debug, Clone)]
 pub struct IngestLocalExecutionResultInput {
     pub organization_id: String,
+    pub requested_by_user_id: Option<String>,
     pub challenge_id: String,
     pub challenge_payload: String,
     pub challenge_signature_base64: String,
@@ -787,6 +788,7 @@ impl AppService {
                 },
             )
             .await?;
+        self.validate_challenge_requester(input.requested_by_user_id.as_deref(), &challenge)?;
         self.db
             .consume_cert_gateway_challenge(&input.challenge_id)
             .await?;
