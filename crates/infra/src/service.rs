@@ -610,19 +610,12 @@ impl AppService {
                 },
             )
             .await?;
-        if let Some(requested_by_user_id) = input
+        let requested_by_user_id = input
             .requested_by_user_id
             .as_deref()
             .map(|value| require_non_empty("requestedByUserId", value))
-            .transpose()?
-        {
-            if requested_by_user_id != challenge.created_by_user_id {
-                return Err(forbidden_error(format!(
-                    "forbidden: challenge creator {} does not match requester {}",
-                    challenge.created_by_user_id, requested_by_user_id
-                )));
-            }
-        }
+            .transpose()?;
+        self.validate_challenge_requester(requested_by_user_id.as_deref(), &challenge)?;
         self.db
             .consume_cert_gateway_challenge(&input.challenge_id)
             .await?;
@@ -686,14 +679,7 @@ impl AppService {
                 },
             )
             .await?;
-        if let Some(requested_by_user_id) = requested_by_user_id {
-            if requested_by_user_id != challenge.created_by_user_id {
-                return Err(forbidden_error(format!(
-                    "forbidden: challenge creator {} does not match requester {}",
-                    challenge.created_by_user_id, requested_by_user_id
-                )));
-            }
-        }
+        self.validate_challenge_requester(requested_by_user_id.as_deref(), &challenge)?;
         let requested_facility_code = normalize_optional_text(input.facility_code);
         let effective_facility_code = match (
             challenge.facility_code.as_deref(),
@@ -942,18 +928,16 @@ impl AppService {
             .map(|value| require_safe_facility_code("facilityCode", value))
             .transpose()?;
         match facility_code.as_deref() {
-            Some(facility_code) => match self.db.get_plant_by_facility_code(facility_code).await {
-                Ok(_) => {
+            Some(facility_code) => match self
+                .get_existing_plant_by_facility_code_strong(facility_code)
+                .await?
+            {
+                Some(_) => {
                     self.authorize_sync(user_id, organization_id, Some(facility_code))
                         .await?;
                     Ok(Some(facility_code.to_owned()))
                 }
-                Err(err)
-                    if matches!(
-                        err.downcast_ref::<DatabaseLookupError>(),
-                        Some(DatabaseLookupError::PlantNotFound)
-                    ) =>
-                {
+                None => {
                     self.authorize_organization_action(
                         user_id,
                         organization_id,
@@ -965,7 +949,6 @@ impl AppService {
                     .await?;
                     Ok(Some(facility_code.to_owned()))
                 }
-                Err(err) => Err(err),
             },
             None => {
                 let executable = self
@@ -1204,6 +1187,47 @@ impl AppService {
         (message, duration_ms)
     }
 
+    async fn record_and_log_sync_failure(
+        &self,
+        run_id: &str,
+        started: std::time::Instant,
+        business_no: &str,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        effective_mode: &SyncMode,
+        err: &anyhow::Error,
+        failure: &'static str,
+    ) {
+        let (message, duration_ms) = self
+            .record_failed_sync_error(run_id, started, facility_code, asset_id, err)
+            .await;
+        error!(
+            business_no,
+            facility_code = facility_code.unwrap_or(""),
+            mode = ?effective_mode,
+            duration_ms,
+            error = %message,
+            failure,
+            "sync run failed"
+        );
+    }
+
+    fn validate_challenge_requester(
+        &self,
+        requested_by_user_id: Option<&str>,
+        challenge: &CertGatewayChallenge,
+    ) -> Result<()> {
+        if let Some(requested_by_user_id) = requested_by_user_id {
+            if requested_by_user_id != challenge.created_by_user_id {
+                return Err(forbidden_error(format!(
+                    "forbidden: challenge creator {} does not match requester {}",
+                    challenge.created_by_user_id, requested_by_user_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn get_existing_plant_by_facility_code_strong(
         &self,
         facility_code: &str,
@@ -1346,45 +1370,33 @@ impl AppService {
                 {
                     Ok(run) => Ok(run),
                     Err(err) => {
-                        let (message, duration_ms) = self
-                            .record_failed_sync_error(
-                                &run_id,
-                                started,
-                                facility_code.as_deref(),
-                                None,
-                                &err,
-                            )
-                            .await;
-                        error!(
-                            business_no,
-                            facility_code = facility_code.as_deref().unwrap_or(""),
-                            mode = ?effective_mode,
-                            duration_ms,
-                            error = %message,
-                            "sync materialization failed"
-                        );
+                        self.record_and_log_sync_failure(
+                            &run_id,
+                            started,
+                            business_no.as_str(),
+                            facility_code.as_deref(),
+                            None,
+                            &effective_mode,
+                            &err,
+                            "sync materialization failed",
+                        )
+                        .await;
                         Err(err)
                     }
                 }
             }
             Err(err) => {
-                let (message, duration_ms) = self
-                    .record_failed_sync_error(
-                        &run_id,
-                        started,
-                        facility_code.as_deref(),
-                        None,
-                        &err,
-                    )
-                    .await;
-                error!(
-                    business_no,
-                    facility_code = facility_code.as_deref().unwrap_or(""),
-                    mode = ?effective_mode,
-                    duration_ms,
-                    error = %message,
-                    "sync failed"
-                );
+                self.record_and_log_sync_failure(
+                    &run_id,
+                    started,
+                    business_no.as_str(),
+                    facility_code.as_deref(),
+                    None,
+                    &effective_mode,
+                    &err,
+                    "sync failed",
+                )
+                .await;
                 Err(err)
             }
         }
