@@ -3387,12 +3387,8 @@ fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
                 ));
             }
         } else {
-            if seen_padding
-                || !base64::alphabet::STANDARD
-                    .as_str()
-                    .as_bytes()
-                    .contains(&byte)
-            {
+            let is_base64_alphabet = byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/');
+            if seen_padding || !is_base64_alphabet {
                 return Err(bad_request_error(
                     "document contentBase64 is not valid base64",
                 ));
