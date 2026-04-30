@@ -1267,8 +1267,11 @@ fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u
 }
 
 fn decode_base64_value(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    let cleaned: String = value.chars().filter(|ch| !ch.is_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD.decode(cleaned.as_bytes())
+    let cleaned: Vec<u8> = value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    base64::engine::general_purpose::STANDARD.decode(cleaned)
 }
 
 fn decode_optional_base64_field(

@@ -3204,10 +3204,9 @@ fn decode_content_base64_to_hashed_tempfile(
 ) -> Result<DecodedDocumentContent> {
     use std::io::Read;
 
-    let mut decoder = base64::read::DecoderReader::new(
-        content_base64.as_bytes(),
-        &base64::engine::general_purpose::STANDARD,
-    );
+    let filtered = AsciiWhitespaceFilteredReader::new(content_base64.as_bytes());
+    let mut decoder =
+        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
     let mut output = tempfile::NamedTempFile::new().context("create document decode tempfile")?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 8192];
@@ -4037,6 +4036,38 @@ fn select_organization_business_no<'a>(
     )))
 }
 
+struct AsciiWhitespaceFilteredReader<R> {
+    inner: R,
+}
+
+impl<R> AsciiWhitespaceFilteredReader<R> {
+    fn new(inner: R) -> Self {
+        Self { inner }
+    }
+}
+
+impl<R: io::Read> io::Read for AsciiWhitespaceFilteredReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        let mut byte = [0u8; 1];
+        while written < buf.len() {
+            match self.inner.read(&mut byte)? {
+                0 => break,
+                _ if byte[0].is_ascii_whitespace() => {}
+                _ => {
+                    buf[written] = byte[0];
+                    written += 1;
+                }
+            }
+        }
+        Ok(written)
+    }
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -4174,6 +4205,18 @@ mod tests {
     fn content_base64_decoder_streams_to_tempfile() {
         let decoded =
             decode_content_base64_to_hashed_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
+        let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
+        assert_eq!(contents, b"PDF-CONTENT");
+        assert_eq!(
+            decoded.sha256_hex,
+            "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69"
+        );
+    }
+
+    #[test]
+    fn content_base64_decoder_ignores_ascii_whitespace() {
+        let decoded = decode_content_base64_to_hashed_tempfile(" UERG\nLUNP\tTlRFTlQ= ")
+            .expect("decoded tempfile");
         let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
         assert_eq!(contents, b"PDF-CONTENT");
         assert_eq!(
