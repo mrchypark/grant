@@ -791,17 +791,13 @@ impl AppService {
             .consume_cert_gateway_challenge(&input.challenge_id)
             .await?;
 
-        let requested_plant_id = self
+        let requested_plant = self
             .get_existing_plant_by_facility_code_strong(&facility_code)
-            .await?
-            .map(|plant| plant.id);
+            .await?;
+        let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.as_str());
         let run = self
             .db
-            .start_sync_run(
-                &organization_id,
-                requested_plant_id.as_deref(),
-                input.mode.clone(),
-            )
+            .start_sync_run(&organization_id, requested_plant_id, input.mode.clone())
             .await?;
         let run_id = run.id.clone();
         let started = std::time::Instant::now();
@@ -814,6 +810,7 @@ impl AppService {
                 input.snapshot,
                 started,
                 Some(facility_code.as_str()),
+                Some(requested_plant),
                 Some(challenge.created_by_user_id.as_str()),
                 false,
                 true,
@@ -1313,20 +1310,17 @@ impl AppService {
             skip_documents,
             "starting sync"
         );
-        let requested_plant_id = match facility_code.as_deref() {
-            Some(facility_code) => self
-                .get_existing_plant_by_facility_code_strong(facility_code)
-                .await?
-                .map(|plant| plant.id),
+        let requested_plant = match facility_code.as_deref() {
+            Some(facility_code) => {
+                self.get_existing_plant_by_facility_code_strong(facility_code)
+                    .await?
+            }
             None => None,
         };
+        let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.as_str());
         let run = self
             .db
-            .start_sync_run(
-                &organization_id,
-                requested_plant_id.as_deref(),
-                effective_mode.clone(),
-            )
+            .start_sync_run(&organization_id, requested_plant_id, effective_mode.clone())
             .await?;
         let run_id = run.id.clone();
 
@@ -1363,6 +1357,7 @@ impl AppService {
                         snapshot,
                         started,
                         facility_code.as_deref(),
+                        Some(requested_plant),
                         created_by_user_id,
                         requires_stored_credential,
                         true,
@@ -2640,6 +2635,7 @@ impl AppService {
         snapshot: bridge::BridgeSnapshot,
         started: std::time::Instant,
         requested_facility_code: Option<&str>,
+        prechecked_existing_plant: Option<Option<Plant>>,
         created_by_user_id: Option<&str>,
         requires_stored_credential: bool,
         persist_documents: bool,
@@ -2662,9 +2658,13 @@ impl AppService {
         if effective_mode == SyncMode::Full && persist_documents {
             validate_document_payloads(&snapshot.documents)?;
         }
-        let existing_plant = self
-            .get_existing_plant_by_facility_code_strong(&snapshot.facility.code)
-            .await?;
+        let existing_plant = match prechecked_existing_plant {
+            Some(existing_plant) => existing_plant,
+            None => {
+                self.get_existing_plant_by_facility_code_strong(&snapshot.facility.code)
+                    .await?
+            }
+        };
         if let Some(created_by_user_id) = created_by_user_id {
             match existing_plant.as_ref() {
                 Some(_) => {
@@ -4073,11 +4073,19 @@ fn select_organization_business_no<'a>(
 
 struct AsciiWhitespaceFilteredReader<R> {
     inner: R,
+    buffer: [u8; 8192],
+    position: usize,
+    length: usize,
 }
 
 impl<R> AsciiWhitespaceFilteredReader<R> {
     fn new(inner: R) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            buffer: [0; 8192],
+            position: 0,
+            length: 0,
+        }
     }
 }
 
@@ -4088,13 +4096,19 @@ impl<R: io::Read> io::Read for AsciiWhitespaceFilteredReader<R> {
         }
 
         let mut written = 0;
-        let mut byte = [0u8; 1];
         while written < buf.len() {
-            match self.inner.read(&mut byte)? {
-                0 => break,
-                _ if byte[0].is_ascii_whitespace() => {}
-                _ => {
-                    buf[written] = byte[0];
+            if self.position == self.length {
+                self.length = self.inner.read(&mut self.buffer)?;
+                self.position = 0;
+                if self.length == 0 {
+                    break;
+                }
+            }
+            while self.position < self.length && written < buf.len() {
+                let byte = self.buffer[self.position];
+                self.position += 1;
+                if !byte.is_ascii_whitespace() {
+                    buf[written] = byte;
                     written += 1;
                 }
             }
