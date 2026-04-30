@@ -796,10 +796,11 @@ impl AppService {
         let requested_plant = self
             .get_existing_plant_by_facility_code_strong(&facility_code)
             .await?;
-        let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.as_str());
+        let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.clone());
+        let requested_plant_id_ref = requested_plant_id.as_deref();
         let run = self
             .db
-            .start_sync_run(&organization_id, requested_plant_id, input.mode.clone())
+            .start_sync_run(&organization_id, requested_plant_id_ref, input.mode.clone())
             .await?;
         let run_id = run.id.clone();
         let started = std::time::Instant::now();
@@ -826,7 +827,7 @@ impl AppService {
                         &run_id,
                         started,
                         Some(facility_code.as_str()),
-                        None,
+                        requested_plant_id_ref,
                         &err,
                     )
                     .await;
@@ -1322,10 +1323,15 @@ impl AppService {
         let requested_plant_id = prechecked_existing_plant
             .as_ref()
             .and_then(|plant| plant.as_ref())
-            .map(|plant| plant.id.as_str());
+            .map(|plant| plant.id.clone());
+        let requested_plant_id_ref = requested_plant_id.as_deref();
         let run = self
             .db
-            .start_sync_run(&organization_id, requested_plant_id, effective_mode.clone())
+            .start_sync_run(
+                &organization_id,
+                requested_plant_id_ref,
+                effective_mode.clone(),
+            )
             .await?;
         let run_id = run.id.clone();
 
@@ -1376,7 +1382,7 @@ impl AppService {
                             started,
                             business_no.as_str(),
                             facility_code.as_deref(),
-                            None,
+                            requested_plant_id_ref,
                             &effective_mode,
                             &err,
                             "sync materialization failed",
@@ -1392,7 +1398,7 @@ impl AppService {
                     started,
                     business_no.as_str(),
                     facility_code.as_deref(),
-                    None,
+                    requested_plant_id_ref,
                     &effective_mode,
                     &err,
                     "sync failed",
@@ -3263,7 +3269,7 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let decoded_len = validate_content_base64(content_base64)
+            let decoded_len = estimated_base64_decoded_len(content_base64)
                 .with_context(|| format!("validate document {}", doc.file_name))?;
             if decoded_len > MAX_LOCAL_EXECUTION_DOCUMENT_BYTES {
                 return Err(bad_request_error(format!(
@@ -3365,60 +3371,50 @@ fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapsh
 fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
     let mut value_len = 0_usize;
     let mut padding = 0_usize;
+    let mut seen_padding = false;
     for byte in value.bytes() {
         if byte.is_ascii_whitespace() {
             continue;
         }
-        value_len = value_len
-            .checked_add(1)
-            .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
         if byte == b'=' {
+            seen_padding = true;
             padding = padding
                 .checked_add(1)
                 .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+            if padding > 2 {
+                return Err(bad_request_error(
+                    "document contentBase64 is not valid base64",
+                ));
+            }
         } else {
-            padding = 0;
+            if seen_padding
+                || !base64::alphabet::STANDARD
+                    .as_str()
+                    .as_bytes()
+                    .contains(&byte)
+            {
+                return Err(bad_request_error(
+                    "document contentBase64 is not valid base64",
+                ));
+            }
         }
+        value_len = value_len
+            .checked_add(1)
+            .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
     }
     if value_len == 0 {
         return Ok(0);
     }
-    let groups = value_len
-        .checked_add(3)
-        .and_then(|len| len.checked_div(4))
-        .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+    if value_len % 4 != 0 {
+        return Err(bad_request_error(
+            "document contentBase64 is not valid base64",
+        ));
+    }
+    let groups = value_len / 4;
     Ok(groups
         .checked_mul(3)
         .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?
         .saturating_sub(padding))
-}
-
-fn validate_content_base64(content_base64: &str) -> Result<usize> {
-    use std::io::Read;
-
-    let filtered = AsciiWhitespaceFilteredReader::new(content_base64.as_bytes());
-    let mut decoder =
-        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
-    let mut buffer = [0u8; 8192];
-    let mut decoded_len = 0_usize;
-    loop {
-        let read = decoder
-            .read(&mut buffer)
-            .map_err(|err| {
-                if err.kind() == io::ErrorKind::InvalidData {
-                    bad_request_error("document contentBase64 is not valid base64")
-                } else {
-                    anyhow!(err)
-                }
-            })
-            .context("decode document contentBase64")?;
-        if read == 0 {
-            return Ok(decoded_len);
-        }
-        decoded_len = decoded_len
-            .checked_add(read)
-            .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
-    }
 }
 
 fn stable_document_id(organization_id: &str, plant_code: &str, doc: &BridgeDocument) -> String {
