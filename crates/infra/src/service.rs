@@ -16,7 +16,8 @@ use crate::{
     },
     kms::{EnvKmsProvider, KmsProvider},
     npki::{
-        validate_certificate_bundle_async, verify_challenge_signature, verify_message_signature,
+        validate_certificate_bundle_async, validate_certificate_trust_async,
+        verify_challenge_signature, verify_message_signature,
     },
 };
 use anyhow::{Context, Result, anyhow};
@@ -262,6 +263,7 @@ pub struct IngestLocalExecutionResultInput {
     pub challenge_signature_base64: String,
     pub result_signature_base64: String,
     pub sign_cert_der: Vec<u8>,
+    pub certificate_chain_der: Vec<Vec<u8>>,
     pub snapshot: bridge::BridgeSnapshot,
     pub mode: SyncMode,
 }
@@ -743,6 +745,14 @@ impl AppService {
         let business_no = self
             .validate_sign_cert_for_organization(&organization_id, None, &input.sign_cert_der)
             .await?;
+        validate_certificate_trust_async(
+            input.sign_cert_der.clone(),
+            "signCert.der",
+            input.certificate_chain_der.clone(),
+            self.cfg.security.allow_untrusted_certificates,
+            self.cfg.security.certificate_trust_bundle_path.as_deref(),
+        )
+        .await?;
         let snapshot_business_no =
             require_non_empty("facilityBusinessNo", &input.snapshot.facility.business_no)?;
         if snapshot_business_no != business_no {
@@ -799,6 +809,10 @@ impl AppService {
             .await?;
         let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.clone());
         let requested_plant_id_ref = requested_plant_id.as_deref();
+        let requested_asset_id = self
+            .get_existing_kr_rps_asset_id_for_facility_code_strong(&facility_code)
+            .await?;
+        let requested_asset_id_ref = requested_asset_id.as_deref();
         let run = self
             .db
             .start_sync_run(&organization_id, requested_plant_id_ref, input.mode.clone())
@@ -828,7 +842,7 @@ impl AppService {
                         &run_id,
                         started,
                         Some(facility_code.as_str()),
-                        requested_plant_id_ref,
+                        requested_asset_id_ref,
                         &err,
                     )
                     .await;
@@ -1255,6 +1269,31 @@ impl AppService {
         }
     }
 
+    async fn get_existing_kr_rps_asset_id_for_facility_code_strong(
+        &self,
+        facility_code: &str,
+    ) -> Result<Option<String>> {
+        match self
+            .db
+            .get_kr_rps_asset_id_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(asset_id) => Ok(Some(asset_id)),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn run_sync_with_bundle(
         &self,
         organization_id: &str,
@@ -1326,6 +1365,14 @@ impl AppService {
             .and_then(|plant| plant.as_ref())
             .map(|plant| plant.id.clone());
         let requested_plant_id_ref = requested_plant_id.as_deref();
+        let requested_asset_id = match facility_code.as_deref() {
+            Some(facility_code) => {
+                self.get_existing_kr_rps_asset_id_for_facility_code_strong(facility_code)
+                    .await?
+            }
+            None => None,
+        };
+        let requested_asset_id_ref = requested_asset_id.as_deref();
         let run = self
             .db
             .start_sync_run(
@@ -1383,7 +1430,7 @@ impl AppService {
                             started,
                             business_no.as_str(),
                             facility_code.as_deref(),
-                            requested_plant_id_ref,
+                            requested_asset_id_ref,
                             &effective_mode,
                             &err,
                             "sync materialization failed",
@@ -1399,7 +1446,7 @@ impl AppService {
                     started,
                     business_no.as_str(),
                     facility_code.as_deref(),
-                    requested_plant_id_ref,
+                    requested_asset_id_ref,
                     &effective_mode,
                     &err,
                     "sync failed",

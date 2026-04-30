@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{any, get, post, put},
 };
-use base64::Engine;
 use domain::{
     Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
     GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord, SyncMode, SyncRun,
@@ -27,7 +26,7 @@ use infra::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
@@ -304,6 +303,8 @@ struct IngestLocalExecutionResultRequest {
     challenge_signature_base64: String,
     result_signature_base64: String,
     sign_cert_der_base64: String,
+    #[serde(default)]
+    certificate_chain_der_base64: Vec<String>,
     snapshot: BridgeSnapshot,
     mode: Option<String>,
 }
@@ -744,6 +745,9 @@ async fn ingest_local_execution_result(
             challenge_signature_base64: body.challenge_signature_base64,
             result_signature_base64: body.result_signature_base64,
             sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
+            certificate_chain_der: decode_certificate_chain_der_base64(
+                &body.certificate_chain_der_base64,
+            )?,
             snapshot: body.snapshot,
             mode: parse_sync_mode(body.mode.as_deref())?,
         })
@@ -1237,18 +1241,8 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         )));
     }
 
-    let certificate_chain_der = body
-        .certificate_chain_der_base64
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            decode_base64_value(value).map_err(|_| {
-                ApiError::bad_request(anyhow!(
-                    "invalid base64 for certificateChainDerBase64[{idx}]"
-                ))
-            })
-        })
-        .collect::<ApiResult<Vec<_>>>()?;
+    let certificate_chain_der =
+        decode_certificate_chain_der_base64(&body.certificate_chain_der_base64)?;
 
     Ok(CertificateBundle {
         business_no: body.business_no,
@@ -1267,12 +1261,79 @@ fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
 }
 
-fn decode_base64_value(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    let cleaned: Vec<u8> = value
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect();
-    base64::engine::general_purpose::STANDARD.decode(cleaned)
+fn decode_certificate_chain_der_base64(values: &[String]) -> ApiResult<Vec<Vec<u8>>> {
+    if values.len() > MAX_CERTIFICATE_CHAIN_DER_ENTRIES {
+        return Err(ApiError::bad_request(anyhow!(
+            "certificateChainDerBase64 must contain at most {} entries",
+            MAX_CERTIFICATE_CHAIN_DER_ENTRIES
+        )));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            decode_base64_value(value).map_err(|_| {
+                ApiError::bad_request(anyhow!(
+                    "invalid base64 for certificateChainDerBase64[{idx}]"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn decode_base64_value(value: &str) -> anyhow::Result<Vec<u8>> {
+    let filtered = AsciiWhitespaceFilteredReader::new(value.as_bytes());
+    let mut decoder =
+        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
+    let mut decoded = Vec::with_capacity(value.len().saturating_mul(3) / 4);
+    io::Read::read_to_end(&mut decoder, &mut decoded).map_err(|err| anyhow!(err))?;
+    Ok(decoded)
+}
+
+struct AsciiWhitespaceFilteredReader<R> {
+    inner: R,
+    buffer: [u8; 8192],
+    position: usize,
+    length: usize,
+}
+
+impl<R> AsciiWhitespaceFilteredReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buffer: [0; 8192],
+            position: 0,
+            length: 0,
+        }
+    }
+}
+
+impl<R: io::Read> io::Read for AsciiWhitespaceFilteredReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        while written < buf.len() {
+            if self.position == self.length {
+                self.length = self.inner.read(&mut self.buffer)?;
+                self.position = 0;
+                if self.length == 0 {
+                    break;
+                }
+            }
+            while self.position < self.length && written < buf.len() {
+                let byte = self.buffer[self.position];
+                self.position += 1;
+                if !byte.is_ascii_whitespace() {
+                    buf[written] = byte;
+                    written += 1;
+                }
+            }
+        }
+        Ok(written)
+    }
 }
 
 fn decode_optional_base64_field(

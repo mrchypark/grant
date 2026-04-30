@@ -231,6 +231,27 @@ pub async fn validate_certificate_bundle_async(
     .context("join certificate validation task")?
 }
 
+pub async fn validate_certificate_trust_async(
+    cert_der: Vec<u8>,
+    cert_name: &'static str,
+    certificate_chain_der: Vec<Vec<u8>>,
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    let certificate_trust_bundle_path = certificate_trust_bundle_path.map(Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        validate_certificate_trust_with_trust_bundle_path(
+            &cert_der,
+            cert_name,
+            &certificate_chain_der,
+            allow_untrusted,
+            certificate_trust_bundle_path.as_deref(),
+        )
+    })
+    .await
+    .context("join certificate trust validation task")?
+}
+
 fn validate_certificate_bundle_with_trust_bundle_path(
     bundle: &CertificateBundle,
     allow_untrusted: bool,
@@ -254,30 +275,45 @@ fn validate_certificate_bundle_with_trust_bundle_path(
         (None, None) => {}
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
     }
+    validate_certificate_trust_with_trust_bundle_path(
+        &bundle.sign_cert_der,
+        "signCert.der",
+        &bundle.certificate_chain_der,
+        allow_untrusted,
+        certificate_trust_bundle_path,
+    )?;
     if !allow_untrusted {
-        let explicit_store = certificate_trust_bundle_path
-            .map(configured_trust_store)
-            .transpose()?;
-        let store = match explicit_store.as_ref() {
-            Some(store) => store.as_ref().as_ref(),
-            None => default_trust_store()?,
-        };
-        validate_certificate_trust_with_store(
-            &bundle.sign_cert_der,
-            "signCert.der",
-            &bundle.certificate_chain_der,
-            store,
-        )?;
         if let Some(km_cert_der) = &bundle.km_cert_der {
-            validate_certificate_trust_with_store(
+            validate_certificate_trust_with_trust_bundle_path(
                 km_cert_der,
                 "kmCert.der",
                 &bundle.certificate_chain_der,
-                store,
+                allow_untrusted,
+                certificate_trust_bundle_path,
             )?;
         }
     }
     Ok(())
+}
+
+fn validate_certificate_trust_with_trust_bundle_path(
+    cert_der: &[u8],
+    cert_name: &str,
+    certificate_chain_der: &[Vec<u8>],
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    if allow_untrusted {
+        return Ok(());
+    }
+    let explicit_store = certificate_trust_bundle_path
+        .map(configured_trust_store)
+        .transpose()?;
+    let store = match explicit_store.as_ref() {
+        Some(store) => store.as_ref().as_ref(),
+        None => default_trust_store()?,
+    };
+    validate_certificate_trust_with_store(cert_der, cert_name, certificate_chain_der, store)
 }
 
 fn parse_certificate(input: &[u8]) -> Result<X509> {
