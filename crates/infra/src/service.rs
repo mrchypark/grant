@@ -3710,7 +3710,9 @@ fn validate_challenge_payload_bindings(
         validate_optional_binding(
             "facility code",
             payload.facility_code.as_deref(),
-            expected.facility_code,
+            expected
+                .facility_code
+                .or(challenge.facility_code.as_deref()),
         )?;
         validate_month_binding(
             "start month",

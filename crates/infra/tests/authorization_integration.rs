@@ -1584,6 +1584,48 @@ async fn ephemeral_crawl_rejects_facility_different_from_signed_challenge_scope(
 }
 
 #[tokio::test]
+async fn ephemeral_crawl_uses_signed_facility_when_request_omits_scope() {
+    let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
+
+    let challenge = service
+        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
+            organization_id: "bootstrap-user".to_owned(),
+            mode: "ephemeral".to_owned(),
+            sync_mode: None,
+            origin: None,
+            business_no: None,
+            facility_code: Some("FAC-SIGNED-ONLY".to_owned()),
+            start_month: None,
+            end_month: None,
+            sign_cert_sha256_hex: None,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            ttl_seconds: 120,
+        })
+        .await
+        .expect("create challenge");
+    let (bundle, signature) = fake_bundle_and_signature(&challenge.payload);
+
+    let run = service
+        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
+            organization_id: "bootstrap-user".to_owned(),
+            requested_by_user_id: Some("bootstrap-user".to_owned()),
+            challenge_id: challenge.id,
+            challenge_payload: challenge.payload,
+            challenge_signature_base64: signature,
+            bundle,
+            facility_code: None,
+            start_month: challenge.start_month.clone(),
+            end_month: challenge.end_month.clone(),
+            mode: challenge_sync_mode(challenge.sync_mode.as_deref()),
+        })
+        .await
+        .expect("signed facility scope should be used when request omits it");
+
+    assert_eq!(run.status, "completed");
+    assert!(run.plant_id.is_some());
+}
+
+#[tokio::test]
 async fn ephemeral_crawl_normalizes_blank_requested_facility_scope() {
     let (service, _db, _db_dir, _artifacts_dir) = build_service().await;
 
