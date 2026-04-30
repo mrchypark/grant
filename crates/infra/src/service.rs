@@ -768,7 +768,8 @@ impl AppService {
         let facility_code =
             require_safe_facility_code("facilityCode", &input.snapshot.facility.code)?;
         input.snapshot.facility.code = facility_code.clone();
-        require_local_execution_document_contents(&mut input.snapshot)?;
+        input.snapshot =
+            require_local_execution_document_contents_on_blocking_thread(input.snapshot).await?;
         let challenge = self
             .validate_cert_gateway_challenge(
                 &input.challenge_id,
@@ -2667,7 +2668,10 @@ impl AppService {
             return Err(bad_request_error("document upload requires full sync"));
         }
         if effective_mode == SyncMode::Full && persist_documents {
-            validate_document_payloads(&snapshot.documents)?;
+            snapshot.documents = validate_document_payloads_on_blocking_thread(std::mem::take(
+                &mut snapshot.documents,
+            ))
+            .await?;
         }
         let existing_plant = match prechecked_existing_plant {
             Some(existing_plant) => existing_plant,
@@ -3291,6 +3295,28 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
         document_source_path(doc)?;
     }
     Ok(())
+}
+
+async fn validate_document_payloads_on_blocking_thread(
+    docs: Vec<BridgeDocument>,
+) -> Result<Vec<BridgeDocument>> {
+    tokio::task::spawn_blocking(move || {
+        validate_document_payloads(&docs)?;
+        Ok(docs)
+    })
+    .await
+    .context("join document payload validation task")?
+}
+
+async fn require_local_execution_document_contents_on_blocking_thread(
+    mut snapshot: bridge::BridgeSnapshot,
+) -> Result<bridge::BridgeSnapshot> {
+    tokio::task::spawn_blocking(move || {
+        require_local_execution_document_contents(&mut snapshot)?;
+        Ok(snapshot)
+    })
+    .await
+    .context("join local execution document validation task")?
 }
 
 fn normalize_active_organization(
