@@ -1310,14 +1310,17 @@ impl AppService {
             skip_documents,
             "starting sync"
         );
-        let requested_plant = match facility_code.as_deref() {
-            Some(facility_code) => {
+        let prechecked_existing_plant = match facility_code.as_deref() {
+            Some(facility_code) => Some(
                 self.get_existing_plant_by_facility_code_strong(facility_code)
-                    .await?
-            }
+                    .await?,
+            ),
             None => None,
         };
-        let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.as_str());
+        let requested_plant_id = prechecked_existing_plant
+            .as_ref()
+            .and_then(|plant| plant.as_ref())
+            .map(|plant| plant.id.as_str());
         let run = self
             .db
             .start_sync_run(&organization_id, requested_plant_id, effective_mode.clone())
@@ -1357,7 +1360,7 @@ impl AppService {
                         snapshot,
                         started,
                         facility_code.as_deref(),
-                        Some(requested_plant),
+                        prechecked_existing_plant,
                         created_by_user_id,
                         requires_stored_credential,
                         true,
@@ -2808,17 +2811,13 @@ impl AppService {
         let duration_ms = started.elapsed().as_millis() as i64;
         let bootstrap_created_plant = if existing_plant.is_none() {
             if let Some(created_by_user_id) = created_by_user_id.as_deref() {
-                if plant.owner_organization_id == organization_id {
-                    self.ensure_created_plant_bootstrap_roles().await?;
-                    Some(CreatedPlantBootstrap {
-                        user_id: created_by_user_id,
-                        creator_organization_id: organization_id,
-                        owner_organization_id: &plant.owner_organization_id,
-                        creator_agreement_id: None,
-                    })
-                } else {
-                    None
-                }
+                self.ensure_created_plant_bootstrap_roles().await?;
+                Some(CreatedPlantBootstrap {
+                    user_id: created_by_user_id,
+                    creator_organization_id: organization_id,
+                    owner_organization_id: &plant.owner_organization_id,
+                    creator_agreement_id: None,
+                })
             } else {
                 None
             }
@@ -3262,7 +3261,7 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let decoded_len = estimated_base64_decoded_len(content_base64)
+            let decoded_len = validate_content_base64(content_base64)
                 .with_context(|| format!("validate document {}", doc.file_name))?;
             if decoded_len > MAX_LOCAL_EXECUTION_DOCUMENT_BYTES {
                 return Err(bad_request_error(format!(
@@ -3279,8 +3278,6 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
                     MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES
                 )));
             }
-            validate_content_base64(content_base64)
-                .with_context(|| format!("validate document {}", doc.file_name))?;
             continue;
         }
         document_source_path(doc)?;
@@ -3394,13 +3391,14 @@ fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
         .saturating_sub(padding))
 }
 
-fn validate_content_base64(content_base64: &str) -> Result<()> {
+fn validate_content_base64(content_base64: &str) -> Result<usize> {
     use std::io::Read;
 
     let filtered = AsciiWhitespaceFilteredReader::new(content_base64.as_bytes());
     let mut decoder =
         base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
     let mut buffer = [0u8; 8192];
+    let mut decoded_len = 0_usize;
     loop {
         let read = decoder
             .read(&mut buffer)
@@ -3413,8 +3411,11 @@ fn validate_content_base64(content_base64: &str) -> Result<()> {
             })
             .context("decode document contentBase64")?;
         if read == 0 {
-            return Ok(());
+            return Ok(decoded_len);
         }
+        decoded_len = decoded_len
+            .checked_add(read)
+            .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
     }
 }
 
