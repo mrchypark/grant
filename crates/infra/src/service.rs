@@ -3253,6 +3253,7 @@ fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
 }
 
 fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
+    let mut total_content_bytes = 0_usize;
     for doc in docs {
         document_content_type(doc)?;
         if let Some(content_base64) = doc
@@ -3261,8 +3262,23 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            estimated_base64_decoded_len(content_base64)
+            let decoded_len = estimated_base64_decoded_len(content_base64)
                 .with_context(|| format!("validate document {}", doc.file_name))?;
+            if decoded_len > MAX_LOCAL_EXECUTION_DOCUMENT_BYTES {
+                return Err(bad_request_error(format!(
+                    "document {} exceeds {} bytes",
+                    doc.file_name, MAX_LOCAL_EXECUTION_DOCUMENT_BYTES
+                )));
+            }
+            total_content_bytes = total_content_bytes
+                .checked_add(decoded_len)
+                .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+            if total_content_bytes > MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES {
+                return Err(bad_request_error(format!(
+                    "documents exceed {} bytes",
+                    MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES
+                )));
+            }
             validate_content_base64(content_base64)
                 .with_context(|| format!("validate document {}", doc.file_name))?;
             continue;
@@ -3348,19 +3364,26 @@ fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapsh
 }
 
 fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
-    let value_len = value
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .count();
+    let mut value_len = 0_usize;
+    let mut padding = 0_usize;
+    for byte in value.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        value_len = value_len
+            .checked_add(1)
+            .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+        if byte == b'=' {
+            padding = padding
+                .checked_add(1)
+                .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+        } else {
+            padding = 0;
+        }
+    }
     if value_len == 0 {
         return Ok(0);
     }
-    let padding = value
-        .bytes()
-        .rev()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .take_while(|byte| *byte == b'=')
-        .count();
     let groups = value_len
         .checked_add(3)
         .and_then(|len| len.checked_div(4))
@@ -4297,6 +4320,42 @@ mod tests {
                 .to_string()
                 .contains("document contentBase64 is not valid base64")
         }));
+    }
+
+    #[test]
+    fn document_payload_validation_rejects_oversized_content_base64() {
+        let docs = vec![fixture_document(
+            "large.pdf",
+            "A".repeat(encoded_len_for_decoded_bytes(
+                MAX_LOCAL_EXECUTION_DOCUMENT_BYTES + 1,
+            )),
+        )];
+        let err = validate_document_payloads(&docs).expect_err("oversized document");
+        assert!(
+            err.to_string()
+                .contains("document large.pdf exceeds 16777216 bytes")
+        );
+    }
+
+    #[test]
+    fn document_payload_validation_rejects_oversized_content_total() {
+        let per_document_bytes = MAX_LOCAL_EXECUTION_DOCUMENT_BYTES * 3 / 4;
+        let docs = vec![
+            fixture_document(
+                "first.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_bytes)),
+            ),
+            fixture_document(
+                "second.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_bytes)),
+            ),
+            fixture_document(
+                "third.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_bytes)),
+            ),
+        ];
+        let err = validate_document_payloads(&docs).expect_err("oversized document total");
+        assert!(err.to_string().contains("documents exceed 33554432 bytes"));
     }
 
     #[test]
