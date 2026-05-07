@@ -1,3 +1,5 @@
+#[path = "support/auth.rs"]
+mod auth_support;
 mod support;
 
 use std::sync::Arc;
@@ -103,6 +105,8 @@ async fn build_service_with_default_consistency(
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -300,7 +304,7 @@ async fn trailbase_bearer_token_resolves_user_and_allows_list() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/plants")
-                .header("authorization", support::bearer_header("local-user"))
+                .header("authorization", auth_support::bearer_header("local-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -322,7 +326,7 @@ async fn bootstrap_trailbase_owner_binds_first_user_to_bootstrap_org() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/plants")
-                .header("authorization", support::bearer_header("first-user"))
+                .header("authorization", auth_support::bearer_header("first-user"))
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("request"),
@@ -337,7 +341,7 @@ async fn bootstrap_trailbase_owner_binds_first_user_to_bootstrap_org() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/admin/bootstrap/trailbase-owner")
-                .header("authorization", support::bearer_header("first-user"))
+                .header("authorization", auth_support::bearer_header("first-user"))
                 .header("x-certd-master-key", "dev-only-master-key")
                 .body(Body::empty())
                 .expect("request"),
@@ -363,7 +367,7 @@ async fn bootstrap_trailbase_owner_binds_first_user_to_bootstrap_org() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/plants")
-                .header("authorization", support::bearer_header("first-user"))
+                .header("authorization", auth_support::bearer_header("first-user"))
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("request"),
@@ -417,7 +421,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("me-user"))
+                .header("authorization", auth_support::bearer_header("me-user"))
                 .header("x-organization-id", "alpha-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -497,7 +501,7 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
                 .uri("/api/v1/me")
                 .header(
                     "authorization",
-                    support::bearer_header("restored-trailbase-user"),
+                    auth_support::bearer_header("restored-trailbase-user"),
                 )
                 .header("x-organization-id", "restore-org")
                 .body(Body::empty())
@@ -586,7 +590,7 @@ async fn learner_router_keeps_read_and_auth_routes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("first-user"))
+                .header("authorization", auth_support::bearer_header("first-user"))
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("request"),
@@ -600,7 +604,7 @@ async fn learner_router_keeps_read_and_auth_routes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/plants")
-                .header("authorization", support::bearer_header("first-user"))
+                .header("authorization", auth_support::bearer_header("first-user"))
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("request"),
@@ -673,7 +677,7 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("local-user"))
+                .header("authorization", auth_support::bearer_header("local-user"))
                 .header("x-organization-id", "local-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -780,7 +784,7 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("linked-user"))
+                .header("authorization", auth_support::bearer_header("linked-user"))
                 .header("x-organization-id", "linked-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -859,7 +863,7 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me?consistency=strong")
-                .header("authorization", support::bearer_header("strong-user"))
+                .header("authorization", auth_support::bearer_header("strong-user"))
                 .header("x-organization-id", "strong-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -947,7 +951,7 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("strong-user"))
+                .header("authorization", auth_support::bearer_header("strong-user"))
                 .header("x-organization-id", "strong-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -1037,7 +1041,7 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
                 .uri("/api/v1/me")
                 .header(
                     "authorization",
-                    support::bearer_header("prefer-strong-user"),
+                    auth_support::bearer_header("prefer-strong-user"),
                 )
                 .header("x-organization-id", "prefer-strong-org")
                 .body(Body::empty())
@@ -1126,7 +1130,7 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/plants")
-                .header("authorization", support::bearer_header("strong-user"))
+                .header("authorization", auth_support::bearer_header("strong-user"))
                 .header("x-organization-id", "strong-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -1206,7 +1210,7 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
                 .uri("/api/v1/plants")
                 .header(
                     "authorization",
-                    support::bearer_header("prefer-strong-user"),
+                    auth_support::bearer_header("prefer-strong-user"),
                 )
                 .header("x-organization-id", "prefer-strong-org")
                 .body(Body::empty())
@@ -1241,7 +1245,7 @@ async fn read_routes_reject_invalid_consistency_query() {
                 .uri("/api/v1/plants?consistency=bogus")
                 .header(
                     "authorization",
-                    support::bearer_header("invalid-consistency-user"),
+                    auth_support::bearer_header("invalid-consistency-user"),
                 )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
@@ -1274,7 +1278,7 @@ async fn read_routes_allow_explicit_strong_consistency() {
                 .uri("/api/v1/admin/bootstrap/trailbase-owner")
                 .header(
                     "authorization",
-                    support::bearer_header("strong-consistency-user"),
+                    auth_support::bearer_header("strong-consistency-user"),
                 )
                 .header("x-certd-master-key", "dev-only-master-key")
                 .body(Body::empty())
@@ -1291,7 +1295,7 @@ async fn read_routes_allow_explicit_strong_consistency() {
                 .uri("/api/v1/plants?consistency=strong")
                 .header(
                     "authorization",
-                    support::bearer_header("strong-consistency-user"),
+                    auth_support::bearer_header("strong-consistency-user"),
                 )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())

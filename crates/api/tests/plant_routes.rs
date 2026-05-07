@@ -1,3 +1,5 @@
+#[path = "support/auth.rs"]
+mod auth_support;
 mod support;
 
 use std::sync::Arc;
@@ -71,6 +73,8 @@ fn test_config(artifacts_root: &std::path::Path) -> AppConfig {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -595,7 +599,7 @@ async fn plant_routes_require_context_and_apply_visibility() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -615,7 +619,7 @@ async fn plant_routes_require_context_and_apply_visibility() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -629,7 +633,7 @@ async fn plant_routes_require_context_and_apply_visibility() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-DOCUMENT")
-                .header("authorization", support::bearer_header("direct-user"))
+                .header("authorization", auth_support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -673,7 +677,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/generation")
-                .header("authorization", support::bearer_header("direct-user"))
+                .header("authorization", auth_support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -687,7 +691,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/generation")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -701,7 +705,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/rates")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -715,7 +719,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/rec")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -729,7 +733,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-PROFILE/documents")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -743,7 +747,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-DOCUMENT/documents")
-                .header("authorization", support::bearer_header("direct-user"))
+                .header("authorization", auth_support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -779,7 +783,7 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/documents/doc-1/download")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -789,10 +793,11 @@ async fn plant_subresource_routes_require_context_and_authorization() {
     assert_eq!(forbidden_download.status(), StatusCode::FORBIDDEN);
 
     let allowed_download = router
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/v1/documents/doc-1/download")
-                .header("authorization", support::bearer_header("direct-user"))
+                .header("authorization", auth_support::bearer_header("direct-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -804,6 +809,83 @@ async fn plant_subresource_routes_require_context_and_authorization() {
         .await
         .expect("download bytes");
     assert_eq!(&bytes[..], b"test-pdf-bytes");
+
+    let plant = db
+        .get_plant_by_facility_code("FAC-DOCUMENT")
+        .await
+        .expect("load document plant");
+    let asset_id = db
+        .upsert_kr_rps_asset_projection(&plant, None, None, &[], &[])
+        .await
+        .expect("upsert asset projection");
+    runtime
+        .execute(
+            "INSERT INTO roles (id, organization_id, code, name, description, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            vec![
+                "role-asset-document".into(),
+                Option::<String>::Some("worker-org".to_owned()).into(),
+                "asset.document".into(),
+                "Asset Document".into(),
+                Option::<String>::None.into(),
+                "2026-04-03T00:00:00Z".into(),
+                "2026-04-03T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert asset document role");
+    runtime
+        .execute(
+            "INSERT INTO role_actions (role_id, action_id) VALUES ($1, $2)",
+            vec!["role-asset-document".into(), "asset.document.read".into()],
+        )
+        .await
+        .expect("insert asset document action");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "worker-org".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Asset,
+        resource_id: asset_id.clone(),
+        role_id: "role-asset-document".to_owned(),
+        agreement_id: Some("agreement-document".to_owned()),
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save asset organization document binding");
+    db.save_role_binding(&RoleBinding {
+        id: Uuid::new_v4().simple().to_string(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "group-user".to_owned(),
+        subject_organization_id: "worker-org".to_owned(),
+        resource_type: RoleBindingResourceType::Asset,
+        resource_id: asset_id,
+        role_id: "role-asset-document".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-03T00:00:00Z".to_owned(),
+        updated_at: "2026-04-03T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("save asset user document binding");
+
+    let asset_allowed_download = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/documents/doc-1/download")
+                .header("authorization", auth_support::bearer_header("group-user"))
+                .header("x-organization-id", "worker-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("asset allowed download response");
+    assert_eq!(asset_allowed_download.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -888,7 +970,7 @@ async fn plant_detail_handles_integer_generation_aggregates() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plants/FAC-INTEGER")
-                .header("authorization", support::bearer_header("group-user"))
+                .header("authorization", auth_support::bearer_header("group-user"))
                 .header("x-organization-id", "worker-org")
                 .body(Body::empty())
                 .expect("request"),

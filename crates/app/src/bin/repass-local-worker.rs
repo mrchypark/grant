@@ -46,6 +46,8 @@ struct ProofBundle {
     sign_pri_key_base64: String,
     km_cert_der_base64: String,
     km_pri_key_base64: String,
+    #[serde(default)]
+    certificate_chain_der_base64: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +58,8 @@ struct LocalExecutionResultRequest {
     challenge_signature_base64: String,
     result_signature_base64: String,
     sign_cert_der_base64: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    certificate_chain_der_base64: Vec<String>,
     snapshot: BridgeSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<String>,
@@ -343,6 +347,15 @@ fn certificate_bundle(req: &LocalEphemeralRequest) -> Result<CertificateBundle> 
             &req.bundle.km_cert_der_base64,
         )?,
         km_pri_key: decode_optional_base64("bundle.kmPriKeyBase64", &req.bundle.km_pri_key_base64)?,
+        certificate_chain_der: req
+            .bundle
+            .certificate_chain_der_base64
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                decode_base64(&format!("bundle.certificateChainDerBase64[{idx}]"), value)
+            })
+            .collect::<Result<Vec<_>>>()?,
     })
 }
 
@@ -405,6 +418,7 @@ fn local_result_body(
         challenge_signature_base64: req.challenge_signature_base64.clone(),
         result_signature_base64,
         sign_cert_der_base64: req.bundle.sign_cert_der_base64.clone(),
+        certificate_chain_der_base64: req.bundle.certificate_chain_der_base64.clone(),
         snapshot,
         mode: local_result_mode(req),
     }
@@ -489,6 +503,7 @@ mod tests {
         let json = serde_json::to_string(&body).expect("serialize result body");
 
         assert!(json.contains("PUBLIC_CERT"));
+        assert!(json.contains("CHAIN_CERT"));
         for forbidden in [
             "secret-password",
             "PRIVATE_KEY",
@@ -515,6 +530,28 @@ mod tests {
         req.mode = Some(" FULL ".to_owned());
         let full_body = local_result_body(&req, fixture_snapshot(), "RESULT_SIGNATURE".to_owned());
         assert_eq!(full_body.mode.as_deref(), Some("full"));
+    }
+
+    #[test]
+    fn certificate_bundle_preserves_chain_entries() {
+        let mut req = fixture_request();
+        req.bundle.sign_cert_der_base64 = "AQID".to_owned();
+        req.bundle.sign_pri_key_base64 = "BAUG".to_owned();
+        req.bundle.km_cert_der_base64.clear();
+        req.bundle.km_pri_key_base64.clear();
+        req.bundle.certificate_chain_der_base64 = vec!["BwgJ".to_owned(), "CgsM".to_owned()];
+
+        let bundle = certificate_bundle(&req).expect("certificate bundle");
+        assert_eq!(
+            bundle.certificate_chain_der,
+            vec![vec![7, 8, 9], vec![10, 11, 12]]
+        );
+
+        let body = local_result_body(&req, fixture_snapshot(), "RESULT_SIGNATURE".to_owned());
+        assert_eq!(
+            body.certificate_chain_der_base64,
+            vec!["BwgJ".to_owned(), "CgsM".to_owned()]
+        );
     }
 
     #[test]
@@ -948,6 +985,7 @@ mod tests {
                 sign_pri_key_base64: "PRIVATE_KEY".to_owned(),
                 km_cert_der_base64: "KM_PUBLIC_CERT".to_owned(),
                 km_pri_key_base64: "KM_PRIVATE_KEY".to_owned(),
+                certificate_chain_der_base64: vec!["CHAIN_CERT".to_owned()],
             },
         }
     }

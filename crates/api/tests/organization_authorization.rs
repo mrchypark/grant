@@ -1,3 +1,5 @@
+#[path = "support/auth.rs"]
+mod auth_support;
 mod support;
 
 use axum::{
@@ -73,6 +75,8 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -111,7 +115,7 @@ fn app_request(path: &str, token: &str, organization_id: &str, body: Value) -> R
         .method("POST")
         .uri(path)
         .header("content-type", "application/json")
-        .header("authorization", support::bearer_header(token))
+        .header("authorization", auth_support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .body(Body::from(body.to_string()))
         .expect("request")
@@ -121,7 +125,7 @@ fn empty_post_request(path: &str, token: &str, organization_id: &str) -> Request
     Request::builder()
         .method("POST")
         .uri(path)
-        .header("authorization", support::bearer_header(token))
+        .header("authorization", auth_support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .body(Body::empty())
         .expect("request")
@@ -319,7 +323,10 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -359,7 +366,10 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .header("x-organization-id", "creator-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -442,6 +452,8 @@ async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
         .get_plant_by_facility_code("FAC-003")
         .await
         .expect("created plant");
+    assert!(plant.id.starts_with("plant-"));
+    assert_ne!(plant.id, plant.facility_code);
     assert_eq!(plant.owner_organization_id, "owner-org");
     assert_eq!(
         plant.created_by_organization_id.as_deref(),
@@ -461,7 +473,7 @@ async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
         .has_user_plant_action(
             "bootstrap-user",
             "creator-org",
-            "FAC-003",
+            &plant.id,
             "plant.sync.execute",
         )
         .await

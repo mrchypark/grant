@@ -22,6 +22,8 @@ pub struct CertificateBundle {
     pub km_cert_der: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub km_pri_key: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub certificate_chain_der: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

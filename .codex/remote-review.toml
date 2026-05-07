@@ -1,0 +1,21 @@
+storage_scope = "project"
+tool_order = ["gh", "github_connector", "browser"]
+last_confirmed_at = "2026-04-26T00:00:00Z"
+
+[tool_capabilities.gh]
+read_threads = true
+post_replies = true
+resolve_threads = true
+request_review = true
+
+[tool_capabilities.github_connector]
+read_threads = true
+post_replies = false
+resolve_threads = false
+request_review = false
+
+[tool_capabilities.browser]
+read_threads = true
+post_replies = true
+resolve_threads = true
+request_review = true

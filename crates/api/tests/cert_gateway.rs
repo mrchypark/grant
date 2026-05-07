@@ -1,3 +1,5 @@
+#[path = "support/auth.rs"]
+mod auth_support;
 mod support;
 
 use axum::{
@@ -39,7 +41,7 @@ use openssl::{
     x509::{X509, X509NameBuilder},
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -91,6 +93,8 @@ async fn build_app() -> (axum::Router, Database, TempDir, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -193,7 +197,7 @@ fn auth_request(
     Request::builder()
         .method(method)
         .uri(path)
-        .header("authorization", support::bearer_header(token))
+        .header("authorization", auth_support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
@@ -275,28 +279,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-fn stable_document_id(
-    organization_id: &str,
-    plant_code: &str,
-    attachment_code: &str,
-    file_name: &str,
-) -> String {
-    let mut input = Vec::new();
-    push_hash_component(&mut input, organization_id);
-    push_hash_component(&mut input, plant_code);
-    push_hash_component(&mut input, attachment_code);
-    push_hash_component(&mut input, file_name);
-    sha256(&input)[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn push_hash_component(input: &mut Vec<u8>, value: &str) {
-    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    input.extend_from_slice(value.as_bytes());
 }
 
 fn signed_proof_bundle_without_km(challenge_payload: &str) -> (Value, String) {
@@ -384,12 +366,28 @@ fn local_execution_snapshot_with_document(facility_code: &str) -> Value {
         "required": true,
         "category": "permit",
         "sourcePath": "",
-        "sourceSha256": "sha-local",
-        "outputSha256": "sha-local",
+        "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "outputSha256": "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69",
         "contentBase64": STANDARD.encode(b"PDF-CONTENT"),
         "contentType": "application/pdf"
     }]);
     snapshot
+}
+
+fn find_artifact_with_bytes(root: &Path, expected: &[u8]) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            if let Some(found) = find_artifact_with_bytes(&path, expected) {
+                return Some(found);
+            }
+            continue;
+        }
+        if std::fs::read(&path).ok()?.as_slice() == expected {
+            return Some(path);
+        }
+    }
+    None
 }
 
 async fn grant_test_sync_access(
@@ -398,6 +396,10 @@ async fn grant_test_sync_access(
     user_id: &str,
     facility_code: &str,
 ) {
+    let plant = db
+        .get_plant_by_facility_code(facility_code)
+        .await
+        .expect("load plant for sync grant");
     db.upsert_role(&Role {
         id: "role-test-plant-sync-execute".to_owned(),
         organization_id: None,
@@ -416,7 +418,7 @@ async fn grant_test_sync_access(
         subject_id: organization_id.to_owned(),
         subject_organization_id: organization_id.to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: facility_code.to_owned(),
+        resource_id: plant.id.clone(),
         role_id: "role-test-plant-sync-execute".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -432,7 +434,7 @@ async fn grant_test_sync_access(
         subject_id: user_id.to_owned(),
         subject_organization_id: organization_id.to_owned(),
         resource_type: RoleBindingResourceType::Plant,
-        resource_id: facility_code.to_owned(),
+        resource_id: plant.id,
         role_id: "role-test-plant-sync-execute".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -710,7 +712,10 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/organizations/bootstrap-user/certificates")
-                .header("authorization", support::bearer_header("bootstrap-user"))
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
                 .expect("list request"),
@@ -736,8 +741,6 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "bootstrap-user",
             json!({
                 "facilityCode": "FAC-003",
-                "startMonth": "2026-01",
-                "endMonth": "2026-04",
                 "mode": "full"
             }),
         ))
@@ -761,7 +764,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(start_response.status(), StatusCode::ACCEPTED);
     let start_json = json_body(start_response).await;
     assert_eq!(start_json["status"], "completed");
-    assert_eq!(start_json["plantId"], "FAC-003");
+    assert!(
+        start_json["plantId"]
+            .as_str()
+            .unwrap()
+            .starts_with("plant-")
+    );
 
     let reuse_response = app
         .clone()
@@ -820,7 +828,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(ephemeral_response.status(), StatusCode::ACCEPTED);
     let ephemeral_json = json_body(ephemeral_response).await;
     assert_eq!(ephemeral_json["status"], "completed");
-    assert_eq!(ephemeral_json["plantId"], "FAC-002");
+    assert!(
+        ephemeral_json["plantId"]
+            .as_str()
+            .unwrap()
+            .starts_with("plant-")
+    );
 
     let local_challenge = app
         .clone()
@@ -875,7 +888,12 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
     assert_eq!(local_result_response.status(), StatusCode::ACCEPTED);
     let local_result_json = json_body(local_result_response).await;
     assert_eq!(local_result_json["status"], "completed");
-    assert_eq!(local_result_json["plantId"], "FAC-004");
+    assert!(
+        local_result_json["plantId"]
+            .as_str()
+            .expect("local result plant id")
+            .starts_with("plant-")
+    );
     grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-004").await;
 
     let local_delta_challenge = app
@@ -915,6 +933,7 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
             "bootstrap-user",
             json!({
                 "mode": "ephemeral",
+                "syncMode": "full",
                 "origin": "http://127.0.0.1:4173",
                 "facilityCode": "FAC-DOC"
             }),
@@ -957,15 +976,91 @@ async fn cert_gateway_routes_cover_stored_and_ephemeral_flows() {
         .await
         .expect("local document result response");
     assert_eq!(local_doc_result.status(), StatusCode::ACCEPTED);
+    let local_doc_result_json = json_body(local_doc_result).await;
+    let local_doc_plant_id = local_doc_result_json["plantId"]
+        .as_str()
+        .expect("local document result plant id");
 
-    let doc_id = stable_document_id("bootstrap-user", "FAC-DOC", "ATT-LOCAL-1", "permit.pdf");
-    let stored_bytes = std::fs::read(
-        artifacts_dir
-            .path()
-            .join(format!("bootstrap-user/FAC-DOC/{doc_id}.pdf")),
-    )
-    .expect("local execution document artifact");
-    assert_eq!(stored_bytes.as_slice(), b"PDF-CONTENT");
+    assert!(
+        find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT").is_some(),
+        "local execution document artifact should be persisted for {local_doc_plant_id}"
+    );
+
+    let artifact_path = find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT")
+        .expect("persisted local execution document path");
+    std::fs::remove_file(&artifact_path).expect("remove persisted artifact");
+    let orphan_path = artifacts_dir
+        .path()
+        .join("bootstrap-user")
+        .join(local_doc_plant_id)
+        .join("orphan.pdf");
+    std::fs::create_dir_all(orphan_path.parent().expect("orphan parent"))
+        .expect("create orphan parent");
+    std::fs::write(&orphan_path, b"ORPHAN").expect("write orphan artifact");
+    grant_test_sync_access(&db, "bootstrap-user", "bootstrap-user", "FAC-DOC").await;
+
+    let repair_challenge = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "mode": "ephemeral",
+                "syncMode": "full",
+                "origin": "http://127.0.0.1:4173",
+                "facilityCode": "FAC-DOC"
+            }),
+        ))
+        .await
+        .expect("repair document challenge");
+    assert_eq!(repair_challenge.status(), StatusCode::CREATED);
+    let repair_challenge_json = json_body(repair_challenge).await;
+    let repair_payload = repair_challenge_json["payload"]
+        .as_str()
+        .expect("repair document challenge payload");
+    let repair_material = proof_material();
+    let (repair_bundle, repair_signature) =
+        signed_proof_bundle_from_material(&repair_material, repair_payload);
+    let repair_snapshot = local_execution_snapshot_with_document("FAC-DOC");
+    let repair_result_signature = sign_local_execution_result(
+        &repair_material.sign_key,
+        &repair_challenge_json["challengeId"],
+        &repair_challenge_json["payload"],
+        &Value::String("full".to_owned()),
+        &repair_snapshot,
+    );
+    let repair_result = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/api/v1/organizations/bootstrap-user/cert-gateway/local-execution-results",
+            "bootstrap-user",
+            "bootstrap-user",
+            json!({
+                "challengeId": repair_challenge_json["challengeId"],
+                "challengePayload": repair_challenge_json["payload"],
+                "challengeSignatureBase64": repair_signature,
+                "resultSignatureBase64": repair_result_signature,
+                "signCertDerBase64": repair_bundle["signCertDerBase64"],
+                "mode": "full",
+                "snapshot": repair_snapshot
+            }),
+        ))
+        .await
+        .expect("repair document result response");
+    let repair_status = repair_result.status();
+    let repair_body = json_body(repair_result).await;
+    assert_eq!(repair_status, StatusCode::ACCEPTED, "body = {repair_body}");
+    assert!(
+        find_artifact_with_bytes(artifacts_dir.path(), b"PDF-CONTENT").is_some(),
+        "full sync should re-upload a document when the DB row exists but the artifact is missing"
+    );
+    assert!(
+        !orphan_path.exists(),
+        "full sync should retry cleanup for orphaned document artifacts"
+    );
 }
 
 #[tokio::test]
@@ -1147,7 +1242,7 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
         facility_code: "FAC-CROSS".to_owned(),
         name: "Original Owner Plant".to_owned(),
         owner_organization_id: "owner-org".to_owned(),
-        created_by_organization_id: Some("bootstrap-user".to_owned()),
+        created_by_organization_id: None,
         contract_no: "CONTRACT-ORIGINAL".to_owned(),
         address: "Busan".to_owned(),
         installed_kw: 80.0,
@@ -1224,10 +1319,7 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
         .await
         .expect("plant after authorized non-owner sync");
     assert_eq!(plant.owner_organization_id, "owner-org");
-    assert_eq!(
-        plant.created_by_organization_id.as_deref(),
-        Some("bootstrap-user")
-    );
+    assert_eq!(plant.created_by_organization_id, None);
     assert_eq!(plant.name, "Plant FAC-CROSS");
     assert_eq!(plant.contract_no, "CONTRACT-LOCAL");
 }
@@ -1236,7 +1328,7 @@ async fn local_execution_result_preserves_existing_plant_owner_for_authorized_no
 async fn local_execution_result_rejects_untrusted_document_content_type() {
     let (app, db, _db_dir, _artifacts_dir) = build_app().await;
     db.upsert_plant(&Plant {
-        id: "FAC-BAD-CTYPE".to_owned(),
+        id: "plant-existing-bad-ctype".to_owned(),
         facility_code: "FAC-BAD-CTYPE".to_owned(),
         name: "Existing Bad Content Type Plant".to_owned(),
         owner_organization_id: "bootstrap-user".to_owned(),
@@ -1332,6 +1424,19 @@ async fn local_execution_result_rejects_untrusted_document_content_type() {
     assert_eq!(generation.len(), 1);
     assert_eq!(generation[0].month, "2026-02");
     assert_eq!(generation[0].generation_kwh, 12.0);
+    let audit = db
+        .get_latest_sync_run_audit_for_facility("FAC-BAD-CTYPE")
+        .await
+        .expect("failed local execution audit");
+    assert_eq!(audit.run_status, "failed");
+    assert_eq!(audit.item_status.as_deref(), Some("failed"));
+    assert!(
+        audit
+            .item_error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported contentType")
+    );
 }
 
 #[tokio::test]
@@ -1540,7 +1645,13 @@ async fn local_execution_result_persists_normalized_facility_code() {
     let status = response.status();
     let body = json_body(response).await;
     assert_eq!(status, StatusCode::ACCEPTED, "body = {body}");
-    assert_eq!(body["plantId"], "FAC-TRIM");
+    assert!(
+        body["plantId"]
+            .as_str()
+            .expect("plant id")
+            .starts_with("plant-"),
+        "body = {body}"
+    );
 }
 
 #[tokio::test]
@@ -1621,7 +1732,7 @@ async fn crawl_start_rejects_organization_path_mismatch() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            json!({ "mode": "stored" }),
         ))
         .await
         .expect("challenge response");
@@ -1813,7 +1924,7 @@ async fn stored_registration_requires_challenge_signature() {
             "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
             "bootstrap-user",
             "bootstrap-user",
-            json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+            json!({ "mode": "stored" }),
         ))
         .await
         .expect("challenge response");
@@ -1865,7 +1976,7 @@ async fn stored_registration_accepts_omitted_or_empty_km_material() {
                 "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
                 "bootstrap-user",
                 "bootstrap-user",
-                json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+                json!({ "mode": "stored" }),
             ))
             .await
             .expect("challenge response");
@@ -1915,7 +2026,7 @@ async fn stored_registration_rejects_asymmetric_km_material() {
                 "/api/v1/organizations/bootstrap-user/cert-gateway/challenges",
                 "bootstrap-user",
                 "bootstrap-user",
-                json!({ "mode": "stored", "facilityCode": "FAC-001" }),
+                json!({ "mode": "stored" }),
             ))
             .await
             .expect("challenge response");

@@ -1,3 +1,5 @@
+#[path = "support/auth.rs"]
+mod auth_support;
 mod support;
 
 use axum::{
@@ -73,6 +75,8 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
+            allow_untrusted_certificates: true,
+            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -272,7 +276,7 @@ fn app_request(method: &str, path: &str, token: &str, organization_id: &str) -> 
     Request::builder()
         .method(method)
         .uri(path)
-        .header("authorization", support::bearer_header(token))
+        .header("authorization", auth_support::bearer_header(token))
         .header("x-organization-id", organization_id)
         .body(Body::empty())
         .expect("request")

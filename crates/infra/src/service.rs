@@ -6,16 +6,19 @@ use crate::{
     bridge::{self, BridgeDocument, BridgeOptions, BridgeRateRecord},
     config::{AppConfig, ReadConsistency},
     crypto::{
-        CertificateBundle, decode_base64, decrypt_bundle_with_key, encrypt_bundle_with_key,
-        extract_business_no, extract_common_name, generate_data_encryption_key,
-        normalize_business_no,
+        CertificateBundle, decrypt_bundle_with_key, encrypt_bundle_with_key, extract_business_no,
+        extract_common_name, generate_data_encryption_key, normalize_business_no,
     },
     database::{
-        Database, DatabaseLookupError, PersistedDocument, PlantSummary, StoredCertificate,
+        CertGatewayChallenge, CreatedPlantBootstrap, Database, DatabaseLookupError,
+        KrRpsSyncMaterialization, PersistedDocument, PlantSummary, StoredCertificate,
         StoredDocument, StoredRateRecord,
     },
     kms::{EnvKmsProvider, KmsProvider},
-    npki::{validate_certificate_bundle, verify_challenge_signature, verify_message_signature},
+    npki::{
+        validate_certificate_bundle_async, validate_certificate_trust_async,
+        verify_challenge_signature, verify_message_signature,
+    },
 };
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
@@ -27,6 +30,7 @@ use domain::{
     Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
     SyncRun, User,
 };
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -35,7 +39,7 @@ use std::{
     fmt,
     future::Future,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
@@ -45,8 +49,35 @@ use uuid::Uuid;
 type CollectSnapshotFuture = Pin<Box<dyn Future<Output = Result<bridge::BridgeRun>> + Send>>;
 type SnapshotCollector = Arc<dyn Fn(BridgeOptions) -> CollectSnapshotFuture + Send + Sync>;
 const MAX_CLIENT_ACTION_IDS_PER_REQUEST: usize = 999;
+const STALE_OBJECT_DELETE_CONCURRENCY: usize = 8;
+const DOCUMENT_UPLOAD_CONCURRENCY: usize = 8;
 const MAX_LOCAL_EXECUTION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug)]
+struct DecodedDocumentContent {
+    tempfile: tempfile::NamedTempFile,
+    sha256_hex: String,
+}
+
+struct PreparedDocumentUpload {
+    uploaded_sha256: String,
+    content: PreparedDocumentContent,
+}
+
+enum PreparedDocumentContent {
+    DecodedTemp(tempfile::NamedTempFile),
+    SourcePath(PathBuf),
+}
+
+impl PreparedDocumentUpload {
+    fn path(&self) -> &Path {
+        match &self.content {
+            PreparedDocumentContent::DecodedTemp(file) => file.path(),
+            PreparedDocumentContent::SourcePath(path) => path.as_path(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -92,17 +123,6 @@ pub struct AppService {
     artifacts: ArtifactStore,
     auth: AuthResolver,
     collector: SnapshotCollector,
-}
-
-#[derive(Debug, Clone)]
-pub struct PutCertificateInput {
-    pub organization_id: String,
-    pub business_no: Option<String>,
-    pub password: String,
-    pub sign_cert_der_b64: String,
-    pub sign_pri_key_b64: String,
-    pub km_cert_der_b64: String,
-    pub km_pri_key_b64: String,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +233,7 @@ pub struct CertGatewayChallengeView {
 #[derive(Debug, Clone)]
 pub struct RegisterCertificateFromProofInput {
     pub organization_id: String,
+    pub requested_by_user_id: Option<String>,
     pub challenge_id: String,
     pub challenge_payload: String,
     pub challenge_signature_base64: String,
@@ -222,6 +243,7 @@ pub struct RegisterCertificateFromProofInput {
 #[derive(Debug, Clone)]
 pub struct ExecuteEphemeralCrawlInput {
     pub organization_id: String,
+    pub requested_by_user_id: Option<String>,
     pub challenge_id: String,
     pub challenge_payload: String,
     pub challenge_signature_base64: String,
@@ -235,11 +257,13 @@ pub struct ExecuteEphemeralCrawlInput {
 #[derive(Debug, Clone)]
 pub struct IngestLocalExecutionResultInput {
     pub organization_id: String,
+    pub requested_by_user_id: Option<String>,
     pub challenge_id: String,
     pub challenge_payload: String,
     pub challenge_signature_base64: String,
     pub result_signature_base64: String,
     pub sign_cert_der: Vec<u8>,
+    pub certificate_chain_der: Vec<Vec<u8>>,
     pub snapshot: bridge::BridgeSnapshot,
     pub mode: SyncMode,
 }
@@ -460,33 +484,6 @@ impl AppService {
         })
     }
 
-    pub async fn put_certificate(&self, input: PutCertificateInput) -> Result<StoredCertificate> {
-        let organization_id = require_non_empty("organizationId", &input.organization_id)?;
-        let sign_cert_der = decode_base64(&input.sign_cert_der_b64)?;
-        let sign_pri_key = decode_base64(&input.sign_pri_key_b64)?;
-        let km_cert_der = decode_base64(&input.km_cert_der_b64)?;
-        let km_pri_key = decode_base64(&input.km_pri_key_b64)?;
-        let mut bundle = CertificateBundle {
-            business_no: String::new(),
-            password: input.password,
-            common_name: String::new(),
-            sign_cert_der,
-            sign_pri_key,
-            km_cert_der: Some(km_cert_der),
-            km_pri_key: Some(km_pri_key),
-        };
-        let business_no = self
-            .validate_bundle_for_organization(
-                &organization_id,
-                input.business_no.as_deref(),
-                &bundle,
-            )
-            .await?;
-        bundle.business_no = business_no.clone();
-        self.store_certificate_bundle(&organization_id, business_no, bundle)
-            .await
-    }
-
     pub async fn create_cert_gateway_challenge(
         &self,
         input: CreateCertGatewayChallengeInput,
@@ -597,24 +594,34 @@ impl AppService {
         let business_no = self
             .validate_bundle_for_organization(&organization_id, None, &input.bundle)
             .await?;
-        self.consume_valid_challenge(
-            &input.challenge_id,
-            &input.challenge_payload,
-            &input.challenge_signature_base64,
-            "stored",
-            &organization_id,
-            ChallengeBindingExpectations {
-                sign_cert_der: &input.bundle.sign_cert_der,
-                require_origin: false,
-                business_no: Some(&business_no),
-                sync_mode: None,
-                facility_code: None,
-                start_month: None,
-                end_month: None,
-                snapshot: None,
-            },
-        )
-        .await?;
+        let challenge = self
+            .validate_cert_gateway_challenge(
+                &input.challenge_id,
+                &input.challenge_payload,
+                &input.challenge_signature_base64,
+                "stored",
+                &organization_id,
+                ChallengeBindingExpectations {
+                    sign_cert_der: &input.bundle.sign_cert_der,
+                    require_origin: false,
+                    business_no: Some(&business_no),
+                    sync_mode: None,
+                    facility_code: None,
+                    start_month: None,
+                    end_month: None,
+                    snapshot: None,
+                },
+            )
+            .await?;
+        let requested_by_user_id = input
+            .requested_by_user_id
+            .as_deref()
+            .map(|value| require_non_empty("requestedByUserId", value))
+            .transpose()?;
+        self.validate_challenge_requester(requested_by_user_id.as_deref(), &challenge)?;
+        self.db
+            .consume_cert_gateway_challenge(&input.challenge_id)
+            .await?;
         self.store_certificate_bundle(&organization_id, business_no, input.bundle)
             .await
     }
@@ -648,34 +655,80 @@ impl AppService {
         input: ExecuteEphemeralCrawlInput,
     ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
+        let requested_by_user_id = input
+            .requested_by_user_id
+            .as_deref()
+            .map(|value| require_non_empty("requestedByUserId", value))
+            .transpose()?;
         let business_no = self
             .validate_bundle_for_organization(&organization_id, None, &input.bundle)
             .await?;
-        self.consume_valid_challenge(
-            &input.challenge_id,
-            &input.challenge_payload,
-            &input.challenge_signature_base64,
-            "ephemeral",
-            &organization_id,
-            ChallengeBindingExpectations {
-                sign_cert_der: &input.bundle.sign_cert_der,
-                require_origin: false,
-                business_no: Some(&business_no),
-                sync_mode: Some(sync_mode_label(&input.mode)),
-                facility_code: input.facility_code.as_deref(),
-                start_month: input.start_month.as_deref(),
-                end_month: input.end_month.as_deref(),
-                snapshot: None,
-            },
-        )
-        .await?;
+        let challenge = self
+            .validate_cert_gateway_challenge(
+                &input.challenge_id,
+                &input.challenge_payload,
+                &input.challenge_signature_base64,
+                "ephemeral",
+                &organization_id,
+                ChallengeBindingExpectations {
+                    sign_cert_der: &input.bundle.sign_cert_der,
+                    require_origin: false,
+                    business_no: Some(&business_no),
+                    sync_mode: Some(sync_mode_label(&input.mode)),
+                    facility_code: input.facility_code.as_deref(),
+                    start_month: input.start_month.as_deref(),
+                    end_month: input.end_month.as_deref(),
+                    snapshot: None,
+                },
+            )
+            .await?;
+        self.validate_challenge_requester(requested_by_user_id.as_deref(), &challenge)?;
+        let requested_facility_code = normalize_optional_text(input.facility_code);
+        let effective_facility_code = match (
+            challenge.facility_code.as_deref(),
+            requested_facility_code.as_deref(),
+        ) {
+            (None, Some(requested_facility_code)) => {
+                return Err(bad_request_error(format!(
+                    "challenge facilityCode mismatch: signed <none>, requested {}",
+                    requested_facility_code
+                )));
+            }
+            (Some(challenge_facility_code), Some(requested_facility_code))
+                if challenge_facility_code != requested_facility_code =>
+            {
+                return Err(bad_request_error(format!(
+                    "challenge facilityCode mismatch: signed {}, requested {}",
+                    challenge_facility_code, requested_facility_code
+                )));
+            }
+            (Some(challenge_facility_code), _) => Some(challenge_facility_code.to_owned()),
+            (None, None) => None,
+        };
+        let authorized_facility_code = self
+            .authorize_gateway_sync_scope(
+                &challenge.created_by_user_id,
+                &organization_id,
+                effective_facility_code.as_deref(),
+            )
+            .await?;
+        validate_sync_request_shape(
+            &input.mode,
+            input.start_month.as_deref(),
+            input.end_month.as_deref(),
+        )?;
+        self.db
+            .consume_cert_gateway_challenge(&input.challenge_id)
+            .await?;
 
         let skip_documents = matches!(input.mode, SyncMode::Delta);
         self.run_sync_with_resolved_plan(
             &organization_id,
+            Some(challenge.created_by_user_id.as_str()),
+            false,
             business_no,
             input.bundle,
-            input.facility_code,
+            authorized_facility_code,
             input.start_month,
             input.end_month,
             input.mode,
@@ -692,6 +745,14 @@ impl AppService {
         let business_no = self
             .validate_sign_cert_for_organization(&organization_id, None, &input.sign_cert_der)
             .await?;
+        validate_certificate_trust_async(
+            input.sign_cert_der.clone(),
+            "signCert.der",
+            input.certificate_chain_der.clone(),
+            self.cfg.security.allow_untrusted_certificates,
+            self.cfg.security.certificate_trust_bundle_path.as_deref(),
+        )
+        .await?;
         let snapshot_business_no =
             require_non_empty("facilityBusinessNo", &input.snapshot.facility.business_no)?;
         if snapshot_business_no != business_no {
@@ -717,33 +778,44 @@ impl AppService {
         let facility_code =
             require_safe_facility_code("facilityCode", &input.snapshot.facility.code)?;
         input.snapshot.facility.code = facility_code.clone();
-        require_local_execution_document_contents(&mut input.snapshot)?;
-        self.consume_valid_challenge(
-            &input.challenge_id,
-            &input.challenge_payload,
-            &input.challenge_signature_base64,
-            "ephemeral",
-            &organization_id,
-            ChallengeBindingExpectations {
-                sign_cert_der: &input.sign_cert_der,
-                require_origin: true,
-                business_no: Some(&business_no),
-                sync_mode: Some(sync_mode_label(&input.mode)),
-                facility_code: Some(facility_code.as_str()),
-                start_month: None,
-                end_month: None,
-                snapshot: Some(&input.snapshot),
-            },
-        )
-        .await?;
+        input.snapshot =
+            require_local_execution_document_contents_on_blocking_thread(input.snapshot).await?;
+        let challenge = self
+            .validate_cert_gateway_challenge(
+                &input.challenge_id,
+                &input.challenge_payload,
+                &input.challenge_signature_base64,
+                "ephemeral",
+                &organization_id,
+                ChallengeBindingExpectations {
+                    sign_cert_der: &input.sign_cert_der,
+                    require_origin: true,
+                    business_no: Some(&business_no),
+                    sync_mode: Some(sync_mode_label(&input.mode)),
+                    facility_code: Some(facility_code.as_str()),
+                    start_month: None,
+                    end_month: None,
+                    snapshot: Some(&input.snapshot),
+                },
+            )
+            .await?;
+        self.validate_challenge_requester(input.requested_by_user_id.as_deref(), &challenge)?;
+        self.db
+            .consume_cert_gateway_challenge(&input.challenge_id)
+            .await?;
 
+        let requested_plant = self
+            .get_existing_plant_by_facility_code_strong(&facility_code)
+            .await?;
+        let requested_plant_id = requested_plant.as_ref().map(|plant| plant.id.clone());
+        let requested_plant_id_ref = requested_plant_id.as_deref();
+        let requested_asset_id = self
+            .get_existing_kr_rps_asset_id_for_facility_code_strong(&facility_code)
+            .await?;
+        let requested_asset_id_ref = requested_asset_id.as_deref();
         let run = self
             .db
-            .start_sync_run(
-                &organization_id,
-                Some(facility_code.as_str()),
-                input.mode.clone(),
-            )
+            .start_sync_run(&organization_id, requested_plant_id_ref, input.mode.clone())
             .await?;
         let run_id = run.id.clone();
         let started = std::time::Instant::now();
@@ -755,14 +827,25 @@ impl AppService {
                 input.mode,
                 input.snapshot,
                 started,
+                Some(facility_code.as_str()),
+                Some(requested_plant),
+                Some(challenge.created_by_user_id.as_str()),
+                false,
                 true,
             )
             .await
         {
             Ok(run) => Ok(run),
             Err(err) => {
-                let duration_ms = started.elapsed().as_millis() as i64;
-                let message = format!("{err:#}");
+                let (message, duration_ms) = self
+                    .record_failed_sync_error(
+                        &run_id,
+                        started,
+                        Some(facility_code.as_str()),
+                        requested_asset_id_ref,
+                        &err,
+                    )
+                    .await;
                 error!(
                     business_no,
                     facility_code,
@@ -770,10 +853,6 @@ impl AppService {
                     error = %message,
                     "local execution ingest failed"
                 );
-                let _ = self
-                    .db
-                    .finish_sync_run(&run_id, "failed", duration_ms, Some(&message))
-                    .await;
                 Err(err)
             }
         }
@@ -805,10 +884,31 @@ impl AppService {
         if certificate.active != 1 {
             return Err(bad_request_error("certificate is inactive"));
         }
+        validate_sync_request_shape(
+            &input.mode,
+            input.start_month.as_deref(),
+            input.end_month.as_deref(),
+        )?;
+        let requested_facility_code = normalize_optional_text(input.facility_code);
+        let authorized_facility_code = self
+            .authorize_gateway_sync_scope(
+                &created_by_user_id,
+                &organization_id,
+                requested_facility_code.as_deref(),
+            )
+            .await?;
+        if let Some(facility_code) = authorized_facility_code.as_deref() {
+            self.authorize_stored_certificate_use_for_existing_facility(
+                &created_by_user_id,
+                &organization_id,
+                facility_code,
+            )
+            .await?;
+        }
 
         let scope = CrawlTaskScope {
             certificate_id: certificate.id,
-            facility_code: input.facility_code,
+            facility_code: authorized_facility_code,
             start_month: input.start_month,
             end_month: input.end_month,
             mode: sync_mode_label(&input.mode).to_owned(),
@@ -844,18 +944,16 @@ impl AppService {
             .map(|value| require_safe_facility_code("facilityCode", value))
             .transpose()?;
         match facility_code.as_deref() {
-            Some(facility_code) => match self.db.get_plant_by_facility_code(facility_code).await {
-                Ok(_) => {
+            Some(facility_code) => match self
+                .get_existing_plant_by_facility_code_strong(facility_code)
+                .await?
+            {
+                Some(_) => {
                     self.authorize_sync(user_id, organization_id, Some(facility_code))
                         .await?;
                     Ok(Some(facility_code.to_owned()))
                 }
-                Err(err)
-                    if matches!(
-                        err.downcast_ref::<DatabaseLookupError>(),
-                        Some(DatabaseLookupError::PlantNotFound)
-                    ) =>
-                {
+                None => {
                     self.authorize_organization_action(
                         user_id,
                         organization_id,
@@ -867,7 +965,6 @@ impl AppService {
                     .await?;
                     Ok(Some(facility_code.to_owned()))
                 }
-                Err(err) => Err(err),
             },
             None => {
                 let executable = self
@@ -923,6 +1020,9 @@ impl AppService {
                 issued.organization_id, organization_id
             )));
         }
+        if issued.used_at.is_some() {
+            return Err(bad_request_error("crawl task token already used"));
+        }
         let organization = self.db.get_organization(&organization_id).await?;
         if organization.inactivated_at.is_some() {
             return Err(forbidden_error(format!(
@@ -932,6 +1032,26 @@ impl AppService {
         let scope: CrawlTaskScope =
             serde_json::from_str(&issued.scope_json).context("parse crawl task scope")?;
         let mode = parse_sync_mode(&scope.mode)?;
+        validate_sync_request_shape(
+            &mode,
+            scope.start_month.as_deref(),
+            scope.end_month.as_deref(),
+        )?;
+        let authorized_facility_code = self
+            .authorize_gateway_sync_scope(
+                &issued.created_by_user_id,
+                &organization_id,
+                scope.facility_code.as_deref(),
+            )
+            .await?;
+        if let Some(facility_code) = authorized_facility_code.as_deref() {
+            self.authorize_stored_certificate_use_for_existing_facility(
+                &issued.created_by_user_id,
+                &organization_id,
+                facility_code,
+            )
+            .await?;
+        }
         let certificate = if let Some(certificate_id) = issued.certificate_id.as_deref() {
             let certificate = self
                 .db
@@ -964,9 +1084,11 @@ impl AppService {
             return self
                 .run_sync_with_bundle(
                     &consumed.organization_id,
+                    Some(issued.created_by_user_id.as_str()),
+                    true,
                     business_no,
                     bundle,
-                    scope.facility_code,
+                    authorized_facility_code,
                     scope.start_month,
                     scope.end_month,
                     mode,
@@ -977,6 +1099,14 @@ impl AppService {
     }
 
     pub async fn sync(&self, input: SyncInput) -> Result<SyncRun> {
+        self.sync_with_initiator(input, None).await
+    }
+
+    async fn sync_with_initiator(
+        &self,
+        input: SyncInput,
+        created_by_user_id: Option<&str>,
+    ) -> Result<SyncRun> {
         let organization_id = require_non_empty("organizationId", &input.organization_id)?;
         let business_no = self
             .resolve_organization_business_no(&organization_id, None)
@@ -991,6 +1121,8 @@ impl AppService {
 
         self.run_sync_with_bundle(
             &organization_id,
+            created_by_user_id,
+            true,
             business_no,
             bundle,
             input.facility_code,
@@ -1001,9 +1133,172 @@ impl AppService {
         .await
     }
 
+    async fn finish_failed_sync_run(
+        &self,
+        run_id: &str,
+        duration_ms: i64,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        message: &str,
+    ) {
+        if let Some(facility_code) = facility_code {
+            if let Err(err) = self
+                .db
+                .upsert_sync_run_item(
+                    run_id,
+                    asset_id,
+                    facility_code,
+                    "failed",
+                    0,
+                    0,
+                    0,
+                    0,
+                    Some(message),
+                )
+                .await
+            {
+                warn!(
+                    run_id,
+                    facility_code,
+                    error = %err,
+                    "failed to record sync run item failure"
+                );
+            }
+        }
+        if let Err(err) = self
+            .db
+            .finish_sync_run(run_id, "failed", duration_ms, Some(message))
+            .await
+        {
+            warn!(run_id, error = %err, "failed to mark sync run failed");
+        }
+    }
+
+    async fn record_failed_sync_run(
+        &self,
+        run_id: &str,
+        started: std::time::Instant,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        message: &str,
+    ) -> i64 {
+        let duration_ms = started.elapsed().as_millis() as i64;
+        self.finish_failed_sync_run(run_id, duration_ms, facility_code, asset_id, message)
+            .await;
+        duration_ms
+    }
+
+    async fn record_failed_sync_error(
+        &self,
+        run_id: &str,
+        started: std::time::Instant,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        err: &anyhow::Error,
+    ) -> (String, i64) {
+        let message = format!("{err:#}");
+        let duration_ms = self
+            .record_failed_sync_run(run_id, started, facility_code, asset_id, &message)
+            .await;
+        (message, duration_ms)
+    }
+
+    async fn record_and_log_sync_failure(
+        &self,
+        run_id: &str,
+        started: std::time::Instant,
+        business_no: &str,
+        facility_code: Option<&str>,
+        asset_id: Option<&str>,
+        effective_mode: &SyncMode,
+        err: &anyhow::Error,
+        failure: &'static str,
+    ) {
+        let (message, duration_ms) = self
+            .record_failed_sync_error(run_id, started, facility_code, asset_id, err)
+            .await;
+        error!(
+            business_no,
+            facility_code = facility_code.unwrap_or(""),
+            mode = ?effective_mode,
+            duration_ms,
+            error = %message,
+            failure,
+            "sync run failed"
+        );
+    }
+
+    fn validate_challenge_requester(
+        &self,
+        requested_by_user_id: Option<&str>,
+        challenge: &CertGatewayChallenge,
+    ) -> Result<()> {
+        if let Some(requested_by_user_id) = requested_by_user_id {
+            if requested_by_user_id != challenge.created_by_user_id {
+                return Err(forbidden_error(format!(
+                    "forbidden: challenge creator {} does not match requester {}",
+                    challenge.created_by_user_id, requested_by_user_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_existing_plant_by_facility_code_strong(
+        &self,
+        facility_code: &str,
+    ) -> Result<Option<Plant>> {
+        match self
+            .db
+            .get_plant_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(plant) => Ok(Some(plant)),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn get_existing_kr_rps_asset_id_for_facility_code_strong(
+        &self,
+        facility_code: &str,
+    ) -> Result<Option<String>> {
+        match self
+            .db
+            .get_kr_rps_asset_id_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(asset_id) => Ok(Some(asset_id)),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn run_sync_with_bundle(
         &self,
         organization_id: &str,
+        created_by_user_id: Option<&str>,
+        requires_stored_credential: bool,
         business_no: String,
         bundle: CertificateBundle,
         facility_code: Option<String>,
@@ -1023,6 +1318,8 @@ impl AppService {
             self.resolve_sync_plan(&input).await?;
         self.run_sync_with_resolved_plan(
             organization_id,
+            created_by_user_id,
+            requires_stored_credential,
             business_no,
             bundle,
             input.facility_code,
@@ -1037,6 +1334,8 @@ impl AppService {
     async fn run_sync_with_resolved_plan(
         &self,
         organization_id: &str,
+        created_by_user_id: Option<&str>,
+        requires_stored_credential: bool,
         business_no: String,
         bundle: CertificateBundle,
         facility_code: Option<String>,
@@ -1054,14 +1353,35 @@ impl AppService {
             skip_documents,
             "starting sync"
         );
+        let prechecked_existing_plant = match facility_code.as_deref() {
+            Some(facility_code) => Some(
+                self.get_existing_plant_by_facility_code_strong(facility_code)
+                    .await?,
+            ),
+            None => None,
+        };
+        let requested_plant_id = prechecked_existing_plant
+            .as_ref()
+            .and_then(|plant| plant.as_ref())
+            .map(|plant| plant.id.clone());
+        let requested_plant_id_ref = requested_plant_id.as_deref();
+        let requested_asset_id = match facility_code.as_deref() {
+            Some(facility_code) => {
+                self.get_existing_kr_rps_asset_id_for_facility_code_strong(facility_code)
+                    .await?
+            }
+            None => None,
+        };
+        let requested_asset_id_ref = requested_asset_id.as_deref();
         let run = self
             .db
             .start_sync_run(
                 &organization_id,
-                facility_code.as_deref(),
+                requested_plant_id_ref,
                 effective_mode.clone(),
             )
             .await?;
+        let run_id = run.id.clone();
 
         let started = std::time::Instant::now();
         let collect = self
@@ -1087,32 +1407,51 @@ impl AppService {
                     document_count = snapshot.documents.len(),
                     "collector finished"
                 );
-                self.persist_successful_snapshot(
-                    organization_id,
-                    business_no,
-                    run,
-                    effective_mode,
-                    snapshot,
-                    started,
-                    true,
-                )
-                .await
+                match self
+                    .persist_successful_snapshot(
+                        organization_id,
+                        business_no.clone(),
+                        run,
+                        effective_mode.clone(),
+                        snapshot,
+                        started,
+                        facility_code.as_deref(),
+                        prechecked_existing_plant,
+                        created_by_user_id,
+                        requires_stored_credential,
+                        true,
+                    )
+                    .await
+                {
+                    Ok(run) => Ok(run),
+                    Err(err) => {
+                        self.record_and_log_sync_failure(
+                            &run_id,
+                            started,
+                            business_no.as_str(),
+                            facility_code.as_deref(),
+                            requested_asset_id_ref,
+                            &effective_mode,
+                            &err,
+                            "sync materialization failed",
+                        )
+                        .await;
+                        Err(err)
+                    }
+                }
             }
             Err(err) => {
-                let duration_ms = started.elapsed().as_millis() as i64;
-                let message = format!("{err:#}");
-                error!(
-                    business_no,
-                    facility_code = facility_code.as_deref().unwrap_or(""),
-                    mode = ?effective_mode,
-                    duration_ms,
-                    error = %message,
-                    "sync failed"
-                );
-                let _ = self
-                    .db
-                    .finish_sync_run(&run.id, "failed", duration_ms, Some(&message))
-                    .await;
+                self.record_and_log_sync_failure(
+                    &run_id,
+                    started,
+                    business_no.as_str(),
+                    facility_code.as_deref(),
+                    requested_asset_id_ref,
+                    &effective_mode,
+                    &err,
+                    "sync failed",
+                )
+                .await;
                 Err(err)
             }
         }
@@ -1126,7 +1465,11 @@ impl AppService {
     ) -> Result<SyncRun> {
         self.authorize_sync(user_id, organization_id, input.facility_code.as_deref())
             .await?;
-        self.sync(input).await
+        if let Some(facility_code) = input.facility_code.as_deref() {
+            self.authorize_stored_certificate_use_for_sync(user_id, organization_id, facility_code)
+                .await?;
+        }
+        self.sync_with_initiator(input, Some(user_id)).await
     }
 
     pub async fn authorize_sync(
@@ -1137,20 +1480,150 @@ impl AppService {
     ) -> Result<()> {
         let facility_code =
             facility_code.ok_or_else(|| anyhow::anyhow!("facilityCode is required"))?;
-        let plant = self.db.get_plant_by_facility_code(facility_code).await?;
-        let allowed = self
-            .db
-            .has_user_plant_action(user_id, organization_id, &plant.id, "plant.sync.execute")
-            .await?;
+        self.authorize_plant_action_by_facility_code(
+            user_id,
+            organization_id,
+            facility_code,
+            "plant.sync.execute",
+            "execute sync for plant",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn authorize_stored_certificate_use_for_sync(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: &str,
+    ) -> Result<()> {
+        let allowed = match self
+            .has_user_kr_rps_asset_action_by_facility_code(
+                user_id,
+                organization_id,
+                facility_code,
+                "asset.credential.use",
+                Some(ReadConsistency::Strong),
+            )
+            .await?
+        {
+            Some(allowed) => allowed,
+            None => {
+                self.authorize_legacy_stored_certificate_use_for_sync(
+                    user_id,
+                    organization_id,
+                    facility_code,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         if !allowed {
             anyhow::bail!(
-                "forbidden: user {} in organization {} cannot execute sync for plant {}",
+                "forbidden: user {} in organization {} cannot use stored credential for plant {}",
                 user_id,
                 organization_id,
                 facility_code
             );
         }
+        let has_credential = self
+            .db
+            .has_usable_kr_rps_certificate_credential_with_consistency(
+                organization_id,
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if !has_credential {
+            anyhow::bail!(
+                "forbidden: organization {} has no usable stored KR RPS credential for plant {}",
+                organization_id,
+                facility_code
+            );
+        }
         Ok(())
+    }
+
+    async fn authorize_legacy_stored_certificate_use_for_sync(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: &str,
+    ) -> Result<()> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.credential.use",
+            &format!("use stored credential for legacy plant {}", facility_code),
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        self.db
+            .get_plant_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        let has_credential = self
+            .db
+            .has_active_kr_rps_certificate_credential_with_consistency(
+                organization_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if !has_credential {
+            anyhow::bail!(
+                "forbidden: organization {} has no active stored KR RPS credential for legacy plant {}",
+                organization_id,
+                facility_code
+            );
+        }
+        Ok(())
+    }
+
+    async fn authorize_stored_certificate_use_for_existing_facility(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: &str,
+    ) -> Result<()> {
+        match self
+            .db
+            .get_plant_by_facility_code_with_consistency(
+                facility_code,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+        {
+            Ok(_) => {
+                self.authorize_stored_certificate_use_for_sync(
+                    user_id,
+                    organization_id,
+                    facility_code,
+                )
+                .await
+            }
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                self.authorize_organization_action(
+                    user_id,
+                    organization_id,
+                    organization_id,
+                    "organization.credential.use",
+                    &format!("use stored credential for new plant {}", facility_code),
+                    Some(ReadConsistency::Strong),
+                )
+                .await?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn list_visible_plants(
@@ -1276,7 +1749,7 @@ impl AppService {
         };
 
         let plant = Plant {
-            id: facility_code.clone(),
+            id: kr_rps_plant_id(&facility_code),
             facility_code,
             name,
             owner_organization_id: owner_organization_id.clone(),
@@ -1289,12 +1762,17 @@ impl AppService {
         };
 
         self.db.upsert_plant(&plant).await?;
+        let asset_id = self
+            .db
+            .upsert_kr_rps_asset_projection(&plant, None, None, &[], &[])
+            .await?;
         self.bootstrap_created_plant_bindings(
             user_id,
             organization_id,
             &owner_organization_id,
             owner_agreement_id.as_deref(),
             &plant,
+            &asset_id,
         )
         .await?;
 
@@ -1606,7 +2084,7 @@ impl AppService {
             .db
             .get_document_with_consistency(document_id, read_consistency.clone())
             .await?;
-        self.authorize_plant_action_by_id(
+        self.authorize_plant_action_by_id_with_asset_fallback(
             user_id,
             organization_id,
             &doc.plant_id,
@@ -1636,19 +2114,84 @@ impl AppService {
             .db
             .get_plant_by_facility_code_with_consistency(facility_code, read_consistency.clone())
             .await?;
-        self.authorize_plant_action_by_id(
-            user_id,
-            organization_id,
-            &plant.id,
-            action_id,
-            &format!("{action_label} {}", facility_code),
-            read_consistency,
-        )
-        .await?;
+        let plant_allowed = self
+            .db
+            .has_user_plant_action_with_consistency(
+                user_id,
+                organization_id,
+                &plant.id,
+                action_id,
+                read_consistency.clone(),
+            )
+            .await?;
+        if plant_allowed {
+            return Ok(plant);
+        }
+        let asset_action_id = kr_rps_plant_action_to_asset_action(action_id);
+        let asset_allowed = if let Some(asset_action_id) = asset_action_id {
+            self.has_user_kr_rps_asset_action_by_facility_code(
+                user_id,
+                organization_id,
+                facility_code,
+                asset_action_id,
+                read_consistency.clone(),
+            )
+            .await?
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        if !asset_allowed {
+            anyhow::bail!(
+                "forbidden: user {} in organization {} cannot {}",
+                user_id,
+                organization_id,
+                &format!("{action_label} {}", facility_code)
+            );
+        }
         Ok(plant)
     }
 
-    async fn authorize_plant_action_by_id(
+    async fn has_user_kr_rps_asset_action_by_facility_code(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        facility_code: &str,
+        asset_action_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Option<bool>> {
+        match self
+            .db
+            .get_kr_rps_asset_id_by_facility_code_with_consistency(
+                facility_code,
+                read_consistency.clone(),
+            )
+            .await
+        {
+            Ok(asset_id) => Ok(Some(
+                self.db
+                    .has_user_asset_action_with_consistency(
+                        user_id,
+                        organization_id,
+                        &asset_id,
+                        asset_action_id,
+                        read_consistency,
+                    )
+                    .await?,
+            )),
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<DatabaseLookupError>(),
+                    Some(DatabaseLookupError::PlantNotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn authorize_plant_action_by_id_with_asset_fallback(
         &self,
         user_id: &str,
         organization_id: &str,
@@ -1664,10 +2207,52 @@ impl AppService {
                 organization_id,
                 plant_id,
                 action_id,
-                read_consistency,
+                read_consistency.clone(),
             )
             .await?;
-        if !allowed {
+        if allowed {
+            return Ok(());
+        }
+
+        let plant = self
+            .db
+            .get_plant_by_id_with_consistency(plant_id, read_consistency.clone())
+            .await?;
+        let asset_action_id = kr_rps_plant_action_to_asset_action(action_id);
+        let asset_allowed = if let Some(asset_action_id) = asset_action_id {
+            match self
+                .db
+                .get_kr_rps_asset_id_by_facility_code_with_consistency(
+                    &plant.facility_code,
+                    read_consistency.clone(),
+                )
+                .await
+            {
+                Ok(asset_id) => {
+                    self.db
+                        .has_user_asset_action_with_consistency(
+                            user_id,
+                            organization_id,
+                            &asset_id,
+                            asset_action_id,
+                            read_consistency,
+                        )
+                        .await?
+                }
+                Err(err)
+                    if matches!(
+                        err.downcast_ref::<DatabaseLookupError>(),
+                        Some(DatabaseLookupError::PlantNotFound)
+                    ) =>
+                {
+                    false
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            false
+        };
+        if !asset_allowed {
             anyhow::bail!(
                 "forbidden: user {} in organization {} cannot {}",
                 user_id,
@@ -1782,18 +2367,38 @@ impl AppService {
         input: &SyncInput,
     ) -> Result<(SyncMode, Option<String>, Option<String>, bool)> {
         match input.mode {
-            SyncMode::Full => Ok((
-                SyncMode::Full,
-                input.start_month.clone(),
-                input.end_month.clone(),
-                false,
-            )),
+            SyncMode::Full => {
+                if input.start_month.is_some() || input.end_month.is_some() {
+                    return Err(bad_request_error(
+                        "full sync cannot be bounded by startMonth or endMonth",
+                    ));
+                }
+                Ok((SyncMode::Full, None, None, false))
+            }
             SyncMode::Delta => {
                 let Some(facility_code) = input.facility_code.as_deref() else {
                     return Ok((SyncMode::Full, None, None, false));
                 };
-                let Some(latest_month) = self.db.latest_generation_month(facility_code).await?
-                else {
+                let plant = match self
+                    .db
+                    .get_plant_by_facility_code_with_consistency(
+                        facility_code,
+                        Some(ReadConsistency::Strong),
+                    )
+                    .await
+                {
+                    Ok(plant) => plant,
+                    Err(err)
+                        if matches!(
+                            err.downcast_ref::<DatabaseLookupError>(),
+                            Some(DatabaseLookupError::PlantNotFound)
+                        ) =>
+                    {
+                        return Ok((SyncMode::Full, None, None, false));
+                    }
+                    Err(err) => return Err(err),
+                };
+                let Some(latest_month) = self.db.latest_generation_month(&plant.id).await? else {
                     return Ok((SyncMode::Full, None, None, false));
                 };
                 let end_month = current_month_seoul();
@@ -1802,14 +2407,7 @@ impl AppService {
         }
     }
 
-    async fn bootstrap_created_plant_bindings(
-        &self,
-        user_id: &str,
-        creator_organization_id: &str,
-        owner_organization_id: &str,
-        creator_agreement_id: Option<&str>,
-        plant: &Plant,
-    ) -> Result<()> {
+    async fn ensure_created_plant_bootstrap_roles(&self) -> Result<()> {
         self.ensure_system_role(
             "role-system-plant-owner",
             "system.plant.owner",
@@ -1829,6 +2427,43 @@ impl AppService {
             &["plant.profile.read", "plant.sync.execute"],
         )
         .await?;
+        self.ensure_system_role(
+            "role-system-asset-owner",
+            "system.asset.owner",
+            "System Asset Owner",
+            &[
+                "asset.profile.read",
+                "asset.profile.write",
+                "asset.sync.execute",
+                "asset.credential.use",
+                "asset.permission.manage",
+            ],
+        )
+        .await?;
+        self.ensure_system_role(
+            "role-system-asset-creator",
+            "system.asset.creator",
+            "System Asset Creator",
+            &[
+                "asset.profile.read",
+                "asset.sync.execute",
+                "asset.credential.use",
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn bootstrap_created_plant_bindings(
+        &self,
+        user_id: &str,
+        creator_organization_id: &str,
+        owner_organization_id: &str,
+        creator_agreement_id: Option<&str>,
+        plant: &Plant,
+        asset_id: &str,
+    ) -> Result<()> {
+        self.ensure_created_plant_bootstrap_roles().await?;
 
         let now = Utc::now().to_rfc3339();
         self.db
@@ -1840,6 +2475,22 @@ impl AppService {
                 resource_type: RoleBindingResourceType::Plant,
                 resource_id: plant.id.clone(),
                 role_id: "role-system-plant-owner".to_owned(),
+                agreement_id: None,
+                state: RoleBindingState::Active,
+                created_by_user_id: user_id.to_owned(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .await?;
+        self.db
+            .save_role_binding(&RoleBinding {
+                id: Uuid::new_v4().simple().to_string(),
+                subject_type: RoleBindingSubjectType::Organization,
+                subject_id: owner_organization_id.to_owned(),
+                subject_organization_id: owner_organization_id.to_owned(),
+                resource_type: RoleBindingResourceType::Asset,
+                resource_id: asset_id.to_owned(),
+                role_id: "role-system-asset-owner".to_owned(),
                 agreement_id: None,
                 state: RoleBindingState::Active,
                 created_by_user_id: user_id.to_owned(),
@@ -1865,6 +2516,22 @@ impl AppService {
                     updated_at: now.clone(),
                 })
                 .await?;
+            self.db
+                .save_role_binding(&RoleBinding {
+                    id: Uuid::new_v4().simple().to_string(),
+                    subject_type: RoleBindingSubjectType::Organization,
+                    subject_id: creator_organization_id.to_owned(),
+                    subject_organization_id: creator_organization_id.to_owned(),
+                    resource_type: RoleBindingResourceType::Asset,
+                    resource_id: asset_id.to_owned(),
+                    role_id: "role-system-asset-creator".to_owned(),
+                    agreement_id: creator_agreement_id.map(ToOwned::to_owned),
+                    state: RoleBindingState::Active,
+                    created_by_user_id: user_id.to_owned(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                })
+                .await?;
         }
 
         self.db
@@ -1876,6 +2543,22 @@ impl AppService {
                 resource_type: RoleBindingResourceType::Plant,
                 resource_id: plant.id.clone(),
                 role_id: "role-system-plant-creator".to_owned(),
+                agreement_id: None,
+                state: RoleBindingState::Active,
+                created_by_user_id: user_id.to_owned(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .await?;
+        self.db
+            .save_role_binding(&RoleBinding {
+                id: Uuid::new_v4().simple().to_string(),
+                subject_type: RoleBindingSubjectType::User,
+                subject_id: user_id.to_owned(),
+                subject_organization_id: creator_organization_id.to_owned(),
+                resource_type: RoleBindingResourceType::Asset,
+                resource_id: asset_id.to_owned(),
+                role_id: "role-system-asset-creator".to_owned(),
                 agreement_id: None,
                 state: RoleBindingState::Active,
                 created_by_user_id: user_id.to_owned(),
@@ -1922,6 +2605,7 @@ impl AppService {
             organization_id,
             requested_business_no,
             linked_business_no.as_deref(),
+            None,
         )?)
     }
 
@@ -1956,18 +2640,31 @@ impl AppService {
         requested_business_no: Option<&str>,
         bundle: &CertificateBundle,
     ) -> Result<String> {
-        let business_no = self
-            .resolve_organization_business_no(organization_id, requested_business_no)
+        let linked_business_no = self
+            .db
+            .get_organization_business_no(organization_id)
             .await?;
+        let cert_business_no = extract_business_no(&bundle.sign_cert_der)?;
+        let business_no = normalize_business_no(select_organization_business_no(
+            organization_id,
+            requested_business_no,
+            linked_business_no.as_deref(),
+            None,
+        )?)?;
         // Some supported certificates omit subject serialNumber entirely. In that case,
-        // the linked organization business number remains the source of truth and any
-        // client-supplied bundle business number is ignored.
-        if let Some(cert_business_no) = extract_business_no(&bundle.sign_cert_der)? {
+        // only a linked or explicitly requested organization business number can be used;
+        // the request-controlled bundle field must not bootstrap legal identity.
+        if let Some(cert_business_no) = cert_business_no {
             if cert_business_no != business_no {
                 return Err(bad_request_error("certificate business number mismatch"));
             }
         }
-        validate_certificate_bundle(bundle)?;
+        validate_certificate_bundle_async(
+            bundle,
+            self.cfg.security.allow_untrusted_certificates,
+            self.cfg.security.certificate_trust_bundle_path.as_deref(),
+        )
+        .await?;
         Ok(business_no)
     }
 
@@ -1996,49 +2693,106 @@ impl AppService {
         effective_mode: SyncMode,
         snapshot: bridge::BridgeSnapshot,
         started: std::time::Instant,
+        requested_facility_code: Option<&str>,
+        prechecked_existing_plant: Option<Option<Plant>>,
+        created_by_user_id: Option<&str>,
+        requires_stored_credential: bool,
         persist_documents: bool,
     ) -> Result<SyncRun> {
         let mut snapshot = snapshot;
         let facility_code = require_safe_facility_code("facilityCode", &snapshot.facility.code)?;
         snapshot.facility.code = facility_code;
+        if let Some(requested_facility_code) = requested_facility_code {
+            if snapshot.facility.code != requested_facility_code {
+                anyhow::bail!(
+                    "facility code mismatch: requested {}, collector returned {}",
+                    requested_facility_code,
+                    snapshot.facility.code
+                );
+            }
+        }
         if effective_mode != SyncMode::Full && !snapshot.documents.is_empty() {
             return Err(bad_request_error("document upload requires full sync"));
         }
         if effective_mode == SyncMode::Full && persist_documents {
-            validate_document_payloads(&snapshot.documents)?;
+            snapshot.documents = validate_document_payloads_on_blocking_thread(std::mem::take(
+                &mut snapshot.documents,
+            ))
+            .await?;
         }
-        let (owner_organization_id, created_by_organization_id) = match self
-            .db
-            .get_plant_by_facility_code(&snapshot.facility.code)
-            .await
-        {
-            Ok(existing) => (
-                existing.owner_organization_id,
-                existing.created_by_organization_id,
-            ),
-            Err(err)
-                if matches!(
-                    err.downcast_ref::<DatabaseLookupError>(),
-                    Some(DatabaseLookupError::PlantNotFound)
-                ) =>
-            {
-                (organization_id.to_owned(), None)
+        let existing_plant = match prechecked_existing_plant {
+            Some(existing_plant) => existing_plant,
+            None => {
+                self.get_existing_plant_by_facility_code_strong(&snapshot.facility.code)
+                    .await?
             }
-            Err(err) => return Err(err),
         };
+        if let Some(created_by_user_id) = created_by_user_id {
+            match existing_plant.as_ref() {
+                Some(_) => {
+                    self.authorize_sync(
+                        created_by_user_id,
+                        organization_id,
+                        Some(&snapshot.facility.code),
+                    )
+                    .await?;
+                    if requires_stored_credential {
+                        self.authorize_stored_certificate_use_for_sync(
+                            created_by_user_id,
+                            organization_id,
+                            &snapshot.facility.code,
+                        )
+                        .await?;
+                    }
+                }
+                None => {
+                    self.authorize_organization_action(
+                        created_by_user_id,
+                        organization_id,
+                        organization_id,
+                        "organization.plant.create",
+                        &format!("create plant {}", snapshot.facility.code),
+                        Some(ReadConsistency::Strong),
+                    )
+                    .await?;
+                    if requires_stored_credential {
+                        self.authorize_organization_action(
+                            created_by_user_id,
+                            organization_id,
+                            organization_id,
+                            "organization.credential.use",
+                            &format!(
+                                "use stored credential for new plant {}",
+                                snapshot.facility.code
+                            ),
+                            Some(ReadConsistency::Strong),
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
         let plant = Plant {
-            id: snapshot.facility.code.clone(),
+            id: existing_plant
+                .as_ref()
+                .map(|plant| plant.id.clone())
+                .unwrap_or_else(|| kr_rps_plant_id(&snapshot.facility.code)),
             facility_code: snapshot.facility.code.clone(),
             name: snapshot.facility.name.clone(),
-            owner_organization_id,
-            created_by_organization_id,
+            owner_organization_id: existing_plant
+                .as_ref()
+                .map(|plant| plant.owner_organization_id.clone())
+                .unwrap_or_else(|| organization_id.to_owned()),
+            created_by_organization_id: match existing_plant.as_ref() {
+                Some(plant) => plant.created_by_organization_id.clone(),
+                None => Some(organization_id.to_owned()),
+            },
             contract_no: snapshot.facility.contract_no.clone(),
             address: snapshot.facility.address.clone(),
             installed_kw: snapshot.facility.installed_kw,
             rec_start_date: snapshot.facility.rec_start_date.clone(),
             confirm_issued: snapshot.facility.confirm_issued.clone(),
         };
-        self.db.upsert_plant(&plant).await?;
 
         let generation: Vec<GenerationRecord> = snapshot
             .generation
@@ -2053,80 +2807,155 @@ impl AppService {
             .collect();
         let rates: Vec<StoredRateRecord> = snapshot.rates.iter().map(map_rate_record).collect();
         let rec: Vec<RecRecord> = snapshot.rec.iter().map(map_rec_record).collect();
-
-        if effective_mode == SyncMode::Full {
+        let registry_account_scope = if plant.owner_organization_id == organization_id {
+            Some((organization_id, business_no.as_str()))
+        } else {
+            None
+        };
+        let (existing_objects, persisted_docs) = if effective_mode == SyncMode::Full
+            && persist_documents
+        {
+            let mut existing_objects = self.db.list_document_objects(&plant.id).await?;
+            if plant.id != plant.facility_code {
+                existing_objects.extend(self.db.list_document_objects(&plant.facility_code).await?);
+            }
+            let mut existing_storage_object_keys = BTreeSet::new();
+            self.extend_artifact_document_object_keys(
+                organization_id,
+                &plant.id,
+                &mut existing_objects,
+                &mut existing_storage_object_keys,
+            )
+            .await;
+            if plant.id != plant.facility_code {
+                self.extend_artifact_document_object_keys(
+                    organization_id,
+                    &plant.facility_code,
+                    &mut existing_objects,
+                    &mut existing_storage_object_keys,
+                )
+                .await;
+            }
+            existing_objects.sort();
+            existing_objects.dedup();
+            let existing_object_keys = existing_objects.iter().cloned().collect();
             info!(
                 plant_code = plant.facility_code,
-                "replacing canonical full records"
+                document_count = snapshot.documents.len(),
+                "persisting documents to object storage"
             );
-            self.db
-                .replace_full_records(&plant.facility_code, &generation, &rates, &rec)
+            let documents = std::mem::take(&mut snapshot.documents);
+            let persisted_docs = self
+                .persist_documents(
+                    organization_id,
+                    &plant.id,
+                    documents,
+                    &existing_object_keys,
+                    &existing_storage_object_keys,
+                )
                 .await?;
-            if persist_documents {
-                info!(
-                    plant_code = plant.facility_code,
-                    "listing stale document objects"
-                );
-                let existing_objects = self.db.list_document_objects(&plant.facility_code).await?;
-                info!(
-                    plant_code = plant.facility_code,
-                    document_count = snapshot.documents.len(),
-                    "persisting documents to object storage"
-                );
-                let persisted_docs = self
-                    .persist_documents(organization_id, &plant.facility_code, &snapshot.documents)
-                    .await?;
-                info!(
-                    plant_code = plant.facility_code,
-                    document_count = persisted_docs.len(),
-                    "writing document rows"
-                );
-                self.db
-                    .replace_documents(&plant.facility_code, &persisted_docs)
-                    .await?;
-                let active_objects: BTreeSet<&str> = persisted_docs
-                    .iter()
-                    .map(|doc| doc.object_key.as_str())
-                    .collect();
-                for object_key in existing_objects {
-                    if active_objects.contains(object_key.as_str()) {
-                        continue;
-                    }
-                    if let Err(err) = self.artifacts.delete_object(&object_key).await {
-                        warn!("delete stale object {} failed: {}", object_key, err);
-                    }
-                }
-            }
+            info!(
+                plant_code = plant.facility_code,
+                document_count = persisted_docs.len(),
+                "writing document rows"
+            );
+            (existing_objects, persisted_docs)
         } else {
-            info!(plant_code = plant.facility_code, "upserting delta records");
-            self.db
-                .upsert_generation_records(&plant.facility_code, &generation)
-                .await?;
-            self.db
-                .upsert_rate_records(&plant.facility_code, &rates)
-                .await?;
-            self.db
-                .upsert_rec_records(&plant.facility_code, &rec)
-                .await?;
-        }
+            if effective_mode == SyncMode::Delta {
+                info!(plant_code = plant.facility_code, "upserting delta records");
+            }
+            (Vec::new(), Vec::new())
+        };
 
         let duration_ms = started.elapsed().as_millis() as i64;
-        self.db
-            .finish_sync_run(&run.id, "completed", duration_ms, None)
-            .await?;
+        let bootstrap_created_plant = if existing_plant.is_none() {
+            if let Some(created_by_user_id) = created_by_user_id.as_deref() {
+                self.ensure_created_plant_bootstrap_roles().await?;
+                Some(CreatedPlantBootstrap {
+                    user_id: created_by_user_id,
+                    creator_organization_id: organization_id,
+                    owner_organization_id: &plant.owner_organization_id,
+                    creator_agreement_id: None,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let _asset_id = match self
+            .db
+            .materialize_kr_rps_sync(KrRpsSyncMaterialization {
+                run_id: &run.id,
+                plant: &plant,
+                registry_account_organization_id: registry_account_scope
+                    .map(|(organization_id, _)| organization_id),
+                business_no: registry_account_scope.map(|(_, business_no)| business_no),
+                bootstrap_created_plant,
+                mode: &effective_mode,
+                generation: &generation,
+                rates: &rates,
+                rec: &rec,
+                documents: &persisted_docs,
+                duration_ms,
+            })
+            .await
+        {
+            Ok(asset_id) => asset_id,
+            Err(err) => {
+                if effective_mode == SyncMode::Full && persist_documents {
+                    let existing_object_keys = existing_objects.iter().cloned().collect();
+                    self.cleanup_unmaterialized_documents(&persisted_docs, &existing_object_keys)
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+        if effective_mode == SyncMode::Full && persist_documents {
+            let current_objects: BTreeSet<&str> = persisted_docs
+                .iter()
+                .map(|doc| doc.object_key.as_str())
+                .collect();
+            let stale_objects = existing_objects
+                .into_iter()
+                .filter(|object_key| !current_objects.contains(object_key.as_str()));
+            stream::iter(stale_objects)
+                .for_each_concurrent(STALE_OBJECT_DELETE_CONCURRENCY, |object_key| {
+                    let artifacts = self.artifacts.clone();
+                    async move {
+                        if let Err(err) = artifacts.delete_object(&object_key).await {
+                            warn!("delete stale object {} failed: {}", object_key, err);
+                        }
+                    }
+                })
+                .await;
+        }
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let finished_at = now_string();
+        if let Err(err) = self
+            .db
+            .refresh_completed_sync_run_timing(&run.id, duration_ms, &finished_at)
+            .await
+        {
+            warn!(
+                run_id = run.id.as_str(),
+                error = %err,
+                "failed to refresh completed sync run timing"
+            );
+        }
         info!(
-            "sync completed organization={} business_no={} plant={} mode={:?} duration_ms={}",
-            organization_id, business_no, plant.facility_code, effective_mode, duration_ms
+            "sync completed organization={} plant={} mode={:?} duration_ms={}",
+            organization_id, plant.facility_code, effective_mode, duration_ms
         );
 
         Ok(SyncRun {
-            id: run.id,
+            id: run.id.clone(),
             organization_id: organization_id.to_owned(),
-            plant_id: Some(plant.facility_code),
+            plant_id: Some(plant.id.clone()),
             mode: effective_mode,
             status: "completed".to_owned(),
-            started_at: run.started_at,
-            finished_at: Some(now_string()),
+            started_at: run.started_at.clone(),
+            finished_at: Some(finished_at),
             duration_ms,
         })
     }
@@ -2157,7 +2986,7 @@ impl AppService {
             .await
     }
 
-    async fn consume_valid_challenge(
+    async fn validate_cert_gateway_challenge(
         &self,
         challenge_id: &str,
         challenge_payload: &str,
@@ -2165,7 +2994,7 @@ impl AppService {
         expected_mode: &str,
         organization_id: &str,
         bindings: ChallengeBindingExpectations<'_>,
-    ) -> Result<()> {
+    ) -> Result<CertGatewayChallenge> {
         let challenge = self
             .db
             .get_cert_gateway_challenge(challenge_id)
@@ -2206,91 +3035,268 @@ impl AppService {
             &challenge_signature_base64,
         )
         .map_err(|err| bad_request_error(err.to_string()))?;
-        self.db.consume_cert_gateway_challenge(challenge_id).await?;
-        Ok(())
+        Ok(challenge)
     }
 
     async fn persist_documents(
         &self,
         organization_id: &str,
         plant_code: &str,
-        docs: &[BridgeDocument],
+        docs: Vec<BridgeDocument>,
+        existing_object_keys: &BTreeSet<String>,
+        existing_storage_object_keys: &BTreeSet<String>,
     ) -> Result<Vec<PersistedDocument>> {
-        let mut persisted = Vec::with_capacity(docs.len());
-        for doc in docs {
-            let id = stable_document_id(organization_id, plant_code, doc);
-            let category = resolved_document_category(doc);
-            let object_key = format!("{organization_id}/{plant_code}/{id}.pdf");
-            info!(
-                plant_code,
-                file_name = doc.file_name.as_str(),
-                object_key = object_key.as_str(),
-                "uploading document"
-            );
-            self.persist_document(object_key.clone(), doc).await?;
-            persisted.push(PersistedDocument {
-                id,
-                category,
-                attachment_code: doc.attachment_code.clone(),
-                file_class: doc.file_class.clone(),
-                file_sec_name: doc.file_sec_name.clone(),
-                file_name: doc.file_name.clone(),
-                required: doc.required,
-                source_sha256: doc.source_sha256.clone(),
-                output_sha256: doc
-                    .output_sha256
-                    .clone()
-                    .or_else(|| doc.source_sha256.clone()),
-                object_key,
-                content_type: document_content_type(doc)?.to_owned(),
-            });
+        let doc_count = docs.len();
+        let results = stream::iter(docs.into_iter())
+            .map(|doc| {
+                let organization_id = organization_id.to_owned();
+                let plant_code = plant_code.to_owned();
+                async move {
+                    self.prepare_and_persist_document(
+                        &organization_id,
+                        &plant_code,
+                        doc,
+                        existing_object_keys,
+                        existing_storage_object_keys,
+                    )
+                    .await
+                }
+            })
+            .buffered(DOCUMENT_UPLOAD_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut persisted = Vec::with_capacity(doc_count);
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok(doc) => persisted.push(doc),
+                Err(err) if first_error.is_none() => first_error = Some(err),
+                Err(_) => {}
+            }
+        }
+        if let Some(err) = first_error {
+            self.cleanup_unmaterialized_documents(&persisted, existing_object_keys)
+                .await;
+            return Err(err);
         }
         Ok(persisted)
     }
 
-    async fn persist_document(&self, object_key: String, doc: &BridgeDocument) -> Result<()> {
-        let content_type = document_content_type(doc)?;
-        if let Some(content_base64) = doc
-            .content_base64
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let decoded = decode_content_base64_to_tempfile(content_base64)
-                .with_context(|| format!("decode document {}", doc.file_name))?;
-            self.artifacts
-                .put_file(object_key, decoded.path(), content_type)
-                .await
-                .with_context(|| format!("upload document {}", doc.file_name))?;
-            return Ok(());
+    async fn extend_artifact_document_object_keys(
+        &self,
+        organization_id: &str,
+        plant_code: &str,
+        object_keys: &mut Vec<String>,
+        storage_object_keys: &mut BTreeSet<String>,
+    ) {
+        let prefix = format!("{organization_id}/{plant_code}/");
+        match self.artifacts.list_keys(&prefix).await {
+            Ok(keys) => {
+                storage_object_keys.extend(keys.iter().cloned());
+                object_keys.extend(keys);
+            }
+            Err(err) => {
+                warn!(
+                    prefix = prefix.as_str(),
+                    error = %err,
+                    "failed to list document artifact keys for cleanup"
+                );
+            }
         }
+    }
 
-        let source_path = Path::new(document_source_path(doc)?);
+    async fn prepare_and_persist_document(
+        &self,
+        organization_id: &str,
+        plant_code: &str,
+        mut doc: BridgeDocument,
+        existing_object_keys: &BTreeSet<String>,
+        existing_storage_object_keys: &BTreeSet<String>,
+    ) -> Result<PersistedDocument> {
+        let id = stable_document_id(organization_id, plant_code, &doc);
+        let category = resolved_document_category(&doc);
+        let upload = prepare_document_upload(&mut doc)
+            .await
+            .with_context(|| format!("prepare document {}", doc.file_name))?;
+        let uploaded_sha256 = &upload.uploaded_sha256;
+        if let Some(expected_sha256) = doc.output_sha256.as_deref() {
+            if expected_sha256 != uploaded_sha256 {
+                return Err(bad_request_error(format!(
+                    "document {} outputSha256 mismatch: expected {}, got {}",
+                    doc.file_name, expected_sha256, uploaded_sha256
+                )));
+            }
+        }
+        let source_sha256 = doc
+            .source_sha256
+            .clone()
+            .unwrap_or_else(|| uploaded_sha256.to_owned());
+        let output_sha256 = doc
+            .output_sha256
+            .clone()
+            .unwrap_or_else(|| uploaded_sha256.to_owned());
+        let object_version = uploaded_sha256.as_str();
+        let object_key = format!("{organization_id}/{plant_code}/{id}-{object_version}.pdf");
+        info!(
+            plant_code,
+            file_name = doc.file_name.as_str(),
+            object_key = object_key.as_str(),
+            "uploading document"
+        );
+        let object_exists = if existing_storage_object_keys.contains(object_key.as_str()) {
+            true
+        } else if existing_object_keys.contains(object_key.as_str()) {
+            self.artifacts.object_exists(&object_key).await?
+        } else {
+            false
+        };
+        if !object_exists {
+            if let Err(err) = self
+                .persist_document(object_key.clone(), &doc, &upload)
+                .await
+            {
+                return Err(err);
+            }
+        }
+        Ok(PersistedDocument {
+            id,
+            category,
+            attachment_code: doc.attachment_code.clone(),
+            file_class: doc.file_class.clone(),
+            file_sec_name: doc.file_sec_name.clone(),
+            file_name: doc.file_name.clone(),
+            required: doc.required,
+            source_sha256: Some(source_sha256),
+            output_sha256: Some(output_sha256),
+            object_key,
+            content_type: document_content_type(&doc)?.to_owned(),
+        })
+    }
+
+    async fn cleanup_unmaterialized_documents(
+        &self,
+        docs: &[PersistedDocument],
+        existing_object_keys: &BTreeSet<String>,
+    ) {
+        // Do not delete here: concurrent full syncs can upload the same
+        // content-addressed key, and a failed run must not remove an object
+        // that another run may be about to materialize. The next successful
+        // full sync retries stale/orphan cleanup from the storage listing.
+        let orphan_count = docs
+            .iter()
+            .filter(|doc| !existing_object_keys.contains(doc.object_key.as_str()))
+            .count();
+        if orphan_count > 0 {
+            warn!(
+                orphan_count,
+                "leaving unmaterialized document objects for full-sync stale cleanup"
+            );
+        }
+    }
+
+    async fn persist_document(
+        &self,
+        object_key: String,
+        doc: &BridgeDocument,
+        upload: &PreparedDocumentUpload,
+    ) -> Result<()> {
+        let content_type = document_content_type(doc)?;
         self.artifacts
-            .put_file(object_key, source_path, content_type)
+            .put_file(object_key, upload.path(), content_type)
             .await
             .with_context(|| format!("upload document {}", doc.file_name))?;
         Ok(())
     }
 }
 
-fn decode_content_base64_to_tempfile(content_base64: &str) -> Result<tempfile::NamedTempFile> {
-    let mut decoder = base64::read::DecoderReader::new(
-        content_base64.as_bytes(),
-        &base64::engine::general_purpose::STANDARD,
-    );
-    let mut output = tempfile::NamedTempFile::new().context("create document decode tempfile")?;
-    io::copy(&mut decoder, &mut output)
-        .map_err(|err| {
-            if err.kind() == io::ErrorKind::InvalidData {
-                bad_request_error("document contentBase64 is not valid base64")
-            } else {
-                anyhow!(err)
-            }
+async fn prepare_document_upload(doc: &mut BridgeDocument) -> Result<PreparedDocumentUpload> {
+    if let Some(content_base64) = doc.content_base64.take() {
+        if content_base64
+            .bytes()
+            .all(|byte| byte.is_ascii_whitespace())
+        {
+            return prepare_source_document_upload(doc).await;
+        }
+        let decoded = tokio::task::spawn_blocking(move || {
+            decode_content_base64_to_hashed_tempfile(&content_base64)
         })
-        .context("decode document contentBase64")?;
+        .await
+        .context("join document decode task")?
+        .with_context(|| format!("decode document {}", doc.file_name))?;
+        return Ok(PreparedDocumentUpload {
+            uploaded_sha256: decoded.sha256_hex,
+            content: PreparedDocumentContent::DecodedTemp(decoded.tempfile),
+        });
+    }
+
+    prepare_source_document_upload(doc).await
+}
+
+async fn prepare_source_document_upload(doc: &BridgeDocument) -> Result<PreparedDocumentUpload> {
+    let source_path = PathBuf::from(document_source_path(doc)?);
+    let uploaded_sha256 = sha256_file_hex(&source_path).await?;
+    Ok(PreparedDocumentUpload {
+        uploaded_sha256,
+        content: PreparedDocumentContent::SourcePath(source_path),
+    })
+}
+
+async fn sha256_file_hex(path: &Path) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("open document {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("read document {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn decode_content_base64_to_hashed_tempfile(
+    content_base64: &str,
+) -> Result<DecodedDocumentContent> {
+    use std::io::Read;
+
+    let filtered = AsciiWhitespaceFilteredReader::new(content_base64.as_bytes());
+    let mut decoder =
+        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
+    let mut output = tempfile::NamedTempFile::new().context("create document decode tempfile")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = decoder
+            .read(&mut buffer)
+            .map_err(|err| {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    bad_request_error("document contentBase64 is not valid base64")
+                } else {
+                    anyhow!(err)
+                }
+            })
+            .context("decode document contentBase64")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .context("write document decode tempfile")?;
+    }
     output.flush().context("flush document decode tempfile")?;
-    Ok(output)
+    Ok(DecodedDocumentContent {
+        tempfile: output,
+        sha256_hex: hex::encode(hasher.finalize()),
+    })
 }
 
 fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
@@ -2305,6 +3311,7 @@ fn document_source_path(doc: &BridgeDocument) -> Result<&str> {
 }
 
 fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
+    let mut total_content_bytes = 0_usize;
     for doc in docs {
         document_content_type(doc)?;
         if let Some(content_base64) = doc
@@ -2313,13 +3320,50 @@ fn validate_document_payloads(docs: &[BridgeDocument]) -> Result<()> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let _decoded = decode_content_base64_to_tempfile(content_base64)
-                .with_context(|| format!("decode document {}", doc.file_name))?;
+            let decoded_len = estimated_base64_decoded_len(content_base64)
+                .with_context(|| format!("validate document {}", doc.file_name))?;
+            if decoded_len > MAX_LOCAL_EXECUTION_DOCUMENT_BYTES {
+                return Err(bad_request_error(format!(
+                    "document {} exceeds {} bytes",
+                    doc.file_name, MAX_LOCAL_EXECUTION_DOCUMENT_BYTES
+                )));
+            }
+            total_content_bytes = total_content_bytes
+                .checked_add(decoded_len)
+                .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+            if total_content_bytes > MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES {
+                return Err(bad_request_error(format!(
+                    "documents exceed {} bytes",
+                    MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES
+                )));
+            }
             continue;
         }
         document_source_path(doc)?;
     }
     Ok(())
+}
+
+async fn validate_document_payloads_on_blocking_thread(
+    docs: Vec<BridgeDocument>,
+) -> Result<Vec<BridgeDocument>> {
+    tokio::task::spawn_blocking(move || {
+        validate_document_payloads(&docs)?;
+        Ok(docs)
+    })
+    .await
+    .context("join document payload validation task")?
+}
+
+async fn require_local_execution_document_contents_on_blocking_thread(
+    mut snapshot: bridge::BridgeSnapshot,
+) -> Result<bridge::BridgeSnapshot> {
+    tokio::task::spawn_blocking(move || {
+        require_local_execution_document_contents(&mut snapshot)?;
+        Ok(snapshot)
+    })
+    .await
+    .context("join local execution document validation task")?
 }
 
 fn normalize_active_organization(
@@ -2398,21 +3442,44 @@ fn require_local_execution_document_contents(snapshot: &mut bridge::BridgeSnapsh
 }
 
 fn estimated_base64_decoded_len(value: &str) -> Result<usize> {
-    let value = value.trim();
-    if value.is_empty() {
+    let mut value_len = 0_usize;
+    let mut padding = 0_usize;
+    let mut seen_padding = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            seen_padding = true;
+            padding = padding
+                .checked_add(1)
+                .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+            if padding > 2 {
+                return Err(bad_request_error(
+                    "document contentBase64 is not valid base64",
+                ));
+            }
+        } else {
+            let is_base64_alphabet = byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/');
+            if seen_padding || !is_base64_alphabet {
+                return Err(bad_request_error(
+                    "document contentBase64 is not valid base64",
+                ));
+            }
+        }
+        value_len = value_len
+            .checked_add(1)
+            .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+    }
+    if value_len == 0 {
         return Ok(0);
     }
-    let padding = value
-        .as_bytes()
-        .iter()
-        .rev()
-        .take_while(|byte| **byte == b'=')
-        .count();
-    let groups = value
-        .len()
-        .checked_add(3)
-        .and_then(|len| len.checked_div(4))
-        .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?;
+    if value_len % 4 != 0 {
+        return Err(bad_request_error(
+            "document contentBase64 is not valid base64",
+        ));
+    }
+    let groups = value_len / 4;
     Ok(groups
         .checked_mul(3)
         .ok_or_else(|| bad_request_error("document contentBase64 is too large"))?
@@ -2553,6 +3620,20 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles
         .iter()
         .any(|needle| value.contains(&needle.to_lowercase()))
+}
+
+fn kr_rps_plant_action_to_asset_action(action_id: &str) -> Option<&'static str> {
+    match action_id {
+        "plant.profile.read" => Some("asset.profile.read"),
+        "plant.profile.write" => Some("asset.profile.write"),
+        "plant.sync.execute" => Some("asset.sync.execute"),
+        "plant.telemetry.read" => Some("asset.generation.read"),
+        "plant.document.read" => Some("asset.document.read"),
+        "plant.rec.read" => Some("asset.certificate.read"),
+        "plant.rate.read" => Some("asset.rate.read"),
+        "plant.permission.manage" => Some("asset.permission.manage"),
+        _ => None,
+    }
 }
 
 fn map_plant_summary(summary: PlantSummary) -> PlantView {
@@ -2720,7 +3801,9 @@ fn validate_challenge_payload_bindings(
         validate_optional_binding(
             "facility code",
             payload.facility_code.as_deref(),
-            expected.facility_code,
+            expected
+                .facility_code
+                .or(challenge.facility_code.as_deref()),
         )?;
         validate_month_binding(
             "start month",
@@ -2932,6 +4015,13 @@ fn hash_hex(value: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn kr_rps_plant_id(facility_code: &str) -> String {
+    format!(
+        "plant-{}",
+        &hash_hex(&format!("kr_rps:{facility_code}"))[..32]
+    )
+}
+
 fn hash_bytes_hex(value: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value);
@@ -2972,6 +4062,19 @@ fn is_expired(expires_at: &str) -> Result<bool> {
         .with_context(|| format!("parse expiresAt {expires_at}"))?
         .with_timezone(&Utc);
     Ok(Utc::now() > expires_at)
+}
+
+fn validate_sync_request_shape(
+    mode: &SyncMode,
+    start_month: Option<&str>,
+    end_month: Option<&str>,
+) -> Result<()> {
+    if matches!(mode, SyncMode::Full) && (start_month.is_some() || end_month.is_some()) {
+        return Err(bad_request_error(
+            "full sync cannot be bounded by startMonth or endMonth",
+        ));
+    }
+    Ok(())
 }
 
 fn now_string() -> String {
@@ -3046,6 +4149,7 @@ fn select_organization_business_no<'a>(
     organization_id: &str,
     requested_business_no: Option<&'a str>,
     linked_business_no: Option<&'a str>,
+    _certificate_business_no: Option<&'a str>,
 ) -> Result<&'a str> {
     if let Some(business_no) = requested_business_no.filter(|value| !value.trim().is_empty()) {
         return Ok(business_no);
@@ -3056,6 +4160,52 @@ fn select_organization_business_no<'a>(
     Err(bad_request_error(format!(
         "organization missing linked legal party business number: {organization_id}"
     )))
+}
+
+struct AsciiWhitespaceFilteredReader<R> {
+    inner: R,
+    buffer: [u8; 8192],
+    position: usize,
+    length: usize,
+}
+
+impl<R> AsciiWhitespaceFilteredReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buffer: [0; 8192],
+            position: 0,
+            length: 0,
+        }
+    }
+}
+
+impl<R: io::Read> io::Read for AsciiWhitespaceFilteredReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        while written < buf.len() {
+            if self.position == self.length {
+                self.length = self.inner.read(&mut self.buffer)?;
+                self.position = 0;
+                if self.length == 0 {
+                    break;
+                }
+            }
+            while self.position < self.length && written < buf.len() {
+                let byte = self.buffer[self.position];
+                self.position += 1;
+                if !byte.is_ascii_whitespace() {
+                    buf[written] = byte;
+                    written += 1;
+                }
+            }
+        }
+        Ok(written)
+    }
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -3073,40 +4223,59 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         MAX_LOCAL_EXECUTION_DOCUMENT_BYTES, MAX_LOCAL_EXECUTION_TOTAL_DOCUMENT_BYTES,
-        decode_challenge_payload, decode_content_base64_to_tempfile, document_content_type,
+        decode_challenge_payload, decode_content_base64_to_hashed_tempfile, document_content_type,
         document_source_path, estimated_base64_decoded_len, normalize_optional_text,
         require_local_execution_document_contents, select_organization_business_no,
-        stable_document_id, validate_month_format,
+        stable_document_id, validate_document_payloads, validate_month_format,
     };
     use crate::bridge::{BridgeDocument, BridgeFacility, BridgeSnapshot};
     use chrono::{DateTime, FixedOffset};
 
     #[test]
     fn requested_business_number_wins() {
-        let selected =
-            select_organization_business_no("ops-seoul", Some("2768603291"), Some("9999999999"))
-                .expect("selected business number");
+        let selected = select_organization_business_no(
+            "ops-seoul",
+            Some("2768603291"),
+            Some("9999999999"),
+            Some("1111111111"),
+        )
+        .expect("selected business number");
         assert_eq!(selected, "2768603291");
     }
 
     #[test]
     fn linked_business_number_is_used_when_request_omits_it() {
-        let selected = select_organization_business_no("ops-seoul", None, Some("2768603291"))
-            .expect("selected business number");
+        let selected = select_organization_business_no(
+            "ops-seoul",
+            None,
+            Some("2768603291"),
+            Some("1111111111"),
+        )
+        .expect("selected business number");
         assert_eq!(selected, "2768603291");
     }
 
     #[test]
     fn blank_requested_business_number_falls_back_to_linked_business_number() {
         let selected =
-            select_organization_business_no("ops-seoul", Some("   "), Some("2768603291"))
+            select_organization_business_no("ops-seoul", Some("   "), Some("2768603291"), None)
                 .expect("selected business number");
         assert_eq!(selected, "2768603291");
     }
 
     #[test]
+    fn certificate_subject_business_number_does_not_bootstrap_unlinked_organization() {
+        let err = select_organization_business_no("ops-seoul", None, None, Some("2768603291"))
+            .expect_err("certificate subject must not bootstrap legal identity");
+        assert!(
+            err.to_string()
+                .contains("organization missing linked legal party business number: ops-seoul")
+        );
+    }
+
+    #[test]
     fn missing_business_number_returns_explicit_error() {
-        let err = select_organization_business_no("ops-seoul", None, None)
+        let err = select_organization_business_no("ops-seoul", None, None, None)
             .expect_err("missing business number must fail");
         assert!(
             err.to_string()
@@ -3174,20 +4343,96 @@ mod tests {
 
     #[test]
     fn content_base64_decoder_streams_to_tempfile() {
-        let file = decode_content_base64_to_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
-        let contents = std::fs::read(file.path()).expect("read decoded tempfile");
+        let decoded =
+            decode_content_base64_to_hashed_tempfile("UERGLUNPTlRFTlQ=").expect("decoded tempfile");
+        let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
+        assert_eq!(contents, b"PDF-CONTENT");
+        assert_eq!(
+            decoded.sha256_hex,
+            "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69"
+        );
+    }
+
+    #[test]
+    fn content_base64_decoder_ignores_ascii_whitespace() {
+        let decoded = decode_content_base64_to_hashed_tempfile(" UERG\nLUNP\tTlRFTlQ= ")
+            .expect("decoded tempfile");
+        let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
+        assert_eq!(contents, b"PDF-CONTENT");
+        assert_eq!(
+            decoded.sha256_hex,
+            "e64c80fda9361b10ce197ad1bc9753b57d52739b904137c376a5aafaddc79f69"
+        );
+    }
+
+    #[test]
+    fn content_base64_decoder_does_not_end_on_large_whitespace_block() {
+        let mut encoded = " ".repeat(8192);
+        encoded.push_str("UERGLUNPTlRFTlQ=");
+        let decoded = decode_content_base64_to_hashed_tempfile(&encoded).expect("decoded tempfile");
+        let contents = std::fs::read(decoded.tempfile.path()).expect("read decoded tempfile");
         assert_eq!(contents, b"PDF-CONTENT");
     }
 
     #[test]
     fn content_base64_decoder_rejects_invalid_base64() {
-        let err =
-            decode_content_base64_to_tempfile("not valid base64").expect_err("invalid base64");
+        let err = decode_content_base64_to_hashed_tempfile("not valid base64")
+            .expect_err("invalid base64");
         assert!(err.chain().any(|cause| {
             cause
                 .to_string()
                 .contains("document contentBase64 is not valid base64")
         }));
+    }
+
+    #[test]
+    fn document_payload_validation_rejects_invalid_base64_before_upload() {
+        let docs = vec![fixture_document(
+            "invalid.pdf",
+            "not valid base64".to_owned(),
+        )];
+        let err = validate_document_payloads(&docs).expect_err("invalid base64");
+        assert!(err.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("document contentBase64 is not valid base64")
+        }));
+    }
+
+    #[test]
+    fn document_payload_validation_rejects_oversized_content_base64() {
+        let docs = vec![fixture_document(
+            "large.pdf",
+            "A".repeat(encoded_len_for_decoded_bytes(
+                MAX_LOCAL_EXECUTION_DOCUMENT_BYTES + 1,
+            )),
+        )];
+        let err = validate_document_payloads(&docs).expect_err("oversized document");
+        assert!(
+            err.to_string()
+                .contains("document large.pdf exceeds 16777216 bytes")
+        );
+    }
+
+    #[test]
+    fn document_payload_validation_rejects_oversized_content_total() {
+        let per_document_bytes = MAX_LOCAL_EXECUTION_DOCUMENT_BYTES * 3 / 4;
+        let docs = vec![
+            fixture_document(
+                "first.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_bytes)),
+            ),
+            fixture_document(
+                "second.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_bytes)),
+            ),
+            fixture_document(
+                "third.pdf",
+                "A".repeat(encoded_len_for_decoded_bytes(per_document_bytes)),
+            ),
+        ];
+        let err = validate_document_payloads(&docs).expect_err("oversized document total");
+        assert!(err.to_string().contains("documents exceed 33554432 bytes"));
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use domain::{
     Action, ActionRiskLevel, Agreement, AgreementDocument, AgreementDocumentType, AgreementStatus,
-    AgreementType, Client, ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant,
-    ClientGrantAction, ClientGrantStatus, ClientType, DocumentArtifact, DocumentCategory,
-    GenerationRecord, Group, MembershipRole, MembershipStatus, Organization,
+    AgreementType, Asset, AssetProfile, AuthCredential, Client, ClientAction, ClientAppType,
+    ClientConsentPolicy, ClientGrant, ClientGrantAction, ClientGrantStatus, ClientType,
+    CredentialBinding, DataSource, DocumentArtifact, DocumentCategory, EnergyCertificate,
+    GenerationDatum, GenerationRecord, Group, MembershipRole, MembershipStatus, Organization,
     OrganizationMembership, OrganizationPartyLink, OrganizationPartyRelationType, Party, Plant,
-    RateRecord, RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
-    RoleBindingSubjectType, SyncMode, SyncRun, User,
+    RateDatum, RateRecord, RecRecord, Registry, RegistryAccount, RegistryProject, Role,
+    RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType, SyncMode,
+    SyncRun, User,
 };
 
 #[test]
@@ -124,8 +126,8 @@ fn serializes_core_models() {
         subject_type: RoleBindingSubjectType::Group,
         subject_id: group.id.clone(),
         subject_organization_id: organization.id.clone(),
-        resource_type: RoleBindingResourceType::Plant,
-        resource_id: "plant_1".into(),
+        resource_type: RoleBindingResourceType::Asset,
+        resource_id: "asset_1".into(),
         role_id: role.id.clone(),
         agreement_id: Some(agreement.id.clone()),
         state: RoleBindingState::Active,
@@ -144,6 +146,120 @@ fn serializes_core_models() {
         installed_kw: 221.615,
         rec_start_date: "2024-09-05".into(),
         confirm_issued: "2024-11-12".into(),
+    };
+    let asset = Asset {
+        id: "asset_1".into(),
+        owner_organization_id: organization.id.clone(),
+        created_by_organization_id: Some("org_2".into()),
+        name: "커널로그1호 태양광발전소".into(),
+        country_code: "KR".into(),
+        address: "부산광역시 기장군 장안읍 명례리 907-4".into(),
+        capacity_kw: 221.615,
+        timezone: "Asia/Seoul".into(),
+    };
+    let asset_profile = AssetProfile {
+        id: "asset_profile_1".into(),
+        asset_id: asset.id.clone(),
+        country_code: "KR".into(),
+        provider: "korea_energy_rps".into(),
+        profile_type: "kr_rps".into(),
+        external_id: "PV15-R-090795".into(),
+        metadata_json: r#"{"contractNo":"5001058115"}"#.into(),
+    };
+    let registry = Registry {
+        id: "registry_1".into(),
+        registry_type: "rec".into(),
+        country_code: Some("KR".into()),
+        provider: "korea_energy_rps".into(),
+        name: "Korea RPS".into(),
+        metadata_json: "{}".into(),
+    };
+    let registry_account = RegistryAccount {
+        id: "registry_account_1".into(),
+        registry_id: registry.id.clone(),
+        organization_id: organization.id.clone(),
+        external_account_id: "2768603291".into(),
+        display_name: Some("커널로그에너지".into()),
+        status: "active".into(),
+        metadata_json: "{}".into(),
+    };
+    let registry_project = RegistryProject {
+        id: "registry_project_1".into(),
+        registry_id: registry.id.clone(),
+        asset_id: asset.id.clone(),
+        registry_account_id: Some(registry_account.id.clone()),
+        external_project_id: "PV15-R-090795".into(),
+        project_type: "generation_facility".into(),
+        status: "active".into(),
+        metadata_json: "{}".into(),
+    };
+    let data_source = DataSource {
+        id: "source_1".into(),
+        asset_id: asset.id.clone(),
+        registry_id: Some(registry.id.clone()),
+        registry_project_id: Some(registry_project.id.clone()),
+        source_type: "registry".into(),
+        provider: "korea_energy_rps".into(),
+        external_source_id: Some("PV15-R-090795".into()),
+        unit: "kWh".into(),
+        metadata_json: "{}".into(),
+    };
+    let generation_datum = GenerationDatum {
+        id: "generation_data_1".into(),
+        asset_id: asset.id.clone(),
+        source_id: data_source.id.clone(),
+        period_start: "2026-02-01T00:00:00+09:00".into(),
+        period_end: "2026-03-01T00:00:00+09:00".into(),
+        metric_type: "gross_generation_kwh".into(),
+        value: 21036.0,
+        unit: "kWh".into(),
+        quality: "settled".into(),
+        metadata_json: "{}".into(),
+        recorded_at: "2026-03-31T00:00:00Z".into(),
+    };
+    let rate_datum = RateDatum {
+        id: "rate_data_1".into(),
+        asset_id: asset.id.clone(),
+        source_id: data_source.id.clone(),
+        period_start: "2026-02-01T00:00:00+09:00".into(),
+        period_end: "2026-03-01T00:00:00+09:00".into(),
+        metric_type: "self_rate".into(),
+        value: "110.0".into(),
+        unit: "KRW/kWh".into(),
+        currency: Some("KRW".into()),
+        quality: "published".into(),
+        metadata_json: "{}".into(),
+        recorded_at: "2026-03-31T00:00:00Z".into(),
+    };
+    let energy_certificate = EnergyCertificate {
+        id: "energy_certificate_1".into(),
+        certificate_type: "REC".into(),
+        registry_id: registry.id.clone(),
+        registry_project_id: Some(registry_project.id.clone()),
+        asset_id: asset.id.clone(),
+        serial_number: "KR-REC-12154225".into(),
+        vintage_start: Some("2026-02-01".into()),
+        vintage_end: Some("2026-02-28".into()),
+        quantity_mwh: 21.036,
+        owner_account_id: Some(registry_account.id.clone()),
+        status: "issued".into(),
+        issued_at: Some("2026-03-25T00:00:00Z".into()),
+        retired_at: None,
+        metadata_json: "{}".into(),
+    };
+    let auth_credential = AuthCredential {
+        id: "credential_1".into(),
+        organization_id: organization.id.clone(),
+        credential_type: "certificate".into(),
+        country_code: Some("KR".into()),
+        provider: "korea_energy_rps".into(),
+        external_subject_id: Some("2768603291".into()),
+        active: true,
+        last_used_at: None,
+    };
+    let credential_binding = CredentialBinding {
+        credential_id: auth_credential.id.clone(),
+        registry_account_id: registry_account.id.clone(),
     };
     let sync = SyncRun {
         id: "run_1".into(),
@@ -209,6 +325,17 @@ fn serializes_core_models() {
         "clientAction": client_action,
         "clientGrant": client_grant,
         "clientGrantAction": client_grant_action,
+        "asset": asset,
+        "assetProfile": asset_profile,
+        "registry": registry,
+        "registryAccount": registry_account,
+        "registryProject": registry_project,
+        "dataSource": data_source,
+        "generationDatum": generation_datum,
+        "rateDatum": rate_datum,
+        "energyCertificate": energy_certificate,
+        "authCredential": auth_credential,
+        "credentialBinding": credential_binding,
         "plant": plant,
         "sync": sync,
         "generation": generation,
@@ -239,8 +366,8 @@ fn serializes_core_models() {
     assert_eq!(value["action"]["grantableToClients"], true);
     assert_eq!(value["action"]["consentLabel"], "발전소 기본정보 조회");
     assert_eq!(value["role"]["code"], "viewer");
-    assert_eq!(value["binding"]["resourceType"], "plant");
-    assert_eq!(value["binding"]["resourceId"], "plant_1");
+    assert_eq!(value["binding"]["resourceType"], "asset");
+    assert_eq!(value["binding"]["resourceId"], "asset_1");
     assert_eq!(value["client"]["slug"], "awesome-dashboard");
     assert_eq!(value["client"]["clientType"], "confidential");
     assert_eq!(value["clientAction"]["actionId"], "action_1");
@@ -248,6 +375,34 @@ fn serializes_core_models() {
     assert_eq!(
         value["clientGrantAction"]["clientGrantId"],
         "client_grant_1"
+    );
+    assert_eq!(value["asset"]["id"], "asset_1");
+    assert_eq!(value["asset"]["countryCode"], "KR");
+    assert_eq!(value["asset"]["capacityKw"], 221.615);
+    assert_eq!(value["assetProfile"]["profileType"], "kr_rps");
+    assert_eq!(value["assetProfile"]["externalId"], "PV15-R-090795");
+    assert_eq!(value["registry"]["provider"], "korea_energy_rps");
+    assert_eq!(value["registryAccount"]["externalAccountId"], "2768603291");
+    assert_eq!(
+        value["registryProject"]["externalProjectId"],
+        "PV15-R-090795"
+    );
+    assert_eq!(value["dataSource"]["sourceType"], "registry");
+    assert_eq!(value["generationDatum"]["sourceId"], "source_1");
+    assert_eq!(
+        value["generationDatum"]["metricType"],
+        "gross_generation_kwh"
+    );
+    assert_eq!(value["rateDatum"]["metricType"], "self_rate");
+    assert_eq!(value["rateDatum"]["currency"], "KRW");
+    assert_eq!(
+        value["energyCertificate"]["serialNumber"],
+        "KR-REC-12154225"
+    );
+    assert_eq!(value["authCredential"]["credentialType"], "certificate");
+    assert_eq!(
+        value["credentialBinding"]["registryAccountId"],
+        "registry_account_1"
     );
     assert_eq!(value["sync"]["mode"], "delta");
     assert_eq!(value["sync"]["organizationId"], "2768603291");

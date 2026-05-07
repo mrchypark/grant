@@ -12,11 +12,23 @@ use openssl::{
     sign::{Signer, Verifier},
     stack::Stack,
     symm::{Cipher, Crypter, Mode},
-    x509::X509,
+    x509::{
+        X509, X509StoreContext,
+        store::{X509StoreBuilder, X509StoreRef},
+    },
 };
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use simple_asn1::{ASN1Block, ASN1Class, BigUint, OID, from_der};
-use std::{path::Path, sync::OnceLock};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::{
+    collections::HashMap,
+    fs::Metadata,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::SystemTime,
+};
 
 const OID_NPKI_SEED_CBC: &[u64] = &[1, 2, 410, 200004, 1, 4];
 const OID_NPKI_SEED_CBC_WITH_SHA1: &[u64] = &[1, 2, 410, 200004, 1, 15];
@@ -189,7 +201,62 @@ pub fn sign_message_base64(bundle: &CertificateBundle, message: &[u8]) -> Result
     Ok(STANDARD.encode(signer.sign_to_vec().context("sign message")?))
 }
 
-pub fn validate_certificate_bundle(bundle: &CertificateBundle) -> Result<()> {
+pub fn validate_certificate_bundle(
+    bundle: &CertificateBundle,
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    validate_certificate_bundle_with_trust_bundle_path(
+        bundle,
+        allow_untrusted,
+        certificate_trust_bundle_path,
+    )
+}
+
+pub async fn validate_certificate_bundle_async(
+    bundle: &CertificateBundle,
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    let bundle = bundle.clone();
+    let certificate_trust_bundle_path = certificate_trust_bundle_path.map(Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        validate_certificate_bundle_with_trust_bundle_path(
+            &bundle,
+            allow_untrusted,
+            certificate_trust_bundle_path.as_deref(),
+        )
+    })
+    .await
+    .context("join certificate validation task")?
+}
+
+pub async fn validate_certificate_trust_async(
+    cert_der: Vec<u8>,
+    cert_name: &'static str,
+    certificate_chain_der: Vec<Vec<u8>>,
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    let certificate_trust_bundle_path = certificate_trust_bundle_path.map(Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        validate_certificate_trust_with_trust_bundle_path(
+            &cert_der,
+            cert_name,
+            &certificate_chain_der,
+            allow_untrusted,
+            certificate_trust_bundle_path.as_deref(),
+        )
+    })
+    .await
+    .context("join certificate trust validation task")?
+}
+
+fn validate_certificate_bundle_with_trust_bundle_path(
+    bundle: &CertificateBundle,
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
     validate_key_pair(
         &bundle.sign_cert_der,
         &bundle.sign_pri_key,
@@ -208,7 +275,45 @@ pub fn validate_certificate_bundle(bundle: &CertificateBundle) -> Result<()> {
         (None, None) => {}
         _ => bail!("kmCert.der and kmPri.key must both be provided or both omitted"),
     }
+    validate_certificate_trust_with_trust_bundle_path(
+        &bundle.sign_cert_der,
+        "signCert.der",
+        &bundle.certificate_chain_der,
+        allow_untrusted,
+        certificate_trust_bundle_path,
+    )?;
+    if !allow_untrusted {
+        if let Some(km_cert_der) = &bundle.km_cert_der {
+            validate_certificate_trust_with_trust_bundle_path(
+                km_cert_der,
+                "kmCert.der",
+                &bundle.certificate_chain_der,
+                allow_untrusted,
+                certificate_trust_bundle_path,
+            )?;
+        }
+    }
     Ok(())
+}
+
+fn validate_certificate_trust_with_trust_bundle_path(
+    cert_der: &[u8],
+    cert_name: &str,
+    certificate_chain_der: &[Vec<u8>],
+    allow_untrusted: bool,
+    certificate_trust_bundle_path: Option<&Path>,
+) -> Result<()> {
+    if allow_untrusted {
+        return Ok(());
+    }
+    let explicit_store = certificate_trust_bundle_path
+        .map(configured_trust_store)
+        .transpose()?;
+    let store = match explicit_store.as_ref() {
+        Some(store) => store.as_ref().as_ref(),
+        None => default_trust_store()?,
+    };
+    validate_certificate_trust_with_store(cert_der, cert_name, certificate_chain_der, store)
 }
 
 fn parse_certificate(input: &[u8]) -> Result<X509> {
@@ -341,6 +446,160 @@ fn validate_key_pair(
     let private_key = load_private_key_material(private_key_der, password, key_name)?.private_key;
     if !private_key.public_eq(&certificate_public_key) {
         bail!("{key_name} does not match {cert_name}");
+    }
+    Ok(())
+}
+
+fn default_trust_store() -> Result<&'static openssl::x509::store::X509Store> {
+    static STORE: OnceLock<Result<openssl::x509::store::X509Store, String>> = OnceLock::new();
+    match STORE.get_or_init(|| {
+        let mut store_builder =
+            X509StoreBuilder::new().map_err(|err| format!("create X509 trust store: {err:#}"))?;
+        store_builder
+            .set_default_paths()
+            .map_err(|err| format!("load default X509 trust paths: {err:#}"))?;
+        Ok(store_builder.build())
+    }) {
+        Ok(store) => Ok(store),
+        Err(message) => bail!("{message}"),
+    }
+}
+
+fn trust_store_from_ca_bundle_pem(
+    path: &Path,
+    pem: &[u8],
+) -> Result<openssl::x509::store::X509Store> {
+    let certs = X509::stack_from_pem(pem)
+        .with_context(|| format!("parse X509 trust bundle {}", path.display()))?;
+    if certs.is_empty() {
+        bail!(
+            "X509 trust bundle {} contains no certificates",
+            path.display()
+        );
+    }
+    let mut store_builder =
+        X509StoreBuilder::new().context("create configured X509 trust store")?;
+    for cert in certs {
+        store_builder.add_cert(cert).with_context(|| {
+            format!("add certificate from X509 trust bundle {}", path.display())
+        })?;
+    }
+    Ok(store_builder.build())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrustStoreFileState {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrustStoreContentState {
+    sha256: [u8; 32],
+}
+
+struct CachedTrustStore {
+    file_state: TrustStoreFileState,
+    content_state: TrustStoreContentState,
+    store: Arc<openssl::x509::store::X509Store>,
+}
+
+fn trust_store_file_state(metadata: &Metadata) -> TrustStoreFileState {
+    TrustStoreFileState {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        dev: metadata.dev(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+        #[cfg(unix)]
+        ctime: metadata.ctime(),
+        #[cfg(unix)]
+        ctime_nsec: metadata.ctime_nsec(),
+    }
+}
+
+fn configured_trust_store(path: &Path) -> Result<Arc<openssl::x509::store::X509Store>> {
+    static TRUST_STORES: OnceLock<Mutex<HashMap<PathBuf, CachedTrustStore>>> = OnceLock::new();
+
+    let cache_key = path.to_path_buf();
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("stat X509 trust bundle {}", path.display()))?;
+    let file_state = trust_store_file_state(&metadata);
+    let cache = TRUST_STORES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(store) = cache
+        .lock()
+        .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
+        .get(&cache_key)
+        .filter(|cached| cached.file_state == file_state)
+        .map(|cached| cached.store.clone())
+    {
+        return Ok(store);
+    }
+
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read X509 trust bundle {}", path.display()))?;
+    let content_state = TrustStoreContentState {
+        sha256: Sha256::digest(&pem).into(),
+    };
+    if let Some(store) = cache
+        .lock()
+        .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
+        .get_mut(&cache_key)
+        .filter(|cached| cached.content_state == content_state)
+        .map(|cached| {
+            cached.file_state = file_state;
+            cached.store.clone()
+        })
+    {
+        return Ok(store);
+    }
+
+    let store = Arc::new(trust_store_from_ca_bundle_pem(path, &pem)?);
+    cache
+        .lock()
+        .map_err(|_| anyhow!("X509 trust store cache lock poisoned"))?
+        .insert(
+            cache_key,
+            CachedTrustStore {
+                file_state,
+                content_state,
+                store: store.clone(),
+            },
+        );
+    Ok(store)
+}
+
+fn validate_certificate_trust_with_store(
+    cert_der: &[u8],
+    cert_name: &str,
+    certificate_chain_der: &[Vec<u8>],
+    store: &X509StoreRef,
+) -> Result<()> {
+    let certificate = X509::from_der(cert_der).with_context(|| format!("parse {cert_name}"))?;
+    let mut chain = Stack::new().context("create certificate chain")?;
+    for (idx, chain_cert_der) in certificate_chain_der.iter().enumerate() {
+        chain
+            .push(
+                X509::from_der(chain_cert_der)
+                    .with_context(|| format!("parse certificateChainDer[{idx}]"))?,
+            )
+            .with_context(|| format!("add certificateChainDer[{idx}] to chain"))?;
+    }
+    let mut context = X509StoreContext::new().context("create X509 store context")?;
+    let trusted = context
+        .init(&store, &certificate, &chain, |ctx| ctx.verify_cert())
+        .with_context(|| format!("verify {cert_name} trust chain"))?;
+    if !trusted {
+        bail!("{cert_name} is not trusted: {}", context.error());
     }
     Ok(())
 }
@@ -551,15 +810,20 @@ fn biguint_to_u64(value: &BigUint) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::verify_challenge_signature;
+    use super::{validate_certificate_trust_with_store, verify_challenge_signature};
     use base64::{Engine, engine::general_purpose::STANDARD};
     use openssl::{
         asn1::Asn1Time,
+        bn::BigNum,
         hash::MessageDigest,
         pkey::{PKey, Private},
         rsa::Rsa,
         sign::Signer,
-        x509::{X509Builder, X509NameBuilder},
+        x509::{
+            X509, X509Builder, X509NameBuilder,
+            extension::{BasicConstraints, KeyUsage},
+            store::X509StoreBuilder,
+        },
     };
 
     #[test]
@@ -572,6 +836,39 @@ mod tests {
         let err = verify_challenge_signature(&cert_der, payload, &signature)
             .expect_err("future certificate should be rejected");
         assert!(err.to_string().contains("not yet valid"));
+    }
+
+    #[test]
+    fn validate_certificate_trust_accepts_leaf_with_intermediate_chain() {
+        let root_key = generate_key();
+        let intermediate_key = generate_key();
+        let leaf_key = generate_key();
+        let root = create_ca_certificate("Root Test CA", &root_key, None, None, 1);
+        let intermediate = create_ca_certificate(
+            "Intermediate Test CA",
+            &intermediate_key,
+            Some(&root),
+            Some(&root_key),
+            2,
+        );
+        let leaf = create_leaf_certificate(
+            "Leaf Test Certificate",
+            &leaf_key,
+            &intermediate,
+            &intermediate_key,
+            3,
+        );
+        let mut store_builder = X509StoreBuilder::new().expect("store builder");
+        store_builder.add_cert(root).expect("add root");
+        let store = store_builder.build();
+
+        validate_certificate_trust_with_store(
+            &leaf.to_der().expect("leaf der"),
+            "signCert.der",
+            &[intermediate.to_der().expect("intermediate der")],
+            &store,
+        )
+        .expect("leaf should validate through supplied intermediate");
     }
 
     fn create_sign_cert_der_with_validity(
@@ -602,6 +899,116 @@ mod tests {
             .sign(key, MessageDigest::sha256())
             .expect("sign cert");
         builder.build().to_der().expect("cert der")
+    }
+
+    fn generate_key() -> PKey<Private> {
+        PKey::from_rsa(Rsa::generate(2048).expect("generate rsa key")).expect("wrap key")
+    }
+
+    fn create_ca_certificate(
+        common_name: &str,
+        key: &PKey<Private>,
+        issuer_cert: Option<&X509>,
+        issuer_key: Option<&PKey<Private>>,
+        serial: u32,
+    ) -> X509 {
+        let name = certificate_name(common_name);
+        let signing_key = issuer_key.unwrap_or(key);
+        let mut builder = base_certificate_builder(serial, key);
+        builder.set_subject_name(&name).expect("set subject");
+        builder
+            .set_issuer_name(
+                issuer_cert
+                    .map(|cert| cert.subject_name())
+                    .unwrap_or_else(|| name.as_ref()),
+            )
+            .expect("set issuer");
+        builder
+            .append_extension(
+                BasicConstraints::new()
+                    .critical()
+                    .ca()
+                    .build()
+                    .expect("ca basic constraints"),
+            )
+            .expect("append ca basic constraints");
+        builder
+            .append_extension(
+                KeyUsage::new()
+                    .critical()
+                    .key_cert_sign()
+                    .crl_sign()
+                    .build()
+                    .expect("ca key usage"),
+            )
+            .expect("append ca key usage");
+        builder
+            .sign(signing_key, MessageDigest::sha256())
+            .expect("sign ca cert");
+        builder.build()
+    }
+
+    fn create_leaf_certificate(
+        common_name: &str,
+        key: &PKey<Private>,
+        issuer_cert: &X509,
+        issuer_key: &PKey<Private>,
+        serial: u32,
+    ) -> X509 {
+        let name = certificate_name(common_name);
+        let mut builder = base_certificate_builder(serial, key);
+        builder.set_subject_name(&name).expect("set subject");
+        builder
+            .set_issuer_name(issuer_cert.subject_name())
+            .expect("set issuer");
+        builder
+            .append_extension(
+                BasicConstraints::new()
+                    .critical()
+                    .build()
+                    .expect("leaf basic constraints"),
+            )
+            .expect("append leaf basic constraints");
+        builder
+            .append_extension(
+                KeyUsage::new()
+                    .critical()
+                    .digital_signature()
+                    .build()
+                    .expect("leaf key usage"),
+            )
+            .expect("append leaf key usage");
+        builder
+            .sign(issuer_key, MessageDigest::sha256())
+            .expect("sign leaf cert");
+        builder.build()
+    }
+
+    fn base_certificate_builder(serial: u32, key: &PKey<Private>) -> X509Builder {
+        let mut builder = X509Builder::new().expect("x509 builder");
+        builder.set_version(2).expect("set version");
+        let serial = BigNum::from_u32(serial)
+            .expect("serial bignum")
+            .to_asn1_integer()
+            .expect("serial asn1");
+        builder.set_serial_number(&serial).expect("set serial");
+        builder.set_pubkey(key).expect("set pubkey");
+        let not_before = Asn1Time::days_from_now(0).expect("not before");
+        let not_after = Asn1Time::days_from_now(365).expect("not after");
+        builder
+            .set_not_before(not_before.as_ref())
+            .expect("set not before");
+        builder
+            .set_not_after(not_after.as_ref())
+            .expect("set not after");
+        builder
+    }
+
+    fn certificate_name(common_name: &str) -> openssl::x509::X509Name {
+        let mut name = X509NameBuilder::new().expect("name builder");
+        name.append_entry_by_text("CN", common_name)
+            .expect("append cn");
+        name.build()
     }
 
     fn sign_challenge(key: &PKey<Private>, challenge_payload: &str) -> String {

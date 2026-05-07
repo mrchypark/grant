@@ -1,10 +1,20 @@
 use domain::{
     Agreement, AgreementDocument, AgreementDocumentType, AgreementStatus, AgreementType, Client,
     ClientAction, ClientAppType, ClientConsentPolicy, ClientGrant, ClientGrantAction,
-    ClientGrantStatus, ClientType, Plant,
+    ClientGrantStatus, ClientType, DocumentCategory, GenerationRecord, Plant, RateRecord,
+    RecRecord, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
+    RoleBindingSubjectType, SyncMode,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
-use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
+use infra::{
+    config::ReadConsistency,
+    database::{
+        CreatedPlantBootstrap, Database, KrRpsSyncMaterialization, PersistedDocument,
+        StoredRateRecord,
+    },
+    runtime::HiqliteRuntime,
+};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[derive(Debug)]
@@ -74,6 +84,72 @@ impl From<&mut Row<'_>> for ActionRow {
             visibility_granting: row.get("visibility_granting"),
         }
     }
+}
+
+#[derive(Debug)]
+struct CountRow {
+    count: i64,
+}
+
+impl From<&mut Row<'_>> for CountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OptionalTextRow {
+    value: Option<String>,
+}
+
+impl From<&mut Row<'_>> for OptionalTextRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RequiredTextRow {
+    value: String,
+}
+
+impl From<&mut Row<'_>> for RequiredTextRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GenerationScopeRow {
+    asset_id: String,
+    source_id: String,
+}
+
+impl From<&mut Row<'_>> for GenerationScopeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            asset_id: row.get("asset_id"),
+            source_id: row.get("source_id"),
+        }
+    }
+}
+
+fn stable_scoped_id(scope: &str, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    format!(
+        "{}-{}",
+        scope.replace(':', "-"),
+        hex::encode(&hasher.finalize()[..8])
+    )
 }
 
 #[derive(Debug)]
@@ -155,6 +231,23 @@ struct ClientGrantRow {
     client_id: String,
     organization_id: String,
     status: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct UserAssetVisibilityRow {
+    user_id: String,
+    organization_id: String,
+    asset_id: String,
+}
+
+impl From<&mut Row<'_>> for UserAssetVisibilityRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            user_id: row.get("user_id"),
+            organization_id: row.get("organization_id"),
+            asset_id: row.get("asset_id"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for ClientGrantRow {
@@ -262,6 +355,1446 @@ async fn plant_upsert_rejects_cross_organization_facility_takeover() {
 }
 
 #[tokio::test]
+async fn asset_role_bindings_expand_to_asset_visibility() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    runtime
+        .execute(
+            "INSERT INTO assets (
+                id, owner_organization_id, created_by_organization_id, name, country_code,
+                address, capacity_kw, timezone, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            vec![
+                "asset-1".into(),
+                "conalog-account".into(),
+                "conalog-account".into(),
+                "Asset One".into(),
+                "KR".into(),
+                "Busan".into(),
+                100.0.into(),
+                "Asia/Seoul".into(),
+                "2026-04-25T00:00:00Z".into(),
+                "2026-04-25T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert asset");
+    db.upsert_role(&Role {
+        id: "role-asset-profile-reader".to_owned(),
+        organization_id: Some("conalog-account".to_owned()),
+        code: "asset_profile_reader".to_owned(),
+        name: "Asset Profile Reader".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert asset role");
+    db.upsert_role_action("role-asset-profile-reader", "asset.profile.read")
+        .await
+        .expect("bind asset action");
+
+    let now = "2026-04-25T00:00:00Z".to_owned();
+    db.save_role_binding(&RoleBinding {
+        id: "binding-org-asset-reader".to_owned(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "conalog-account".to_owned(),
+        subject_organization_id: "conalog-account".to_owned(),
+        resource_type: RoleBindingResourceType::Asset,
+        resource_id: "asset-1".to_owned(),
+        role_id: "role-asset-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "conalog-account".to_owned(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    })
+    .await
+    .expect("save organization asset binding");
+    db.save_role_binding(&RoleBinding {
+        id: "binding-user-asset-reader".to_owned(),
+        subject_type: RoleBindingSubjectType::User,
+        subject_id: "conalog-account".to_owned(),
+        subject_organization_id: "conalog-account".to_owned(),
+        resource_type: RoleBindingResourceType::Asset,
+        resource_id: "asset-1".to_owned(),
+        role_id: "role-asset-profile-reader".to_owned(),
+        agreement_id: None,
+        state: RoleBindingState::Active,
+        created_by_user_id: "conalog-account".to_owned(),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+    .await
+    .expect("save user asset binding");
+
+    let rows: Vec<UserAssetVisibilityRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT user_id, organization_id, asset_id FROM effective_user_asset_visibility",
+            vec![],
+        )
+        .await
+        .expect("asset visibility rows");
+
+    assert_eq!(
+        rows,
+        vec![UserAssetVisibilityRow {
+            user_id: "conalog-account".to_owned(),
+            organization_id: "conalog-account".to_owned(),
+            asset_id: "asset-1".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn ensure_schema_does_not_backfill_kr_rps_asset_projection_from_existing_plants() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema_only().await.expect("ensure schema only");
+    db.upsert_plant(&Plant {
+        id: "legacy-plant-1".to_owned(),
+        facility_code: "FAC-BACKFILL-001".to_owned(),
+        name: "Legacy Plant".to_owned(),
+        owner_organization_id: "legacy-owner-org".to_owned(),
+        created_by_organization_id: Some("legacy-creator-org".to_owned()),
+        contract_no: "CN-BACKFILL-001".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    })
+    .await
+    .expect("upsert preexisting plant");
+
+    db.ensure_schema().await.expect("ensure schema");
+
+    db.get_kr_rps_asset_id_by_facility_code_with_consistency("FAC-BACKFILL-001", None)
+        .await
+        .expect_err("ensure_schema must not create a KR RPS asset projection for old plant rows");
+
+    let projection_counts: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT (
+                 SELECT COUNT(*)
+                 FROM asset_profiles
+                 WHERE provider = 'korea_energy_rps'
+                   AND profile_type = 'kr_rps'
+                   AND external_id = $1
+             ) + (
+                 SELECT COUNT(*)
+                 FROM registry_projects
+                 WHERE registry_id = 'registry-kr-rps'
+                   AND external_project_id = $1
+             ) + (
+                 SELECT COUNT(*)
+                 FROM data_sources
+                 WHERE provider = 'korea_energy_rps'
+                   AND external_source_id = $1
+             ) AS count",
+            vec!["FAC-BACKFILL-001".into()],
+        )
+        .await
+        .expect("KR RPS projection count");
+    assert_eq!(projection_counts[0].count, 0);
+}
+
+#[tokio::test]
+async fn kr_rps_asset_projection_without_business_no_does_not_fabricate_registry_account() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    let plant = Plant {
+        id: "plant-no-registry-account".to_owned(),
+        facility_code: "FAC-NO-REGISTRY-ACCOUNT".to_owned(),
+        name: "No Registry Account Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-NO-REGISTRY-ACCOUNT".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    let asset_id = db
+        .upsert_kr_rps_asset_projection(&plant, None, None, &[], &[])
+        .await
+        .expect("upsert KR RPS asset projection");
+    assert!(
+        asset_id.starts_with("asset-") && !asset_id.starts_with("asset-kr_rps-"),
+        "asset_id must be an internal canonical id, not a KR RPS facility-code derived id"
+    );
+
+    let registry_accounts: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT COUNT(*) AS count FROM registry_accounts WHERE registry_id = $1",
+            vec!["registry-kr-rps".into()],
+        )
+        .await
+        .expect("registry account count");
+    assert_eq!(
+        registry_accounts[0].count, 0,
+        "projection must not fabricate a registry account without a real external account"
+    );
+
+    let registry_projects_without_account: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT COUNT(*) AS count
+             FROM registry_projects
+             WHERE external_project_id = $1 AND registry_account_id IS NULL",
+            vec!["FAC-NO-REGISTRY-ACCOUNT".into()],
+        )
+        .await
+        .expect("registry project without account count");
+    assert_eq!(registry_projects_without_account[0].count, 1);
+}
+
+#[tokio::test]
+async fn kr_rps_projection_without_business_no_preserves_existing_registry_account_link() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("conalog-account", Some("2768603291"), "Conalog Account")
+        .await
+        .expect("organization identity");
+    db.save_certificate(
+        "conalog-account",
+        Some("2768603291"),
+        "Conalog Account Certificate",
+        "encrypted-bundle",
+        b"wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("save certificate");
+    let plant = Plant {
+        id: "plant-preserve-registry-account".to_owned(),
+        facility_code: "FAC-PRESERVE-REGISTRY-ACCOUNT".to_owned(),
+        name: "Preserve Registry Account Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-PRESERVE-REGISTRY-ACCOUNT".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    db.upsert_kr_rps_asset_projection(
+        &plant,
+        Some("conalog-account"),
+        Some("2768603291"),
+        &[],
+        &[],
+    )
+    .await
+    .expect("upsert KR RPS asset projection with account");
+
+    let before: Vec<OptionalTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT registry_account_id AS value
+             FROM registry_projects
+             WHERE registry_id = 'registry-kr-rps' AND external_project_id = $1",
+            vec!["FAC-PRESERVE-REGISTRY-ACCOUNT".into()],
+        )
+        .await
+        .expect("registry project account before");
+    assert!(before[0].value.is_some());
+    let credential_bindings: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT COUNT(*) AS count
+             FROM credential_bindings
+             WHERE registry_account_id = $1",
+            vec![before[0].value.clone().expect("registry account id").into()],
+        )
+        .await
+        .expect("credential binding count");
+    assert_eq!(credential_bindings[0].count, 1);
+
+    db.save_certificate(
+        "conalog-account",
+        Some("2768603291"),
+        "Replacement Conalog Account Certificate",
+        "replacement-encrypted-bundle",
+        b"replacement-wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("replace certificate");
+    let active_bound_credentials: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT COUNT(*) AS count
+             FROM credential_bindings cb
+             JOIN auth_credentials ac ON ac.id = cb.credential_id
+             WHERE cb.registry_account_id = $1
+               AND ac.active = 1
+               AND ac.provider = 'korea_energy_rps'
+               AND ac.credential_type = 'certificate'",
+            vec![before[0].value.clone().expect("registry account id").into()],
+        )
+        .await
+        .expect("active bound credential count");
+    assert_eq!(active_bound_credentials[0].count, 1);
+
+    db.upsert_kr_rps_asset_projection(&plant, None, None, &[], &[])
+        .await
+        .expect("upsert KR RPS asset projection without account");
+
+    let after: Vec<OptionalTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT registry_account_id AS value
+             FROM registry_projects
+             WHERE registry_id = 'registry-kr-rps' AND external_project_id = $1",
+            vec!["FAC-PRESERVE-REGISTRY-ACCOUNT".into()],
+        )
+        .await
+        .expect("registry project account after");
+    assert_eq!(after[0].value, before[0].value);
+}
+
+#[tokio::test]
+async fn kr_rps_projection_conflict_preserves_first_claimed_owner_and_account() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("owner-org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("owner identity");
+    db.upsert_organization_identity("operator-org", Some("2768603291"), "Operator Org")
+        .await
+        .expect("operator identity");
+    let owner_plant = Plant {
+        id: "plant-first-claim".to_owned(),
+        facility_code: "FAC-FIRST-CLAIM".to_owned(),
+        name: "First Claim Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("owner-org".to_owned()),
+        contract_no: "CN-FIRST-CLAIM".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&owner_plant).await.expect("owner plant");
+    db.upsert_kr_rps_asset_projection(
+        &owner_plant,
+        Some("owner-org"),
+        Some("1234567890"),
+        &[],
+        &[],
+    )
+    .await
+    .expect("owner projection");
+
+    let operator_plant = Plant {
+        owner_organization_id: "operator-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        ..owner_plant.clone()
+    };
+    let err = db
+        .upsert_plant(&operator_plant)
+        .await
+        .expect_err("operator conflicting plant must not overwrite plant owner");
+    assert!(
+        err.to_string()
+            .contains("plant already belongs to another organization")
+    );
+    db.upsert_kr_rps_asset_projection(
+        &operator_plant,
+        Some("operator-org"),
+        Some("2768603291"),
+        &[],
+        &[],
+    )
+    .await
+    .expect("operator conflicting projection");
+
+    let plant = db
+        .get_plant_by_facility_code("FAC-FIRST-CLAIM")
+        .await
+        .expect("plant after conflict");
+    assert_eq!(plant.owner_organization_id, "owner-org");
+
+    let asset_owners: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT owner_organization_id AS value
+             FROM assets a
+             JOIN asset_profiles ap ON ap.asset_id = a.id
+             WHERE ap.external_id = $1",
+            vec!["FAC-FIRST-CLAIM".into()],
+        )
+        .await
+        .expect("asset owner");
+    assert_eq!(asset_owners[0].value, "owner-org");
+
+    let registry_accounts: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT ra.organization_id AS value
+             FROM registry_projects rp
+             JOIN registry_accounts ra ON ra.id = rp.registry_account_id
+             WHERE rp.registry_id = 'registry-kr-rps' AND rp.external_project_id = $1",
+            vec!["FAC-FIRST-CLAIM".into()],
+        )
+        .await
+        .expect("registry account owner");
+    assert_eq!(registry_accounts[0].value, "owner-org");
+}
+
+#[tokio::test]
+async fn kr_rps_stored_credential_use_requires_binding_to_project_registry_account() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("owner-org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("owner identity");
+    db.upsert_organization_identity("operator-org", Some("2768603291"), "Operator Org")
+        .await
+        .expect("operator identity");
+    db.save_certificate(
+        "owner-org",
+        Some("1234567890"),
+        "Owner Certificate",
+        "owner-encrypted-bundle",
+        b"owner-wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("save owner certificate");
+    db.save_certificate(
+        "operator-org",
+        Some("2768603291"),
+        "Operator Certificate",
+        "operator-encrypted-bundle",
+        b"operator-wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("save operator certificate");
+
+    let plant = Plant {
+        id: "plant-bound-registry-account".to_owned(),
+        facility_code: "FAC-BOUND-REGISTRY-ACCOUNT".to_owned(),
+        name: "Bound Registry Account Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        contract_no: "CN-BOUND-REGISTRY-ACCOUNT".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    db.upsert_kr_rps_asset_projection(&plant, Some("owner-org"), Some("1234567890"), &[], &[])
+        .await
+        .expect("upsert owner registry projection");
+
+    assert!(
+        db.has_usable_kr_rps_certificate_credential_with_consistency(
+            "owner-org",
+            "FAC-BOUND-REGISTRY-ACCOUNT",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("owner credential usability")
+    );
+    assert!(
+        !db.has_usable_kr_rps_certificate_credential_with_consistency(
+            "operator-org",
+            "FAC-BOUND-REGISTRY-ACCOUNT",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("operator credential usability"),
+        "operator's unrelated active certificate must not satisfy owner registry project binding"
+    );
+}
+
+#[tokio::test]
+async fn kr_rps_stored_credential_null_registry_account_fallback_is_owner_only() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("owner-org", Some("1234567890"), "Owner Org")
+        .await
+        .expect("owner identity");
+    db.upsert_organization_identity("operator-org", Some("2768603291"), "Operator Org")
+        .await
+        .expect("operator identity");
+    db.save_certificate(
+        "owner-org",
+        Some("1234567890"),
+        "Owner Certificate",
+        "owner-encrypted-bundle",
+        b"owner-wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("save owner certificate");
+    db.save_certificate(
+        "operator-org",
+        Some("2768603291"),
+        "Operator Certificate",
+        "operator-encrypted-bundle",
+        b"operator-wrapped-dek",
+        "local-dev-v1",
+    )
+    .await
+    .expect("save operator certificate");
+
+    let plant = Plant {
+        id: "plant-null-registry-account".to_owned(),
+        facility_code: "FAC-NULL-REGISTRY-ACCOUNT".to_owned(),
+        name: "Null Registry Account Plant".to_owned(),
+        owner_organization_id: "owner-org".to_owned(),
+        created_by_organization_id: Some("operator-org".to_owned()),
+        contract_no: "CN-NULL-REGISTRY-ACCOUNT".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    db.upsert_kr_rps_asset_projection(&plant, None, None, &[], &[])
+        .await
+        .expect("upsert projection without registry account");
+
+    assert!(
+        db.has_usable_kr_rps_certificate_credential_with_consistency(
+            "owner-org",
+            "FAC-NULL-REGISTRY-ACCOUNT",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("owner credential usability")
+    );
+    assert!(
+        !db.has_usable_kr_rps_certificate_credential_with_consistency(
+            "operator-org",
+            "FAC-NULL-REGISTRY-ACCOUNT",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("operator credential usability")
+    );
+}
+
+#[tokio::test]
+async fn failed_kr_rps_full_projection_preserves_existing_canonical_rows() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    let plant = Plant {
+        id: "plant-failed-full-preserve".to_owned(),
+        facility_code: "FAC-FAILED-FULL-PRESERVE".to_owned(),
+        name: "Failed Full Preserve Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-FAILED-FULL-PRESERVE".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    db.upsert_kr_rps_asset_projection(
+        &plant,
+        Some("conalog-account"),
+        Some("2768603291"),
+        &[GenerationRecord {
+            month: "2026-03".to_owned(),
+            generation_kwh: 1000.0,
+            self_consumption_kwh: None,
+            supply_kwh: 1000.0,
+            application_deadline: None,
+        }],
+        &[],
+    )
+    .await
+    .expect("seed canonical rows");
+
+    db.replace_kr_rps_asset_projection(
+        &plant,
+        Some("conalog-account"),
+        Some("2768603291"),
+        &[GenerationRecord {
+            month: "not-a-month".to_owned(),
+            generation_kwh: 2000.0,
+            self_consumption_kwh: None,
+            supply_kwh: 2000.0,
+            application_deadline: None,
+        }],
+        &[],
+        &[],
+    )
+    .await
+    .expect_err("invalid full replacement should fail");
+
+    let counts = db
+        .kr_rps_projection_counts("FAC-FAILED-FULL-PRESERVE")
+        .await
+        .expect("projection counts");
+    assert_eq!(counts.generation_data, 1);
+}
+
+#[tokio::test]
+async fn kr_rps_energy_certificates_do_not_collide_on_application_no_across_plants() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    let rec = [RecRecord {
+        month: "2026-02".to_owned(),
+        application_no: "APP-SHARED".to_owned(),
+        supply_kwh: 1000,
+        rec_quantity: 1,
+        fee_krw: 1000,
+        issued_date: "2026-03-01".to_owned(),
+        expiry_date: "2027-03-01".to_owned(),
+        virtual_account: None,
+        bank_name: None,
+        status: Some("issued".to_owned()),
+    }];
+    for facility_code in ["FAC-CERT-001", "FAC-CERT-002"] {
+        let plant = Plant {
+            id: format!("plant-{facility_code}"),
+            facility_code: facility_code.to_owned(),
+            name: format!("Certificate Plant {facility_code}"),
+            owner_organization_id: "conalog-account".to_owned(),
+            created_by_organization_id: Some("conalog-account".to_owned()),
+            contract_no: format!("CN-{facility_code}"),
+            address: "Seoul".to_owned(),
+            installed_kw: 100.0,
+            rec_start_date: "2026-01-01".to_owned(),
+            confirm_issued: "Y".to_owned(),
+        };
+        db.upsert_plant(&plant).await.expect("upsert plant");
+        db.upsert_kr_rps_asset_projection(
+            &plant,
+            Some("conalog-account"),
+            Some("2768603291"),
+            &[],
+            &rec,
+        )
+        .await
+        .expect("upsert KR RPS asset projection");
+    }
+
+    let certificate_count: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT COUNT(*) AS count
+             FROM energy_certificates
+             WHERE registry_id = 'registry-kr-rps'
+               AND serial_number IN ('FAC-CERT-001:APP-SHARED', 'FAC-CERT-002:APP-SHARED')",
+            vec![],
+        )
+        .await
+        .expect("energy certificate count");
+    assert_eq!(certificate_count[0].count, 2);
+}
+
+#[tokio::test]
+async fn plant_role_bindings_do_not_project_to_kr_rps_asset_actions() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    let plant = Plant {
+        id: "legacy-plant-permission".to_owned(),
+        facility_code: "FAC-LEGACY-PERMISSION".to_owned(),
+        name: "Legacy Permission Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-LEGACY-PERMISSION".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    let asset_id = db
+        .upsert_kr_rps_asset_projection(&plant, None, None, &[], &[])
+        .await
+        .expect("upsert asset projection");
+
+    db.upsert_role(&Role {
+        id: "role-legacy-plant-operator".to_owned(),
+        organization_id: Some("conalog-account".to_owned()),
+        code: "plant_operator".to_owned(),
+        name: "Plant Operator".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("upsert legacy role");
+    for action in ["plant.profile.read", "plant.sync.execute"] {
+        db.upsert_role_action("role-legacy-plant-operator", action)
+            .await
+            .expect("bind legacy action");
+    }
+
+    let now = "2026-04-25T00:00:00Z".to_owned();
+    for (binding_id, subject_type, subject_id) in [
+        (
+            "binding-org-plant-operator",
+            RoleBindingSubjectType::Organization,
+            "conalog-account",
+        ),
+        (
+            "binding-user-plant-operator",
+            RoleBindingSubjectType::User,
+            "conalog-account",
+        ),
+    ] {
+        db.save_role_binding(&RoleBinding {
+            id: binding_id.to_owned(),
+            subject_type,
+            subject_id: subject_id.to_owned(),
+            subject_organization_id: "conalog-account".to_owned(),
+            resource_type: RoleBindingResourceType::Plant,
+            resource_id: plant.id.clone(),
+            role_id: "role-legacy-plant-operator".to_owned(),
+            agreement_id: None,
+            state: RoleBindingState::Active,
+            created_by_user_id: "conalog-account".to_owned(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        })
+        .await
+        .expect("save plant binding");
+    }
+
+    assert!(
+        !db.has_user_asset_action_with_consistency(
+            "conalog-account",
+            "conalog-account",
+            &asset_id,
+            "asset.profile.read",
+            Some(ReadConsistency::Local),
+        )
+        .await
+        .expect("asset profile action")
+    );
+    assert!(
+        !db.has_user_asset_action_with_consistency(
+            "conalog-account",
+            "conalog-account",
+            &asset_id,
+            "asset.sync.execute",
+            Some(ReadConsistency::Local),
+        )
+        .await
+        .expect("asset sync action")
+    );
+}
+
+#[tokio::test]
+async fn kr_rps_full_projection_replace_removes_stale_canonical_rows() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    let plant = Plant {
+        id: "FAC-FULL-001".to_owned(),
+        facility_code: "FAC-FULL-001".to_owned(),
+        name: "Full Sync Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-FULL-001".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 100.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    db.upsert_plant(&plant).await.expect("upsert plant");
+    db.upsert_kr_rps_asset_projection(
+        &plant,
+        Some("conalog-account"),
+        Some("2768603291"),
+        &[
+            GenerationRecord {
+                month: "2026-02".to_owned(),
+                generation_kwh: 500.0,
+                self_consumption_kwh: None,
+                supply_kwh: 500.0,
+                application_deadline: None,
+            },
+            GenerationRecord {
+                month: "2026-03".to_owned(),
+                generation_kwh: 1000.0,
+                self_consumption_kwh: None,
+                supply_kwh: 1000.0,
+                application_deadline: None,
+            },
+        ],
+        &[
+            RecRecord {
+                month: "2026-02".to_owned(),
+                application_no: "APP-OLD".to_owned(),
+                supply_kwh: 500,
+                rec_quantity: 1,
+                fee_krw: 1000,
+                issued_date: "2026-03-01".to_owned(),
+                expiry_date: "2027-03-01".to_owned(),
+                virtual_account: None,
+                bank_name: None,
+                status: Some("issued".to_owned()),
+            },
+            RecRecord {
+                month: "2026-03".to_owned(),
+                application_no: "APP-KEEP".to_owned(),
+                supply_kwh: 1000,
+                rec_quantity: 1,
+                fee_krw: 1000,
+                issued_date: "2026-04-01".to_owned(),
+                expiry_date: "2027-04-01".to_owned(),
+                virtual_account: None,
+                bank_name: None,
+                status: Some("issued".to_owned()),
+            },
+        ],
+    )
+    .await
+    .expect("initial canonical projection");
+
+    let generation_scope: Vec<GenerationScopeRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT asset_id, source_id FROM generation_data LIMIT 1",
+            vec![],
+        )
+        .await
+        .expect("generation scope");
+    let generation_scope = generation_scope
+        .into_iter()
+        .next()
+        .expect("generation scope row");
+    runtime
+        .execute(
+            "DELETE FROM generation_data
+             WHERE asset_id = $1
+               AND source_id = $2
+               AND period_start = $3
+               AND period_end = $4
+               AND metric_type = $5",
+            vec![
+                generation_scope.asset_id.clone().into(),
+                generation_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-04-01".into(),
+                "gross_generation_kwh".into(),
+            ],
+        )
+        .await
+        .expect("delete current generation row before stale id regression");
+    runtime
+        .execute(
+            "INSERT INTO generation_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            vec![
+                "stale-generation-metric".into(),
+                generation_scope.asset_id.clone().into(),
+                generation_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-04-01".into(),
+                "net_export_kwh".into(),
+                900.0.into(),
+                "kWh".into(),
+                "settled".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale generation metric");
+    runtime
+        .execute(
+            "INSERT INTO generation_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            vec![
+                stable_scoped_id(
+                    "generation_data:kr_rps",
+                    "FAC-FULL-001:2026-03:gross_generation_kwh",
+                )
+                .into(),
+                generation_scope.asset_id.clone().into(),
+                generation_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-05-01".into(),
+                "gross_generation_kwh".into(),
+                900.0.into(),
+                "kWh".into(),
+                "settled".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale generation period end");
+
+    let rate_scope: Vec<GenerationScopeRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT asset_id, id AS source_id
+             FROM data_sources
+             WHERE asset_id = $1 AND unit = 'KRW/kWh'
+             LIMIT 1",
+            vec![generation_scope.asset_id.clone().into()],
+        )
+        .await
+        .expect("rate scope");
+    let rate_scope = rate_scope.into_iter().next().expect("rate scope row");
+    runtime
+        .execute(
+            "INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                "stale-rate-metric".into(),
+                rate_scope.asset_id.clone().into(),
+                rate_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-04-01".into(),
+                "nearby_highest".into(),
+                "130".into(),
+                "KRW/kWh".into(),
+                "KRW".into(),
+                "published".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale rate metric");
+    runtime
+        .execute(
+            "INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                "stale-rate-period".into(),
+                rate_scope.asset_id.clone().into(),
+                rate_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-05-01".into(),
+                "self_rate".into(),
+                "109".into(),
+                "KRW/kWh".into(),
+                "KRW".into(),
+                "published".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale rate period end");
+
+    db.replace_kr_rps_asset_projection(
+        &plant,
+        Some("conalog-account"),
+        Some("2768603291"),
+        &[GenerationRecord {
+            month: "2026-03".to_owned(),
+            generation_kwh: 1100.0,
+            self_consumption_kwh: None,
+            supply_kwh: 1100.0,
+            application_deadline: None,
+        }],
+        &[StoredRateRecord {
+            record: RateRecord {
+                month: "2026-03".to_owned(),
+                self_rate: Some(111.0),
+                national_average: None,
+                nearby_average: None,
+                nearby_highest: None,
+            },
+            published: true,
+            source_control_flag: Some("replace".to_owned()),
+        }],
+        &[RecRecord {
+            month: "2026-03".to_owned(),
+            application_no: "APP-KEEP".to_owned(),
+            supply_kwh: 1100,
+            rec_quantity: 1,
+            fee_krw: 1200,
+            issued_date: "2026-04-01".to_owned(),
+            expiry_date: "2027-04-01".to_owned(),
+            virtual_account: None,
+            bank_name: None,
+            status: Some("issued".to_owned()),
+        }],
+    )
+    .await
+    .expect("replace canonical projection");
+
+    let counts = db
+        .kr_rps_projection_counts("FAC-FULL-001")
+        .await
+        .expect("projection counts");
+    assert_eq!(counts.generation_data, 1);
+    assert_eq!(counts.rate_data, 1);
+    assert_eq!(counts.energy_certificates, 1);
+
+    let generation_metrics: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT metric_type AS value FROM generation_data ORDER BY metric_type ASC",
+            vec![],
+        )
+        .await
+        .expect("generation metric semantics");
+    assert_eq!(
+        generation_metrics
+            .into_iter()
+            .map(|row| row.value)
+            .collect::<Vec<_>>(),
+        vec!["gross_generation_kwh"]
+    );
+    let rate_metrics: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT metric_type AS value FROM rate_data ORDER BY metric_type ASC",
+            vec![],
+        )
+        .await
+        .expect("rate metric semantics");
+    assert_eq!(
+        rate_metrics
+            .into_iter()
+            .map(|row| row.value)
+            .collect::<Vec<_>>(),
+        vec!["self_rate"]
+    );
+}
+
+#[tokio::test]
+async fn kr_rps_full_sync_replaces_canonical_rate_data() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("conalog-account", Some("2768603291"), "Conalog Account")
+        .await
+        .expect("organization identity");
+    let plant = Plant {
+        id: "plant-rate-canonical".to_owned(),
+        facility_code: "FAC-RATE-CANONICAL".to_owned(),
+        name: "Rate Canonical Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-RATE-CANONICAL".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    let first_rates = vec![StoredRateRecord {
+        record: RateRecord {
+            month: "2026-03".to_owned(),
+            self_rate: Some(110.0),
+            national_average: Some(120.0),
+            nearby_average: None,
+            nearby_highest: Some(130.0),
+        },
+        published: true,
+        source_control_flag: Some("first".to_owned()),
+    }];
+    let docs: Vec<PersistedDocument> = Vec::new();
+    let run = db
+        .start_sync_run("conalog-account", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start first sync run");
+    db.materialize_kr_rps_sync(KrRpsSyncMaterialization {
+        run_id: &run.id,
+        plant: &plant,
+        registry_account_organization_id: Some("conalog-account"),
+        business_no: Some("2768603291"),
+        bootstrap_created_plant: None,
+        mode: &SyncMode::Full,
+        generation: &[],
+        rates: &first_rates,
+        rec: &[],
+        documents: &docs,
+        duration_ms: 1,
+    })
+    .await
+    .expect("materialize first full sync");
+
+    let first_count: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT COUNT(*) AS count FROM rate_data",
+            vec![],
+        )
+        .await
+        .expect("first rate data count");
+    assert_eq!(first_count[0].count, 3);
+
+    let rate_scope: Vec<GenerationScopeRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT asset_id, source_id FROM rate_data LIMIT 1",
+            vec![],
+        )
+        .await
+        .expect("rate scope");
+    let rate_scope = rate_scope.into_iter().next().expect("rate scope row");
+    runtime
+        .execute(
+            "DELETE FROM rate_data
+             WHERE asset_id = $1
+               AND source_id = $2
+               AND period_start = $3
+               AND period_end = $4
+               AND metric_type = $5",
+            vec![
+                rate_scope.asset_id.clone().into(),
+                rate_scope.source_id.clone().into(),
+                "2026-03-01".into(),
+                "2026-04-01".into(),
+                "self_rate".into(),
+            ],
+        )
+        .await
+        .expect("delete current rate row before stale id regression");
+    runtime
+        .execute(
+            "INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                stable_scoped_id("rate_data:kr_rps", "FAC-RATE-CANONICAL:2026-03:self_rate").into(),
+                rate_scope.asset_id.into(),
+                rate_scope.source_id.into(),
+                "2026-03-01".into(),
+                "2026-05-01".into(),
+                "self_rate".into(),
+                "109.0".into(),
+                "KRW/kWh".into(),
+                "KRW".into(),
+                "published".into(),
+                "{}".into(),
+                "2026-04-01T00:00:00Z".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert stale rate period end");
+
+    let second_rates = vec![StoredRateRecord {
+        record: RateRecord {
+            month: "2026-03".to_owned(),
+            self_rate: Some(111.0),
+            national_average: None,
+            nearby_average: None,
+            nearby_highest: None,
+        },
+        published: true,
+        source_control_flag: Some("second".to_owned()),
+    }];
+    let run = db
+        .start_sync_run("conalog-account", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start second sync run");
+    db.materialize_kr_rps_sync(KrRpsSyncMaterialization {
+        run_id: &run.id,
+        plant: &plant,
+        registry_account_organization_id: Some("conalog-account"),
+        business_no: Some("2768603291"),
+        bootstrap_created_plant: None,
+        mode: &SyncMode::Full,
+        generation: &[],
+        rates: &second_rates,
+        rec: &[],
+        documents: &docs,
+        duration_ms: 1,
+    })
+    .await
+    .expect("materialize second full sync");
+
+    let remaining: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT metric_type AS value FROM rate_data ORDER BY metric_type ASC",
+            vec![],
+        )
+        .await
+        .expect("remaining rate metrics");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].value, "self_rate");
+
+    let stored_value: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT typeof(value) || ':' || value AS value FROM rate_data WHERE metric_type = 'self_rate'",
+            vec![],
+        )
+        .await
+        .expect("stored rate value type");
+    assert_eq!(stored_value[0].value, "text:111");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kr_rps_full_sync_prunes_legacy_facility_code_document_rows() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("conalog-account", Some("2768603291"), "Conalog Account")
+        .await
+        .expect("organization identity");
+    let plant = Plant {
+        id: "plant-doc-canonical".to_owned(),
+        facility_code: "FAC-DOC-CANONICAL".to_owned(),
+        name: "Document Canonical Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-DOC-CANONICAL".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    runtime
+        .execute(
+            "INSERT INTO documents (
+                id, plant_id, category, attachment_code, file_class, file_sec_name,
+                file_name, required, source_sha256, output_sha256, object_key,
+                content_type, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            vec![
+                "legacy-doc".into(),
+                plant.facility_code.clone().into(),
+                "other".into(),
+                "ATT-OLD".into(),
+                "old".into(),
+                "old".into(),
+                "old.pdf".into(),
+                0_i64.into(),
+                "old-source".into(),
+                "old-output".into(),
+                "conalog-account/FAC-DOC-CANONICAL/old.pdf".into(),
+                "application/pdf".into(),
+                "2026-04-01T00:00:00Z".into(),
+            ],
+        )
+        .await
+        .expect("insert legacy document row");
+    let docs = vec![PersistedDocument {
+        id: "current-doc".to_owned(),
+        category: DocumentCategory::Other,
+        attachment_code: "ATT-NEW".to_owned(),
+        file_class: "new".to_owned(),
+        file_sec_name: "new".to_owned(),
+        file_name: "new.pdf".to_owned(),
+        required: false,
+        source_sha256: Some("new-source".to_owned()),
+        output_sha256: Some("new-output".to_owned()),
+        object_key: "conalog-account/plant-doc-canonical/new.pdf".to_owned(),
+        content_type: "application/pdf".to_owned(),
+    }];
+    let run = db
+        .start_sync_run("conalog-account", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start sync run");
+    db.materialize_kr_rps_sync(KrRpsSyncMaterialization {
+        run_id: &run.id,
+        plant: &plant,
+        registry_account_organization_id: Some("conalog-account"),
+        business_no: Some("2768603291"),
+        bootstrap_created_plant: None,
+        mode: &SyncMode::Full,
+        generation: &[],
+        rates: &[],
+        rec: &[],
+        documents: &docs,
+        duration_ms: 1,
+    })
+    .await
+    .expect("materialize full sync");
+
+    let legacy_count: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count FROM documents WHERE plant_id = $1",
+            vec![plant.facility_code.into()],
+        )
+        .await
+        .expect("legacy document count");
+    assert_eq!(legacy_count[0].count, 0);
+
+    let current_count: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count FROM documents WHERE plant_id = $1",
+            vec![plant.id.into()],
+        )
+        .await
+        .expect("current document count");
+    assert_eq!(current_count[0].count, 1);
+}
+
+#[tokio::test]
+async fn sync_materialization_ignores_post_commit_authorization_rebuild_failure() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime.clone(),
+        "conalog-account".to_owned(),
+        "Conalog Account".to_owned(),
+    );
+
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_identity("conalog-account", Some("2768603291"), "Conalog Account")
+        .await
+        .expect("organization identity");
+    runtime
+        .execute("DROP TABLE effective_user_plant_visibility", vec![])
+        .await
+        .expect("drop rebuild target table");
+
+    let plant = Plant {
+        id: "plant-post-commit-rebuild".to_owned(),
+        facility_code: "FAC-POST-COMMIT-REBUILD".to_owned(),
+        name: "Post Commit Rebuild Plant".to_owned(),
+        owner_organization_id: "conalog-account".to_owned(),
+        created_by_organization_id: Some("conalog-account".to_owned()),
+        contract_no: "CN-POST-COMMIT-REBUILD".to_owned(),
+        address: "Seoul".to_owned(),
+        installed_kw: 120.0,
+        rec_start_date: "2026-01-01".to_owned(),
+        confirm_issued: "Y".to_owned(),
+    };
+    let docs: Vec<PersistedDocument> = Vec::new();
+    let run = db
+        .start_sync_run("conalog-account", Some(&plant.id), SyncMode::Full)
+        .await
+        .expect("start sync run");
+
+    let asset_id = db
+        .materialize_kr_rps_sync(KrRpsSyncMaterialization {
+            run_id: &run.id,
+            plant: &plant,
+            registry_account_organization_id: Some("conalog-account"),
+            business_no: Some("2768603291"),
+            bootstrap_created_plant: Some(CreatedPlantBootstrap {
+                user_id: "conalog-account",
+                creator_organization_id: "conalog-account",
+                owner_organization_id: "conalog-account",
+                creator_agreement_id: None,
+            }),
+            mode: &SyncMode::Full,
+            generation: &[],
+            rates: &[],
+            rec: &[],
+            documents: &docs,
+            duration_ms: 17,
+        })
+        .await
+        .expect("materialization result should survive post-commit rebuild failure");
+
+    assert!(!asset_id.is_empty());
+
+    let run_status: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT status AS value FROM sync_runs WHERE id = $1",
+            vec![run.id.clone().into()],
+        )
+        .await
+        .expect("sync run status");
+    assert_eq!(run_status[0].value, "completed");
+
+    let item_status: Vec<RequiredTextRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT status AS value FROM sync_run_items WHERE sync_run_id = $1",
+            vec![run.id.into()],
+        )
+        .await
+        .expect("sync run item status");
+    assert_eq!(item_status[0].value, "completed");
+}
+
+#[tokio::test]
 async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
@@ -318,11 +1851,22 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
         .find(|action| action.code == "plant.profile.read")
         .expect("plant.profile.read action");
     assert_eq!(profile_read.visibility_granting, 1);
+    let asset_profile_read = actions
+        .iter()
+        .find(|action| action.code == "asset.profile.read")
+        .expect("asset.profile.read action");
+    assert_eq!(asset_profile_read.visibility_granting, 1);
     assert!(
         actions
             .iter()
             .any(|action| action.code == "organization.plant.create"),
         "organization.plant.create action must exist"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.code == "organization.credential.use"),
+        "organization.credential.use action must exist"
     );
 
     let roles: Vec<RoleRow> = runtime
@@ -357,6 +1901,7 @@ async fn ensure_schema_seeds_bootstrap_organization_and_actions() {
         })
         .collect();
     assert!(seeded_actions.contains(&"organization.plant.create".to_owned()));
+    assert!(seeded_actions.contains(&"organization.credential.use".to_owned()));
 
     let bindings: Vec<RoleBindingRow> = runtime
         .query_rows(
@@ -1265,6 +2810,21 @@ async fn certificates_are_shared_across_organizations_linked_to_same_party() {
     assert_eq!(loaded.party_id, "party-2768603291");
     assert_eq!(loaded.business_no.as_deref(), Some("2768603291"));
     assert_eq!(loaded.encrypted_blob, "encrypted-bundle");
+
+    let auth_credentials: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count
+             FROM auth_credentials
+             WHERE organization_id = 'ops-seoul'
+               AND provider = 'korea_energy_rps'
+               AND credential_type = 'certificate'
+               AND active = 1",
+            vec![],
+        )
+        .await
+        .expect("auth credential count");
+    assert_eq!(auth_credentials[0].count, 1);
 }
 
 #[tokio::test]

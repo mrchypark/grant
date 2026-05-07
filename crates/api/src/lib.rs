@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{any, get, post, put},
 };
-use base64::Engine;
 use domain::{
     Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
     GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord, SyncMode, SyncRun,
@@ -22,13 +21,12 @@ use infra::{
     service::{
         AppService, BackupInfo, CreateCertGatewayChallengeInput, CreateClientInput,
         CreatePlantInput, ExecuteEphemeralCrawlInput, IngestLocalExecutionResultInput,
-        IssueCrawlTaskTokenInput, PlantView, PutCertificateInput,
-        RegisterCertificateFromProofInput, ServiceError, ServiceErrorKind,
-        StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
+        IssueCrawlTaskTokenInput, PlantView, RegisterCertificateFromProofInput, ServiceError,
+        ServiceErrorKind, StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
@@ -43,10 +41,6 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
             put(replace_client_actions),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificate",
-            put(put_organization_certificate),
         )
         .route(
             "/api/v1/organizations/{organizationId}/sync",
@@ -112,10 +106,6 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
         )
         .route(
             "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificate",
             any(requires_voter_node),
         )
         .route(
@@ -216,17 +206,6 @@ async fn auth_root() -> Redirect {
     Redirect::temporary("/auth/login")
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CertificateUploadRequest {
-    business_no: Option<String>,
-    password: String,
-    sign_cert_der_base64: String,
-    sign_pri_key_base64: String,
-    km_cert_der_base64: String,
-    km_pri_key_base64: String,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CertificateResponse {
@@ -290,6 +269,8 @@ struct ProofBundleRequest {
     sign_pri_key_base64: String,
     km_cert_der_base64: Option<String>,
     km_pri_key_base64: Option<String>,
+    #[serde(default)]
+    certificate_chain_der_base64: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,6 +303,8 @@ struct IngestLocalExecutionResultRequest {
     challenge_signature_base64: String,
     result_signature_base64: String,
     sign_cert_der_base64: String,
+    #[serde(default)]
+    certificate_chain_der_base64: Vec<String>,
     snapshot: BridgeSnapshot,
     mode: Option<String>,
 }
@@ -481,26 +464,6 @@ struct RequestContext {
 #[derive(Debug, Default, Deserialize)]
 struct ReadConsistencyQuery {
     consistency: Option<String>,
-}
-
-async fn put_organization_certificate(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    Json(body): Json<CertificateUploadRequest>,
-) -> ApiResult<Json<CertificateResponse>> {
-    let cert = service
-        .put_certificate(PutCertificateInput {
-            organization_id: organization_id.clone(),
-            business_no: body.business_no,
-            password: body.password,
-            sign_cert_der_b64: body.sign_cert_der_base64,
-            sign_pri_key_b64: body.sign_pri_key_base64,
-            km_cert_der_b64: body.km_cert_der_base64,
-            km_pri_key_b64: body.km_pri_key_base64,
-        })
-        .await
-        .map_err(ApiError::bad_request_if_known)?;
-    Ok(Json(map_certificate(cert, &organization_id)))
 }
 
 async fn get_current_user(
@@ -739,22 +702,15 @@ async fn execute_ephemeral_crawl(
 ) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let facility_code = service
-        .authorize_gateway_sync_scope(
-            &ctx.user_id,
-            &organization_id,
-            body.facility_code.as_deref(),
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
     let run = service
         .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
             organization_id,
+            requested_by_user_id: Some(ctx.user_id),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
             bundle: map_proof_bundle(body.bundle)?,
-            facility_code,
+            facility_code: body.facility_code,
             start_month: body.start_month,
             end_month: body.end_month,
             mode: parse_sync_mode(body.mode.as_deref())?,
@@ -783,11 +739,15 @@ async fn ingest_local_execution_result(
     let run = service
         .ingest_local_execution_result(IngestLocalExecutionResultInput {
             organization_id,
+            requested_by_user_id: Some(ctx.user_id),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
             result_signature_base64: body.result_signature_base64,
             sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
+            certificate_chain_der: decode_certificate_chain_der_base64(
+                &body.certificate_chain_der_base64,
+            )?,
             snapshot: body.snapshot,
             mode: parse_sync_mode(body.mode.as_deref())?,
         })
@@ -811,6 +771,7 @@ async fn register_stored_certificate(
     let cert = service
         .register_certificate_from_proof(RegisterCertificateFromProofInput {
             organization_id: organization_id.clone(),
+            requested_by_user_id: Some(ctx.user_id),
             challenge_id: body.challenge_id,
             challenge_payload: body.challenge_payload,
             challenge_signature_base64: body.challenge_signature_base64,
@@ -1260,6 +1221,8 @@ fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
     }
 }
 
+const MAX_CERTIFICATE_CHAIN_DER_ENTRIES: usize = 8;
+
 fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
     let km_cert_der =
         decode_optional_base64_field("kmCertDerBase64", body.km_cert_der_base64.as_deref())?;
@@ -1271,6 +1234,16 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         )));
     }
 
+    if body.certificate_chain_der_base64.len() > MAX_CERTIFICATE_CHAIN_DER_ENTRIES {
+        return Err(ApiError::bad_request(anyhow!(
+            "certificateChainDerBase64 must contain at most {} entries",
+            MAX_CERTIFICATE_CHAIN_DER_ENTRIES
+        )));
+    }
+
+    let certificate_chain_der =
+        decode_certificate_chain_der_base64(&body.certificate_chain_der_base64)?;
+
     Ok(CertificateBundle {
         business_no: body.business_no,
         password: body.password,
@@ -1279,13 +1252,88 @@ fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
         sign_pri_key: decode_base64_field("signPriKeyBase64", &body.sign_pri_key_base64)?,
         km_cert_der,
         km_pri_key,
+        certificate_chain_der,
     })
 }
 
 fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD
-        .decode(value.trim())
+    decode_base64_value(value)
         .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
+}
+
+fn decode_certificate_chain_der_base64(values: &[String]) -> ApiResult<Vec<Vec<u8>>> {
+    if values.len() > MAX_CERTIFICATE_CHAIN_DER_ENTRIES {
+        return Err(ApiError::bad_request(anyhow!(
+            "certificateChainDerBase64 must contain at most {} entries",
+            MAX_CERTIFICATE_CHAIN_DER_ENTRIES
+        )));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            decode_base64_value(value).map_err(|_| {
+                ApiError::bad_request(anyhow!(
+                    "invalid base64 for certificateChainDerBase64[{idx}]"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn decode_base64_value(value: &str) -> anyhow::Result<Vec<u8>> {
+    let filtered = AsciiWhitespaceFilteredReader::new(value.as_bytes());
+    let mut decoder =
+        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
+    let mut decoded = Vec::with_capacity(value.len().saturating_mul(3) / 4);
+    io::Read::read_to_end(&mut decoder, &mut decoded).map_err(|err| anyhow!(err))?;
+    Ok(decoded)
+}
+
+struct AsciiWhitespaceFilteredReader<R> {
+    inner: R,
+    buffer: [u8; 8192],
+    position: usize,
+    length: usize,
+}
+
+impl<R> AsciiWhitespaceFilteredReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buffer: [0; 8192],
+            position: 0,
+            length: 0,
+        }
+    }
+}
+
+impl<R: io::Read> io::Read for AsciiWhitespaceFilteredReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        while written < buf.len() {
+            if self.position == self.length {
+                self.length = self.inner.read(&mut self.buffer)?;
+                self.position = 0;
+                if self.length == 0 {
+                    break;
+                }
+            }
+            while self.position < self.length && written < buf.len() {
+                let byte = self.buffer[self.position];
+                self.position += 1;
+                if !byte.is_ascii_whitespace() {
+                    buf[written] = byte;
+                    written += 1;
+                }
+            }
+        }
+        Ok(written)
+    }
 }
 
 fn decode_optional_base64_field(
@@ -1533,26 +1581,6 @@ impl ApiError {
         }
     }
 
-    fn bad_request_if_known(err: anyhow::Error) -> Self {
-        if let Some(status) = structured_status(&err) {
-            return Self {
-                status,
-                message: err.to_string(),
-            };
-        }
-        let message = err.to_string();
-        let status = if message.contains("businessNo")
-            || message.contains("organizationId")
-            || message.contains("base64")
-            || message.contains("certificate")
-        {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        Self { status, message }
-    }
-
     fn internal<E>(err: E) -> Self
     where
         E: ToString,
@@ -1649,7 +1677,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiError, decode_base64_field, ensure_active_organization_path_matches, map_certificate,
+        ApiError, MAX_CERTIFICATE_CHAIN_DER_ENTRIES, ProofBundleRequest, decode_base64_field,
+        ensure_active_organization_path_matches, map_certificate, map_proof_bundle,
     };
     use anyhow::anyhow;
     use axum::http::StatusCode;
@@ -1709,10 +1738,54 @@ mod tests {
     }
 
     #[test]
-    fn decode_base64_field_trims_surrounding_whitespace() {
-        let decoded = decode_base64_field("signCertDerBase64", "  Zm9vYmFy\n")
-            .expect("trimmed base64 should decode");
+    fn decode_base64_field_ignores_ascii_whitespace() {
+        let decoded = decode_base64_field("signCertDerBase64", "  Zm9v\nYmFy\t")
+            .expect("base64 with whitespace should decode");
         assert_eq!(decoded, b"foobar");
+    }
+
+    #[test]
+    fn proof_bundle_maps_certificate_chain_entries() {
+        let bundle = map_proof_bundle(ProofBundleRequest {
+            business_no: "2768603291".to_owned(),
+            common_name: "Test Certificate".to_owned(),
+            password: "password".to_owned(),
+            sign_cert_der_base64: "AQID".to_owned(),
+            sign_pri_key_base64: "BAUG".to_owned(),
+            km_cert_der_base64: None,
+            km_pri_key_base64: None,
+            certificate_chain_der_base64: vec!["Bwg\nJ".to_owned(), "Cg sM".to_owned()],
+        })
+        .expect("proof bundle should decode certificate chain");
+
+        assert_eq!(
+            bundle.certificate_chain_der,
+            vec![vec![7, 8, 9], vec![10, 11, 12]]
+        );
+    }
+
+    #[test]
+    fn proof_bundle_rejects_too_many_certificate_chain_entries() {
+        let err = map_proof_bundle(ProofBundleRequest {
+            business_no: "2768603291".to_owned(),
+            common_name: "Test Certificate".to_owned(),
+            password: "password".to_owned(),
+            sign_cert_der_base64: "AQID".to_owned(),
+            sign_pri_key_base64: "BAUG".to_owned(),
+            km_cert_der_base64: None,
+            km_pri_key_base64: None,
+            certificate_chain_der_base64: vec![
+                "BwgJ".to_owned();
+                MAX_CERTIFICATE_CHAIN_DER_ENTRIES + 1
+            ],
+        })
+        .expect_err("oversized certificate chain should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message
+                .contains("certificateChainDerBase64 must contain at most")
+        );
     }
 
     #[test]

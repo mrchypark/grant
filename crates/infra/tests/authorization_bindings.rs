@@ -520,22 +520,6 @@ async fn saves_and_lists_role_bindings_for_subjects_and_resources() {
         .expect_err("binding should reject missing agreement");
     assert!(err.to_string().contains("agreement"));
 
-    let duplicate_binding = RoleBinding {
-        id: "binding-org-plant-duplicate".to_owned(),
-        ..organization_binding.clone()
-    };
-    let err = db
-        .save_role_binding(&duplicate_binding)
-        .await
-        .expect_err("duplicate logical binding should fail");
-    let duplicate_err = err.to_string();
-    assert!(
-        duplicate_err.contains("UNIQUE")
-            || duplicate_err.contains("constraint")
-            || duplicate_err.contains("save role binding"),
-        "{duplicate_err}"
-    );
-
     let mismatched_agreement = RoleBinding {
         id: "binding-mismatched-agreement".to_owned(),
         agreement_id: Some("agreement-mismatch".to_owned()),

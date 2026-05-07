@@ -30,6 +30,36 @@ impl From<&mut Row<'_>> for ColumnRow {
 }
 
 #[derive(Debug)]
+struct ColumnTypeRow {
+    name: String,
+    type_name: String,
+}
+
+impl From<&mut Row<'_>> for ColumnTypeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            type_name: row.get("type"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TypeOfValueRow {
+    value_type: String,
+    value: String,
+}
+
+impl From<&mut Row<'_>> for TypeOfValueRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value_type: row.get("value_type"),
+            value: row.get("value"),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct IndexRow {
     name: String,
 }
@@ -147,6 +177,22 @@ async fn ensure_schema_creates_authorization_tables() {
         "client_actions",
         "client_grants",
         "client_grant_actions",
+        "sync_run_items",
+        "assets",
+        "asset_profiles",
+        "registries",
+        "registry_accounts",
+        "registry_projects",
+        "data_sources",
+        "generation_data",
+        "rate_data",
+        "energy_certificates",
+        "auth_credentials",
+        "credential_bindings",
+        "country_capabilities",
+        "effective_organization_asset_actions",
+        "effective_user_asset_actions",
+        "effective_user_asset_visibility",
         "effective_organization_plant_actions",
         "effective_user_plant_actions",
         "effective_user_plant_visibility",
@@ -308,21 +354,104 @@ async fn ensure_schema_creates_authorization_tables() {
         vec!["client_grant_id", "action_id"]
     );
 
-    let plant_columns: Vec<ColumnRow> = runtime
+    let asset_columns: Vec<ColumnRow> = runtime
         .query_rows(
             ReadConsistency::Local,
-            "SELECT name FROM pragma_table_info('plants') ORDER BY cid ASC",
+            "SELECT name FROM pragma_table_info('assets') ORDER BY cid ASC",
             vec![],
         )
         .await
-        .expect("plants columns");
-    let plant_columns: Vec<String> = plant_columns
+        .expect("assets columns");
+    let asset_columns: Vec<String> = asset_columns
         .into_iter()
         .map(|column| column.name)
         .collect();
-    assert!(plant_columns.contains(&"owner_organization_id".to_owned()));
-    assert!(plant_columns.contains(&"created_by_organization_id".to_owned()));
-    assert!(plant_columns.contains(&"facility_code".to_owned()));
+    assert_eq!(
+        asset_columns,
+        vec![
+            "id",
+            "owner_organization_id",
+            "created_by_organization_id",
+            "name",
+            "country_code",
+            "address",
+            "capacity_kw",
+            "timezone",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let asset_profile_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('asset_profiles') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("asset_profiles columns");
+    let asset_profile_columns: Vec<String> = asset_profile_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        asset_profile_columns,
+        vec![
+            "id",
+            "asset_id",
+            "country_code",
+            "provider",
+            "profile_type",
+            "external_id",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+        ]
+    );
+
+    let generation_data_columns: Vec<ColumnRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name FROM pragma_table_info('generation_data') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("generation_data columns");
+    let generation_data_columns: Vec<String> = generation_data_columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(
+        generation_data_columns,
+        vec![
+            "id",
+            "asset_id",
+            "source_id",
+            "period_start",
+            "period_end",
+            "metric_type",
+            "value",
+            "unit",
+            "quality",
+            "metadata_json",
+            "recorded_at",
+            "updated_at",
+        ]
+    );
+
+    let rate_data_columns: Vec<ColumnTypeRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name, type FROM pragma_table_info('rate_data') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("rate_data columns");
+    let rate_value_column = rate_data_columns
+        .iter()
+        .find(|column| column.name == "value")
+        .expect("rate_data.value column");
+    assert_eq!(rate_value_column.type_name, "TEXT");
 
     let organization_columns: Vec<ColumnRow> = runtime
         .query_rows(
@@ -503,9 +632,25 @@ async fn ensure_schema_creates_authorization_tables() {
         "idx_agreement_documents_agreement",
         "idx_client_grants_active_unique",
         "idx_client_grants_user_client",
+        "idx_assets_owner_country",
+        "idx_asset_profiles_asset_type",
+        "idx_asset_profiles_country_provider_type_external",
+        "idx_registries_country_type",
+        "idx_registries_country_provider_type",
+        "idx_registries_global_provider_type",
+        "idx_registry_accounts_org_registry",
+        "idx_registry_projects_asset_registry",
+        "idx_data_sources_asset_type",
+        "idx_generation_data_asset_source_metric_period",
+        "idx_rate_data_asset_source_metric_period",
+        "idx_energy_certificates_asset_registry",
+        "idx_auth_credentials_org_provider",
+        "idx_credential_bindings_account",
         "idx_organization_party_links_org_relation",
         "idx_parties_business_no",
         "idx_plants_owner_facility",
+        "idx_sync_run_items_asset",
+        "idx_sync_run_items_run_status",
         "idx_roles_global_code",
         "idx_sync_runs_plant_started",
         "idx_user_identities_provider_external",
@@ -543,4 +688,78 @@ async fn ensure_schema_creates_authorization_tables() {
         has_unique_slug_index,
         "clients.slug must have a unique index"
     );
+}
+
+#[tokio::test]
+async fn ensure_schema_migrates_rate_data_value_to_text() {
+    let (runtime, _dir) = test_runtime().await;
+    seed_rate_data_real_value_schema(&runtime).await;
+    let db = Database::new(
+        runtime.clone(),
+        format!("bootstrap-{}", Uuid::new_v4().simple()),
+        "Bootstrap User".to_owned(),
+    );
+
+    db.ensure_schema_only().await.expect("ensure schema only");
+
+    let rate_data_columns: Vec<ColumnTypeRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT name, type FROM pragma_table_info('rate_data') ORDER BY cid ASC",
+            vec![],
+        )
+        .await
+        .expect("rate_data columns");
+    let rate_value_column = rate_data_columns
+        .iter()
+        .find(|column| column.name == "value")
+        .expect("rate_data.value column");
+    assert_eq!(rate_value_column.type_name, "TEXT");
+
+    let rows: Vec<TypeOfValueRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT typeof(value) AS value_type, value FROM rate_data WHERE id = 'rate-old'",
+            vec![],
+        )
+        .await
+        .expect("migrated rate value");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value_type, "text");
+    assert_eq!(rows[0].value, "109.25");
+}
+
+async fn seed_rate_data_real_value_schema(runtime: &HiqliteRuntime) {
+    runtime
+        .batch(
+            r#"
+            CREATE TABLE rate_data (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                metric_type TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                currency TEXT,
+                quality TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                recorded_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (asset_id, source_id, metric_type, period_start, period_end)
+            );
+            INSERT INTO rate_data (
+                id, asset_id, source_id, period_start, period_end, metric_type, value,
+                unit, currency, quality, metadata_json, recorded_at, updated_at
+            ) VALUES (
+                'rate-old', 'asset-old', 'source-old', '2026-03-01', '2026-04-01',
+                'self_rate', 109.25, 'KRW/kWh', 'KRW', 'published', '{}',
+                '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'
+            );
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed old rate_data schema");
 }
