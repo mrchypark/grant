@@ -2,69 +2,38 @@ use anyhow::anyhow;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::DefaultBodyLimit,
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{any, get, post, put},
 };
 use domain::{
-    Action, Client, ClientAppType, ClientConsentPolicy, ClientType, DocumentArtifact,
-    GenerationRecord, HealthStatus, Organization, Plant, RateRecord, RecRecord, SyncMode, SyncRun,
-    User,
+    Action, Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationType,
+    HealthStatus, Organization, User,
 };
 use infra::{
-    bridge::BridgeSnapshot,
     config::ReadConsistency,
-    crypto::CertificateBundle,
-    database::StoredCertificate,
     service::{
-        AppService, BackupInfo, CreateCertGatewayChallengeInput, CreateClientInput,
-        CreatePlantInput, ExecuteEphemeralCrawlInput, IngestLocalExecutionResultInput,
-        IssueCrawlTaskTokenInput, PlantView, RegisterCertificateFromProofInput, ServiceError,
-        ServiceErrorKind, StartCrawlWithTaskTokenInput, SyncInput, UpdateClientInput,
+        AppService, BackupInfo, CreateApplicationInput, ServiceError, ServiceErrorKind,
+        UpdateApplicationInput,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
         .route(
-            "/api/v1/organizations/{organizationId}/clients",
-            post(create_client),
+            "/api/v1/organizations/{organizationId}/applications",
+            post(create_application),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/clients/{clientId}",
-            put(update_client),
+            "/api/v1/organizations/{organizationId}/applications/{applicationId}",
+            put(update_application),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
-            put(replace_client_actions),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/sync",
-            post(sync_organization),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/cert-gateway/challenges",
-            post(create_cert_gateway_challenge),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/cert-gateway/ephemeral-executions",
-            post(execute_ephemeral_crawl),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/cert-gateway/local-execution-results",
-            post(ingest_local_execution_result).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificates",
-            get(list_stored_certificates).post(register_stored_certificate),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/plants",
-            post(create_plant),
+            "/api/v1/organizations/{organizationId}/applications/{applicationId}/actions",
+            put(replace_application_actions),
         )
         .route(
             "/api/v1/organizations/{organizationId}/deactivate",
@@ -73,14 +42,6 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/organizations/{organizationId}/reactivate",
             post(reactivate_organization),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificates/{certificateId}/crawl-tokens",
-            post(issue_crawl_task_token),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/crawls",
-            post(start_crawl),
         )
         .route(
             "/api/v1/admin/backups",
@@ -97,39 +58,15 @@ pub fn build_router(service: Arc<AppService>) -> Router {
 pub fn build_learner_router(service: Arc<AppService>) -> Router {
     build_shared_router()
         .route(
-            "/api/v1/organizations/{organizationId}/clients",
+            "/api/v1/organizations/{organizationId}/applications",
             any(requires_voter_node),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/clients/{clientId}",
+            "/api/v1/organizations/{organizationId}/applications/{applicationId}",
             any(requires_voter_node),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/sync",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/cert-gateway/challenges",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/cert-gateway/ephemeral-executions",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/cert-gateway/local-execution-results",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificates",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/plants",
+            "/api/v1/organizations/{organizationId}/applications/{applicationId}/actions",
             any(requires_voter_node),
         )
         .route(
@@ -138,14 +75,6 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
         )
         .route(
             "/api/v1/organizations/{organizationId}/reactivate",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/certificates/{certificateId}/crawl-tokens",
-            any(requires_voter_node),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/crawls",
             any(requires_voter_node),
         )
         .route("/api/v1/admin/backups", any(requires_voter_node))
@@ -169,32 +98,16 @@ fn build_shared_router() -> Router<Arc<AppService>> {
         )
         .route("/api/v1/me", get(get_current_user))
         .route(
-            "/api/v1/organizations/{organizationId}/clients",
-            get(list_clients),
+            "/api/v1/organizations/{organizationId}/applications",
+            get(list_applications),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/clients/{clientId}",
-            get(get_client),
+            "/api/v1/organizations/{organizationId}/applications/{applicationId}",
+            get(get_application),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/clients/{clientId}/actions",
-            get(list_client_actions),
-        )
-        .route("/api/v1/plants", get(list_plants))
-        .route("/api/v1/plants/{facilityCode}", get(get_plant))
-        .route(
-            "/api/v1/plants/{facilityCode}/generation",
-            get(list_plant_generation),
-        )
-        .route("/api/v1/plants/{facilityCode}/rates", get(list_plant_rates))
-        .route("/api/v1/plants/{facilityCode}/rec", get(list_plant_rec))
-        .route(
-            "/api/v1/plants/{facilityCode}/documents",
-            get(list_plant_documents),
-        )
-        .route(
-            "/api/v1/documents/{documentId}/download",
-            get(download_document),
+            "/api/v1/organizations/{organizationId}/applications/{applicationId}/actions",
+            get(list_application_actions),
         )
 }
 
@@ -206,222 +119,37 @@ async fn auth_root() -> Redirect {
     Redirect::temporary("/auth/login")
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CertificateResponse {
-    id: String,
-    organization_id: String,
-    party_id: String,
-    business_no: Option<String>,
-    common_name: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SyncRequest {
-    facility_code: Option<String>,
-    start_month: Option<String>,
-    end_month: Option<String>,
-    mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateCertGatewayChallengeRequest {
-    mode: String,
-    sync_mode: Option<String>,
-    origin: Option<String>,
-    business_no: Option<String>,
-    facility_code: Option<String>,
-    start_month: Option<String>,
-    end_month: Option<String>,
-    sign_cert_sha256_hex: Option<String>,
-    ttl_seconds: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CertGatewayChallengeResponse {
-    challenge_id: String,
-    mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sync_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    facility_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    business_no: Option<String>,
-    nonce: String,
-    payload: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    start_month: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    end_month: Option<String>,
-    expires_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProofBundleRequest {
-    business_no: String,
-    common_name: String,
-    password: String,
-    sign_cert_der_base64: String,
-    sign_pri_key_base64: String,
-    km_cert_der_base64: Option<String>,
-    km_pri_key_base64: Option<String>,
-    #[serde(default)]
-    certificate_chain_der_base64: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RegisterStoredCertificateRequest {
-    challenge_id: String,
-    challenge_payload: String,
-    challenge_signature_base64: String,
-    bundle: ProofBundleRequest,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExecuteEphemeralCrawlRequest {
-    challenge_id: String,
-    challenge_payload: String,
-    challenge_signature_base64: String,
-    bundle: ProofBundleRequest,
-    facility_code: Option<String>,
-    start_month: Option<String>,
-    end_month: Option<String>,
-    mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IngestLocalExecutionResultRequest {
-    challenge_id: String,
-    challenge_payload: String,
-    challenge_signature_base64: String,
-    result_signature_base64: String,
-    sign_cert_der_base64: String,
-    #[serde(default)]
-    certificate_chain_der_base64: Vec<String>,
-    snapshot: BridgeSnapshot,
-    mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueCrawlTaskTokenRequest {
-    facility_code: Option<String>,
-    start_month: Option<String>,
-    end_month: Option<String>,
-    mode: Option<String>,
-    ttl_seconds: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CrawlTaskTokenResponse {
-    crawl_task_token: String,
-    expires_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreatePlantRequest {
-    facility_code: String,
-    name: String,
-    contract_no: String,
-    address: String,
-    installed_kw: f64,
-    rec_start_date: String,
-    confirm_issued: String,
-    owner_organization_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateClientRequest {
+struct CreateApplicationRequest {
     id: String,
     slug: String,
     name: String,
     description: Option<String>,
-    client_type: ClientType,
-    app_type: ClientAppType,
+    application_type: ApplicationType,
+    app_type: ApplicationAppType,
     first_party: bool,
-    consent_policy: ClientConsentPolicy,
+    consent_policy: ApplicationConsentPolicy,
     active: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UpdateClientRequest {
+struct UpdateApplicationRequest {
     slug: String,
     name: String,
     description: Option<String>,
-    client_type: ClientType,
-    app_type: ClientAppType,
+    application_type: ApplicationType,
+    app_type: ApplicationAppType,
     first_party: bool,
-    consent_policy: ClientConsentPolicy,
+    consent_policy: ApplicationConsentPolicy,
     active: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReplaceClientActionsRequest {
+struct ReplaceApplicationActionsRequest {
     action_ids: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncResponse {
-    id: String,
-    organization_id: String,
-    plant_id: Option<String>,
-    mode: String,
-    status: String,
-    started_at: Option<String>,
-    finished_at: Option<String>,
-    duration_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlantResponse {
-    plant: Plant,
-    last_synced_at: Option<String>,
-    last_sync: Option<SyncResponse>,
-    generation: PlantMetricF64,
-    rates: PlantMetricCount,
-    rec: PlantMetricI64,
-    documents: PlantDocumentMetric,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlantMetricF64 {
-    count: i64,
-    total_kwh: f64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlantMetricCount {
-    count: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlantMetricI64 {
-    count: i64,
-    total: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlantDocumentMetric {
-    count: i64,
-    categories: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -491,66 +219,40 @@ async fn get_current_user(
     }))
 }
 
-async fn sync_organization(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<SyncRequest>,
-) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let mode = parse_sync_mode(body.mode.as_deref())?;
-    let run = service
-        .sync_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            SyncInput {
-                organization_id,
-                facility_code: body.facility_code,
-                start_month: body.start_month,
-                end_month: body.end_month,
-                mode,
-            },
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(map_sync(run))))
-}
-
-async fn list_clients(
+async fn list_applications(
     State(service): State<Arc<AppService>>,
     Path(organization_id): Path<String>,
     Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
-) -> ApiResult<Json<Vec<Client>>> {
+) -> ApiResult<Json<Vec<Application>>> {
     let read_consistency = read_consistency_override(&query)?;
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let clients = service
-        .list_clients_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+    let applications = service
+        .list_applications_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(clients))
+    Ok(Json(applications))
 }
 
-async fn create_client(
+async fn create_application(
     State(service): State<Arc<AppService>>,
     Path(organization_id): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<CreateClientRequest>,
-) -> ApiResult<(StatusCode, Json<Client>)> {
+    Json(body): Json<CreateApplicationRequest>,
+) -> ApiResult<(StatusCode, Json<Application>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let client = service
-        .create_client(
+    let application = service
+        .create_application(
             &ctx.user_id,
             &ctx.organization_id,
-            CreateClientInput {
+            CreateApplicationInput {
                 id: body.id,
                 slug: body.slug,
                 name: body.name,
                 description: body.description,
-                client_type: body.client_type,
+                application_type: body.application_type,
                 app_type: body.app_type,
                 first_party: body.first_party,
                 consent_policy: body.consent_policy,
@@ -559,48 +261,48 @@ async fn create_client(
         )
         .await
         .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(client)))
+    Ok((StatusCode::CREATED, Json(application)))
 }
 
-async fn get_client(
+async fn get_application(
     State(service): State<Arc<AppService>>,
-    Path((organization_id, client_id)): Path<(String, String)>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
-) -> ApiResult<Json<Client>> {
+) -> ApiResult<Json<Application>> {
     let read_consistency = read_consistency_override(&query)?;
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let client = service
-        .get_client_authorized(
+    let application = service
+        .get_application_authorized(
             &ctx.user_id,
             &ctx.organization_id,
-            &client_id,
+            &application_id,
             read_consistency,
         )
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(client))
+    Ok(Json(application))
 }
 
-async fn update_client(
+async fn update_application(
     State(service): State<Arc<AppService>>,
-    Path((organization_id, client_id)): Path<(String, String)>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(body): Json<UpdateClientRequest>,
-) -> ApiResult<Json<Client>> {
+    Json(body): Json<UpdateApplicationRequest>,
+) -> ApiResult<Json<Application>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let client = service
-        .update_client(
+    let application = service
+        .update_application(
             &ctx.user_id,
             &ctx.organization_id,
-            &client_id,
-            UpdateClientInput {
+            &application_id,
+            UpdateApplicationInput {
                 slug: body.slug,
                 name: body.name,
                 description: body.description,
-                client_type: body.client_type,
+                application_type: body.application_type,
                 app_type: body.app_type,
                 first_party: body.first_party,
                 consent_policy: body.consent_policy,
@@ -609,12 +311,12 @@ async fn update_client(
         )
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(client))
+    Ok(Json(application))
 }
 
-async fn list_client_actions(
+async fn list_application_actions(
     State(service): State<Arc<AppService>>,
-    Path((organization_id, client_id)): Path<(String, String)>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Action>>> {
@@ -622,10 +324,10 @@ async fn list_client_actions(
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
     let actions = service
-        .list_client_actions_authorized(
+        .list_application_actions_authorized(
             &ctx.user_id,
             &ctx.organization_id,
-            &client_id,
+            &application_id,
             read_consistency,
         )
         .await
@@ -633,293 +335,24 @@ async fn list_client_actions(
     Ok(Json(actions))
 }
 
-async fn replace_client_actions(
+async fn replace_application_actions(
     State(service): State<Arc<AppService>>,
-    Path((organization_id, client_id)): Path<(String, String)>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(body): Json<ReplaceClientActionsRequest>,
+    Json(body): Json<ReplaceApplicationActionsRequest>,
 ) -> ApiResult<Json<Vec<Action>>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
     let actions = service
-        .replace_client_actions_authorized(
+        .replace_application_actions_authorized(
             &ctx.user_id,
             &ctx.organization_id,
-            &client_id,
+            &application_id,
             &body.action_ids,
         )
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(actions))
-}
-
-async fn create_cert_gateway_challenge(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<CreateCertGatewayChallengeRequest>,
-) -> ApiResult<(StatusCode, Json<CertGatewayChallengeResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let challenge = service
-        .create_cert_gateway_challenge(CreateCertGatewayChallengeInput {
-            organization_id,
-            mode: body.mode,
-            sync_mode: body.sync_mode,
-            origin: body.origin,
-            business_no: body.business_no,
-            facility_code: body.facility_code,
-            start_month: body.start_month,
-            end_month: body.end_month,
-            sign_cert_sha256_hex: body.sign_cert_sha256_hex,
-            created_by_user_id: ctx.user_id,
-            ttl_seconds: body.ttl_seconds.unwrap_or(120),
-        })
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CertGatewayChallengeResponse {
-            challenge_id: challenge.id,
-            mode: challenge.mode,
-            sync_mode: challenge.sync_mode,
-            facility_code: challenge.facility_code,
-            business_no: challenge.business_no,
-            nonce: challenge.nonce,
-            payload: challenge.payload,
-            start_month: challenge.start_month,
-            end_month: challenge.end_month,
-            expires_at: challenge.expires_at,
-        }),
-    ))
-}
-
-async fn execute_ephemeral_crawl(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<ExecuteEphemeralCrawlRequest>,
-) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let run = service
-        .execute_ephemeral_crawl(ExecuteEphemeralCrawlInput {
-            organization_id,
-            requested_by_user_id: Some(ctx.user_id),
-            challenge_id: body.challenge_id,
-            challenge_payload: body.challenge_payload,
-            challenge_signature_base64: body.challenge_signature_base64,
-            bundle: map_proof_bundle(body.bundle)?,
-            facility_code: body.facility_code,
-            start_month: body.start_month,
-            end_month: body.end_month,
-            mode: parse_sync_mode(body.mode.as_deref())?,
-        })
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::ACCEPTED, Json(map_sync(run))))
-}
-
-async fn ingest_local_execution_result(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<IngestLocalExecutionResultRequest>,
-) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    service
-        .authorize_gateway_sync_scope(
-            &ctx.user_id,
-            &organization_id,
-            Some(body.snapshot.facility.code.as_str()),
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    let run = service
-        .ingest_local_execution_result(IngestLocalExecutionResultInput {
-            organization_id,
-            requested_by_user_id: Some(ctx.user_id),
-            challenge_id: body.challenge_id,
-            challenge_payload: body.challenge_payload,
-            challenge_signature_base64: body.challenge_signature_base64,
-            result_signature_base64: body.result_signature_base64,
-            sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
-            certificate_chain_der: decode_certificate_chain_der_base64(
-                &body.certificate_chain_der_base64,
-            )?,
-            snapshot: body.snapshot,
-            mode: parse_sync_mode(body.mode.as_deref())?,
-        })
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::ACCEPTED, Json(map_sync(run))))
-}
-
-async fn register_stored_certificate(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<RegisterStoredCertificateRequest>,
-) -> ApiResult<(StatusCode, Json<CertificateResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    service
-        .authorize_certificate_registration(&ctx.user_id, &organization_id)
-        .await
-        .map_err(ApiError::from_domain)?;
-    let cert = service
-        .register_certificate_from_proof(RegisterCertificateFromProofInput {
-            organization_id: organization_id.clone(),
-            requested_by_user_id: Some(ctx.user_id),
-            challenge_id: body.challenge_id,
-            challenge_payload: body.challenge_payload,
-            challenge_signature_base64: body.challenge_signature_base64,
-            bundle: map_proof_bundle(body.bundle)?,
-        })
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(map_certificate(cert, &organization_id)),
-    ))
-}
-
-async fn list_stored_certificates(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<CertificateResponse>>> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let certificates = service
-        .list_stored_certificates(&organization_id)
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(
-        certificates
-            .into_iter()
-            .map(|cert| map_certificate(cert, &organization_id))
-            .collect(),
-    ))
-}
-
-async fn issue_crawl_task_token(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, certificate_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(body): Json<IssueCrawlTaskTokenRequest>,
-) -> ApiResult<(StatusCode, Json<CrawlTaskTokenResponse>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&organization_id, &ctx.organization_id)?;
-    let facility_code = service
-        .authorize_gateway_sync_scope(
-            &ctx.user_id,
-            &organization_id,
-            body.facility_code.as_deref(),
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    let issued = service
-        .issue_crawl_task_token(IssueCrawlTaskTokenInput {
-            organization_id,
-            certificate_id,
-            facility_code,
-            start_month: body.start_month,
-            end_month: body.end_month,
-            mode: parse_sync_mode(body.mode.as_deref())?,
-            created_by_user_id: ctx.user_id,
-            ttl_seconds: body.ttl_seconds.unwrap_or(60),
-        })
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CrawlTaskTokenResponse {
-            crawl_task_token: issued.token,
-            expires_at: issued.expires_at,
-        }),
-    ))
-}
-
-async fn start_crawl(
-    State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
-    headers: HeaderMap,
-) -> ApiResult<(StatusCode, Json<SyncResponse>)> {
-    let token = bearer_token(&headers)?
-        .ok_or_else(|| ApiError::bad_request(anyhow!("missing authorization header")))?;
-    let run = service
-        .consume_crawl_task_token_and_start_crawl(StartCrawlWithTaskTokenInput {
-            organization_id,
-            token,
-        })
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::ACCEPTED, Json(map_sync(run))))
-}
-
-async fn list_plants(
-    State(service): State<Arc<AppService>>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<Plant>>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let plants = service
-        .list_visible_plants(&ctx.user_id, &ctx.organization_id, read_consistency)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(plants))
-}
-
-async fn get_plant(
-    State(service): State<Arc<AppService>>,
-    Path(facility_code): Path<String>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<PlantResponse>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let plant = service
-        .get_plant_profile(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &facility_code,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(map_plant(plant)))
-}
-
-async fn create_plant(
-    State(service): State<Arc<AppService>>,
-    Path(path_organization_id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<CreatePlantRequest>,
-) -> ApiResult<(StatusCode, Json<Plant>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_active_organization_path_matches(&path_organization_id, &ctx.organization_id)?;
-
-    let plant = service
-        .create_plant(
-            &ctx.user_id,
-            &ctx.organization_id,
-            CreatePlantInput {
-                facility_code: body.facility_code,
-                name: body.name,
-                contract_no: body.contract_no,
-                address: body.address,
-                installed_kw: body.installed_kw,
-                rec_start_date: body.rec_start_date,
-                confirm_issued: body.confirm_issued,
-                owner_organization_id: body.owner_organization_id,
-            },
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(plant)))
 }
 
 async fn deactivate_organization(
@@ -953,120 +386,6 @@ async fn reactivate_organization(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(organization))
-}
-
-async fn list_plant_generation(
-    State(service): State<Arc<AppService>>,
-    Path(facility_code): Path<String>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<GenerationRecord>>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let items = service
-        .list_generation_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &facility_code,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(items))
-}
-
-async fn list_plant_rates(
-    State(service): State<Arc<AppService>>,
-    Path(facility_code): Path<String>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<RateRecord>>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let items = service
-        .list_rates_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &facility_code,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(items))
-}
-
-async fn list_plant_rec(
-    State(service): State<Arc<AppService>>,
-    Path(facility_code): Path<String>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<RecRecord>>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let items = service
-        .list_rec_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &facility_code,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(items))
-}
-
-async fn list_plant_documents(
-    State(service): State<Arc<AppService>>,
-    Path(facility_code): Path<String>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<DocumentArtifact>>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let items = service
-        .list_documents_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &facility_code,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(items))
-}
-
-async fn download_document(
-    State(service): State<Arc<AppService>>,
-    Path(document_id): Path<String>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Response> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    let (doc, bytes) = service
-        .download_document_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &document_id,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&doc.content_type).map_err(ApiError::internal)?,
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!(
-            "attachment; filename*=UTF-8''{}",
-            urlencoding::encode(&doc.artifact.file_name)
-        ))
-        .map_err(ApiError::internal)?,
-    );
-    Ok((headers, bytes).into_response())
 }
 
 async fn trigger_backup(
@@ -1175,8 +494,8 @@ async fn proxy_trailbase_request(
     let body_bytes = to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(ApiError::internal)?;
-    let client = reqwest::Client::new();
-    let mut upstream = client.request(parts.method.clone(), url);
+    let http_client = reqwest::Client::new();
+    let mut upstream = http_client.request(parts.method.clone(), url);
     for (name, value) in &parts.headers {
         if name == header::HOST || name == header::CONTENT_LENGTH {
             continue;
@@ -1206,197 +525,6 @@ async fn proxy_trailbase_request(
         response_headers.append(name, value.clone());
     }
     Ok(response)
-}
-
-fn parse_sync_mode(value: Option<&str>) -> ApiResult<SyncMode> {
-    match value
-        .unwrap_or("delta")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "delta" => Ok(SyncMode::Delta),
-        "full" => Ok(SyncMode::Full),
-        other => Err(ApiError::bad_request(anyhow!("invalid mode: {other}"))),
-    }
-}
-
-const MAX_CERTIFICATE_CHAIN_DER_ENTRIES: usize = 8;
-
-fn map_proof_bundle(body: ProofBundleRequest) -> ApiResult<CertificateBundle> {
-    let km_cert_der =
-        decode_optional_base64_field("kmCertDerBase64", body.km_cert_der_base64.as_deref())?;
-    let km_pri_key =
-        decode_optional_base64_field("kmPriKeyBase64", body.km_pri_key_base64.as_deref())?;
-    if km_cert_der.is_some() != km_pri_key.is_some() {
-        return Err(ApiError::bad_request(anyhow!(
-            "kmCertDerBase64 and kmPriKeyBase64 must both be provided or both omitted"
-        )));
-    }
-
-    if body.certificate_chain_der_base64.len() > MAX_CERTIFICATE_CHAIN_DER_ENTRIES {
-        return Err(ApiError::bad_request(anyhow!(
-            "certificateChainDerBase64 must contain at most {} entries",
-            MAX_CERTIFICATE_CHAIN_DER_ENTRIES
-        )));
-    }
-
-    let certificate_chain_der =
-        decode_certificate_chain_der_base64(&body.certificate_chain_der_base64)?;
-
-    Ok(CertificateBundle {
-        business_no: body.business_no,
-        password: body.password,
-        common_name: body.common_name,
-        sign_cert_der: decode_base64_field("signCertDerBase64", &body.sign_cert_der_base64)?,
-        sign_pri_key: decode_base64_field("signPriKeyBase64", &body.sign_pri_key_base64)?,
-        km_cert_der,
-        km_pri_key,
-        certificate_chain_der,
-    })
-}
-
-fn decode_base64_field(field_name: &'static str, value: &str) -> ApiResult<Vec<u8>> {
-    decode_base64_value(value)
-        .map_err(|_| ApiError::bad_request(anyhow!("invalid base64 for {field_name}")))
-}
-
-fn decode_certificate_chain_der_base64(values: &[String]) -> ApiResult<Vec<Vec<u8>>> {
-    if values.len() > MAX_CERTIFICATE_CHAIN_DER_ENTRIES {
-        return Err(ApiError::bad_request(anyhow!(
-            "certificateChainDerBase64 must contain at most {} entries",
-            MAX_CERTIFICATE_CHAIN_DER_ENTRIES
-        )));
-    }
-    values
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            decode_base64_value(value).map_err(|_| {
-                ApiError::bad_request(anyhow!(
-                    "invalid base64 for certificateChainDerBase64[{idx}]"
-                ))
-            })
-        })
-        .collect()
-}
-
-fn decode_base64_value(value: &str) -> anyhow::Result<Vec<u8>> {
-    let filtered = AsciiWhitespaceFilteredReader::new(value.as_bytes());
-    let mut decoder =
-        base64::read::DecoderReader::new(filtered, &base64::engine::general_purpose::STANDARD);
-    let mut decoded = Vec::with_capacity(value.len().saturating_mul(3) / 4);
-    io::Read::read_to_end(&mut decoder, &mut decoded).map_err(|err| anyhow!(err))?;
-    Ok(decoded)
-}
-
-struct AsciiWhitespaceFilteredReader<R> {
-    inner: R,
-    buffer: [u8; 8192],
-    position: usize,
-    length: usize,
-}
-
-impl<R> AsciiWhitespaceFilteredReader<R> {
-    fn new(inner: R) -> Self {
-        Self {
-            inner,
-            buffer: [0; 8192],
-            position: 0,
-            length: 0,
-        }
-    }
-}
-
-impl<R: io::Read> io::Read for AsciiWhitespaceFilteredReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
-        let mut written = 0;
-        while written < buf.len() {
-            if self.position == self.length {
-                self.length = self.inner.read(&mut self.buffer)?;
-                self.position = 0;
-                if self.length == 0 {
-                    break;
-                }
-            }
-            while self.position < self.length && written < buf.len() {
-                let byte = self.buffer[self.position];
-                self.position += 1;
-                if !byte.is_ascii_whitespace() {
-                    buf[written] = byte;
-                    written += 1;
-                }
-            }
-        }
-        Ok(written)
-    }
-}
-
-fn decode_optional_base64_field(
-    field_name: &'static str,
-    value: Option<&str>,
-) -> ApiResult<Option<Vec<u8>>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    decode_base64_field(field_name, value).map(Some)
-}
-
-fn map_certificate(cert: StoredCertificate, organization_id: &str) -> CertificateResponse {
-    CertificateResponse {
-        id: cert.id,
-        organization_id: organization_id.to_owned(),
-        party_id: cert.party_id,
-        business_no: cert.business_no,
-        common_name: cert.common_name,
-    }
-}
-
-fn map_sync(run: SyncRun) -> SyncResponse {
-    SyncResponse {
-        id: run.id,
-        organization_id: run.organization_id,
-        plant_id: run.plant_id,
-        mode: match run.mode {
-            SyncMode::Delta => "delta".to_owned(),
-            SyncMode::Full => "full".to_owned(),
-        },
-        status: run.status,
-        started_at: run.started_at,
-        finished_at: run.finished_at,
-        duration_ms: run.duration_ms,
-    }
-}
-
-fn map_plant(view: PlantView) -> PlantResponse {
-    PlantResponse {
-        plant: view.plant,
-        last_synced_at: view.last_synced_at,
-        last_sync: view.last_sync.map(map_sync),
-        generation: PlantMetricF64 {
-            count: view.generation_count,
-            total_kwh: view.generation_total_kwh,
-        },
-        rates: PlantMetricCount {
-            count: view.rates_count,
-        },
-        rec: PlantMetricI64 {
-            count: view.rec_count,
-            total: view.rec_total,
-        },
-        documents: PlantDocumentMetric {
-            count: view.document_count,
-            categories: view.document_categories,
-        },
-    }
 }
 
 fn map_backup(item: BackupInfo) -> BackupItemResponse {
@@ -1613,7 +741,7 @@ impl ApiError {
         } else if contains_chain("not found") {
             StatusCode::NOT_FOUND
         } else if contains_chain("must not be empty")
-            || contains_chain("is not grantable to clients")
+            || contains_chain("is not grantable to applications")
             || contains_chain("expired")
             || contains_chain("consumed")
             || contains_chain("payload mismatch")
@@ -1676,13 +804,9 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ApiError, MAX_CERTIFICATE_CHAIN_DER_ENTRIES, ProofBundleRequest, decode_base64_field,
-        ensure_active_organization_path_matches, map_certificate, map_proof_bundle,
-    };
+    use super::{ApiError, ensure_active_organization_path_matches};
     use anyhow::anyhow;
     use axum::http::StatusCode;
-    use infra::database::StoredCertificate;
     use infra::service::{ServiceError, ServiceErrorKind};
 
     #[test]
@@ -1699,29 +823,6 @@ mod tests {
     }
 
     #[test]
-    fn certificate_response_exposes_party_identity() {
-        let response = map_certificate(
-            StoredCertificate {
-                id: "cert-1".to_owned(),
-                party_id: "party-2768603291".to_owned(),
-                business_no: Some("2768603291".to_owned()),
-                common_name: "주식회사 커널로그에너지".to_owned(),
-                encrypted_blob: "blob".to_owned(),
-                wrapped_dek: Vec::new(),
-                kms_key_id: "kms-key-v1".to_owned(),
-                active: 1,
-                last_used_at: None,
-                created_at: "2026-04-12T00:00:00Z".to_owned(),
-            },
-            "org-2768603291",
-        );
-
-        assert_eq!(response.organization_id, "org-2768603291");
-        assert_eq!(response.party_id, "party-2768603291");
-        assert_eq!(response.business_no.as_deref(), Some("2768603291"));
-    }
-
-    #[test]
     fn structured_service_errors_override_string_matching() {
         let err = ApiError::from_domain(anyhow::Error::new(ServiceError::new(
             ServiceErrorKind::BadRequest,
@@ -1735,57 +836,6 @@ mod tests {
     fn generic_invalid_domain_errors_stay_internal() {
         let err = ApiError::from_domain(anyhow!("invalid internal state"));
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn decode_base64_field_ignores_ascii_whitespace() {
-        let decoded = decode_base64_field("signCertDerBase64", "  Zm9v\nYmFy\t")
-            .expect("base64 with whitespace should decode");
-        assert_eq!(decoded, b"foobar");
-    }
-
-    #[test]
-    fn proof_bundle_maps_certificate_chain_entries() {
-        let bundle = map_proof_bundle(ProofBundleRequest {
-            business_no: "2768603291".to_owned(),
-            common_name: "Test Certificate".to_owned(),
-            password: "password".to_owned(),
-            sign_cert_der_base64: "AQID".to_owned(),
-            sign_pri_key_base64: "BAUG".to_owned(),
-            km_cert_der_base64: None,
-            km_pri_key_base64: None,
-            certificate_chain_der_base64: vec!["Bwg\nJ".to_owned(), "Cg sM".to_owned()],
-        })
-        .expect("proof bundle should decode certificate chain");
-
-        assert_eq!(
-            bundle.certificate_chain_der,
-            vec![vec![7, 8, 9], vec![10, 11, 12]]
-        );
-    }
-
-    #[test]
-    fn proof_bundle_rejects_too_many_certificate_chain_entries() {
-        let err = map_proof_bundle(ProofBundleRequest {
-            business_no: "2768603291".to_owned(),
-            common_name: "Test Certificate".to_owned(),
-            password: "password".to_owned(),
-            sign_cert_der_base64: "AQID".to_owned(),
-            sign_pri_key_base64: "BAUG".to_owned(),
-            km_cert_der_base64: None,
-            km_pri_key_base64: None,
-            certificate_chain_der_base64: vec![
-                "BwgJ".to_owned();
-                MAX_CERTIFICATE_CHAIN_DER_ENTRIES + 1
-            ],
-        })
-        .expect_err("oversized certificate chain should be rejected");
-
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert!(
-            err.message
-                .contains("certificateChainDerBase64 must contain at most")
-        );
     }
 
     #[test]

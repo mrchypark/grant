@@ -70,8 +70,6 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
-            allow_untrusted_certificates: true,
-            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -106,7 +104,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
 }
 
 #[tokio::test]
-async fn organization_certificate_route_is_removed_in_favor_of_cert_gateway() {
+async fn organization_certificate_route_is_removed_with_cert_data() {
     let (service, _db, _dir) = test_service().await;
     let app = api::build_router(service);
 
@@ -149,7 +147,7 @@ async fn organization_certificate_route_is_removed_in_favor_of_cert_gateway() {
 }
 
 #[tokio::test]
-async fn organization_sync_route_replaces_business_route() {
+async fn organization_sync_route_is_removed_with_cert_data() {
     let (service, _db, _dir) = test_service().await;
     let app = api::build_router(service);
 
@@ -175,7 +173,7 @@ async fn organization_sync_route_replaces_business_route() {
         )
         .await
         .expect("response");
-    assert_eq!(new_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(new_response.status(), StatusCode::NOT_FOUND);
 
     let old_response = app
         .oneshot(

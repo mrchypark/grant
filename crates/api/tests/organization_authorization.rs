@@ -7,8 +7,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use domain::{
-    Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType,
+    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -22,7 +21,7 @@ use infra::{
     runtime::HiqliteRuntime,
     service::AppService,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -75,8 +74,6 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
-            allow_untrusted_certificates: true,
-            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -110,17 +107,6 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
     (service, db_for_tests, dir)
 }
 
-fn app_request(path: &str, token: &str, organization_id: &str, body: Value) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("content-type", "application/json")
-        .header("authorization", auth_support::bearer_header(token))
-        .header("x-organization-id", organization_id)
-        .body(Body::from(body.to_string()))
-        .expect("request")
-}
-
 fn empty_post_request(path: &str, token: &str, organization_id: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -138,52 +124,6 @@ async fn seed_creator_context(db: &Database) {
     db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("owner org");
-
-    db.upsert_role(&Role {
-        id: "role-org-plant-create".to_owned(),
-        organization_id: None,
-        code: "organization.plant.create".to_owned(),
-        name: "Org Plant Create".to_owned(),
-        description: None,
-    })
-    .await
-    .expect("upsert org create role");
-    db.upsert_role_action("role-org-plant-create", "organization.plant.create")
-        .await
-        .expect("upsert create action");
-
-    db.upsert_role(&Role {
-        id: "role-org-plant-create-for-owner".to_owned(),
-        organization_id: None,
-        code: "organization.plant.create_for_owner".to_owned(),
-        name: "Org Plant Create For Owner".to_owned(),
-        description: None,
-    })
-    .await
-    .expect("upsert org create-for-owner role");
-    db.upsert_role_action(
-        "role-org-plant-create-for-owner",
-        "organization.plant.create_for_owner",
-    )
-    .await
-    .expect("upsert create-for-owner action");
-
-    db.save_role_binding(&RoleBinding {
-        id: Uuid::new_v4().simple().to_string(),
-        subject_type: RoleBindingSubjectType::Organization,
-        subject_id: "creator-org".to_owned(),
-        subject_organization_id: "creator-org".to_owned(),
-        resource_type: RoleBindingResourceType::Organization,
-        resource_id: "creator-org".to_owned(),
-        role_id: "role-org-plant-create".to_owned(),
-        agreement_id: None,
-        state: RoleBindingState::Active,
-        created_by_user_id: "bootstrap-user".to_owned(),
-        created_at: "2026-04-03T00:00:00Z".to_owned(),
-        updated_at: "2026-04-03T00:00:00Z".to_owned(),
-    })
-    .await
-    .expect("save org create binding");
 }
 
 async fn bind_user_action(db: &Database, role_id: &str) {
@@ -221,62 +161,6 @@ async fn seed_org_permission_manage_role(db: &Database) {
     )
     .await
     .expect("upsert org permission manage action");
-}
-
-#[tokio::test]
-async fn create_plant_requires_organization_scoped_create() {
-    let (service, db, _dir) = test_service().await;
-    seed_creator_context(&db).await;
-    let app = api::build_router(service);
-
-    let response = app
-        .oneshot(app_request(
-            "/api/v1/organizations/creator-org/plants",
-            "bootstrap-user",
-            "creator-org",
-            json!({
-                "facilityCode": "FAC-001",
-                "name": "Plant One",
-                "contractNo": "CN-001",
-                "address": "Seoul",
-                "installedKw": 100.0,
-                "recStartDate": "2026-01-01",
-                "confirmIssued": "Y"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn create_for_owner_requires_extra_permission() {
-    let (service, db, _dir) = test_service().await;
-    seed_creator_context(&db).await;
-    bind_user_action(&db, "role-org-plant-create").await;
-    let app = api::build_router(service);
-
-    let response = app
-        .oneshot(app_request(
-            "/api/v1/organizations/creator-org/plants",
-            "bootstrap-user",
-            "creator-org",
-            json!({
-                "facilityCode": "FAC-002",
-                "name": "Plant Two",
-                "contractNo": "CN-002",
-                "address": "Busan",
-                "installedKw": 80.0,
-                "recStartDate": "2026-01-01",
-                "confirmIssued": "Y",
-                "ownerOrganizationId": "owner-org"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -393,93 +277,5 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
             .iter()
             .any(|item| item["id"].as_str() == Some("creator-org")),
         "reactivated organization should reappear in active organization list"
-    );
-}
-
-#[tokio::test]
-async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
-    let (service, db, _dir) = test_service().await;
-    seed_creator_context(&db).await;
-    bind_user_action(&db, "role-org-plant-create").await;
-    bind_user_action(&db, "role-org-plant-create-for-owner").await;
-    db.upsert_agreement(&Agreement {
-        id: "agreement-create-owner".to_owned(),
-        agreement_type: AgreementType::Delegation,
-        grantor_organization_id: "owner-org".to_owned(),
-        grantee_organization_id: "creator-org".to_owned(),
-        status: AgreementStatus::Active,
-        title: "Create Owner Agreement".to_owned(),
-        reference_no: None,
-        starts_at: None,
-        ends_at: None,
-    })
-    .await
-    .expect("agreement");
-
-    let app = api::build_router(service.clone());
-    let response = app
-        .oneshot(app_request(
-            "/api/v1/organizations/creator-org/plants",
-            "bootstrap-user",
-            "creator-org",
-            json!({
-                "facilityCode": "FAC-003",
-                "name": "Plant Three",
-                "contractNo": "CN-003",
-                "address": "Incheon",
-                "installedKw": 65.0,
-                "recStartDate": "2026-01-01",
-                "confirmIssued": "Y",
-                "ownerOrganizationId": "owner-org"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    let payload: Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(payload["facilityCode"], "FAC-003");
-    assert_eq!(payload["ownerOrganizationId"], "owner-org");
-    assert_eq!(payload["createdByOrganizationId"], "creator-org");
-
-    let plant = db
-        .get_plant_by_facility_code("FAC-003")
-        .await
-        .expect("created plant");
-    assert!(plant.id.starts_with("plant-"));
-    assert_ne!(plant.id, plant.facility_code);
-    assert_eq!(plant.owner_organization_id, "owner-org");
-    assert_eq!(
-        plant.created_by_organization_id.as_deref(),
-        Some("creator-org")
-    );
-
-    let visible = service
-        .list_visible_plants("bootstrap-user", "creator-org", None)
-        .await
-        .expect("creator visibility");
-    assert!(
-        visible.iter().any(|plant| plant.facility_code == "FAC-003"),
-        "creator org should retain profile visibility after create"
-    );
-
-    let can_sync = db
-        .has_user_plant_action(
-            "bootstrap-user",
-            "creator-org",
-            &plant.id,
-            "plant.sync.execute",
-        )
-        .await
-        .expect("sync action lookup");
-    assert!(
-        can_sync,
-        "creator should receive plant.sync.execute bootstrap permission after create"
     );
 }

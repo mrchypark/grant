@@ -12,29 +12,16 @@ aws-sdk-s3.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-chrono-tz.workspace = true
-curl.workspace = true
 domain = { path = "../domain" }
-futures.workspace = true
 hex.workspace = true
 hiqlite.workspace = true
-openraft.workspace = true
-openssl.workspace = true
 rand.workspace = true
-regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-sha1.workspace = true
 sha2.workspace = true
-simple_asn1.workspace = true
 tempfile.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-urlencoding.workspace = true
 uuid.workspace = true
-x509-parser.workspace = true
 
 [dev-dependencies]
 rusqlite = "0.39"

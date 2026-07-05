@@ -15,7 +15,6 @@ serde_urlencoded = "0.7"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tracing = "0.1"
 trailbase = { git = "https://github.com/trailbaseio/trailbase.git", package = "trailbase", default-features = false }
 trailbase-sqlite = { git = "https://github.com/trailbaseio/trailbase.git", package = "trailbase-sqlite" }
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -55,9 +55,9 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
     cfg.health_check_delay_secs = 0;
     cfg.raft_config = NodeConfig::default_raft_config(128);
 
-    let client = hiqlite::start_node(cfg).await.expect("start hiqlite");
+    let application = hiqlite::start_node(cfg).await.expect("start hiqlite");
     (
-        HiqliteRuntime::embedded(client, ReadConsistency::Local),
+        HiqliteRuntime::embedded(application, ReadConsistency::Local),
         dir,
     )
 }
@@ -74,8 +74,6 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             master_key: "dev-only-master-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
-            allow_untrusted_certificates: true,
-            certificate_trust_bundle_path: None,
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
         kms: support::test_kms_config(),
@@ -132,22 +130,25 @@ fn app_request(
         .expect("request")
 }
 
-async fn seed_client_manager(db: &Database, organization_id: &str) {
+async fn seed_application_manager(db: &Database, organization_id: &str) {
     db.upsert_organization_with_owner(organization_id, "Creator Org", None, "Creator Org")
         .await
         .expect("creator org");
     db.upsert_role(&Role {
-        id: "role-org-client-manage".to_owned(),
+        id: "role-org-application-manage".to_owned(),
         organization_id: None,
-        code: "organization.client.manage".to_owned(),
-        name: "Org Client Manage".to_owned(),
+        code: "organization.application.manage".to_owned(),
+        name: "Org Application Manage".to_owned(),
         description: None,
     })
     .await
-    .expect("upsert client manage role");
-    db.upsert_role_action("role-org-client-manage", "organization.client.manage")
-        .await
-        .expect("upsert client manage action");
+    .expect("upsert application manage role");
+    db.upsert_role_action(
+        "role-org-application-manage",
+        "organization.application.manage",
+    )
+    .await
+    .expect("upsert application manage action");
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::User,
@@ -155,7 +156,7 @@ async fn seed_client_manager(db: &Database, organization_id: &str) {
         subject_organization_id: organization_id.to_owned(),
         resource_type: RoleBindingResourceType::Organization,
         resource_id: organization_id.to_owned(),
-        role_id: "role-org-client-manage".to_owned(),
+        role_id: "role-org-application-manage".to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
         created_by_user_id: "bootstrap-user".to_owned(),
@@ -163,28 +164,28 @@ async fn seed_client_manager(db: &Database, organization_id: &str) {
         updated_at: "2026-04-12T00:00:00Z".to_owned(),
     })
     .await
-    .expect("save client manage binding");
+    .expect("save application manage binding");
 }
 
 #[tokio::test]
-async fn client_routes_create_list_get_and_replace_actions() {
+async fn application_routes_create_list_get_and_replace_actions() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "creator-org").await;
+    seed_application_manager(&db, "creator-org").await;
     let app = api::build_router(service);
 
     let create = app
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/clients",
+            "/api/v1/organizations/creator-org/applications",
             "bootstrap-user",
             "creator-org",
             Some(json!({
-                "id": "client-awesome-dashboard",
+                "id": "application-awesome-dashboard",
                 "slug": "awesome-dashboard",
                 "name": "Awesome Dashboard",
                 "description": "External analytics dashboard",
-                "clientType": "confidential",
+                "applicationType": "confidential",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -197,7 +198,7 @@ async fn client_routes_create_list_get_and_replace_actions() {
 
     let body = create.into_body().collect().await.expect("body").to_bytes();
     let payload: Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(payload["id"], "client-awesome-dashboard");
+    assert_eq!(payload["id"], "application-awesome-dashboard");
     assert_eq!(payload["organizationId"], "creator-org");
     assert_eq!(payload["createdByUserId"], "bootstrap-user");
 
@@ -205,7 +206,7 @@ async fn client_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/creator-org/clients",
+            "/api/v1/organizations/creator-org/applications",
             "bootstrap-user",
             "creator-org",
             None,
@@ -221,7 +222,7 @@ async fn client_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/creator-org/clients/client-awesome-dashboard",
+            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard",
             "bootstrap-user",
             "creator-org",
             None,
@@ -234,14 +235,14 @@ async fn client_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/clients/client-awesome-dashboard",
+            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard",
             "bootstrap-user",
             "creator-org",
             Some(json!({
                 "slug": "awesome-dashboard",
                 "name": "Awesome Dashboard v2",
                 "description": "Updated external analytics dashboard",
-                "clientType": "confidential",
+                "applicationType": "confidential",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -264,11 +265,11 @@ async fn client_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/clients/client-awesome-dashboard/actions",
+            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard/actions",
             "bootstrap-user",
             "creator-org",
             Some(json!({
-                "actionIds": ["plant.profile.read", "plant.report.read"]
+                "actionIds": ["organization.profile.read"]
             })),
         ))
         .await
@@ -287,15 +288,12 @@ async fn client_routes_create_list_get_and_replace_actions() {
         .iter()
         .filter_map(|item| item.get("code").and_then(Value::as_str))
         .collect();
-    assert_eq!(
-        action_codes,
-        vec!["plant.profile.read", "plant.report.read"]
-    );
+    assert_eq!(action_codes, vec!["organization.profile.read"]);
 
     let get_actions = app
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/creator-org/clients/client-awesome-dashboard/actions",
+            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard/actions",
             "bootstrap-user",
             "creator-org",
             None,
@@ -306,7 +304,7 @@ async fn client_routes_create_list_get_and_replace_actions() {
 }
 
 #[tokio::test]
-async fn client_routes_require_organization_scoped_manage_permission() {
+async fn application_routes_require_organization_scoped_manage_permission() {
     let (service, db, _dir) = test_service().await;
     db.upsert_organization_with_owner("creator-org", "Creator Org", None, "Creator Org")
         .await
@@ -316,14 +314,14 @@ async fn client_routes_require_organization_scoped_manage_permission() {
     let response = app
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/clients",
+            "/api/v1/organizations/creator-org/applications",
             "bootstrap-user",
             "creator-org",
             Some(json!({
-                "id": "client-denied",
+                "id": "application-denied",
                 "slug": "denied",
                 "name": "Denied",
-                "clientType": "public",
+                "applicationType": "public",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -337,24 +335,24 @@ async fn client_routes_require_organization_scoped_manage_permission() {
 }
 
 #[tokio::test]
-async fn client_create_cannot_rehome_existing_client_to_another_organization() {
+async fn application_create_cannot_rehome_existing_application_to_another_organization() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "org-a").await;
-    seed_client_manager(&db, "org-b").await;
+    seed_application_manager(&db, "org-a").await;
+    seed_application_manager(&db, "org-b").await;
     let app = api::build_router(service);
 
     let first = app
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-a/clients",
+            "/api/v1/organizations/org-a/applications",
             "bootstrap-user",
             "org-a",
             Some(json!({
-                "id": "client-shared",
-                "slug": "shared-client",
-                "name": "Shared Client",
-                "clientType": "confidential",
+                "id": "application-shared",
+                "slug": "shared-application",
+                "name": "Shared Application",
+                "applicationType": "confidential",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -368,14 +366,14 @@ async fn client_create_cannot_rehome_existing_client_to_another_organization() {
     let second = app
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-b/clients",
+            "/api/v1/organizations/org-b/applications",
             "bootstrap-user",
             "org-b",
             Some(json!({
-                "id": "client-shared",
-                "slug": "shared-client-org-b",
+                "id": "application-shared",
+                "slug": "shared-application-org-b",
                 "name": "Hijack Attempt",
-                "clientType": "confidential",
+                "applicationType": "confidential",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -387,32 +385,32 @@ async fn client_create_cannot_rehome_existing_client_to_another_organization() {
     assert_eq!(second.status(), StatusCode::CONFLICT);
 
     let stored = db
-        .get_client_with_consistency("client-shared", None)
+        .get_application_with_consistency("application-shared", None)
         .await
-        .expect("stored client");
+        .expect("stored application");
     assert_eq!(stored.organization_id, "org-a");
-    assert_eq!(stored.slug, "shared-client");
+    assert_eq!(stored.slug, "shared-application");
 }
 
 #[tokio::test]
-async fn client_create_reports_duplicate_slug_as_conflict() {
+async fn application_create_reports_duplicate_slug_as_conflict() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "org-a").await;
-    seed_client_manager(&db, "org-b").await;
+    seed_application_manager(&db, "org-a").await;
+    seed_application_manager(&db, "org-b").await;
     let app = api::build_router(service);
 
     let first = app
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-a/clients",
+            "/api/v1/organizations/org-a/applications",
             "bootstrap-user",
             "org-a",
             Some(json!({
-                "id": "client-a",
+                "id": "application-a",
                 "slug": "shared-slug",
-                "name": "Client A",
-                "clientType": "public",
+                "name": "Application A",
+                "applicationType": "public",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -426,14 +424,14 @@ async fn client_create_reports_duplicate_slug_as_conflict() {
     let second = app
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-b/clients",
+            "/api/v1/organizations/org-b/applications",
             "bootstrap-user",
             "org-b",
             Some(json!({
-                "id": "client-b",
+                "id": "application-b",
                 "slug": "shared-slug",
-                "name": "Client B",
-                "clientType": "public",
+                "name": "Application B",
+                "applicationType": "public",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -446,27 +444,27 @@ async fn client_create_reports_duplicate_slug_as_conflict() {
 }
 
 #[tokio::test]
-async fn client_update_reports_duplicate_slug_as_conflict() {
+async fn application_update_reports_duplicate_slug_as_conflict() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "org-a").await;
+    seed_application_manager(&db, "org-a").await;
     let app = api::build_router(service);
 
     for (id, slug, name) in [
-        ("client-a", "slug-a", "Client A"),
-        ("client-b", "slug-b", "Client B"),
+        ("application-a", "slug-a", "Application A"),
+        ("application-b", "slug-b", "Application B"),
     ] {
         let response = app
             .clone()
             .oneshot(app_request(
                 Method::POST,
-                "/api/v1/organizations/org-a/clients",
+                "/api/v1/organizations/org-a/applications",
                 "bootstrap-user",
                 "org-a",
                 Some(json!({
                     "id": id,
                     "slug": slug,
                     "name": name,
-                    "clientType": "public",
+                    "applicationType": "public",
                     "appType": "web",
                     "firstParty": false,
                     "consentPolicy": "explicit",
@@ -481,13 +479,13 @@ async fn client_update_reports_duplicate_slug_as_conflict() {
     let update = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/org-a/clients/client-b",
+            "/api/v1/organizations/org-a/applications/application-b",
             "bootstrap-user",
             "org-a",
             Some(json!({
                 "slug": "slug-a",
-                "name": "Client B Updated",
-                "clientType": "public",
+                "name": "Application B Updated",
+                "applicationType": "public",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -500,23 +498,23 @@ async fn client_update_reports_duplicate_slug_as_conflict() {
 }
 
 #[tokio::test]
-async fn replace_client_actions_rejects_requests_over_sqlite_parameter_limit() {
+async fn replace_application_actions_rejects_requests_over_sqlite_parameter_limit() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "creator-org").await;
+    seed_application_manager(&db, "creator-org").await;
     let app = api::build_router(service);
 
     let create = app
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/clients",
+            "/api/v1/organizations/creator-org/applications",
             "bootstrap-user",
             "creator-org",
             Some(json!({
-                "id": "client-action-limit",
+                "id": "application-action-limit",
                 "slug": "action-limit",
                 "name": "Action Limit",
-                "clientType": "confidential",
+                "applicationType": "confidential",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -530,7 +528,7 @@ async fn replace_client_actions_rejects_requests_over_sqlite_parameter_limit() {
     let replace = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/clients/client-action-limit/actions",
+            "/api/v1/organizations/creator-org/applications/application-action-limit/actions",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -551,24 +549,24 @@ async fn replace_client_actions_rejects_requests_over_sqlite_parameter_limit() {
 }
 
 #[tokio::test]
-async fn client_routes_hide_clients_owned_by_other_organizations() {
+async fn application_routes_hide_applications_owned_by_other_organizations() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "org-a").await;
-    seed_client_manager(&db, "org-b").await;
+    seed_application_manager(&db, "org-a").await;
+    seed_application_manager(&db, "org-b").await;
     let app = api::build_router(service);
 
     let create = app
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-a/clients",
+            "/api/v1/organizations/org-a/applications",
             "bootstrap-user",
             "org-a",
             Some(json!({
-                "id": "client-owned-by-a",
+                "id": "application-owned-by-a",
                 "slug": "owned-by-a",
                 "name": "Owned by A",
-                "clientType": "confidential",
+                "applicationType": "confidential",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -583,7 +581,7 @@ async fn client_routes_hide_clients_owned_by_other_organizations() {
         .clone()
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/org-b/clients/client-owned-by-a",
+            "/api/v1/organizations/org-b/applications/application-owned-by-a",
             "bootstrap-user",
             "org-b",
             None,
@@ -595,11 +593,11 @@ async fn client_routes_hide_clients_owned_by_other_organizations() {
     let replace_actions = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/org-b/clients/client-owned-by-a/actions",
+            "/api/v1/organizations/org-b/applications/application-owned-by-a/actions",
             "bootstrap-user",
             "org-b",
             Some(json!({
-                "actionIds": ["plant.profile.read"]
+                "actionIds": ["organization.profile.read"]
             })),
         ))
         .await
@@ -608,16 +606,16 @@ async fn client_routes_hide_clients_owned_by_other_organizations() {
 }
 
 #[tokio::test]
-async fn client_routes_forbid_path_organization_mismatch() {
+async fn application_routes_forbid_path_organization_mismatch() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "org-a").await;
-    seed_client_manager(&db, "org-b").await;
+    seed_application_manager(&db, "org-a").await;
+    seed_application_manager(&db, "org-b").await;
     let app = api::build_router(service);
 
     let response = app
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/org-a/clients",
+            "/api/v1/organizations/org-a/applications",
             "bootstrap-user",
             "org-b",
             None,
@@ -628,23 +626,23 @@ async fn client_routes_forbid_path_organization_mismatch() {
 }
 
 #[tokio::test]
-async fn client_routes_reject_invalid_action_ids_as_bad_request() {
+async fn application_routes_reject_invalid_action_ids_as_bad_request() {
     let (service, db, _dir) = test_service().await;
-    seed_client_manager(&db, "creator-org").await;
+    seed_application_manager(&db, "creator-org").await;
     let app = api::build_router(service);
 
     let create = app
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/clients",
+            "/api/v1/organizations/creator-org/applications",
             "bootstrap-user",
             "creator-org",
             Some(json!({
-                "id": "client-invalid-actions",
+                "id": "application-invalid-actions",
                 "slug": "invalid-actions",
                 "name": "Invalid Actions",
-                "clientType": "public",
+                "applicationType": "public",
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -658,7 +656,7 @@ async fn client_routes_reject_invalid_action_ids_as_bad_request() {
     let response = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/clients/client-invalid-actions/actions",
+            "/api/v1/organizations/creator-org/applications/application-invalid-actions/actions",
             "bootstrap-user",
             "creator-org",
             Some(json!({

@@ -23,8 +23,6 @@ fn clear_certd_env() {
         "CERTD_TRAILBASE_INTERNAL_SECRET",
         "CERTD_TRAILBASE_CACHE_TTL_SECONDS",
         "CERTD_MASTER_KEY",
-        "CERTD_ALLOW_UNTRUSTED_CERTIFICATES",
-        "CERTD_CERT_TRUST_BUNDLE_PATH",
         "CERTD_KMS_ACTIVE_KEY_ID",
         "CERTD_KMS_MASTER_KEYS",
     ] {
@@ -58,32 +56,12 @@ fn loads_default_config() {
     );
     assert_eq!(cfg.kms.active_key_id, "test-kms-key");
     assert_eq!(cfg.hiqlite.runtime_mode, RuntimeMode::Embedded);
-    assert!(!cfg.security.allow_untrusted_certificates);
-    assert_eq!(cfg.security.certificate_trust_bundle_path, None);
     assert_eq!(cfg.hiqlite.local_node_role, LocalNodeRole::Voter);
     assert_eq!(cfg.hiqlite.default_read_consistency, ReadConsistency::Local);
     match cfg.artifacts.backend {
         ArtifactBackendConfig::FileSystem { .. } => {}
         other => panic!("expected filesystem artifacts backend, got {other:?}"),
     }
-}
-
-#[test]
-fn loads_security_certificate_trust_bundle_path_from_env() {
-    let _guard = env_lock().lock().expect("env lock");
-    clear_certd_env();
-    set_test_kms_env();
-    unsafe {
-        std::env::set_var("CERTD_TRAILBASE_INTERNAL_SECRET", "trust-secret");
-        std::env::set_var("CERTD_CERT_TRUST_BUNDLE_PATH", "/etc/ssl/certs/custom.pem");
-    }
-
-    let cfg = AppConfig::from_env().expect("config");
-
-    assert_eq!(
-        cfg.security.certificate_trust_bundle_path.as_deref(),
-        Some(std::path::Path::new("/etc/ssl/certs/custom.pem"))
-    );
 }
 
 #[test]
