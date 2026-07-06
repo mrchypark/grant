@@ -3,8 +3,8 @@ use domain::{
     ApplicationAction, ApplicationAppType, ApplicationConsentPolicy, ApplicationGrant,
     ApplicationGrantAction, ApplicationGrantStatus, ApplicationType, Group, MembershipRole,
     MembershipStatus, Organization, OrganizationMembership, OrganizationPartyLink,
-    OrganizationPartyRelationType, Party, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType, User,
+    OrganizationPartyRelationType, Party, Role, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType, User,
 };
 
 #[test]
@@ -59,6 +59,7 @@ fn serializes_account_models() {
     };
     let action = Action {
         id: "action_1".into(),
+        provider_id: "account".into(),
         code: "organization.application.manage".into(),
         name: "Application Manage".into(),
         description: Some("Manage organization applications".into()),
@@ -113,7 +114,8 @@ fn serializes_account_models() {
         subject_type: RoleBindingSubjectType::Group,
         subject_id: group.id.clone(),
         subject_organization_id: organization.id.clone(),
-        resource_type: RoleBindingResourceType::Organization,
+        provider_id: "account".into(),
+        resource_type: "organization".into(),
         resource_id: organization.id.clone(),
         role_id: role.id.clone(),
         agreement_id: Some(agreement.id.clone()),

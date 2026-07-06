@@ -146,6 +146,7 @@ pub enum AgreementStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Action {
     pub id: String,
+    pub provider_id: String,
     pub code: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,7 +267,8 @@ pub struct RoleBinding {
     pub subject_type: RoleBindingSubjectType,
     pub subject_id: String,
     pub subject_organization_id: String,
-    pub resource_type: RoleBindingResourceType,
+    pub provider_id: String,
+    pub resource_type: String,
     pub resource_id: String,
     pub role_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,9 +288,13 @@ pub enum RoleBindingSubjectType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RoleBindingResourceType {
-    Organization,
+#[serde(rename_all = "camelCase")]
+pub struct ServiceProvider {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

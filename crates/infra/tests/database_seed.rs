@@ -1,8 +1,7 @@
 use domain::{
     Agreement, AgreementStatus, AgreementType, Application, ApplicationAction, ApplicationAppType,
     ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantAction, ApplicationGrantStatus,
-    ApplicationType, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
-    RoleBindingSubjectType,
+    ApplicationType, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
@@ -497,7 +496,8 @@ async fn agreement_backed_organization_binding_grants_cross_org_action() {
             subject_type: RoleBindingSubjectType::Organization,
             subject_id: "grantee-org".to_owned(),
             subject_organization_id: "grantee-org".to_owned(),
-            resource_type: RoleBindingResourceType::Organization,
+            provider_id: "account".to_owned(),
+            resource_type: "organization".to_owned(),
             resource_id: "grantor-org".to_owned(),
             role_id: "role-organization-profile-reader".to_owned(),
             agreement_id: None,
@@ -532,7 +532,8 @@ async fn agreement_backed_organization_binding_grants_cross_org_action() {
         subject_type: RoleBindingSubjectType::Organization,
         subject_id: "grantee-org".to_owned(),
         subject_organization_id: "grantee-org".to_owned(),
-        resource_type: RoleBindingResourceType::Organization,
+        provider_id: "account".to_owned(),
+        resource_type: "organization".to_owned(),
         resource_id: "grantor-org".to_owned(),
         role_id: "role-organization-profile-reader".to_owned(),
         agreement_id: Some("agreement-grantor-grantee".to_owned()),

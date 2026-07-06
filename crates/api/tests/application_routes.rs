@@ -6,9 +6,7 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
-use domain::{
-    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
-};
+use domain::{Role, RoleBinding, RoleBindingState, RoleBindingSubjectType};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
@@ -154,7 +152,8 @@ async fn seed_application_manager(db: &Database, organization_id: &str) {
         subject_type: RoleBindingSubjectType::User,
         subject_id: "bootstrap-user".to_owned(),
         subject_organization_id: organization_id.to_owned(),
-        resource_type: RoleBindingResourceType::Organization,
+        provider_id: "account".to_owned(),
+        resource_type: "organization".to_owned(),
         resource_id: organization_id.to_owned(),
         role_id: "role-org-application-manage".to_owned(),
         agreement_id: None,
@@ -177,7 +176,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/applications",
+            "/api/v1/orgs/creator-org/apps",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -206,7 +205,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/creator-org/applications",
+            "/api/v1/orgs/creator-org/apps",
             "bootstrap-user",
             "creator-org",
             None,
@@ -222,7 +221,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard",
+            "/api/v1/orgs/creator-org/apps/application-awesome-dashboard",
             "bootstrap-user",
             "creator-org",
             None,
@@ -235,7 +234,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard",
+            "/api/v1/orgs/creator-org/apps/application-awesome-dashboard",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -265,7 +264,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
         .clone()
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard/actions",
+            "/api/v1/orgs/creator-org/apps/application-awesome-dashboard/actions",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -293,7 +292,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
     let get_actions = app
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/creator-org/applications/application-awesome-dashboard/actions",
+            "/api/v1/orgs/creator-org/apps/application-awesome-dashboard/actions",
             "bootstrap-user",
             "creator-org",
             None,
@@ -301,6 +300,166 @@ async fn application_routes_create_list_get_and_replace_actions() {
         .await
         .expect("get actions response");
     assert_eq!(get_actions.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn application_grant_routes_create_list_replace_actions_and_revoke() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+
+    let create_app = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "application-grant-target",
+                "slug": "grant-target",
+                "name": "Grant Target",
+                "description": null,
+                "applicationType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": true
+            })),
+        ))
+        .await
+        .expect("create app response");
+    assert_eq!(create_app.status(), StatusCode::CREATED);
+
+    let replace_app_actions = app
+        .clone()
+        .oneshot(app_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/apps/application-grant-target/actions",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "actionIds": ["organization.profile.read"]
+            })),
+        ))
+        .await
+        .expect("replace app actions response");
+    assert_eq!(replace_app_actions.status(), StatusCode::OK);
+
+    let invalid_grant = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/app-grants",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "grant-invalid-action",
+                "userId": "bootstrap-user",
+                "applicationId": "application-grant-target",
+                "actionIds": ["organization.permission.manage"]
+            })),
+        ))
+        .await
+        .expect("invalid grant response");
+    assert_eq!(invalid_grant.status(), StatusCode::BAD_REQUEST);
+    let list_after_invalid = app
+        .clone()
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/app-grants",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list after invalid response");
+    assert_eq!(list_after_invalid.status(), StatusCode::OK);
+    let list_after_invalid_body = list_after_invalid
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let listed_after_invalid: Value =
+        serde_json::from_slice(&list_after_invalid_body).expect("json");
+    assert_eq!(listed_after_invalid.as_array().map(Vec::len), Some(0));
+
+    let create_grant = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/app-grants",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "grant-bootstrap-application",
+                "userId": "bootstrap-user",
+                "applicationId": "application-grant-target",
+                "actionIds": ["organization.profile.read"]
+            })),
+        ))
+        .await
+        .expect("create grant response");
+    let create_grant_status = create_grant.status();
+    let create_grant_body = create_grant
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let create_grant_payload: Value = serde_json::from_slice(&create_grant_body).expect("json");
+    assert_eq!(
+        create_grant_status,
+        StatusCode::CREATED,
+        "create grant response body: {create_grant_payload}"
+    );
+
+    let list = app
+        .clone()
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/app-grants",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list grants response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = list.into_body().collect().await.expect("body").to_bytes();
+    let listed: Value = serde_json::from_slice(&list_body).expect("json");
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+
+    let replace_grant_actions = app
+        .clone()
+        .oneshot(app_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/app-grants/grant-bootstrap-application/actions",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "actionIds": ["organization.profile.read"]
+            })),
+        ))
+        .await
+        .expect("replace grant actions response");
+    assert_eq!(replace_grant_actions.status(), StatusCode::OK);
+
+    let revoke = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/app-grants/grant-bootstrap-application/revoke",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("revoke response");
+    assert_eq!(revoke.status(), StatusCode::OK);
+    let revoke_body = revoke.into_body().collect().await.expect("body").to_bytes();
+    let revoked: Value = serde_json::from_slice(&revoke_body).expect("json");
+    assert_eq!(revoked["status"], "revoked");
 }
 
 #[tokio::test]
@@ -314,7 +473,7 @@ async fn application_routes_require_organization_scoped_manage_permission() {
     let response = app
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/applications",
+            "/api/v1/orgs/creator-org/apps",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -345,7 +504,7 @@ async fn application_create_cannot_rehome_existing_application_to_another_organi
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-a/applications",
+            "/api/v1/orgs/org-a/apps",
             "bootstrap-user",
             "org-a",
             Some(json!({
@@ -366,7 +525,7 @@ async fn application_create_cannot_rehome_existing_application_to_another_organi
     let second = app
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-b/applications",
+            "/api/v1/orgs/org-b/apps",
             "bootstrap-user",
             "org-b",
             Some(json!({
@@ -403,7 +562,7 @@ async fn application_create_reports_duplicate_slug_as_conflict() {
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-a/applications",
+            "/api/v1/orgs/org-a/apps",
             "bootstrap-user",
             "org-a",
             Some(json!({
@@ -424,7 +583,7 @@ async fn application_create_reports_duplicate_slug_as_conflict() {
     let second = app
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-b/applications",
+            "/api/v1/orgs/org-b/apps",
             "bootstrap-user",
             "org-b",
             Some(json!({
@@ -457,7 +616,7 @@ async fn application_update_reports_duplicate_slug_as_conflict() {
             .clone()
             .oneshot(app_request(
                 Method::POST,
-                "/api/v1/organizations/org-a/applications",
+                "/api/v1/orgs/org-a/apps",
                 "bootstrap-user",
                 "org-a",
                 Some(json!({
@@ -479,7 +638,7 @@ async fn application_update_reports_duplicate_slug_as_conflict() {
     let update = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/org-a/applications/application-b",
+            "/api/v1/orgs/org-a/apps/application-b",
             "bootstrap-user",
             "org-a",
             Some(json!({
@@ -507,7 +666,7 @@ async fn replace_application_actions_rejects_requests_over_sqlite_parameter_limi
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/applications",
+            "/api/v1/orgs/creator-org/apps",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -528,7 +687,7 @@ async fn replace_application_actions_rejects_requests_over_sqlite_parameter_limi
     let replace = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/applications/application-action-limit/actions",
+            "/api/v1/orgs/creator-org/apps/application-action-limit/actions",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -559,7 +718,7 @@ async fn application_routes_hide_applications_owned_by_other_organizations() {
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/org-a/applications",
+            "/api/v1/orgs/org-a/apps",
             "bootstrap-user",
             "org-a",
             Some(json!({
@@ -581,7 +740,7 @@ async fn application_routes_hide_applications_owned_by_other_organizations() {
         .clone()
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/org-b/applications/application-owned-by-a",
+            "/api/v1/orgs/org-b/apps/application-owned-by-a",
             "bootstrap-user",
             "org-b",
             None,
@@ -593,7 +752,7 @@ async fn application_routes_hide_applications_owned_by_other_organizations() {
     let replace_actions = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/org-b/applications/application-owned-by-a/actions",
+            "/api/v1/orgs/org-b/apps/application-owned-by-a/actions",
             "bootstrap-user",
             "org-b",
             Some(json!({
@@ -615,7 +774,7 @@ async fn application_routes_forbid_path_organization_mismatch() {
     let response = app
         .oneshot(app_request(
             Method::GET,
-            "/api/v1/organizations/org-a/applications",
+            "/api/v1/orgs/org-a/apps",
             "bootstrap-user",
             "org-b",
             None,
@@ -635,7 +794,7 @@ async fn application_routes_reject_invalid_action_ids_as_bad_request() {
         .clone()
         .oneshot(app_request(
             Method::POST,
-            "/api/v1/organizations/creator-org/applications",
+            "/api/v1/orgs/creator-org/apps",
             "bootstrap-user",
             "creator-org",
             Some(json!({
@@ -656,7 +815,7 @@ async fn application_routes_reject_invalid_action_ids_as_bad_request() {
     let response = app
         .oneshot(app_request(
             Method::PUT,
-            "/api/v1/organizations/creator-org/applications/application-invalid-actions/actions",
+            "/api/v1/orgs/creator-org/apps/application-invalid-actions/actions",
             "bootstrap-user",
             "creator-org",
             Some(json!({

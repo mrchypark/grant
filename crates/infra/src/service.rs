@@ -7,13 +7,17 @@ use crate::{
     database::{BackupEntry, Database},
 };
 use anyhow::Result;
+use chrono::Utc;
 use domain::{
-    Action, Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationType,
-    HealthStatus, Organization, RoleBinding, RoleBindingResourceType, RoleBindingSubjectType, User,
+    Action, Agreement, AgreementStatus, AgreementType, Application, ApplicationAppType,
+    ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus, ApplicationType,
+    HealthStatus, Organization, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
+    ServiceProvider, User,
 };
 use std::{error::Error as StdError, fmt};
 
 const MAX_APPLICATION_ACTION_IDS_PER_REQUEST: usize = 999;
+const MAX_ACTION_IDS_PER_REQUEST: usize = 999;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -82,6 +86,69 @@ pub struct UpdateApplicationInput {
     pub first_party: bool,
     pub consent_policy: ApplicationConsentPolicy,
     pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertAgreementInput {
+    pub id: String,
+    pub agreement_type: AgreementType,
+    pub grantor_organization_id: String,
+    pub grantee_organization_id: String,
+    pub status: AgreementStatus,
+    pub title: String,
+    pub reference_no: Option<String>,
+    pub starts_at: Option<String>,
+    pub ends_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateApplicationGrantInput {
+    pub id: String,
+    pub user_id: String,
+    pub application_id: String,
+    pub action_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRoleInput {
+    pub id: String,
+    pub code: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRoleBindingInput {
+    pub id: String,
+    pub subject_type: RoleBindingSubjectType,
+    pub subject_id: String,
+    pub subject_organization_id: String,
+    pub provider_id: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub role_id: String,
+    pub agreement_id: Option<String>,
+    pub state: RoleBindingState,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizationSubject {
+    pub subject_type: String,
+    pub id: String,
+    pub organization_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizationResource {
+    pub provider_id: String,
+    pub resource_type: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizationDecision {
+    pub allowed: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +321,74 @@ impl AppService {
             .await
     }
 
+    pub async fn list_service_providers(
+        &self,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<ServiceProvider>> {
+        self.db
+            .list_service_providers_with_consistency(read_consistency)
+            .await
+    }
+
+    pub async fn upsert_service_provider_admin(
+        &self,
+        provider: ServiceProvider,
+    ) -> Result<ServiceProvider> {
+        let provider = ServiceProvider {
+            id: require_non_empty("id", &provider.id)?,
+            name: require_non_empty("name", &provider.name)?,
+            description: normalize_optional_text(provider.description),
+            active: provider.active,
+        };
+        self.db.upsert_service_provider(&provider).await?;
+        Ok(provider)
+    }
+
+    pub async fn replace_provider_actions_admin(
+        &self,
+        provider_id: &str,
+        actions: Vec<Action>,
+    ) -> Result<Vec<Action>> {
+        let provider_id = require_non_empty("providerId", provider_id)?;
+        if actions.len() > MAX_ACTION_IDS_PER_REQUEST {
+            return Err(bad_request_error(format!(
+                "actions must contain at most {MAX_ACTION_IDS_PER_REQUEST} items"
+            )));
+        }
+        let actions = actions
+            .into_iter()
+            .map(|action| {
+                let id = require_non_empty("action.id", &action.id)?;
+                let code = require_non_empty("action.code", &action.code)?;
+                if id != code {
+                    return Err(bad_request_error(
+                        "action.id must match action.code for manifest actions",
+                    ));
+                }
+                if action.provider_id != provider_id {
+                    return Err(bad_request_error(format!(
+                        "action {id} providerId must match path providerId"
+                    )));
+                }
+                Ok(Action {
+                    id,
+                    provider_id: provider_id.clone(),
+                    code,
+                    name: require_non_empty("action.name", &action.name)?,
+                    description: normalize_optional_text(action.description),
+                    risk_level: action.risk_level,
+                    visibility_granting: action.visibility_granting,
+                    grantable_to_applications: action.grantable_to_applications,
+                    consent_label: normalize_optional_text(action.consent_label),
+                    consent_description: normalize_optional_text(action.consent_description),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.db
+            .replace_provider_actions(&provider_id, &actions)
+            .await
+    }
+
     pub async fn get_application_authorized(
         &self,
         user_id: &str,
@@ -394,6 +529,508 @@ impl AppService {
             .await
     }
 
+    pub async fn list_application_grants_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<ApplicationGrant>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.application.manage",
+            "manage organization application grants",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_application_grants_for_organization_with_consistency(
+                organization_id,
+                read_consistency,
+            )
+            .await
+    }
+
+    pub async fn create_application_grant_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: CreateApplicationGrantInput,
+    ) -> Result<ApplicationGrant> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.application.manage",
+            "manage organization application grants",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let target_user_id = require_non_empty("userId", &input.user_id)?;
+        if !self
+            .db
+            .has_organization_membership_with_consistency(
+                &target_user_id,
+                organization_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?
+        {
+            return Err(forbidden_error(format!(
+                "forbidden: user {target_user_id} is not a member of organization {organization_id}"
+            )));
+        }
+        let application_id = require_non_empty("applicationId", &input.application_id)?;
+        let application = self
+            .db
+            .get_application_with_consistency(&application_id, Some(ReadConsistency::Strong))
+            .await?;
+        if application.organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "application not found: {} in organization {}",
+                application_id, organization_id
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let grant = ApplicationGrant {
+            id: require_non_empty("id", &input.id)?,
+            user_id: target_user_id,
+            application_id,
+            organization_id: organization_id.to_owned(),
+            status: ApplicationGrantStatus::Active,
+            consented_at: now.clone(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.db
+            .validate_application_grant_action_subset(&grant.application_id, &input.action_ids)
+            .await?;
+        let grant_id = self.db.insert_application_grant(&grant).await?;
+        self.db
+            .replace_application_grant_actions(&grant_id, &input.action_ids)
+            .await?;
+        self.db
+            .get_application_grant_with_consistency(&grant_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
+    pub async fn replace_application_grant_actions_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        grant_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.application.manage",
+            "manage organization application grants",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        if action_ids.len() > MAX_ACTION_IDS_PER_REQUEST {
+            return Err(bad_request_error(format!(
+                "actionIds must contain at most {MAX_ACTION_IDS_PER_REQUEST} items"
+            )));
+        }
+        let grant = self
+            .db
+            .get_application_grant_with_consistency(grant_id, Some(ReadConsistency::Strong))
+            .await?;
+        ensure_application_grant_org_scope(&grant, organization_id)?;
+        self.db
+            .replace_application_grant_actions(grant_id, action_ids)
+            .await
+    }
+
+    pub async fn revoke_application_grant_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        grant_id: &str,
+    ) -> Result<ApplicationGrant> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.application.manage",
+            "manage organization application grants",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let grant = self
+            .db
+            .get_application_grant_with_consistency(grant_id, Some(ReadConsistency::Strong))
+            .await?;
+        ensure_application_grant_org_scope(&grant, organization_id)?;
+        self.db.revoke_application_grant(grant_id, user_id).await
+    }
+
+    pub async fn list_agreements_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Agreement>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization agreements",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_agreements_for_organization_with_consistency(organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn get_agreement_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        agreement_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Agreement> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization agreements",
+            read_consistency.clone(),
+        )
+        .await?;
+        let agreement = self
+            .db
+            .get_agreement_with_consistency(agreement_id, read_consistency)
+            .await?;
+        ensure_agreement_org_scope(&agreement, organization_id)?;
+        Ok(agreement)
+    }
+
+    pub async fn upsert_agreement_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: UpsertAgreementInput,
+    ) -> Result<Agreement> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization agreements",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let agreement = Agreement {
+            id: require_non_empty("id", &input.id)?,
+            agreement_type: input.agreement_type,
+            grantor_organization_id: require_non_empty(
+                "grantorOrganizationId",
+                &input.grantor_organization_id,
+            )?,
+            grantee_organization_id: require_non_empty(
+                "granteeOrganizationId",
+                &input.grantee_organization_id,
+            )?,
+            status: input.status,
+            title: require_non_empty("title", &input.title)?,
+            reference_no: normalize_optional_text(input.reference_no),
+            starts_at: normalize_optional_text(input.starts_at),
+            ends_at: normalize_optional_text(input.ends_at),
+        };
+        ensure_agreement_org_scope(&agreement, organization_id)?;
+        self.db
+            .get_organization(&agreement.grantor_organization_id)
+            .await?;
+        self.db
+            .get_organization(&agreement.grantee_organization_id)
+            .await?;
+        self.db.upsert_agreement(&agreement).await?;
+        Ok(agreement)
+    }
+
+    pub async fn create_agreement_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: UpsertAgreementInput,
+    ) -> Result<Agreement> {
+        if self
+            .db
+            .find_agreement_by_id_with_consistency(&input.id, Some(ReadConsistency::Strong))
+            .await?
+            .is_some()
+        {
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                format!("agreement already exists: {}", input.id),
+            ));
+        }
+        if input.grantor_organization_id != organization_id {
+            return Err(forbidden_error(format!(
+                "forbidden: only grantor organization {} can create agreement {}",
+                input.grantor_organization_id, input.id
+            )));
+        }
+        self.upsert_agreement_authorized(user_id, organization_id, input)
+            .await
+    }
+
+    pub async fn update_agreement_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        agreement_id: &str,
+        input: UpsertAgreementInput,
+    ) -> Result<Agreement> {
+        let existing = self
+            .get_agreement_authorized(
+                user_id,
+                organization_id,
+                agreement_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if input.id != agreement_id {
+            return Err(bad_request_error("agreement id must match path id"));
+        }
+        if input.grantor_organization_id != existing.grantor_organization_id
+            || input.grantee_organization_id != existing.grantee_organization_id
+        {
+            return Err(bad_request_error(
+                "agreement grantorOrganizationId and granteeOrganizationId cannot be changed",
+            ));
+        }
+        if existing.grantor_organization_id != organization_id
+            && (input.status != existing.status
+                || input.starts_at != existing.starts_at
+                || input.ends_at != existing.ends_at)
+        {
+            return Err(forbidden_error(format!(
+                "forbidden: only grantor organization {} can change agreement authorization terms",
+                existing.grantor_organization_id
+            )));
+        }
+        self.upsert_agreement_authorized(user_id, organization_id, input)
+            .await
+    }
+
+    pub async fn list_roles_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Role>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization roles",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_roles_for_organization_with_consistency(organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn create_role_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: CreateRoleInput,
+    ) -> Result<Role> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization roles",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let role = Role {
+            id: require_non_empty("id", &input.id)?,
+            organization_id: Some(organization_id.to_owned()),
+            code: require_non_empty("code", &input.code)?,
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+        };
+        self.db.insert_role(&role).await?;
+        Ok(role)
+    }
+
+    pub async fn replace_role_actions_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        role_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization roles",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        if action_ids.len() > MAX_ACTION_IDS_PER_REQUEST {
+            return Err(bad_request_error(format!(
+                "actionIds must contain at most {MAX_ACTION_IDS_PER_REQUEST} items"
+            )));
+        }
+        let role = self
+            .db
+            .get_role_with_consistency(role_id, Some(ReadConsistency::Strong))
+            .await?;
+        if role.organization_id.as_deref() != Some(organization_id) {
+            return Err(not_found_error(format!(
+                "role not found: {} in organization {}",
+                role_id, organization_id
+            )));
+        }
+        self.db.replace_role_actions(role_id, action_ids).await
+    }
+
+    pub async fn list_role_bindings_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<RoleBinding>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization role bindings",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_role_bindings_for_organization_with_consistency(organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn create_role_binding_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: CreateRoleBindingInput,
+    ) -> Result<RoleBinding> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization role bindings",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        if input.subject_organization_id != organization_id {
+            return Err(forbidden_error(format!(
+                "forbidden: role binding subject organization {} does not match path organization {}",
+                input.subject_organization_id, organization_id
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let binding = RoleBinding {
+            id: require_non_empty("id", &input.id)?,
+            subject_type: input.subject_type,
+            subject_id: require_non_empty("subjectId", &input.subject_id)?,
+            subject_organization_id: organization_id.to_owned(),
+            provider_id: require_non_empty("providerId", &input.provider_id)?,
+            resource_type: require_non_empty("resourceType", &input.resource_type)?,
+            resource_id: require_non_empty("resourceId", &input.resource_id)?,
+            role_id: require_non_empty("roleId", &input.role_id)?,
+            agreement_id: normalize_optional_text(input.agreement_id),
+            state: input.state,
+            created_by_user_id: user_id.to_owned(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.db.insert_role_binding(&binding).await?;
+        Ok(binding)
+    }
+
+    pub async fn delete_role_binding_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        binding_id: &str,
+    ) -> Result<()> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.permission.manage",
+            "manage organization role bindings",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let binding = self
+            .db
+            .get_role_binding_with_consistency(binding_id, Some(ReadConsistency::Strong))
+            .await?;
+        if binding.subject_organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "role binding not found: {} in organization {}",
+                binding_id, organization_id
+            )));
+        }
+        self.db.delete_role_binding(binding_id).await
+    }
+
+    pub async fn check_authorization(
+        &self,
+        subject: &AuthorizationSubject,
+        action: &str,
+        resource: &AuthorizationResource,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<AuthorizationDecision> {
+        if subject.subject_type != "user" {
+            return Err(bad_request_error("only user authz subjects are supported"));
+        }
+        let subject_id = require_non_empty("subject.id", &subject.id)?;
+        let organization_id = require_non_empty("subject.orgId", &subject.organization_id)?;
+        let action = require_non_empty("action", action)?;
+        let provider_id = require_non_empty("resource.provider", &resource.provider_id)?;
+        let resource_type = require_non_empty("resource.type", &resource.resource_type)?;
+        let resource_id = require_non_empty("resource.id", &resource.id)?;
+        let allowed = self
+            .db
+            .has_user_action_with_consistency(
+                &subject_id,
+                &organization_id,
+                &provider_id,
+                &resource_type,
+                &resource_id,
+                &action,
+                read_consistency,
+            )
+            .await?;
+        Ok(AuthorizationDecision {
+            allowed,
+            reason: if allowed {
+                "role_binding".to_owned()
+            } else {
+                "no_matching_binding".to_owned()
+            },
+        })
+    }
+
     pub async fn deactivate_organization(
         &self,
         user_id: &str,
@@ -455,11 +1092,12 @@ impl AppService {
 
     pub async fn list_role_bindings_for_resource(
         &self,
-        resource_type: RoleBindingResourceType,
+        provider_id: &str,
+        resource_type: &str,
         resource_id: &str,
     ) -> Result<Vec<RoleBinding>> {
         self.db
-            .list_role_bindings_for_resource(resource_type, resource_id)
+            .list_role_bindings_for_resource(provider_id, resource_type, resource_id)
             .await
     }
 
@@ -550,6 +1188,31 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
             Some(trimmed.to_owned())
         }
     })
+}
+
+fn ensure_agreement_org_scope(agreement: &Agreement, organization_id: &str) -> Result<()> {
+    if agreement.grantor_organization_id == organization_id
+        || agreement.grantee_organization_id == organization_id
+    {
+        return Ok(());
+    }
+    Err(not_found_error(format!(
+        "agreement not found: {} in organization {}",
+        agreement.id, organization_id
+    )))
+}
+
+fn ensure_application_grant_org_scope(
+    grant: &ApplicationGrant,
+    organization_id: &str,
+) -> Result<()> {
+    if grant.organization_id == organization_id {
+        return Ok(());
+    }
+    Err(not_found_error(format!(
+        "application grant not found: {} in organization {}",
+        grant.id, organization_id
+    )))
 }
 
 fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::Error {

@@ -4,11 +4,9 @@ mod support;
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Method, Request, StatusCode},
 };
-use domain::{
-    Role, RoleBinding, RoleBindingResourceType, RoleBindingState, RoleBindingSubjectType,
-};
+use domain::{Role, RoleBinding, RoleBindingState, RoleBindingSubjectType};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
@@ -21,7 +19,7 @@ use infra::{
     runtime::HiqliteRuntime,
     service::AppService,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -117,6 +115,33 @@ fn empty_post_request(path: &str, token: &str, organization_id: &str) -> Request
         .expect("request")
 }
 
+fn json_request(
+    method: Method,
+    path: &str,
+    token: &str,
+    organization_id: &str,
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", auth_support::bearer_header(token))
+        .header("x-organization-id", organization_id)
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+fn master_json_request(method: Method, path: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("x-certd-master-key", "dev-only-master-key")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
 async fn seed_creator_context(db: &Database) {
     db.upsert_organization_with_owner("creator-org", "Creator Org", None, "Creator Org")
         .await
@@ -127,13 +152,18 @@ async fn seed_creator_context(db: &Database) {
 }
 
 async fn bind_user_action(db: &Database, role_id: &str) {
+    bind_user_action_for_org(db, role_id, "creator-org").await;
+}
+
+async fn bind_user_action_for_org(db: &Database, role_id: &str, organization_id: &str) {
     db.save_role_binding(&RoleBinding {
         id: Uuid::new_v4().simple().to_string(),
         subject_type: RoleBindingSubjectType::User,
         subject_id: "bootstrap-user".to_owned(),
-        subject_organization_id: "creator-org".to_owned(),
-        resource_type: RoleBindingResourceType::Organization,
-        resource_id: "creator-org".to_owned(),
+        subject_organization_id: organization_id.to_owned(),
+        provider_id: "account".to_owned(),
+        resource_type: "organization".to_owned(),
+        resource_id: organization_id.to_owned(),
         role_id: role_id.to_owned(),
         agreement_id: None,
         state: RoleBindingState::Active,
@@ -164,6 +194,506 @@ async fn seed_org_permission_manage_role(db: &Database) {
 }
 
 #[tokio::test]
+async fn agreement_routes_require_permission_manage_and_round_trip() {
+    let (service, db, _dir) = test_service().await;
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    let app = api::build_router(service);
+    let create_body = json!({
+        "id": "agreement-creator-owner",
+        "agreementType": "delegation",
+        "grantorOrganizationId": "creator-org",
+        "granteeOrganizationId": "owner-org",
+        "status": "draft",
+        "title": "Creator Owner Agreement",
+        "referenceNo": "AGR-1",
+        "startsAt": "2026-07-01T00:00:00Z",
+        "endsAt": null
+    });
+
+    let forbidden = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/agreements",
+            "bootstrap-user",
+            "creator-org",
+            create_body.clone(),
+        ))
+        .await
+        .expect("forbidden response");
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    bind_user_action(&db, "role-org-permission-manage").await;
+    let create = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/agreements",
+            "bootstrap-user",
+            "creator-org",
+            create_body,
+        ))
+        .await
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_body = create.into_body().collect().await.expect("body").to_bytes();
+    let created: Value = serde_json::from_slice(&create_body).expect("json");
+    assert_eq!(created["id"], "agreement-creator-owner");
+    assert_eq!(created["status"], "draft");
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/orgs/creator-org/agreements")
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
+                .header("x-organization-id", "creator-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = list.into_body().collect().await.expect("body").to_bytes();
+    let listed: Value = serde_json::from_slice(&list_body).expect("json");
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/orgs/creator-org/agreements/agreement-creator-owner")
+                .header(
+                    "authorization",
+                    auth_support::bearer_header("bootstrap-user"),
+                )
+                .header("x-organization-id", "creator-org")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("get response");
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let update = app
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "agreement-creator-owner",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "creator-org",
+                "granteeOrganizationId": "owner-org",
+                "status": "active",
+                "title": "Creator Owner Agreement",
+                "referenceNo": "AGR-1",
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": null
+            }),
+        ))
+        .await
+        .expect("update response");
+    assert_eq!(update.status(), StatusCode::OK);
+    let update_body = update.into_body().collect().await.expect("body").to_bytes();
+    let updated: Value = serde_json::from_slice(&update_body).expect("json");
+    assert_eq!(updated["status"], "active");
+
+    bind_user_action_for_org(&db, "role-org-permission-manage", "owner-org").await;
+    let grantee_extend = app
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/api/v1/orgs/owner-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "owner-org",
+            json!({
+                "id": "agreement-creator-owner",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "creator-org",
+                "granteeOrganizationId": "owner-org",
+                "status": "active",
+                "title": "Creator Owner Agreement",
+                "referenceNo": "AGR-1",
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": "2027-07-01T00:00:00Z"
+            }),
+        ))
+        .await
+        .expect("grantee extend response");
+    assert_eq!(grantee_extend.status(), StatusCode::FORBIDDEN);
+
+    let rehome = app
+        .oneshot(json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "agreement-creator-owner",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "owner-org",
+                "granteeOrganizationId": "creator-org",
+                "status": "active",
+                "title": "Rehome Attempt",
+                "referenceNo": "AGR-1",
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": null
+            }),
+        ))
+        .await
+        .expect("rehome response");
+    assert_eq!(rehome.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn grantee_cannot_self_issue_cross_org_agreement() {
+    let (service, db, _dir) = test_service().await;
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action_for_org(&db, "role-org-permission-manage", "owner-org").await;
+    let app = api::build_router(service);
+
+    let response = app
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/owner-org/agreements",
+            "bootstrap-user",
+            "owner-org",
+            json!({
+                "id": "agreement-self-issued",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "creator-org",
+                "granteeOrganizationId": "owner-org",
+                "status": "active",
+                "title": "Self Issued Agreement",
+                "referenceNo": null,
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": null
+            }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn role_create_cannot_rehome_existing_role_id() {
+    let (service, db, _dir) = test_service().await;
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action(&db, "role-org-permission-manage").await;
+    bind_user_action_for_org(&db, "role-org-permission-manage", "owner-org").await;
+    let app = api::build_router(service);
+
+    let create = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/roles",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "role-shared-id",
+                "code": "creator.shared",
+                "name": "Creator Shared",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let rehome = app
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/owner-org/roles",
+            "bootstrap-user",
+            "owner-org",
+            json!({
+                "id": "role-shared-id",
+                "code": "owner.shared",
+                "name": "Owner Shared",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("rehome response");
+    assert_eq!(rehome.status(), StatusCode::CONFLICT);
+
+    let stored = db
+        .get_role_with_consistency("role-shared-id", Some(ReadConsistency::Strong))
+        .await
+        .expect("stored role");
+    assert_eq!(stored.organization_id.as_deref(), Some("creator-org"));
+    assert_eq!(stored.code, "creator.shared");
+}
+
+#[tokio::test]
+async fn providers_roles_bindings_and_authz_check_filter_round_trip() {
+    let (service, db, _dir) = test_service().await;
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action(&db, "role-org-permission-manage").await;
+    let app = api::build_router(service);
+
+    let provider = app
+        .clone()
+        .oneshot(master_json_request(
+            Method::POST,
+            "/api/v1/admin/providers",
+            json!({
+                "id": "compos",
+                "name": "Compos",
+                "description": "Object data provider",
+                "active": true
+            }),
+        ))
+        .await
+        .expect("provider response");
+    assert_eq!(provider.status(), StatusCode::CREATED);
+
+    let actions = app
+        .clone()
+        .oneshot(master_json_request(
+            Method::PUT,
+            "/api/v1/admin/providers/compos/actions",
+            json!({
+                "actions": [{
+                    "id": "compos.object.read",
+                    "code": "compos.object.read",
+                    "name": "Read Compos Object",
+                    "description": null,
+                    "riskLevel": "low",
+                    "visibilityGranting": true,
+                    "grantableToApplications": true,
+                    "consentLabel": "Read Compos Object",
+                    "consentDescription": null
+                }]
+            }),
+        ))
+        .await
+        .expect("actions response");
+    assert_eq!(actions.status(), StatusCode::OK);
+
+    let role = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/roles",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "role-compos-reader",
+                "code": "compos.reader",
+                "name": "Compos Reader",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("role response");
+    assert_eq!(role.status(), StatusCode::CREATED);
+
+    let role_actions = app
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/roles/role-compos-reader/actions",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "actionIds": ["compos.object.read"]
+            }),
+        ))
+        .await
+        .expect("role actions response");
+    assert_eq!(role_actions.status(), StatusCode::OK);
+
+    let binding = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/bindings",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "binding-compos-reader",
+                "subjectType": "user",
+                "subjectId": "bootstrap-user",
+                "subjectOrganizationId": "creator-org",
+                "providerId": "compos",
+                "resourceType": "object_instance",
+                "resourceId": "obj_1",
+                "roleId": "role-compos-reader",
+                "agreementId": null,
+                "state": "active"
+            }),
+        ))
+        .await
+        .expect("binding response");
+    assert_eq!(binding.status(), StatusCode::CREATED);
+
+    let check = app
+        .clone()
+        .oneshot(master_json_request(
+            Method::POST,
+            "/api/v1/authz/check",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "compos.object.read",
+                "resource": {"provider": "compos", "type": "object_instance", "id": "obj_1"}
+            }),
+        ))
+        .await
+        .expect("check response");
+    assert_eq!(check.status(), StatusCode::OK);
+    let check_body = check.into_body().collect().await.expect("body").to_bytes();
+    let checked: Value = serde_json::from_slice(&check_body).expect("json");
+    assert_eq!(checked["allowed"], true);
+    assert_eq!(checked["reason"], "role_binding");
+
+    let filter = app
+        .clone()
+        .oneshot(master_json_request(
+            Method::POST,
+            "/api/v1/authz/filter",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "compos.object.read",
+                "resources": [
+                    {"provider": "compos", "type": "object_instance", "id": "obj_1"},
+                    {"provider": "compos", "type": "object_instance", "id": "obj_2"}
+                ]
+            }),
+        ))
+        .await
+        .expect("filter response");
+    assert_eq!(filter.status(), StatusCode::OK);
+    let filter_body = filter.into_body().collect().await.expect("body").to_bytes();
+    let filtered: Value = serde_json::from_slice(&filter_body).expect("json");
+    assert_eq!(filtered["resource_ids"], json!(["obj_1"]));
+
+    let account_action_role = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/roles",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "role-account-action-on-compos",
+                "code": "account.action.on.compos",
+                "name": "Account Action On Compos",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("account action role response");
+    assert_eq!(account_action_role.status(), StatusCode::CREATED);
+    let account_role_actions = app
+        .clone()
+        .oneshot(json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/roles/role-account-action-on-compos/actions",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "actionIds": ["organization.profile.read"]
+            }),
+        ))
+        .await
+        .expect("account role actions response");
+    assert_eq!(account_role_actions.status(), StatusCode::OK);
+    let provider_mismatch_binding = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/bindings",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "binding-provider-mismatch",
+                "subjectType": "user",
+                "subjectId": "bootstrap-user",
+                "subjectOrganizationId": "creator-org",
+                "providerId": "compos",
+                "resourceType": "object_instance",
+                "resourceId": "obj_2",
+                "roleId": "role-account-action-on-compos",
+                "agreementId": null,
+                "state": "active"
+            }),
+        ))
+        .await
+        .expect("provider mismatch binding response");
+    assert_eq!(provider_mismatch_binding.status(), StatusCode::CREATED);
+    let provider_mismatch_check = app
+        .clone()
+        .oneshot(master_json_request(
+            Method::POST,
+            "/api/v1/authz/check",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "organization.profile.read",
+                "resource": {"provider": "compos", "type": "object_instance", "id": "obj_2"}
+            }),
+        ))
+        .await
+        .expect("provider mismatch check response");
+    assert_eq!(provider_mismatch_check.status(), StatusCode::OK);
+    let provider_mismatch_body = provider_mismatch_check
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let provider_mismatch: Value = serde_json::from_slice(&provider_mismatch_body).expect("json");
+    assert_eq!(provider_mismatch["allowed"], false);
+
+    let replace_with_empty_manifest = app
+        .clone()
+        .oneshot(master_json_request(
+            Method::PUT,
+            "/api/v1/admin/providers/compos/actions",
+            json!({
+                "actions": []
+            }),
+        ))
+        .await
+        .expect("empty manifest response");
+    assert_eq!(replace_with_empty_manifest.status(), StatusCode::OK);
+    let check_after_manifest_removal = app
+        .oneshot(master_json_request(
+            Method::POST,
+            "/api/v1/authz/check",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "compos.object.read",
+                "resource": {"provider": "compos", "type": "object_instance", "id": "obj_1"}
+            }),
+        ))
+        .await
+        .expect("check after manifest removal");
+    assert_eq!(check_after_manifest_removal.status(), StatusCode::OK);
+    let removed_body = check_after_manifest_removal
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let removed: Value = serde_json::from_slice(&removed_body).expect("json");
+    assert_eq!(removed["allowed"], false);
+}
+
+#[tokio::test]
 async fn deactivate_organization_requires_permission_manage() {
     let (service, db, _dir) = test_service().await;
     seed_creator_context(&db).await;
@@ -172,7 +702,7 @@ async fn deactivate_organization_requires_permission_manage() {
 
     let response = app
         .oneshot(empty_post_request(
-            "/api/v1/organizations/creator-org/deactivate",
+            "/api/v1/orgs/creator-org/deactivate",
             "bootstrap-user",
             "creator-org",
         ))
@@ -193,7 +723,7 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
     let deactivate = app
         .clone()
         .oneshot(empty_post_request(
-            "/api/v1/organizations/creator-org/deactivate",
+            "/api/v1/orgs/creator-org/deactivate",
             "bootstrap-user",
             "creator-org",
         ))
@@ -237,7 +767,7 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
 
     let reactivate = app
         .oneshot(empty_post_request(
-            "/api/v1/organizations/creator-org/reactivate",
+            "/api/v1/orgs/creator-org/reactivate",
             "bootstrap-user",
             "creator-org",
         ))

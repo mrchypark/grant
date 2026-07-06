@@ -5,17 +5,21 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
-    routing::{any, get, post, put},
+    routing::{any, delete, get, post, put},
 };
 use domain::{
-    Action, Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationType,
-    HealthStatus, Organization, User,
+    Action, ActionRiskLevel, Agreement, AgreementStatus, AgreementType, Application,
+    ApplicationAppType, ApplicationConsentPolicy, ApplicationGrant, ApplicationType, HealthStatus,
+    Organization, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType, ServiceProvider,
+    User,
 };
 use infra::{
     config::ReadConsistency,
     service::{
-        AppService, BackupInfo, CreateApplicationInput, ServiceError, ServiceErrorKind,
-        UpdateApplicationInput,
+        AppService, AuthorizationResource, AuthorizationSubject, BackupInfo,
+        CreateApplicationGrantInput, CreateApplicationInput, CreateRoleBindingInput,
+        CreateRoleInput, ServiceError, ServiceErrorKind, UpdateApplicationInput,
+        UpsertAgreementInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -23,24 +27,62 @@ use std::sync::Arc;
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route("/api/v1/admin/providers", post(upsert_provider))
         .route(
-            "/api/v1/organizations/{organizationId}/applications",
+            "/api/v1/admin/providers/{providerId}/actions",
+            put(replace_provider_actions),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/apps",
             post(create_application),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/applications/{applicationId}",
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}",
             put(update_application),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/applications/{applicationId}/actions",
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
             put(replace_application_actions),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/deactivate",
+            "/api/v1/orgs/{organizationId}/app-grants",
+            post(create_application_grant),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/actions",
+            put(replace_application_grant_actions),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/revoke",
+            post(revoke_application_grant),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/agreements",
+            post(create_agreement),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/agreements/{agreementId}",
+            put(update_agreement),
+        )
+        .route("/api/v1/orgs/{organizationId}/roles", post(create_role))
+        .route(
+            "/api/v1/orgs/{organizationId}/roles/{roleId}/actions",
+            put(replace_role_actions),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/bindings",
+            post(create_role_binding),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/bindings/{bindingId}",
+            delete(delete_role_binding),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/deactivate",
             post(deactivate_organization),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/reactivate",
+            "/api/v1/orgs/{organizationId}/reactivate",
             post(reactivate_organization),
         )
         .route(
@@ -57,25 +99,66 @@ pub fn build_router(service: Arc<AppService>) -> Router {
 
 pub fn build_learner_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route("/api/v1/admin/providers", any(requires_voter_node))
         .route(
-            "/api/v1/organizations/{organizationId}/applications",
+            "/api/v1/admin/providers/{providerId}/actions",
             any(requires_voter_node),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/applications/{applicationId}",
-            any(requires_voter_node),
+            "/api/v1/orgs/{organizationId}/apps",
+            post(requires_voter_node),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/applications/{applicationId}/actions",
-            any(requires_voter_node),
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}",
+            put(requires_voter_node),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/deactivate",
-            any(requires_voter_node),
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
+            put(requires_voter_node),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/reactivate",
-            any(requires_voter_node),
+            "/api/v1/orgs/{organizationId}/app-grants",
+            post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/actions",
+            put(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/revoke",
+            post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/agreements",
+            post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/agreements/{agreementId}",
+            put(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/roles",
+            post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/roles/{roleId}/actions",
+            put(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/bindings",
+            post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/bindings/{bindingId}",
+            delete(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/deactivate",
+            post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/reactivate",
+            post(requires_voter_node),
         )
         .route("/api/v1/admin/backups", any(requires_voter_node))
         .route("/api/v1/admin/backups/s3", any(requires_voter_node))
@@ -97,18 +180,36 @@ fn build_shared_router() -> Router<Arc<AppService>> {
             any(proxy_trailbase_passthrough),
         )
         .route("/api/v1/me", get(get_current_user))
+        .route("/api/v1/providers", get(list_providers))
+        .route("/api/v1/orgs/{organizationId}/apps", get(list_applications))
         .route(
-            "/api/v1/organizations/{organizationId}/applications",
-            get(list_applications),
-        )
-        .route(
-            "/api/v1/organizations/{organizationId}/applications/{applicationId}",
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}",
             get(get_application),
         )
         .route(
-            "/api/v1/organizations/{organizationId}/applications/{applicationId}/actions",
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
             get(list_application_actions),
         )
+        .route(
+            "/api/v1/orgs/{organizationId}/app-grants",
+            get(list_application_grants),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/agreements",
+            get(list_agreements),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/agreements/{agreementId}",
+            get(get_agreement),
+        )
+        .route("/api/v1/orgs/{organizationId}/roles", get(list_roles))
+        .route(
+            "/api/v1/orgs/{organizationId}/bindings",
+            get(list_role_bindings),
+        )
+        .route("/api/v1/authz/check", post(authz_check))
+        .route("/api/v1/authz/batch-check", post(authz_batch_check))
+        .route("/api/v1/authz/filter", post(authz_filter))
 }
 
 async fn healthz(State(service): State<Arc<AppService>>) -> Json<HealthStatus> {
@@ -150,6 +251,131 @@ struct UpdateApplicationRequest {
 #[serde(rename_all = "camelCase")]
 struct ReplaceApplicationActionsRequest {
     action_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceActionsRequest {
+    action_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceProviderActionsRequest {
+    actions: Vec<ProviderActionRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderActionRequest {
+    id: String,
+    code: String,
+    name: String,
+    description: Option<String>,
+    risk_level: ActionRiskLevel,
+    visibility_granting: bool,
+    grantable_to_applications: bool,
+    consent_label: Option<String>,
+    consent_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateApplicationGrantRequest {
+    id: String,
+    user_id: String,
+    application_id: String,
+    action_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertAgreementRequest {
+    id: String,
+    agreement_type: AgreementType,
+    grantor_organization_id: String,
+    grantee_organization_id: String,
+    status: AgreementStatus,
+    title: String,
+    reference_no: Option<String>,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRoleRequest {
+    id: String,
+    code: String,
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRoleBindingRequest {
+    id: String,
+    subject_type: RoleBindingSubjectType,
+    subject_id: String,
+    subject_organization_id: String,
+    provider_id: String,
+    resource_type: String,
+    resource_id: String,
+    role_id: String,
+    agreement_id: Option<String>,
+    state: RoleBindingState,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthzSubjectRequest {
+    #[serde(rename = "type")]
+    subject_type: String,
+    id: String,
+    #[serde(rename = "org_id", alias = "orgId")]
+    organization_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct AuthzResourceRequest {
+    provider: String,
+    #[serde(rename = "type")]
+    resource_type: String,
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthzCheckRequest {
+    subject: AuthzSubjectRequest,
+    action: String,
+    resource: AuthzResourceRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthzBatchCheckRequest {
+    checks: Vec<AuthzCheckRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthzFilterRequest {
+    subject: AuthzSubjectRequest,
+    action: String,
+    resources: Vec<AuthzResourceRequest>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthzCheckResponse {
+    allowed: bool,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthzBatchCheckResponse {
+    results: Vec<AuthzCheckResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthzFilterResponse {
+    resource_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,6 +443,50 @@ async fn get_current_user(
         organizations: current.organizations,
         active_organization_id: current.active_organization_id,
     }))
+}
+
+async fn list_providers(
+    State(service): State<Arc<AppService>>,
+    Query(query): Query<ReadConsistencyQuery>,
+) -> ApiResult<Json<Vec<ServiceProvider>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let providers = service
+        .list_service_providers(read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(providers))
+}
+
+async fn upsert_provider(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<ServiceProvider>,
+) -> ApiResult<(StatusCode, Json<ServiceProvider>)> {
+    require_master_key(service.as_ref(), &headers)?;
+    let provider = service
+        .upsert_service_provider_admin(body)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(provider)))
+}
+
+async fn replace_provider_actions(
+    State(service): State<Arc<AppService>>,
+    Path(provider_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ReplaceProviderActionsRequest>,
+) -> ApiResult<Json<Vec<Action>>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let actions = body
+        .actions
+        .into_iter()
+        .map(|action| provider_action_input(&provider_id, action))
+        .collect();
+    let actions = service
+        .replace_provider_actions_admin(&provider_id, actions)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
 }
 
 async fn list_applications(
@@ -353,6 +623,327 @@ async fn replace_application_actions(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(actions))
+}
+
+async fn list_application_grants(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<ApplicationGrant>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let grants = service
+        .list_application_grants_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(grants))
+}
+
+async fn create_application_grant(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateApplicationGrantRequest>,
+) -> ApiResult<(StatusCode, Json<ApplicationGrant>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let grant = service
+        .create_application_grant_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            CreateApplicationGrantInput {
+                id: body.id,
+                user_id: body.user_id,
+                application_id: body.application_id,
+                action_ids: body.action_ids,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(grant)))
+}
+
+async fn replace_application_grant_actions(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, grant_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ReplaceActionsRequest>,
+) -> ApiResult<Json<Vec<Action>>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let actions = service
+        .replace_application_grant_actions_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &grant_id,
+            &body.action_ids,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
+}
+
+async fn revoke_application_grant(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, grant_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ApplicationGrant>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let grant = service
+        .revoke_application_grant_authorized(&ctx.user_id, &ctx.organization_id, &grant_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(grant))
+}
+
+async fn list_agreements(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Agreement>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let agreements = service
+        .list_agreements_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(agreements))
+}
+
+async fn create_agreement(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpsertAgreementRequest>,
+) -> ApiResult<(StatusCode, Json<Agreement>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let agreement = service
+        .create_agreement_authorized(&ctx.user_id, &ctx.organization_id, agreement_input(body))
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(agreement)))
+}
+
+async fn get_agreement(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, agreement_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Agreement>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let agreement = service
+        .get_agreement_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &agreement_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(agreement))
+}
+
+async fn update_agreement(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, agreement_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<UpsertAgreementRequest>,
+) -> ApiResult<Json<Agreement>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let agreement = service
+        .update_agreement_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &agreement_id,
+            agreement_input(body),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(agreement))
+}
+
+async fn list_roles(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Role>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let roles = service
+        .list_roles_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(roles))
+}
+
+async fn create_role(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRoleRequest>,
+) -> ApiResult<(StatusCode, Json<Role>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let role = service
+        .create_role_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            CreateRoleInput {
+                id: body.id,
+                code: body.code,
+                name: body.name,
+                description: body.description,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(role)))
+}
+
+async fn replace_role_actions(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, role_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ReplaceActionsRequest>,
+) -> ApiResult<Json<Vec<Action>>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let actions = service
+        .replace_role_actions_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &role_id,
+            &body.action_ids,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(actions))
+}
+
+async fn list_role_bindings(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<RoleBinding>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let bindings = service
+        .list_role_bindings_authorized(&ctx.user_id, &ctx.organization_id, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(bindings))
+}
+
+async fn create_role_binding(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRoleBindingRequest>,
+) -> ApiResult<(StatusCode, Json<RoleBinding>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let binding = service
+        .create_role_binding_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            CreateRoleBindingInput {
+                id: body.id,
+                subject_type: body.subject_type,
+                subject_id: body.subject_id,
+                subject_organization_id: body.subject_organization_id,
+                provider_id: body.provider_id,
+                resource_type: body.resource_type,
+                resource_id: body.resource_id,
+                role_id: body.role_id,
+                agreement_id: body.agreement_id,
+                state: body.state,
+            },
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(binding)))
+}
+
+async fn delete_role_binding(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, binding_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    service
+        .delete_role_binding_authorized(&ctx.user_id, &ctx.organization_id, &binding_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn authz_check(
+    State(service): State<Arc<AppService>>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+    Json(body): Json<AuthzCheckRequest>,
+) -> ApiResult<Json<AuthzCheckResponse>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let response =
+        run_authz_check(service.as_ref(), body, read_consistency_override(&query)?).await?;
+    Ok(Json(response))
+}
+
+async fn authz_batch_check(
+    State(service): State<Arc<AppService>>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+    Json(body): Json<AuthzBatchCheckRequest>,
+) -> ApiResult<Json<AuthzBatchCheckResponse>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let read_consistency = read_consistency_override(&query)?;
+    let mut results = Vec::with_capacity(body.checks.len());
+    for check in body.checks {
+        results.push(run_authz_check(service.as_ref(), check, read_consistency.clone()).await?);
+    }
+    Ok(Json(AuthzBatchCheckResponse { results }))
+}
+
+async fn authz_filter(
+    State(service): State<Arc<AppService>>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+    Json(body): Json<AuthzFilterRequest>,
+) -> ApiResult<Json<AuthzFilterResponse>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let read_consistency = read_consistency_override(&query)?;
+    let mut resource_ids = Vec::new();
+    for resource in body.resources {
+        let resource_id = resource.id.clone();
+        let check = AuthzCheckRequest {
+            subject: AuthzSubjectRequest {
+                subject_type: body.subject.subject_type.clone(),
+                id: body.subject.id.clone(),
+                organization_id: body.subject.organization_id.clone(),
+            },
+            action: body.action.clone(),
+            resource,
+        };
+        let decision = run_authz_check(service.as_ref(), check, read_consistency.clone()).await?;
+        if decision.allowed {
+            resource_ids.push(resource_id);
+        }
+    }
+    Ok(Json(AuthzFilterResponse { resource_ids }))
 }
 
 async fn deactivate_organization(
@@ -533,6 +1124,63 @@ fn map_backup(item: BackupInfo) -> BackupItemResponse {
         last_modified: item.last_modified,
         size: item.size,
     }
+}
+
+fn provider_action_input(provider_id: &str, body: ProviderActionRequest) -> Action {
+    Action {
+        id: body.id,
+        provider_id: provider_id.to_owned(),
+        code: body.code,
+        name: body.name,
+        description: body.description,
+        risk_level: body.risk_level,
+        visibility_granting: body.visibility_granting,
+        grantable_to_applications: body.grantable_to_applications,
+        consent_label: body.consent_label,
+        consent_description: body.consent_description,
+    }
+}
+
+fn agreement_input(body: UpsertAgreementRequest) -> UpsertAgreementInput {
+    UpsertAgreementInput {
+        id: body.id,
+        agreement_type: body.agreement_type,
+        grantor_organization_id: body.grantor_organization_id,
+        grantee_organization_id: body.grantee_organization_id,
+        status: body.status,
+        title: body.title,
+        reference_no: body.reference_no,
+        starts_at: body.starts_at,
+        ends_at: body.ends_at,
+    }
+}
+
+async fn run_authz_check(
+    service: &AppService,
+    body: AuthzCheckRequest,
+    read_consistency: Option<ReadConsistency>,
+) -> ApiResult<AuthzCheckResponse> {
+    let decision = service
+        .check_authorization(
+            &AuthorizationSubject {
+                subject_type: body.subject.subject_type,
+                id: body.subject.id,
+                organization_id: body.subject.organization_id,
+            },
+            &body.action,
+            &AuthorizationResource {
+                provider_id: body.resource.provider,
+                resource_type: body.resource.resource_type,
+                id: body.resource.id,
+            },
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(AuthzCheckResponse {
+        allowed: decision.allowed,
+        reason: decision.reason,
+    })
 }
 
 async fn request_context(
@@ -746,6 +1394,7 @@ impl ApiError {
             || contains_chain("consumed")
             || contains_chain("payload mismatch")
             || contains_chain("mismatch")
+            || contains_chain("must be included")
             || contains_chain("already used")
         {
             StatusCode::BAD_REQUEST

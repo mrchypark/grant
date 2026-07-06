@@ -15,6 +15,7 @@
 - 로그인 주체(`users`, `user_identities`, `auth_identity_cache`)는 account 보안 경계라 동적 object로 내리지 않는다.
 - 공동인증서 credential, 저장 인증서, gateway challenge, crawl task token은 `cert-data` 경계라 이 repo에서 제거한다.
 - 권한 원본은 `role_bindings`다. plant/asset 전개 cache였던 `effective_*` 테이블은 cert-data 분리와 함께 제거한다.
+- `service_providers`가 compos/certd 같은 외부 서비스와 account 자체의 action catalog 경계를 선언한다.
 - SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.
 
 ## Account 테이블
@@ -51,12 +52,18 @@
 
 조직 내부 권한 그룹과 membership 연결. 권한 전개 입력이라 account 경계에 남긴다.
 
+### `service_providers`
+
+account가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. 기본 provider는 `account`이며, compos/certd 같은 first-party 서비스도 이 테이블에 등록한 뒤 action manifest를 넣는다.
+
 ### `actions`, `roles`, `role_actions`, `role_bindings`
 
-권한 엔진의 원본 데이터. `role_bindings.resource_type`은 account 경계 안의 `organization`만 받으며, `resource_id`는 조직 ID다.
+권한 엔진의 원본 데이터. `actions.provider_id`는 action을 제공하는 `service_providers.id`를 가리킨다.
+
+`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. account 내부 조직 권한은 `provider_id = account`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. compos/certd 리소스는 해당 provider의 resource type/id를 그대로 저장하며, account는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다.
 
 `agreements`는 별도 테이블로 다시 살아났지만, `role_bindings.agreement_id`는 물리 FK 없이 앱 레벨로 검증한다.
-발전소/자산 단위 권한은 cert-data 쪽 리소스 모델이 확정된 뒤 service-provider 계약으로 다시 붙인다.
+account 조직 간 권한은 active `agreements`가 있어야 cross-org binding을 만들 수 있다.
 
 ### `applications`, `application_actions`, `application_grants`, `application_grant_actions`
 
@@ -108,12 +115,14 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `group_memberships.organization_membership_id` -> `organization_memberships.id`
 - `agreements.grantor_organization_id` -> `organizations.id`
 - `agreements.grantee_organization_id` -> `organizations.id`
+- `actions.provider_id` -> `service_providers.id`
 - `roles.organization_id` -> `organizations.id`
 - `role_actions.role_id` -> `roles.id`
 - `role_actions.action_id` -> `actions.id`
 - `role_bindings.role_id` -> `roles.id`
 - `role_bindings.agreement_id` -> `agreements.id`
 - `role_bindings.subject_organization_id` -> `organizations.id`
+- `role_bindings.provider_id` -> `service_providers.id`
 - `application_actions.application_id` -> `applications.id`
 - `application_actions.action_id` -> `actions.id`
 - `application_grants.user_id` -> `users.id`
@@ -125,4 +134,4 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 ## 주의할 점
 
 - `cert-data` 저장/실행 모델은 별도 프로젝트에서 다시 정한다.
-- `role_bindings.resource_type`은 앱 레벨에서 `organization`으로 제한한다. 기존 `asset`/`plant` 권한 문자열과 캐시는 더 이상 account 스키마의 일부가 아니다.
+- `role_bindings.resource_type`은 `provider_id`와 함께 해석한다. `account/organization`만 account가 직접 존재 검증하고, 외부 provider resource는 해당 서비스가 후보 목록을 넘긴 뒤 `/api/v1/authz/filter`로 걸러야 한다.

@@ -136,6 +136,7 @@ async fn ensure_schema_creates_authorization_tables() {
         "groups",
         "group_memberships",
         "agreements",
+        "service_providers",
         "actions",
         "roles",
         "role_actions",
@@ -208,6 +209,7 @@ async fn ensure_schema_creates_authorization_tables() {
             "subject_type",
             "subject_id",
             "subject_organization_id",
+            "provider_id",
             "resource_type",
             "resource_id",
             "role_id",
@@ -235,6 +237,7 @@ async fn ensure_schema_creates_authorization_tables() {
         action_columns,
         vec![
             "id",
+            "provider_id",
             "code",
             "name",
             "description",
@@ -433,11 +436,13 @@ async fn ensure_schema_creates_authorization_tables() {
         indexes.into_iter().map(|index| index.name).collect();
     for index in [
         "idx_agreements_grantor_grantee",
+        "idx_actions_provider",
         "idx_application_grants_active_unique",
         "idx_application_grants_user_application",
         "idx_organization_party_links_org_relation",
         "idx_parties_business_no",
         "idx_roles_global_code",
+        "idx_service_providers_active",
         "idx_user_identities_provider_external",
     ] {
         assert!(index_names.contains(index), "missing index {index}");
@@ -601,6 +606,22 @@ async fn ensure_schema_drops_removed_certd_tables() {
             VALUES
                 ('grant-old', 'asset.profile.read'),
                 ('grant-account', 'organization.profile.read');
+            INSERT INTO service_providers (id, name, description, active, created_at, updated_at)
+            VALUES ('compos', 'Compos', NULL, 1, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z');
+            INSERT INTO actions (
+                id, provider_id, code, name, description, risk_level, visibility_granting,
+                grantable_to_applications, consent_label, consent_description, created_at, updated_at
+            ) VALUES (
+                'compos.object.read', 'compos', 'compos.object.read', 'Read Compos Object',
+                NULL, 'low', 1, 1, NULL, NULL, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'
+            );
+            INSERT INTO role_bindings (
+                id, subject_type, subject_id, subject_organization_id, provider_id, resource_type, resource_id,
+                role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+            ) VALUES (
+                'binding-compos-object', 'user', 'bootstrap-user', 'org-1', 'compos', 'object_instance', 'obj-1',
+                'role-account', NULL, 'active', 'bootstrap-user', '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'
+            );
             "#
             .to_owned(),
         )
@@ -633,7 +654,8 @@ async fn ensure_schema_drops_removed_certd_tables() {
              UNION ALL
              SELECT action_id AS name FROM application_grant_actions WHERE action_id <> 'organization.profile.read'
              UNION ALL
-             SELECT resource_type AS name FROM role_bindings WHERE resource_type <> 'organization'",
+             SELECT resource_type AS name FROM role_bindings
+             WHERE provider_id = 'account' AND resource_type <> 'organization'",
             vec![],
         )
         .await
@@ -649,4 +671,76 @@ async fn ensure_schema_drops_removed_certd_tables() {
         .await
         .expect("kept actions");
     assert_eq!(kept_actions.len(), 1);
+
+    let kept_external_bindings: Vec<TableRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT id AS name FROM role_bindings WHERE id = 'binding-compos-object'",
+            vec![],
+        )
+        .await
+        .expect("kept external bindings");
+    assert_eq!(kept_external_bindings.len(), 1);
+}
+
+#[tokio::test]
+async fn ensure_schema_adds_provider_columns_to_existing_authorization_tables() {
+    let (runtime, _dir) = test_runtime().await;
+    runtime
+        .batch(
+            r#"
+            CREATE TABLE actions (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT,
+                risk_level TEXT NOT NULL,
+                visibility_granting INTEGER NOT NULL DEFAULT 0,
+                grantable_to_applications INTEGER NOT NULL DEFAULT 0,
+                consent_label TEXT,
+                consent_description TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE role_bindings (
+                id TEXT PRIMARY KEY,
+                subject_type TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                subject_organization_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                agreement_id TEXT,
+                state TEXT NOT NULL,
+                created_by_user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed legacy auth tables");
+
+    let db = Database::new(
+        runtime.clone(),
+        format!("bootstrap-{}", Uuid::new_v4().simple()),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema_only().await.expect("ensure schema only");
+
+    for (table, column) in [("actions", "provider_id"), ("role_bindings", "provider_id")] {
+        let columns: Vec<ColumnRow> = runtime
+            .query_rows(
+                ReadConsistency::Local,
+                format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid ASC"),
+                vec![],
+            )
+            .await
+            .expect("columns");
+        assert!(
+            columns.iter().any(|row| row.name == column),
+            "missing {table}.{column}"
+        );
+    }
 }

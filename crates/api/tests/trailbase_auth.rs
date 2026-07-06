@@ -321,7 +321,7 @@ async fn learner_router_rejects_mutation_and_admin_endpoints() {
     let app = api::build_learner_router(service);
 
     for (method, uri) in [
-        ("POST", "/api/v1/organizations/bootstrap-user/applications"),
+        ("POST", "/api/v1/orgs/bootstrap-user/apps"),
         ("POST", "/api/v1/admin/bootstrap/trailbase-owner"),
         ("GET", "/api/v1/admin/backups/s3"),
     ] {

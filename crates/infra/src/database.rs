@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use domain::{
     Action, ActionRiskLevel, Agreement, Application, ApplicationAction, ApplicationAppType,
     ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantAction, ApplicationGrantStatus,
-    ApplicationType, HealthStatus, Organization, Party, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType, User,
+    ApplicationType, HealthStatus, Organization, Party, Role, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType, ServiceProvider, User,
 };
 use hiqlite::Row;
 use std::borrow::Cow;
@@ -93,6 +93,7 @@ struct RoleBindingRow {
     subject_type: String,
     subject_id: String,
     subject_organization_id: String,
+    provider_id: String,
     resource_type: String,
     resource_id: String,
     role_id: String,
@@ -101,6 +102,27 @@ struct RoleBindingRow {
     created_by_user_id: String,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceProviderRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    active: i64,
+}
+
+#[derive(Debug, Clone)]
+struct AgreementRow {
+    id: String,
+    agreement_type: String,
+    grantor_organization_id: String,
+    grantee_organization_id: String,
+    status: String,
+    title: String,
+    reference_no: Option<String>,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +150,7 @@ struct PartyRow {
 #[derive(Debug, Clone)]
 struct ActionRow {
     id: String,
+    provider_id: String,
     code: String,
     name: String,
     description: Option<String>,
@@ -136,6 +159,15 @@ struct ActionRow {
     grantable_to_applications: i64,
     consent_label: Option<String>,
     consent_description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RoleRow {
+    id: String,
+    organization_id: Option<String>,
+    code: String,
+    name: String,
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,8 +191,27 @@ struct ApplicationGrantLookupRow {
 }
 
 #[derive(Debug, Clone)]
+struct ApplicationGrantRow {
+    id: String,
+    user_id: String,
+    application_id: String,
+    organization_id: String,
+    status: String,
+    consented_at: String,
+    revoked_at: Option<String>,
+    revoked_by_user_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
 struct ActionLookupRow {
     id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ColumnNameRow {
+    name: String,
 }
 
 impl Database {
@@ -395,8 +446,17 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS service_providers (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS actions (
                     id TEXT PRIMARY KEY,
+                    provider_id TEXT NOT NULL DEFAULT 'account',
                     code TEXT NOT NULL UNIQUE,
                     name TEXT NOT NULL,
                     description TEXT,
@@ -428,6 +488,7 @@ impl Database {
                     subject_type TEXT NOT NULL,
                     subject_id TEXT NOT NULL,
                     subject_organization_id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL DEFAULT 'account',
                     resource_type TEXT NOT NULL,
                     resource_id TEXT NOT NULL,
                     role_id TEXT NOT NULL,
@@ -474,6 +535,29 @@ impl Database {
                     action_id TEXT NOT NULL,
                     PRIMARY KEY (application_grant_id, action_id)
                 );
+                "#
+                .to_owned(),
+            )
+            .await
+            .context("create schema")?;
+        self.add_column_if_missing("actions", "provider_id", "TEXT NOT NULL DEFAULT 'account'")
+            .await?;
+        self.add_column_if_missing(
+            "role_bindings",
+            "provider_id",
+            "TEXT NOT NULL DEFAULT 'account'",
+        )
+        .await?;
+        self.ensure_indexes().await?;
+        self.drop_removed_certd_tables().await?;
+        self.delete_removed_certd_authorization_rows().await?;
+        Ok(())
+    }
+
+    async fn ensure_indexes(&self) -> Result<()> {
+        self.runtime
+            .batch(
+                r#"
                 CREATE INDEX IF NOT EXISTS idx_organization_memberships_org_user
                     ON organization_memberships (organization_id, user_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_party_links_org_relation
@@ -490,18 +574,24 @@ impl Database {
                     ON group_memberships (group_id, organization_membership_id);
                 CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
                     ON agreements (grantor_organization_id, grantee_organization_id, status);
+                CREATE INDEX IF NOT EXISTS idx_service_providers_active
+                    ON service_providers (active, id);
                 CREATE INDEX IF NOT EXISTS idx_actions_code
                     ON actions (code);
+                CREATE INDEX IF NOT EXISTS idx_actions_provider
+                    ON actions (provider_id, code);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_global_code
                     ON roles (code)
                     WHERE organization_id IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_role_bindings_subject_resource_state
-                    ON role_bindings (subject_type, subject_id, resource_type, resource_id, state);
+                    ON role_bindings (subject_type, subject_id, provider_id, resource_type, resource_id, state);
+                DROP INDEX IF EXISTS idx_role_bindings_logical_unique;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_role_bindings_logical_unique
                     ON role_bindings (
                         subject_type,
                         subject_id,
                         subject_organization_id,
+                        provider_id,
                         resource_type,
                         resource_id,
                         role_id
@@ -515,9 +605,34 @@ impl Database {
                 .to_owned(),
             )
             .await
-            .context("create schema")?;
-        self.drop_removed_certd_tables().await?;
-        self.delete_removed_certd_authorization_rows().await?;
+            .context("create indexes")?;
+        Ok(())
+    }
+
+    async fn add_column_if_missing(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        column_definition: &str,
+    ) -> Result<()> {
+        let escaped_table = table_name.replace('\'', "''");
+        let columns: Vec<ColumnNameRow> = self
+            .query_default_rows(
+                format!("SELECT name FROM pragma_table_info('{escaped_table}')"),
+                vec![],
+                "table column lookup",
+            )
+            .await?;
+        if columns.iter().any(|column| column.name == column_name) {
+            return Ok(());
+        }
+        self.runtime
+            .execute(
+                format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+                vec![],
+            )
+            .await
+            .with_context(|| format!("add {table_name}.{column_name}"))?;
         Ok(())
     }
 
@@ -570,34 +685,47 @@ impl Database {
                 DELETE FROM application_grant_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
-                    WHERE code LIKE 'plant.%'
-                       OR code LIKE 'asset.%'
-                       OR code LIKE 'organization.plant.%'
-                       OR code = 'organization.credential.use'
+                    WHERE provider_id = 'account'
+                      AND (
+                          code LIKE 'plant.%'
+                          OR code LIKE 'asset.%'
+                          OR code LIKE 'organization.plant.%'
+                          OR code = 'organization.credential.use'
+                      )
                 );
                 DELETE FROM application_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
-                    WHERE code LIKE 'plant.%'
-                       OR code LIKE 'asset.%'
-                       OR code LIKE 'organization.plant.%'
-                       OR code = 'organization.credential.use'
+                    WHERE provider_id = 'account'
+                      AND (
+                          code LIKE 'plant.%'
+                          OR code LIKE 'asset.%'
+                          OR code LIKE 'organization.plant.%'
+                          OR code = 'organization.credential.use'
+                      )
                 );
                 DELETE FROM role_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
-                    WHERE code LIKE 'plant.%'
-                       OR code LIKE 'asset.%'
-                       OR code LIKE 'organization.plant.%'
-                       OR code = 'organization.credential.use'
+                    WHERE provider_id = 'account'
+                      AND (
+                          code LIKE 'plant.%'
+                          OR code LIKE 'asset.%'
+                          OR code LIKE 'organization.plant.%'
+                          OR code = 'organization.credential.use'
+                      )
                 );
                 DELETE FROM role_bindings
-                WHERE resource_type <> 'organization';
+                WHERE provider_id = 'account'
+                  AND resource_type <> 'organization';
                 DELETE FROM actions
-                WHERE code LIKE 'plant.%'
-                   OR code LIKE 'asset.%'
-                   OR code LIKE 'organization.plant.%'
-                   OR code = 'organization.credential.use';
+                WHERE provider_id = 'account'
+                  AND (
+                      code LIKE 'plant.%'
+                      OR code LIKE 'asset.%'
+                      OR code LIKE 'organization.plant.%'
+                      OR code = 'organization.credential.use'
+                  );
                 "#
                 .to_owned(),
             )
@@ -701,7 +829,8 @@ impl Database {
             subject_type: RoleBindingSubjectType::User,
             subject_id: self.bootstrap_user_id.clone(),
             subject_organization_id: self.bootstrap_user_id.clone(),
-            resource_type: RoleBindingResourceType::Organization,
+            provider_id: "account".to_owned(),
+            resource_type: "organization".to_owned(),
             resource_id: self.bootstrap_user_id.clone(),
             role_id: role.id,
             agreement_id: None,
@@ -715,6 +844,13 @@ impl Database {
 
     async fn ensure_action_catalog(&self) -> Result<()> {
         let now = now_string();
+        self.upsert_service_provider(&ServiceProvider {
+            id: "account".to_owned(),
+            name: "Account".to_owned(),
+            description: Some("Account organization and authorization service".to_owned()),
+            active: true,
+        })
+        .await?;
         for (code, name, risk_level, visibility_granting, grantable_to_applications) in [
             (
                 "organization.application.manage",
@@ -762,11 +898,12 @@ impl Database {
             self.runtime
                 .execute(
                     "INSERT INTO actions (
-                        id, code, name, description, risk_level, visibility_granting,
+                        id, provider_id, code, name, description, risk_level, visibility_granting,
                         grantable_to_applications, consent_label, consent_description, created_at, updated_at
                      )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                      ON CONFLICT(code) DO UPDATE SET
+                        provider_id = excluded.provider_id,
                         name = excluded.name,
                         risk_level = excluded.risk_level,
                         visibility_granting = excluded.visibility_granting,
@@ -776,6 +913,7 @@ impl Database {
                         updated_at = excluded.updated_at",
                     params!(
                         code.to_owned(),
+                        "account".to_owned(),
                         code.to_owned(),
                         name.to_owned(),
                         Option::<String>::None,
@@ -1480,6 +1618,189 @@ impl Database {
         Ok(rows.into_iter().map(Organization::from).collect())
     }
 
+    pub async fn upsert_service_provider(&self, provider: &ServiceProvider) -> Result<()> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO service_providers (id, name, description, active, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at",
+                params!(
+                    provider.id.clone(),
+                    provider.name.clone(),
+                    provider.description.clone(),
+                    if provider.active { 1_i64 } else { 0_i64 },
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("upsert service provider")?;
+        Ok(())
+    }
+
+    pub async fn list_service_providers_with_consistency(
+        &self,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<ServiceProvider>> {
+        let rows: Vec<ServiceProviderRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, name, description, active
+                 FROM service_providers
+                 ORDER BY name ASC, id ASC",
+                vec![],
+                "service providers",
+            )
+            .await?;
+        Ok(rows.into_iter().map(ServiceProvider::from).collect())
+    }
+
+    pub async fn upsert_action(&self, action: &Action) -> Result<()> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM service_providers WHERE id = $1",
+                params!(action.provider_id.clone()),
+                "action provider existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "service provider {} does not exist",
+                action.provider_id
+            ));
+        }
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO actions (
+                    id, provider_id, code, name, description, risk_level, visibility_granting,
+                    grantable_to_applications, consent_label, consent_description, created_at, updated_at
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 ON CONFLICT(code) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    name = excluded.name,
+                    description = excluded.description,
+                    risk_level = excluded.risk_level,
+                    visibility_granting = excluded.visibility_granting,
+                    grantable_to_applications = excluded.grantable_to_applications,
+                    consent_label = excluded.consent_label,
+                    consent_description = excluded.consent_description,
+                    updated_at = excluded.updated_at",
+                params!(
+                    action.id.clone(),
+                    action.provider_id.clone(),
+                    action.code.clone(),
+                    action.name.clone(),
+                    action.description.clone(),
+                    action_risk_level_str(&action.risk_level),
+                    if action.visibility_granting { 1_i64 } else { 0_i64 },
+                    if action.grantable_to_applications {
+                        1_i64
+                    } else {
+                        0_i64
+                    },
+                    action.consent_label.clone(),
+                    action.consent_description.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("upsert action")?;
+        Ok(())
+    }
+
+    pub async fn replace_provider_actions(
+        &self,
+        provider_id: &str,
+        actions: &[Action],
+    ) -> Result<Vec<Action>> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM service_providers WHERE id = $1",
+                params!(provider_id.to_owned()),
+                "provider existence for action replace",
+            )
+            .await?
+        {
+            return Err(anyhow!("service provider {provider_id} does not exist"));
+        }
+        let keep_ids = actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect::<HashSet<_>>();
+        let existing_actions = self
+            .list_actions_for_provider_with_consistency(provider_id, Some(ReadConsistency::Strong))
+            .await?;
+        for existing in existing_actions {
+            if keep_ids.contains(&existing.id) {
+                continue;
+            }
+            self.runtime
+                .transaction([
+                    (
+                        Cow::Borrowed("DELETE FROM application_grant_actions WHERE action_id = $1"),
+                        params!(existing.id.clone()),
+                    ),
+                    (
+                        Cow::Borrowed("DELETE FROM application_actions WHERE action_id = $1"),
+                        params!(existing.id.clone()),
+                    ),
+                    (
+                        Cow::Borrowed("DELETE FROM role_actions WHERE action_id = $1"),
+                        params!(existing.id.clone()),
+                    ),
+                    (
+                        Cow::Borrowed("DELETE FROM actions WHERE id = $1"),
+                        params!(existing.id.clone()),
+                    ),
+                ])
+                .await
+                .with_context(|| format!("remove stale provider action {}", existing.id))?;
+        }
+        for action in actions {
+            if action.provider_id != provider_id {
+                return Err(anyhow!(
+                    "action {} provider {} does not match path provider {}",
+                    action.id,
+                    action.provider_id,
+                    provider_id
+                ));
+            }
+            self.upsert_action(action).await?;
+        }
+        self.list_actions_for_provider_with_consistency(provider_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
+    pub async fn list_actions_for_provider_with_consistency(
+        &self,
+        provider_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Action>> {
+        let rows: Vec<ActionRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, provider_id, code, name, description, risk_level, visibility_granting,
+                        grantable_to_applications, consent_label, consent_description
+                 FROM actions
+                 WHERE provider_id = $1
+                 ORDER BY code ASC",
+                params!(provider_id.to_owned()),
+                "provider actions",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     pub async fn upsert_role(&self, role: &Role) -> Result<()> {
         let now = now_string();
         self.runtime
@@ -1505,6 +1826,156 @@ impl Database {
             .await
             .context("upsert role")?;
         Ok(())
+    }
+
+    pub async fn insert_role(&self, role: &Role) -> Result<()> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "INSERT INTO roles (id, organization_id, code, name, description, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                params!(
+                    role.id.clone(),
+                    role.organization_id.clone(),
+                    role.code.clone(),
+                    role.name.clone(),
+                    role.description.clone(),
+                    now.clone(),
+                    now
+                ),
+            )
+            .await
+            .context("insert role")?;
+        Ok(())
+    }
+
+    pub async fn get_role_with_consistency(
+        &self,
+        role_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Role> {
+        let rows: Vec<RoleRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, organization_id, code, name, description
+                 FROM roles
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(role_id.to_owned()),
+                "role by id",
+            )
+            .await?;
+        rows.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("role not found: {role_id}"))
+            .map(Role::from)
+    }
+
+    pub async fn list_roles_for_organization_with_consistency(
+        &self,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Role>> {
+        let rows: Vec<RoleRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, organization_id, code, name, description
+                 FROM roles
+                 WHERE organization_id IS NULL OR organization_id = $1
+                 ORDER BY organization_id IS NOT NULL DESC, name ASC, id ASC",
+                params!(organization_id.to_owned()),
+                "roles by organization",
+            )
+            .await?;
+        Ok(rows.into_iter().map(Role::from).collect())
+    }
+
+    pub async fn replace_role_actions(
+        &self,
+        role_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        self.get_role_with_consistency(role_id, Some(ReadConsistency::Strong))
+            .await?;
+        let mut deduped = Vec::new();
+        let mut seen = HashSet::new();
+        for action_id in action_ids {
+            let trimmed = action_id.trim();
+            if trimmed.is_empty() {
+                return Err(anyhow!("role action ids must not be empty"));
+            }
+            if seen.insert(trimmed.to_owned()) {
+                deduped.push(trimmed.to_owned());
+            }
+        }
+        if !deduped.is_empty() {
+            let placeholders = (1..=deduped.len())
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rows: Vec<ActionLookupRow> = self
+                .query_rows_with(
+                    ReadConsistency::Strong,
+                    format!("SELECT id FROM actions WHERE id IN ({placeholders})"),
+                    deduped
+                        .iter()
+                        .cloned()
+                        .map(hiqlite::Param::from)
+                        .collect::<Vec<_>>(),
+                    "role action existence set",
+                )
+                .await?;
+            let action_ids = rows.into_iter().map(|row| row.id).collect::<HashSet<_>>();
+            if let Some(missing) = deduped
+                .iter()
+                .find(|action_id| !action_ids.contains(*action_id))
+            {
+                return Err(anyhow!("action {missing} does not exist"));
+            }
+        }
+        let mut queries = Vec::with_capacity(1 + deduped.len());
+        queries.push((
+            Cow::Borrowed("DELETE FROM role_actions WHERE role_id = $1"),
+            params!(role_id.to_owned()),
+        ));
+        for action_id in deduped {
+            queries.push((
+                Cow::Borrowed(
+                    "INSERT INTO role_actions (role_id, action_id)
+                     VALUES ($1, $2)
+                     ON CONFLICT(role_id, action_id) DO NOTHING",
+                ),
+                params!(role_id.to_owned(), action_id.clone()),
+            ));
+        }
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("replace role actions transaction")?;
+        self.list_role_actions_with_consistency(role_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
+    pub async fn list_role_actions_with_consistency(
+        &self,
+        role_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Action>> {
+        let rows: Vec<ActionRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT a.id, a.provider_id, a.code, a.name, a.description, a.risk_level,
+                        a.visibility_granting, a.grantable_to_applications, a.consent_label,
+                        a.consent_description
+                 FROM role_actions ra
+                 JOIN actions a ON a.id = ra.action_id
+                 WHERE ra.role_id = $1
+                 ORDER BY a.code ASC",
+                params!(role_id.to_owned()),
+                "role actions",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     pub async fn upsert_role_action(&self, role_id: &str, action_id: &str) -> Result<()> {
@@ -1931,7 +2402,7 @@ impl Database {
             Cow::Borrowed("DELETE FROM application_actions WHERE application_id = $1"),
             params!(application_id.to_owned()),
         ));
-        for action_id in &deduped {
+        for action_id in deduped {
             queries.push((
                 Cow::Borrowed(
                     "INSERT INTO application_actions (application_id, action_id)
@@ -1961,8 +2432,9 @@ impl Database {
         let rows: Vec<ActionRow> = self
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
-                "SELECT a.id, a.code, a.name, a.description, a.risk_level, a.visibility_granting,
-                        a.grantable_to_applications, a.consent_label, a.consent_description
+                "SELECT a.id, a.provider_id, a.code, a.name, a.description, a.risk_level,
+                        a.visibility_granting, a.grantable_to_applications, a.consent_label,
+                        a.consent_description
                  FROM application_actions ca
                  JOIN actions a ON a.id = ca.action_id
                  WHERE ca.application_id = $1
@@ -1978,48 +2450,8 @@ impl Database {
         &self,
         application_grant: &ApplicationGrant,
     ) -> Result<String> {
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM users WHERE id = $1",
-                params!(application_grant.user_id.clone()),
-                "application grant user existence",
-            )
-            .await?
-        {
-            return Err(anyhow!(
-                "application grant user {} does not exist",
-                application_grant.user_id
-            ));
-        }
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM applications WHERE id = $1",
-                params!(application_grant.application_id.clone()),
-                "application grant application existence",
-            )
-            .await?
-        {
-            return Err(anyhow!(
-                "application grant application {} does not exist",
-                application_grant.application_id
-            ));
-        }
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
-                params!(application_grant.organization_id.clone()),
-                "application grant organization existence",
-            )
-            .await?
-        {
-            return Err(anyhow!(
-                "application grant organization {} does not exist",
-                application_grant.organization_id
-            ));
-        }
+        self.validate_application_grant_refs(application_grant)
+            .await?;
         if application_grant.status == ApplicationGrantStatus::Active {
             let existing: Vec<ApplicationGrantLookupRow> = self
                 .query_consistent_rows(
@@ -2113,6 +2545,279 @@ impl Database {
         Ok(application_grant.id.clone())
     }
 
+    pub async fn insert_application_grant(
+        &self,
+        application_grant: &ApplicationGrant,
+    ) -> Result<String> {
+        self.validate_application_grant_refs(application_grant)
+            .await?;
+        self.runtime
+            .execute(
+                "INSERT INTO application_grants (
+                    id, user_id, application_id, organization_id, status, consented_at,
+                    revoked_at, revoked_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                params!(
+                    application_grant.id.clone(),
+                    application_grant.user_id.clone(),
+                    application_grant.application_id.clone(),
+                    application_grant.organization_id.clone(),
+                    application_grant_status_str(&application_grant.status),
+                    application_grant.consented_at.clone(),
+                    application_grant.revoked_at.clone(),
+                    application_grant.revoked_by_user_id.clone(),
+                    application_grant.created_at.clone(),
+                    application_grant.updated_at.clone()
+                ),
+            )
+            .await
+            .context("insert application grant")?;
+        Ok(application_grant.id.clone())
+    }
+
+    async fn validate_application_grant_refs(
+        &self,
+        application_grant: &ApplicationGrant,
+    ) -> Result<()> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM users WHERE id = $1",
+                params!(application_grant.user_id.clone()),
+                "application grant user existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application grant user {} does not exist",
+                application_grant.user_id
+            ));
+        }
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM applications WHERE id = $1",
+                params!(application_grant.application_id.clone()),
+                "application grant application existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application grant application {} does not exist",
+                application_grant.application_id
+            ));
+        }
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                params!(application_grant.organization_id.clone()),
+                "application grant organization existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application grant organization {} does not exist",
+                application_grant.organization_id
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn list_application_grants_for_organization_with_consistency(
+        &self,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<ApplicationGrant>> {
+        let rows: Vec<ApplicationGrantRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, user_id, application_id, organization_id, status, consented_at,
+                        revoked_at, revoked_by_user_id, created_at, updated_at
+                 FROM application_grants
+                 WHERE organization_id = $1
+                 ORDER BY updated_at DESC, id ASC",
+                params!(organization_id.to_owned()),
+                "application grants by organization",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn get_application_grant_with_consistency(
+        &self,
+        grant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<ApplicationGrant> {
+        let rows: Vec<ApplicationGrantRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, user_id, application_id, organization_id, status, consented_at,
+                        revoked_at, revoked_by_user_id, created_at, updated_at
+                 FROM application_grants
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(grant_id.to_owned()),
+                "application grant by id",
+            )
+            .await?;
+        rows.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("application grant not found: {grant_id}"))?
+            .try_into()
+    }
+
+    pub async fn replace_application_grant_actions(
+        &self,
+        grant_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<Action>> {
+        let grant = self
+            .get_application_grant_with_consistency(grant_id, Some(ReadConsistency::Strong))
+            .await?;
+        let deduped = self
+            .validate_application_grant_action_subset(&grant.application_id, action_ids)
+            .await?;
+        self.replace_application_grant_actions_checked(grant_id, &deduped)
+            .await
+    }
+
+    pub async fn validate_application_grant_action_subset(
+        &self,
+        application_id: &str,
+        action_ids: &[String],
+    ) -> Result<Vec<String>> {
+        let mut deduped = Vec::new();
+        let mut seen = HashSet::new();
+        for action_id in action_ids {
+            let trimmed = action_id.trim();
+            if trimmed.is_empty() {
+                return Err(anyhow!("application grant action ids must not be empty"));
+            }
+            if seen.insert(trimmed.to_owned()) {
+                deduped.push(trimmed.to_owned());
+            }
+        }
+        if !deduped.is_empty() {
+            let placeholders = (2..=(deduped.len() + 1))
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let allowed_rows: Vec<ActionLookupRow> = self
+                .query_rows_with(
+                    ReadConsistency::Strong,
+                    format!(
+                        "SELECT ca.action_id AS id
+                         FROM application_actions ca
+                         WHERE ca.application_id = $1
+                           AND ca.action_id IN ({placeholders})"
+                    ),
+                    std::iter::once(hiqlite::Param::from(application_id.to_owned()))
+                        .chain(deduped.iter().cloned().map(hiqlite::Param::from))
+                        .collect::<Vec<_>>(),
+                    "application grant action replace subset",
+                )
+                .await?;
+            let allowed_ids = allowed_rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<HashSet<_>>();
+            if let Some(missing) = deduped
+                .iter()
+                .find(|action_id| !allowed_ids.contains(*action_id))
+            {
+                return Err(anyhow!(
+                    "application grant action {missing} must be included in application_actions for the parent application"
+                ));
+            }
+        }
+        Ok(deduped)
+    }
+
+    async fn replace_application_grant_actions_checked(
+        &self,
+        grant_id: &str,
+        deduped: &[String],
+    ) -> Result<Vec<Action>> {
+        let mut queries = Vec::with_capacity(1 + deduped.len());
+        queries.push((
+            Cow::Borrowed("DELETE FROM application_grant_actions WHERE application_grant_id = $1"),
+            params!(grant_id.to_owned()),
+        ));
+        for action_id in deduped {
+            queries.push((
+                Cow::Borrowed(
+                    "INSERT INTO application_grant_actions (application_grant_id, action_id)
+                     VALUES ($1, $2)
+                     ON CONFLICT(application_grant_id, action_id) DO NOTHING",
+                ),
+                params!(grant_id.to_owned(), action_id.clone()),
+            ));
+        }
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("replace application grant actions transaction")?;
+        self.list_application_grant_actions_with_consistency(
+            grant_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await
+    }
+
+    pub async fn list_application_grant_actions_with_consistency(
+        &self,
+        grant_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Action>> {
+        let rows: Vec<ActionRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT a.id, a.provider_id, a.code, a.name, a.description, a.risk_level,
+                        a.visibility_granting, a.grantable_to_applications, a.consent_label,
+                        a.consent_description
+                 FROM application_grant_actions cga
+                 JOIN actions a ON a.id = cga.action_id
+                 WHERE cga.application_grant_id = $1
+                 ORDER BY a.code ASC",
+                params!(grant_id.to_owned()),
+                "application grant actions",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn revoke_application_grant(
+        &self,
+        grant_id: &str,
+        revoked_by_user_id: &str,
+    ) -> Result<ApplicationGrant> {
+        let now = now_string();
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE application_grants
+                 SET status = 'revoked',
+                     revoked_at = $1,
+                     revoked_by_user_id = $2,
+                     updated_at = $3
+                 WHERE id = $4",
+                params!(
+                    now.clone(),
+                    revoked_by_user_id.to_owned(),
+                    now,
+                    grant_id.to_owned()
+                ),
+            )
+            .await
+            .context("revoke application grant")?;
+        if updated == 0 {
+            return Err(anyhow!("application grant not found: {grant_id}"));
+        }
+        self.get_application_grant_with_consistency(grant_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
     pub async fn upsert_application_grant_action(
         &self,
         application_grant_action: &ApplicationGrantAction,
@@ -2189,6 +2894,56 @@ impl Database {
             .context("upsert agreement")?;
         self.rebuild_organization_expansion().await?;
         Ok(())
+    }
+
+    pub async fn list_agreements_for_organization_with_consistency(
+        &self,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Agreement>> {
+        let rows: Vec<AgreementRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, agreement_type, grantor_organization_id, grantee_organization_id,
+                        status, title, reference_no, starts_at, ends_at
+                 FROM agreements
+                 WHERE grantor_organization_id = $1 OR grantee_organization_id = $1
+                 ORDER BY title ASC, id ASC",
+                params!(organization_id.to_owned()),
+                "agreements by organization",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn get_agreement_with_consistency(
+        &self,
+        agreement_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Agreement> {
+        self.find_agreement_by_id_with_consistency(agreement_id, consistency)
+            .await?
+            .ok_or_else(|| anyhow!("agreement not found: {agreement_id}"))
+    }
+
+    pub async fn find_agreement_by_id_with_consistency(
+        &self,
+        agreement_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<Agreement>> {
+        let rows: Vec<AgreementRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, agreement_type, grantor_organization_id, grantee_organization_id,
+                        status, title, reference_no, starts_at, ends_at
+                 FROM agreements
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(agreement_id.to_owned()),
+                "agreement by id",
+            )
+            .await?;
+        rows.into_iter().next().map(TryInto::try_into).transpose()
     }
 
     pub async fn get_organization(&self, organization_id: &str) -> Result<Organization> {
@@ -2313,13 +3068,35 @@ impl Database {
         action_id: &str,
         consistency: Option<ReadConsistency>,
     ) -> Result<bool> {
+        self.has_user_action_with_consistency(
+            user_id,
+            organization_id,
+            "account",
+            "organization",
+            target_organization_id,
+            action_id,
+            consistency,
+        )
+        .await
+    }
+
+    pub async fn has_user_action_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        provider_id: &str,
+        resource_type: &str,
+        resource_id: &str,
+        action_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
         let consistency = self.default_read_consistency_with_override(consistency);
         let now = Utc::now().to_rfc3339();
         let active_agreement = "(
             rb.agreement_id IS NULL OR (
                 a.status = 'active'
-                AND (a.starts_at IS NULL OR a.starts_at <= $5)
-                AND (a.ends_at IS NULL OR a.ends_at >= $5)
+                AND (a.starts_at IS NULL OR a.starts_at <= $7)
+                AND (a.ends_at IS NULL OR a.ends_at >= $7)
             )
         )";
 
@@ -2330,6 +3107,9 @@ impl Database {
                     "SELECT COUNT(*) as count
                      FROM role_bindings rb
                      JOIN role_actions ra ON ra.role_id = rb.role_id
+                     JOIN actions act
+                       ON act.id = ra.action_id
+                      AND act.provider_id = rb.provider_id
                      JOIN organization_memberships om
                        ON om.organization_id = rb.subject_id
                       AND om.user_id = $1
@@ -2338,16 +3118,19 @@ impl Database {
                      WHERE rb.subject_type = 'organization'
                        AND rb.subject_id = $2
                        AND rb.subject_organization_id = $2
-                       AND rb.resource_type = 'organization'
-                       AND rb.resource_id = $3
+                       AND rb.provider_id = $3
+                       AND rb.resource_type = $4
+                       AND rb.resource_id = $5
                        AND rb.state = 'active'
-                       AND ra.action_id = $4
+                       AND ra.action_id = $6
                        AND {active_agreement}"
                 ),
                 params!(
                     user_id.to_owned(),
                     organization_id.to_owned(),
-                    target_organization_id.to_owned(),
+                    provider_id.to_owned(),
+                    resource_type.to_owned(),
+                    resource_id.to_owned(),
                     action_id.to_owned(),
                     now.clone()
                 ),
@@ -2364,6 +3147,9 @@ impl Database {
                 "SELECT COUNT(*) as count
                  FROM role_bindings rb
                  JOIN role_actions ra ON ra.role_id = rb.role_id
+                 JOIN actions act
+                   ON act.id = ra.action_id
+                  AND act.provider_id = rb.provider_id
                  JOIN organization_memberships om
                    ON om.organization_id = rb.subject_organization_id
                   AND om.user_id = rb.subject_id
@@ -2371,14 +3157,17 @@ impl Database {
                  WHERE rb.subject_type = 'user'
                    AND rb.subject_id = $1
                    AND rb.subject_organization_id = $2
-                   AND rb.resource_type = 'organization'
-                   AND rb.resource_id = $3
+                   AND rb.provider_id = $3
+                   AND rb.resource_type = $4
+                   AND rb.resource_id = $5
                    AND rb.state = 'active'
-                   AND ra.action_id = $4",
+                   AND ra.action_id = $6",
                 params!(
                     user_id.to_owned(),
                     organization_id.to_owned(),
-                    target_organization_id.to_owned(),
+                    provider_id.to_owned(),
+                    resource_type.to_owned(),
+                    resource_id.to_owned(),
                     action_id.to_owned()
                 ),
                 "direct user organization action",
@@ -2393,20 +3182,26 @@ impl Database {
             "SELECT COUNT(*) as count
              FROM role_bindings rb
              JOIN role_actions ra ON ra.role_id = rb.role_id
+             JOIN actions act
+               ON act.id = ra.action_id
+              AND act.provider_id = rb.provider_id
              JOIN group_memberships gm ON gm.group_id = rb.subject_id
              JOIN organization_memberships om ON om.id = gm.organization_membership_id
              WHERE rb.subject_type = 'group'
                AND rb.subject_organization_id = $1
-               AND rb.resource_type = 'organization'
-               AND rb.resource_id = $2
+               AND rb.provider_id = $2
+               AND rb.resource_type = $3
+               AND rb.resource_id = $4
                AND rb.state = 'active'
-               AND ra.action_id = $3
-               AND om.user_id = $4
+               AND ra.action_id = $5
+               AND om.user_id = $6
                AND om.organization_id = $1
                AND om.status = 'active'",
             params!(
                 organization_id.to_owned(),
-                target_organization_id.to_owned(),
+                provider_id.to_owned(),
+                resource_type.to_owned(),
+                resource_id.to_owned(),
                 action_id.to_owned(),
                 user_id.to_owned()
             ),
@@ -2420,21 +3215,22 @@ impl Database {
         self.validate_role_binding_refs(binding).await?;
         self.runtime
             .execute(
-	                "INSERT INTO role_bindings (
-	                    id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
-	                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
-	                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                "INSERT INTO role_bindings (
+	                    id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+	                    resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+	                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	                 ON CONFLICT(id) DO UPDATE SET
 	                    subject_type = excluded.subject_type,
 	                    subject_id = excluded.subject_id,
 	                    subject_organization_id = excluded.subject_organization_id,
+	                    provider_id = excluded.provider_id,
 	                    resource_type = excluded.resource_type,
 	                    resource_id = excluded.resource_id,
 	                    role_id = excluded.role_id,
 	                    agreement_id = excluded.agreement_id,
 	                    state = excluded.state,
 	                    updated_at = excluded.updated_at
-	                 ON CONFLICT(subject_type, subject_id, subject_organization_id, resource_type, resource_id, role_id)
+	                 ON CONFLICT(subject_type, subject_id, subject_organization_id, provider_id, resource_type, resource_id, role_id)
 	                 DO UPDATE SET
 	                    agreement_id = excluded.agreement_id,
 	                    state = excluded.state,
@@ -2444,7 +3240,8 @@ impl Database {
                     role_binding_subject_type_str(&binding.subject_type),
                     binding.subject_id.clone(),
                     binding.subject_organization_id.clone(),
-                    role_binding_resource_type_str(&binding.resource_type),
+                    binding.provider_id.clone(),
+                    binding.resource_type.clone(),
                     binding.resource_id.clone(),
                     binding.role_id.clone(),
                     binding.agreement_id.clone(),
@@ -2460,6 +3257,37 @@ impl Database {
         Ok(())
     }
 
+    pub async fn insert_role_binding(&self, binding: &RoleBinding) -> Result<()> {
+        validate_role_binding(binding)?;
+        self.validate_role_binding_refs(binding).await?;
+        self.runtime
+            .execute(
+                "INSERT INTO role_bindings (
+                    id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+                    resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                params!(
+                    binding.id.clone(),
+                    role_binding_subject_type_str(&binding.subject_type),
+                    binding.subject_id.clone(),
+                    binding.subject_organization_id.clone(),
+                    binding.provider_id.clone(),
+                    binding.resource_type.clone(),
+                    binding.resource_id.clone(),
+                    binding.role_id.clone(),
+                    binding.agreement_id.clone(),
+                    role_binding_state_str(&binding.state),
+                    binding.created_by_user_id.clone(),
+                    binding.created_at.clone(),
+                    binding.updated_at.clone()
+                ),
+            )
+            .await
+            .context("insert role binding")?;
+        self.rebuild_organization_expansion().await?;
+        Ok(())
+    }
+
     async fn rebuild_organization_expansion(&self) -> Result<()> {
         Ok(())
     }
@@ -2471,8 +3299,8 @@ impl Database {
         subject_organization_id: Option<&str>,
     ) -> Result<Vec<RoleBinding>> {
         let mut sql = String::from(
-            "SELECT id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
-                    role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+            "SELECT id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+                    resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
              FROM role_bindings
              WHERE subject_type = $1 AND subject_id = $2",
         );
@@ -2496,18 +3324,20 @@ impl Database {
 
     pub async fn list_role_bindings_for_resource(
         &self,
-        resource_type: RoleBindingResourceType,
+        provider_id: &str,
+        resource_type: &str,
         resource_id: &str,
     ) -> Result<Vec<RoleBinding>> {
         let rows: Vec<RoleBindingRow> = self
             .query_default_rows(
-                "SELECT id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
-                        role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                "SELECT id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+                        resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
                  FROM role_bindings
-                 WHERE resource_type = $1 AND resource_id = $2
+                 WHERE provider_id = $1 AND resource_type = $2 AND resource_id = $3
                  ORDER BY id ASC",
                 params!(
-                    role_binding_resource_type_str(&resource_type),
+                    provider_id.to_owned(),
+                    resource_type.to_owned(),
                     resource_id.to_owned()
                 ),
                 "role bindings for resource",
@@ -2518,9 +3348,83 @@ impl Database {
             .collect::<Result<Vec<_>>>()
     }
 
+    pub async fn list_role_bindings_for_organization_with_consistency(
+        &self,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<RoleBinding>> {
+        let rows: Vec<RoleBindingRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+                        resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 FROM role_bindings
+                 WHERE subject_organization_id = $1
+                    OR (provider_id = 'account' AND resource_type = 'organization' AND resource_id = $1)
+                 ORDER BY id ASC",
+                params!(organization_id.to_owned()),
+                "role bindings by organization",
+            )
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn get_role_binding_with_consistency(
+        &self,
+        binding_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<RoleBinding> {
+        let rows: Vec<RoleBindingRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+                        resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+                 FROM role_bindings
+                 WHERE id = $1
+                 LIMIT 1",
+                params!(binding_id.to_owned()),
+                "role binding by id",
+            )
+            .await?;
+        rows.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("role binding not found: {binding_id}"))?
+            .try_into()
+    }
+
+    pub async fn delete_role_binding(&self, binding_id: &str) -> Result<()> {
+        let deleted = self
+            .runtime
+            .execute(
+                "DELETE FROM role_bindings WHERE id = $1",
+                params!(binding_id.to_owned()),
+            )
+            .await
+            .context("delete role binding")?;
+        if deleted == 0 {
+            return Err(anyhow!("role binding not found: {binding_id}"));
+        }
+        Ok(())
+    }
+
     async fn validate_role_binding_refs(&self, binding: &RoleBinding) -> Result<()> {
         let consistency = self.validation_read_consistency();
         let validation_time = Utc::now().to_rfc3339();
+
+        if !self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count FROM service_providers WHERE id = $1",
+                params!(binding.provider_id.clone()),
+                "binding provider existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "service provider {} does not exist",
+                binding.provider_id
+            ));
+        }
 
         if !self
             .exists_row_with(
@@ -2608,7 +3512,8 @@ impl Database {
                     validation_time
                 ));
             }
-            if matches!(binding.resource_type, RoleBindingResourceType::Organization)
+            if binding.provider_id == "account"
+                && binding.resource_type == "organization"
                 && binding.resource_id != binding.subject_organization_id
             {
                 let agreement_matches = self
@@ -2696,22 +3601,20 @@ impl Database {
             }
         }
 
-        match binding.resource_type {
-            RoleBindingResourceType::Organization => {
-                if !self
-                    .exists_row_with(
-                        consistency.clone(),
-                        "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
-                        params!(binding.resource_id.clone()),
-                        "organization resource existence",
-                    )
-                    .await?
-                {
-                    return Err(anyhow!(
-                        "organization resource {} does not exist",
-                        binding.resource_id
-                    ));
-                }
+        if binding.provider_id == "account" && binding.resource_type == "organization" {
+            if !self
+                .exists_row_with(
+                    consistency.clone(),
+                    "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                    params!(binding.resource_id.clone()),
+                    "organization resource existence",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "organization resource {} does not exist",
+                    binding.resource_id
+                ));
             }
         }
 
@@ -2781,6 +3684,7 @@ impl From<&mut Row<'_>> for RoleBindingRow {
             subject_type: row.get("subject_type"),
             subject_id: row.get("subject_id"),
             subject_organization_id: row.get("subject_organization_id"),
+            provider_id: row.get("provider_id"),
             resource_type: row.get("resource_type"),
             resource_id: row.get("resource_id"),
             role_id: row.get("role_id"),
@@ -2789,6 +3693,33 @@ impl From<&mut Row<'_>> for RoleBindingRow {
             created_by_user_id: row.get("created_by_user_id"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for ServiceProviderRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            name: row.get("name"),
+            description: row.get("description"),
+            active: row.get("active"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for AgreementRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            agreement_type: row.get("agreement_type"),
+            grantor_organization_id: row.get("grantor_organization_id"),
+            grantee_organization_id: row.get("grantee_organization_id"),
+            status: row.get("status"),
+            title: row.get("title"),
+            reference_no: row.get("reference_no"),
+            starts_at: row.get("starts_at"),
+            ends_at: row.get("ends_at"),
         }
     }
 }
@@ -2828,6 +3759,7 @@ impl From<&mut Row<'_>> for ActionRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             id: row.get("id"),
+            provider_id: row.get("provider_id"),
             code: row.get("code"),
             name: row.get("name"),
             description: row.get("description"),
@@ -2836,6 +3768,18 @@ impl From<&mut Row<'_>> for ActionRow {
             grantable_to_applications: row.get("grantable_to_applications"),
             consent_label: row.get("consent_label"),
             consent_description: row.get("consent_description"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for RoleRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            code: row.get("code"),
+            name: row.get("name"),
+            description: row.get("description"),
         }
     }
 }
@@ -2864,9 +3808,34 @@ impl From<&mut Row<'_>> for ApplicationGrantLookupRow {
     }
 }
 
+impl From<&mut Row<'_>> for ApplicationGrantRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            user_id: row.get("user_id"),
+            application_id: row.get("application_id"),
+            organization_id: row.get("organization_id"),
+            status: row.get("status"),
+            consented_at: row.get("consented_at"),
+            revoked_at: row.get("revoked_at"),
+            revoked_by_user_id: row.get("revoked_by_user_id"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for ActionLookupRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self { id: row.get("id") }
+    }
+}
+
+impl From<&mut Row<'_>> for ColumnNameRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+        }
     }
 }
 
@@ -2893,12 +3862,36 @@ impl From<PartyRow> for Party {
     }
 }
 
+impl From<ServiceProviderRow> for ServiceProvider {
+    fn from(value: ServiceProviderRow) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            description: value.description,
+            active: value.active == 1,
+        }
+    }
+}
+
+impl From<RoleRow> for Role {
+    fn from(value: RoleRow) -> Self {
+        Self {
+            id: value.id,
+            organization_id: value.organization_id,
+            code: value.code,
+            name: value.name,
+            description: value.description,
+        }
+    }
+}
+
 impl TryFrom<ActionRow> for Action {
     type Error = anyhow::Error;
 
     fn try_from(value: ActionRow) -> Result<Self> {
         Ok(Self {
             id: value.id,
+            provider_id: value.provider_id,
             code: value.code,
             name: value.name,
             description: value.description,
@@ -2931,6 +3924,25 @@ impl TryFrom<ApplicationRow> for Application {
     }
 }
 
+impl TryFrom<ApplicationGrantRow> for ApplicationGrant {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ApplicationGrantRow) -> Result<Self> {
+        Ok(Self {
+            id: value.id,
+            user_id: value.user_id,
+            application_id: value.application_id,
+            organization_id: value.organization_id,
+            status: application_grant_status_from_str(&value.status)?,
+            consented_at: value.consented_at,
+            revoked_at: value.revoked_at,
+            revoked_by_user_id: value.revoked_by_user_id,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
+    }
+}
+
 impl TryFrom<RoleBindingRow> for RoleBinding {
     type Error = anyhow::Error;
 
@@ -2940,7 +3952,8 @@ impl TryFrom<RoleBindingRow> for RoleBinding {
             subject_type: role_binding_subject_type_from_str(&value.subject_type)?,
             subject_id: value.subject_id,
             subject_organization_id: value.subject_organization_id,
-            resource_type: role_binding_resource_type_from_str(&value.resource_type)?,
+            provider_id: value.provider_id,
+            resource_type: value.resource_type,
             resource_id: value.resource_id,
             role_id: value.role_id,
             agreement_id: value.agreement_id,
@@ -2952,11 +3965,35 @@ impl TryFrom<RoleBindingRow> for RoleBinding {
     }
 }
 
+impl TryFrom<AgreementRow> for Agreement {
+    type Error = anyhow::Error;
+
+    fn try_from(value: AgreementRow) -> Result<Self> {
+        Ok(Self {
+            id: value.id,
+            agreement_type: agreement_type_from_str(&value.agreement_type)?,
+            grantor_organization_id: value.grantor_organization_id,
+            grantee_organization_id: value.grantee_organization_id,
+            status: agreement_status_from_str(&value.status)?,
+            title: value.title,
+            reference_no: value.reference_no,
+            starts_at: value.starts_at,
+            ends_at: value.ends_at,
+        })
+    }
+}
+
 fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
     if binding.subject_organization_id.trim().is_empty() {
         return Err(anyhow!(
             "role binding subject organization id must not be empty"
         ));
+    }
+    if binding.provider_id.trim().is_empty() {
+        return Err(anyhow!("role binding provider id must not be empty"));
+    }
+    if binding.resource_type.trim().is_empty() {
+        return Err(anyhow!("role binding resource type must not be empty"));
     }
     if binding.resource_id.trim().is_empty() {
         return Err(anyhow!("role binding resource id must not be empty"));
@@ -2975,7 +4012,8 @@ fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
             "group/user role bindings must not carry agreement references"
         ));
     }
-    if matches!(binding.resource_type, RoleBindingResourceType::Organization)
+    if binding.provider_id == "account"
+        && binding.resource_type == "organization"
         && binding.resource_id != binding.subject_organization_id
         && binding.agreement_id.is_none()
     {
@@ -3000,19 +4038,6 @@ fn role_binding_subject_type_from_str(value: &str) -> Result<RoleBindingSubjectT
         "group" => Ok(RoleBindingSubjectType::Group),
         "user" => Ok(RoleBindingSubjectType::User),
         other => Err(anyhow!("invalid role binding subject type {other}")),
-    }
-}
-
-fn role_binding_resource_type_str(resource_type: &RoleBindingResourceType) -> &'static str {
-    match resource_type {
-        RoleBindingResourceType::Organization => "organization",
-    }
-}
-
-fn role_binding_resource_type_from_str(value: &str) -> Result<RoleBindingResourceType> {
-    match value {
-        "organization" => Ok(RoleBindingResourceType::Organization),
-        other => Err(anyhow!("invalid role binding resource type {other}")),
     }
 }
 
@@ -3045,12 +4070,33 @@ fn agreement_type_str(agreement_type: &domain::AgreementType) -> &'static str {
     }
 }
 
+fn agreement_type_from_str(value: &str) -> Result<domain::AgreementType> {
+    match value {
+        "delegation" => Ok(domain::AgreementType::Delegation),
+        "epc" => Ok(domain::AgreementType::Epc),
+        "om" => Ok(domain::AgreementType::Om),
+        "distributor" => Ok(domain::AgreementType::Distributor),
+        "dealer" => Ok(domain::AgreementType::Dealer),
+        other => Err(anyhow!("invalid agreement type {other}")),
+    }
+}
+
 fn agreement_status_str(status: &domain::AgreementStatus) -> &'static str {
     match status {
         domain::AgreementStatus::Draft => "draft",
         domain::AgreementStatus::Active => "active",
         domain::AgreementStatus::Expired => "expired",
         domain::AgreementStatus::Terminated => "terminated",
+    }
+}
+
+fn agreement_status_from_str(value: &str) -> Result<domain::AgreementStatus> {
+    match value {
+        "draft" => Ok(domain::AgreementStatus::Draft),
+        "active" => Ok(domain::AgreementStatus::Active),
+        "expired" => Ok(domain::AgreementStatus::Expired),
+        "terminated" => Ok(domain::AgreementStatus::Terminated),
+        other => Err(anyhow!("invalid agreement status {other}")),
     }
 }
 
@@ -3082,6 +4128,24 @@ fn application_grant_status_str(status: &ApplicationGrantStatus) -> &'static str
         ApplicationGrantStatus::Active => "active",
         ApplicationGrantStatus::Revoked => "revoked",
         ApplicationGrantStatus::Expired => "expired",
+    }
+}
+
+fn application_grant_status_from_str(value: &str) -> Result<ApplicationGrantStatus> {
+    match value {
+        "active" => Ok(ApplicationGrantStatus::Active),
+        "revoked" => Ok(ApplicationGrantStatus::Revoked),
+        "expired" => Ok(ApplicationGrantStatus::Expired),
+        other => Err(anyhow!("invalid application grant status {other}")),
+    }
+}
+
+fn action_risk_level_str(value: &ActionRiskLevel) -> &'static str {
+    match value {
+        ActionRiskLevel::Low => "low",
+        ActionRiskLevel::Medium => "medium",
+        ActionRiskLevel::High => "high",
+        ActionRiskLevel::Critical => "critical",
     }
 }
 
