@@ -517,6 +517,7 @@ impl Database {
             .await
             .context("create schema")?;
         self.drop_removed_certd_tables().await?;
+        self.delete_removed_certd_authorization_rows().await?;
         Ok(())
     }
 
@@ -559,6 +560,49 @@ impl Database {
             )
             .await
             .context("drop removed certd tables")?;
+        Ok(())
+    }
+
+    async fn delete_removed_certd_authorization_rows(&self) -> Result<()> {
+        self.runtime
+            .batch(
+                r#"
+                DELETE FROM application_grant_actions
+                WHERE action_id IN (
+                    SELECT id FROM actions
+                    WHERE code LIKE 'plant.%'
+                       OR code LIKE 'asset.%'
+                       OR code LIKE 'organization.plant.%'
+                       OR code = 'organization.credential.use'
+                );
+                DELETE FROM application_actions
+                WHERE action_id IN (
+                    SELECT id FROM actions
+                    WHERE code LIKE 'plant.%'
+                       OR code LIKE 'asset.%'
+                       OR code LIKE 'organization.plant.%'
+                       OR code = 'organization.credential.use'
+                );
+                DELETE FROM role_actions
+                WHERE action_id IN (
+                    SELECT id FROM actions
+                    WHERE code LIKE 'plant.%'
+                       OR code LIKE 'asset.%'
+                       OR code LIKE 'organization.plant.%'
+                       OR code = 'organization.credential.use'
+                );
+                DELETE FROM role_bindings
+                WHERE resource_type <> 'organization';
+                DELETE FROM actions
+                WHERE code LIKE 'plant.%'
+                   OR code LIKE 'asset.%'
+                   OR code LIKE 'organization.plant.%'
+                   OR code = 'organization.credential.use';
+                "#
+                .to_owned(),
+            )
+            .await
+            .context("delete removed certd authorization rows")?;
         Ok(())
     }
 
@@ -2564,6 +2608,34 @@ impl Database {
                     validation_time
                 ));
             }
+            if matches!(binding.resource_type, RoleBindingResourceType::Organization)
+                && binding.resource_id != binding.subject_organization_id
+            {
+                let agreement_matches = self
+                    .query_count(
+                        consistency.clone(),
+                        "SELECT COUNT(*) as count
+                         FROM agreements
+                         WHERE id = $1
+                           AND grantor_organization_id = $2
+                           AND grantee_organization_id = $3",
+                        params!(
+                            agreement_id.clone(),
+                            binding.resource_id.clone(),
+                            binding.subject_organization_id.clone()
+                        ),
+                        "organization agreement grantor grantee match",
+                    )
+                    .await?;
+                if agreement_matches == 0 {
+                    return Err(anyhow!(
+                        "agreement {} does not grant organization {} access to organization {}",
+                        agreement_id,
+                        binding.subject_organization_id,
+                        binding.resource_id
+                    ));
+                }
+            }
         }
         match binding.subject_type {
             RoleBindingSubjectType::Organization => {
@@ -2905,9 +2977,10 @@ fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
     }
     if matches!(binding.resource_type, RoleBindingResourceType::Organization)
         && binding.resource_id != binding.subject_organization_id
+        && binding.agreement_id.is_none()
     {
         return Err(anyhow!(
-            "organization-scoped role binding must target the subject organization"
+            "cross-organization role binding requires an agreement"
         ));
     }
     Ok(())

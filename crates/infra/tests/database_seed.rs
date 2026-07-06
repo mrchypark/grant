@@ -1,7 +1,8 @@
 use domain::{
     Agreement, AgreementStatus, AgreementType, Application, ApplicationAction, ApplicationAppType,
     ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantAction, ApplicationGrantStatus,
-    ApplicationType,
+    ApplicationType, Role, RoleBinding, RoleBindingResourceType, RoleBindingState,
+    RoleBindingSubjectType,
 };
 use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
 use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
@@ -457,6 +458,103 @@ async fn application_grant_actions_must_be_subset_of_application_actions() {
         err.to_string()
             .contains("application grant action must be included in application_actions")
     );
+}
+
+#[tokio::test]
+async fn agreement_backed_organization_binding_grants_cross_org_action() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "bootstrap-user".to_owned(),
+        "Bootstrap User".to_owned(),
+    );
+    db.ensure_schema().await.expect("ensure schema");
+    db.upsert_organization_with_owner("grantor-org", "Grantor Org", None, "Grantor Org")
+        .await
+        .expect("grantor org");
+    db.upsert_organization_with_owner("grantee-org", "Grantee Org", None, "Grantee Org")
+        .await
+        .expect("grantee org");
+    db.upsert_role(&Role {
+        id: "role-organization-profile-reader".to_owned(),
+        organization_id: None,
+        code: "organization.profile.reader".to_owned(),
+        name: "Organization Profile Reader".to_owned(),
+        description: None,
+    })
+    .await
+    .expect("role");
+    db.upsert_role_action(
+        "role-organization-profile-reader",
+        "organization.profile.read",
+    )
+    .await
+    .expect("role action");
+
+    let without_agreement = db
+        .save_role_binding(&RoleBinding {
+            id: "binding-cross-org-without-agreement".to_owned(),
+            subject_type: RoleBindingSubjectType::Organization,
+            subject_id: "grantee-org".to_owned(),
+            subject_organization_id: "grantee-org".to_owned(),
+            resource_type: RoleBindingResourceType::Organization,
+            resource_id: "grantor-org".to_owned(),
+            role_id: "role-organization-profile-reader".to_owned(),
+            agreement_id: None,
+            state: RoleBindingState::Active,
+            created_by_user_id: "bootstrap-user".to_owned(),
+            created_at: "2026-04-12T00:00:00Z".to_owned(),
+            updated_at: "2026-04-12T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect_err("cross-org binding without agreement must fail");
+    assert!(
+        without_agreement
+            .to_string()
+            .contains("requires an agreement")
+    );
+
+    db.upsert_agreement(&Agreement {
+        id: "agreement-grantor-grantee".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "grantor-org".to_owned(),
+        grantee_organization_id: "grantee-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "Grantor to Grantee".to_owned(),
+        reference_no: None,
+        starts_at: Some("2026-01-01T00:00:00Z".to_owned()),
+        ends_at: None,
+    })
+    .await
+    .expect("agreement");
+    db.save_role_binding(&RoleBinding {
+        id: "binding-cross-org-with-agreement".to_owned(),
+        subject_type: RoleBindingSubjectType::Organization,
+        subject_id: "grantee-org".to_owned(),
+        subject_organization_id: "grantee-org".to_owned(),
+        resource_type: RoleBindingResourceType::Organization,
+        resource_id: "grantor-org".to_owned(),
+        role_id: "role-organization-profile-reader".to_owned(),
+        agreement_id: Some("agreement-grantor-grantee".to_owned()),
+        state: RoleBindingState::Active,
+        created_by_user_id: "bootstrap-user".to_owned(),
+        created_at: "2026-04-12T00:00:00Z".to_owned(),
+        updated_at: "2026-04-12T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("agreement-backed binding");
+
+    let allowed = db
+        .has_user_organization_action_with_consistency(
+            "bootstrap-user",
+            "grantee-org",
+            "grantor-org",
+            "organization.profile.read",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("action lookup");
+    assert!(allowed);
 }
 
 #[tokio::test]

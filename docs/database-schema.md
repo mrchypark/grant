@@ -64,7 +64,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 
 ## 제거된 테이블
 
-`ensure_schema_only()`는 아래 테이블을 더 이상 생성하지 않고, 기존 DB에 남아 있으면 삭제한다.
+`ensure_schema_only()`는 아래 테이블을 더 이상 생성하지 않고, 기존 DB에 남아 있으면 삭제한다. 이 테이블들이 사용하던 `plant.*`, `asset.*`, `organization.plant.*`, `organization.credential.use` action catalog와 role/application 참조도 함께 삭제한다.
 
 - `agreement_documents`
 - `assets`

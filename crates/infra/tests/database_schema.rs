@@ -568,4 +568,85 @@ async fn ensure_schema_drops_removed_certd_tables() {
             "removed table still exists {removed_table}"
         );
     }
+
+    runtime
+        .batch(
+            r#"
+            INSERT INTO actions (
+                id, code, name, description, risk_level, visibility_granting,
+                grantable_to_applications, consent_label, consent_description, created_at, updated_at
+            ) VALUES
+                ('plant.profile.read', 'plant.profile.read', 'Read Plant Profile', NULL, 'low', 1, 1, NULL, NULL, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'),
+                ('asset.profile.read', 'asset.profile.read', 'Read Asset Profile', NULL, 'low', 1, 1, NULL, NULL, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'),
+                ('organization.plant.create', 'organization.plant.create', 'Create Plant', NULL, 'medium', 0, 0, NULL, NULL, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'),
+                ('organization.credential.use', 'organization.credential.use', 'Use Credential', NULL, 'critical', 0, 0, NULL, NULL, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'),
+                ('organization.profile.read', 'organization.profile.read', 'Read Organization Profile', NULL, 'low', 1, 1, NULL, NULL, '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z');
+            INSERT INTO role_actions (role_id, action_id)
+            VALUES
+                ('role-old-plant', 'plant.profile.read'),
+                ('role-old-asset', 'asset.profile.read'),
+                ('role-account', 'organization.profile.read');
+            INSERT INTO role_bindings (
+                id, subject_type, subject_id, subject_organization_id, resource_type, resource_id,
+                role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+            ) VALUES (
+                'binding-old-plant', 'organization', 'org-1', 'org-1', 'plant', 'plant-1',
+                'role-old-plant', NULL, 'active', 'bootstrap-user', '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'
+            );
+            INSERT INTO application_actions (application_id, action_id)
+            VALUES
+                ('application-old', 'plant.profile.read'),
+                ('application-account', 'organization.profile.read');
+            INSERT INTO application_grant_actions (application_grant_id, action_id)
+            VALUES
+                ('grant-old', 'asset.profile.read'),
+                ('grant-account', 'organization.profile.read');
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed stale authorization rows");
+
+    db.ensure_schema_only().await.expect("cleanup stale rows");
+
+    let removed_actions: Vec<TableRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT code AS name
+             FROM actions
+             WHERE code LIKE 'plant.%'
+                OR code LIKE 'asset.%'
+                OR code LIKE 'organization.plant.%'
+                OR code = 'organization.credential.use'",
+            vec![],
+        )
+        .await
+        .expect("removed actions");
+    assert!(removed_actions.is_empty());
+
+    let stale_refs: Vec<TableRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT action_id AS name FROM role_actions WHERE action_id <> 'organization.profile.read'
+             UNION ALL
+             SELECT action_id AS name FROM application_actions WHERE action_id <> 'organization.profile.read'
+             UNION ALL
+             SELECT action_id AS name FROM application_grant_actions WHERE action_id <> 'organization.profile.read'
+             UNION ALL
+             SELECT resource_type AS name FROM role_bindings WHERE resource_type <> 'organization'",
+            vec![],
+        )
+        .await
+        .expect("stale authorization references");
+    assert!(stale_refs.is_empty());
+
+    let kept_actions: Vec<TableRow> = runtime
+        .query_rows(
+            ReadConsistency::Local,
+            "SELECT code AS name FROM actions WHERE code = 'organization.profile.read'",
+            vec![],
+        )
+        .await
+        .expect("kept actions");
+    assert_eq!(kept_actions.len(), 1);
 }
