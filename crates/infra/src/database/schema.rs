@@ -159,9 +159,17 @@ impl Database {
                     first_party INTEGER NOT NULL DEFAULT 0,
                     consent_policy TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
+                    rauthy_client_id TEXT,
+                    secret_rotated_at TEXT,
                     created_by_user_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS application_redirect_uris (
+                    application_id TEXT NOT NULL,
+                    redirect_uri TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (application_id, redirect_uri)
                 );
                 CREATE TABLE IF NOT EXISTS application_actions (
                     application_id TEXT NOT NULL,
@@ -198,6 +206,10 @@ impl Database {
             "TEXT NOT NULL DEFAULT 'grant'",
         )
         .await?;
+        self.add_column_if_missing("applications", "rauthy_client_id", "TEXT")
+            .await?;
+        self.add_column_if_missing("applications", "secret_rotated_at", "TEXT")
+            .await?;
         self.migrate_actions_provider_scoped_uniqueness().await?;
         self.migrate_legacy_account_organization_authorization()
             .await?;

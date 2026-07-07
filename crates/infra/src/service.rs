@@ -9,11 +9,12 @@ use anyhow::Result;
 use chrono::Utc;
 use domain::{
     Action, Agreement, AgreementStatus, AgreementType, Application, ApplicationAppType,
-    ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus, ApplicationType,
-    HealthStatus, Organization, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
-    ServiceProvider, User,
+    ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus, ApplicationRedirectUri,
+    ApplicationType, HealthStatus, Organization, Role, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType, ServiceProvider, User,
 };
 use std::{collections::HashSet, error::Error as StdError, fmt};
+use uuid::Uuid;
 
 const MAX_APPLICATION_ACTION_IDS_PER_REQUEST: usize = 999;
 const MAX_ACTION_IDS_PER_REQUEST: usize = 999;
@@ -106,6 +107,12 @@ pub struct CreateApplicationGrantInput {
     pub user_id: String,
     pub application_id: String,
     pub action_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RotateClientSecretResult {
+    pub client_secret: String,
+    pub secret_rotated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -474,8 +481,9 @@ impl AppService {
             Some(ReadConsistency::Strong),
         )
         .await?;
+        let application_id = require_non_empty("id", &input.id)?;
         let application = Application {
-            id: require_non_empty("id", &input.id)?,
+            id: application_id.clone(),
             organization_id: organization_id.to_owned(),
             slug: require_non_empty("slug", &input.slug)?,
             name: require_non_empty("name", &input.name)?,
@@ -485,6 +493,8 @@ impl AppService {
             first_party: input.first_party,
             consent_policy: input.consent_policy,
             active: input.active,
+            rauthy_client_id: Some(application_id),
+            secret_rotated_at: None,
             created_by_user_id: user_id.to_owned(),
         };
         self.db.insert_application(&application).await?;
@@ -519,12 +529,100 @@ impl AppService {
             first_party: input.first_party,
             consent_policy: input.consent_policy,
             active: input.active,
+            rauthy_client_id: existing.rauthy_client_id,
+            secret_rotated_at: existing.secret_rotated_at,
             created_by_user_id: existing.created_by_user_id,
         };
         self.db
             .update_application(&application, slug_changed)
             .await?;
         Ok(application)
+    }
+
+    pub async fn list_application_redirect_uris_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<ApplicationRedirectUri>> {
+        self.get_application_authorized(
+            user_id,
+            organization_id,
+            application_id,
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_application_redirect_uris_with_consistency(application_id, read_consistency)
+            .await
+    }
+
+    pub async fn create_application_redirect_uri_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+        redirect_uri: &str,
+    ) -> Result<ApplicationRedirectUri> {
+        self.get_application_authorized(
+            user_id,
+            organization_id,
+            application_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let redirect_uri = normalize_redirect_uri(redirect_uri)?;
+        let item = ApplicationRedirectUri {
+            application_id: application_id.to_owned(),
+            redirect_uri,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.db.insert_application_redirect_uri(&item).await?;
+        Ok(item)
+    }
+
+    pub async fn delete_application_redirect_uri_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+        redirect_uri: &str,
+    ) -> Result<()> {
+        self.get_application_authorized(
+            user_id,
+            organization_id,
+            application_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let redirect_uri = normalize_redirect_uri(redirect_uri)?;
+        self.db
+            .delete_application_redirect_uri(application_id, &redirect_uri)
+            .await
+    }
+
+    pub async fn rotate_application_client_secret_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+    ) -> Result<RotateClientSecretResult> {
+        self.get_application_authorized(
+            user_id,
+            organization_id,
+            application_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let secret_rotated_at = Utc::now().to_rfc3339();
+        self.db
+            .update_application_secret_rotated_at(application_id, &secret_rotated_at)
+            .await?;
+        Ok(RotateClientSecretResult {
+            client_secret: format!("grant_{}", Uuid::new_v4().simple()),
+            secret_rotated_at,
+        })
     }
 
     pub async fn list_application_actions_authorized(
@@ -1292,6 +1390,41 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
             Some(trimmed.to_owned())
         }
     })
+}
+
+fn normalize_redirect_uri(value: &str) -> Result<String> {
+    let redirect_uri = require_non_empty("redirectUri", value)?;
+    let Some((scheme, rest)) = redirect_uri.split_once("://") else {
+        return Err(bad_request_error(
+            "redirectUri must use http or https scheme and include a host",
+        ));
+    };
+    if !matches!(scheme, "http" | "https") {
+        return Err(bad_request_error(
+            "redirectUri must use http or https scheme and include a host",
+        ));
+    }
+    let authority = rest
+        .split(|ch| matches!(ch, '/' | '?' | '#'))
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed
+            .split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    if host.trim().is_empty() {
+        return Err(bad_request_error(
+            "redirectUri must use http or https scheme and include a host",
+        ));
+    }
+    Ok(redirect_uri)
 }
 
 fn ensure_agreement_org_scope(agreement: &Agreement, organization_id: &str) -> Result<()> {

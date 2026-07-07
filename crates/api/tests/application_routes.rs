@@ -4,7 +4,10 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
-use domain::{Role, RoleBinding, RoleBindingState, RoleBindingSubjectType};
+use domain::{
+    Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationType, Role, RoleBinding,
+    RoleBindingState, RoleBindingSubjectType,
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
@@ -155,6 +158,245 @@ async fn seed_application_manager(db: &Database, organization_id: &str) {
     .expect("save application manage binding");
 }
 
+async fn create_application_via_api(
+    app: axum::Router,
+    organization_id: &str,
+    application_id: &str,
+) {
+    let response = app
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/{organization_id}/apps"),
+            "bootstrap-user",
+            organization_id,
+            Some(json!({
+                "id": application_id,
+                "slug": application_id.trim_start_matches("application-"),
+                "name": application_id,
+                "applicationType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": true
+            })),
+        ))
+        .await
+        .expect("create application response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+async fn seed_application_without_manage(
+    db: &Database,
+    organization_id: &str,
+    application_id: &str,
+) {
+    db.upsert_organization_with_owner(organization_id, organization_id, None, organization_id)
+        .await
+        .expect("organization");
+    db.insert_application(&Application {
+        id: application_id.to_owned(),
+        organization_id: organization_id.to_owned(),
+        slug: application_id.trim_start_matches("application-").to_owned(),
+        name: application_id.to_owned(),
+        description: None,
+        application_type: ApplicationType::Confidential,
+        app_type: ApplicationAppType::Web,
+        first_party: false,
+        consent_policy: ApplicationConsentPolicy::Explicit,
+        active: true,
+        rauthy_client_id: None,
+        secret_rotated_at: None,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("application");
+}
+
+#[tokio::test]
+async fn application_redirect_uri_routes_create_list_and_delete() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-developer-console").await;
+
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_body = create.into_body().collect().await.expect("body").to_bytes();
+    let created: Value = serde_json::from_slice(&create_body).expect("json");
+    assert_eq!(created["applicationId"], "application-developer-console");
+    assert_eq!(created["redirectUri"], "https://client.example/callback");
+
+    let list = app
+        .clone()
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list redirect uri response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = list.into_body().collect().await.expect("body").to_bytes();
+    let listed: Value = serde_json::from_slice(&list_body).expect("json");
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+
+    let delete = app
+        .clone()
+        .oneshot(app_request(
+            Method::DELETE,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("delete redirect uri response");
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    let list_after_delete = app
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list after delete response");
+    assert_eq!(list_after_delete.status(), StatusCode::OK);
+    let list_after_delete_body = list_after_delete
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let listed_after_delete: Value = serde_json::from_slice(&list_after_delete_body).expect("json");
+    assert_eq!(listed_after_delete.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-invalid-redirect").await;
+
+    for redirect_uri in [
+        "ftp://client.example/callback",
+        "https:///callback",
+        "http://",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/orgs/creator-org/apps/application-invalid-redirect/redirect-uris",
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": redirect_uri })),
+            ))
+            .await
+            .expect("invalid redirect uri response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn application_client_secret_rotate_returns_secret_and_updates_application() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-secret-rotation").await;
+
+    let rotate = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-secret-rotation/client-secret/rotate",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("rotate response");
+    let rotate_status = rotate.status();
+    let rotate_body = rotate.into_body().collect().await.expect("body").to_bytes();
+    let rotated: Value = serde_json::from_slice(&rotate_body).expect("json");
+    assert_eq!(
+        rotate_status,
+        StatusCode::OK,
+        "rotate response body: {rotated}"
+    );
+    assert!(
+        rotated["clientSecret"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    let rotated_at = rotated["secretRotatedAt"]
+        .as_str()
+        .expect("secretRotatedAt")
+        .to_owned();
+
+    let get = app
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-secret-rotation",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("get response");
+    assert_eq!(get.status(), StatusCode::OK);
+    let get_body = get.into_body().collect().await.expect("body").to_bytes();
+    let application: Value = serde_json::from_slice(&get_body).expect("json");
+    assert_eq!(application["secretRotatedAt"], rotated_at);
+}
+
+#[tokio::test]
+async fn application_developer_console_routes_require_manage_permission() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_without_manage(&db, "creator-org", "application-forbidden-console").await;
+    let app = api::build_router(service);
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-forbidden-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("redirect response");
+    assert_eq!(redirect.status(), StatusCode::FORBIDDEN);
+
+    let rotate = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-forbidden-console/client-secret/rotate",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("rotate response");
+    assert_eq!(rotate.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn application_routes_create_list_get_and_replace_actions() {
     let (service, db, _dir) = test_service().await;
@@ -188,6 +430,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
     let payload: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(payload["id"], "application-awesome-dashboard");
     assert_eq!(payload["organizationId"], "creator-org");
+    assert_eq!(payload["rauthyClientId"], "application-awesome-dashboard");
     assert_eq!(payload["createdByUserId"], "bootstrap-user");
 
     let list = app

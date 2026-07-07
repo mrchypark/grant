@@ -6,8 +6,8 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use domain::{
     Action, Agreement, Application, ApplicationAction, ApplicationGrant, ApplicationGrantAction,
-    ApplicationGrantStatus, HealthStatus, Organization, Role, RoleBinding, RoleBindingState,
-    RoleBindingSubjectType, ServiceProvider, User,
+    ApplicationGrantStatus, ApplicationRedirectUri, HealthStatus, Organization, Role, RoleBinding,
+    RoleBindingState, RoleBindingSubjectType, ServiceProvider, User,
 };
 use hiqlite::Row;
 use std::borrow::Cow;

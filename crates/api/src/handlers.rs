@@ -4,18 +4,19 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use domain::{
-    Action, Agreement, Application, ApplicationGrant, HealthStatus, Organization, Role,
-    RoleBinding, ServiceProvider,
+    Action, Agreement, Application, ApplicationGrant, ApplicationRedirectUri, HealthStatus,
+    Organization, Role, RoleBinding, ServiceProvider,
 };
 use infra::{config::ReadConsistency, service::AppService};
 use std::sync::Arc;
 
 use crate::{
     dto::{
-        BootstrapOwnerResponse, CreateApplicationGrantRequest, CreateApplicationRequest,
-        CreateRoleBindingRequest, CreateRoleRequest, CurrentUserResponse, ReadConsistencyQuery,
-        ReplaceActionsRequest, ReplaceApplicationActionsRequest, ReplaceProviderActionsRequest,
-        UpdateApplicationRequest, UpsertAgreementRequest,
+        ApplicationRedirectUriRequest, BootstrapOwnerResponse, CreateApplicationGrantRequest,
+        CreateApplicationRequest, CreateRoleBindingRequest, CreateRoleRequest, CurrentUserResponse,
+        ReadConsistencyQuery, ReplaceActionsRequest, ReplaceApplicationActionsRequest,
+        ReplaceProviderActionsRequest, RotateClientSecretResponse, UpdateApplicationRequest,
+        UpsertAgreementRequest,
     },
     error::{ApiError, ApiResult},
     mappers::{
@@ -177,6 +178,88 @@ pub(crate) async fn update_application(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(application))
+}
+
+pub(crate) async fn list_application_redirect_uris(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, application_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<ApplicationRedirectUri>>> {
+    let read_consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let redirect_uris = service
+        .list_application_redirect_uris_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &application_id,
+            read_consistency,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(redirect_uris))
+}
+
+pub(crate) async fn create_application_redirect_uri(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, application_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ApplicationRedirectUriRequest>,
+) -> ApiResult<(StatusCode, Json<ApplicationRedirectUri>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let redirect_uri = service
+        .create_application_redirect_uri_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &application_id,
+            &body.redirect_uri,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(redirect_uri)))
+}
+
+pub(crate) async fn delete_application_redirect_uri(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, application_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ApplicationRedirectUriRequest>,
+) -> ApiResult<StatusCode> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    service
+        .delete_application_redirect_uri_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &application_id,
+            &body.redirect_uri,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn rotate_application_client_secret(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, application_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<RotateClientSecretResponse>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let rotated = service
+        .rotate_application_client_secret_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &application_id,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(RotateClientSecretResponse {
+        client_secret: rotated.client_secret,
+        secret_rotated_at: rotated.secret_rotated_at,
+    }))
 }
 
 pub(crate) async fn list_application_actions(

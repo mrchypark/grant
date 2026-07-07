@@ -80,6 +80,8 @@ fn serializes_grant_models() {
         first_party: false,
         consent_policy: ApplicationConsentPolicy::Explicit,
         active: true,
+        rauthy_client_id: None,
+        secret_rotated_at: None,
         created_by_user_id: user.id.clone(),
     };
     let application_action = ApplicationAction {

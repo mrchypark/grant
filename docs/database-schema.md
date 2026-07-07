@@ -67,9 +67,13 @@ grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을
 
 과거 `account` provider에 남아 있던 `organization.*` action과 `organization` resource binding은 schema migration에서 `grant` provider로 이동한다. 동일 logical binding이 이미 `grant`에 있으면 legacy `account` row의 active 상태와 agreement 참조를 `grant` row에 병합한 뒤 legacy row를 삭제한다.
 
-### `applications`, `application_actions`, `application_grants`, `application_grant_actions`
+### `applications`, `application_redirect_uris`, `application_actions`, `application_grants`, `application_grant_actions`
 
 API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 grant 경계에 남긴다.
+
+`applications.rauthy_client_id`는 나중에 Rauthy client와 연결할 선택 필드다. 현재 developer console 기반은 grant DB에만 저장하며 Rauthy Admin/DCR과 동기화하지 않는다. `applications.secret_rotated_at`은 grant 쪽 client secret이 마지막으로 회전된 시각만 저장한다. secret 원문은 저장하지 않고 rotate 응답에서 한 번만 반환한다.
+
+`application_redirect_uris`는 application별 허용 redirect URI 목록이다. key는 `(application_id, redirect_uri)`이고, API에서는 `http`/`https` scheme과 non-empty host만 허용한다.
 
 ## 제거된 테이블
 
@@ -126,6 +130,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `role_bindings.agreement_id` -> `agreements.id`
 - `role_bindings.subject_organization_id` -> `organizations.id`
 - `role_bindings.provider_id` -> `service_providers.id`
+- `application_redirect_uris.application_id` -> `applications.id`
 - `application_actions.application_id` -> `applications.id`
 - `application_actions.action_id` -> `actions.id`
 - `application_grants.user_id` -> `users.id`

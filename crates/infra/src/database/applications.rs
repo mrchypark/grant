@@ -41,8 +41,9 @@ impl Database {
             .execute(
                 "INSERT INTO applications (
                     id, organization_id, slug, name, description, application_type, app_type,
-                    first_party, consent_policy, active, created_by_user_id, created_at, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                    first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                    created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                 params!(
                     application.id.clone(),
                     application.organization_id.clone(),
@@ -58,6 +59,8 @@ impl Database {
                     },
                     application_consent_policy_str(&application.consent_policy),
                     if application.active { 1_i64 } else { 0_i64 },
+                    application.rauthy_client_id.clone(),
+                    application.secret_rotated_at.clone(),
                     application.created_by_user_id.clone(),
                     now.clone(),
                     now
@@ -180,8 +183,9 @@ impl Database {
             .execute(
                 "INSERT INTO applications (
                     id, organization_id, slug, name, description, application_type, app_type,
-                    first_party, consent_policy, active, created_by_user_id, created_at, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                    created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                  ON CONFLICT(id) DO UPDATE SET
                     organization_id = excluded.organization_id,
                     slug = excluded.slug,
@@ -192,6 +196,8 @@ impl Database {
                     first_party = excluded.first_party,
                     consent_policy = excluded.consent_policy,
                     active = excluded.active,
+                    rauthy_client_id = excluded.rauthy_client_id,
+                    secret_rotated_at = excluded.secret_rotated_at,
                     created_by_user_id = excluded.created_by_user_id,
                     updated_at = excluded.updated_at",
                 params!(
@@ -209,6 +215,8 @@ impl Database {
                     },
                     application_consent_policy_str(&application.consent_policy),
                     if application.active { 1_i64 } else { 0_i64 },
+                    application.rauthy_client_id.clone(),
+                    application.secret_rotated_at.clone(),
                     application.created_by_user_id.clone(),
                     now.clone(),
                     now
@@ -228,7 +236,8 @@ impl Database {
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT id, organization_id, slug, name, description, application_type, app_type,
-                        first_party, consent_policy, active, created_by_user_id
+                        first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                        created_by_user_id
                  FROM applications
                  WHERE organization_id = $1
                  ORDER BY name ASC, slug ASC, id ASC",
@@ -248,7 +257,8 @@ impl Database {
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT id, organization_id, slug, name, description, application_type, app_type,
-                        first_party, consent_policy, active, created_by_user_id
+                        first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                        created_by_user_id
                  FROM applications
                  WHERE id = $1
                  LIMIT 1",
@@ -280,7 +290,8 @@ impl Database {
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT id, organization_id, slug, name, description, application_type, app_type,
-                        first_party, consent_policy, active, created_by_user_id
+                        first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                        created_by_user_id
                  FROM applications
                  WHERE slug = $1
                  LIMIT 1",
@@ -289,6 +300,89 @@ impl Database {
             )
             .await?;
         rows.into_iter().next().map(TryInto::try_into).transpose()
+    }
+
+    pub async fn insert_application_redirect_uri(
+        &self,
+        redirect_uri: &ApplicationRedirectUri,
+    ) -> Result<()> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM applications WHERE id = $1",
+                params!(redirect_uri.application_id.clone()),
+                "application existence for redirect uri",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application {} does not exist",
+                redirect_uri.application_id
+            ));
+        }
+        self.runtime
+            .execute(
+                "INSERT INTO application_redirect_uris (application_id, redirect_uri, created_at)
+                 VALUES ($1, $2, $3)",
+                params!(
+                    redirect_uri.application_id.clone(),
+                    redirect_uri.redirect_uri.clone(),
+                    redirect_uri.created_at.clone()
+                ),
+            )
+            .await
+            .context("insert application redirect uri")?;
+        Ok(())
+    }
+
+    pub async fn list_application_redirect_uris_with_consistency(
+        &self,
+        application_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<ApplicationRedirectUri>> {
+        let rows: Vec<ApplicationRedirectUriRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT application_id, redirect_uri, created_at
+                 FROM application_redirect_uris
+                 WHERE application_id = $1
+                 ORDER BY redirect_uri ASC",
+                params!(application_id.to_owned()),
+                "application redirect uris",
+            )
+            .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn delete_application_redirect_uri(
+        &self,
+        application_id: &str,
+        redirect_uri: &str,
+    ) -> Result<()> {
+        self.runtime
+            .execute(
+                "DELETE FROM application_redirect_uris
+                 WHERE application_id = $1
+                   AND redirect_uri = $2",
+                params!(application_id.to_owned(), redirect_uri.to_owned()),
+            )
+            .await
+            .context("delete application redirect uri")?;
+        Ok(())
+    }
+
+    pub async fn update_application_secret_rotated_at(
+        &self,
+        application_id: &str,
+        secret_rotated_at: &str,
+    ) -> Result<()> {
+        let mut application = self
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        application.secret_rotated_at = Some(secret_rotated_at.to_owned());
+        self.upsert_application(&application)
+            .await
+            .context("update application secret rotation timestamp")
     }
 
     pub async fn upsert_application_action(

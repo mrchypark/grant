@@ -60,6 +60,8 @@ application은 조직이 만든 실행 주체다. 조직 owner/관리자는 appl
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
+developer console의 redirect URI와 client secret rotation은 기존 `applications`에 붙은 설정이다. 별도 partner 테이블을 만들지 않고, create/list/delete redirect URI와 secret rotate API는 기존 `organization.application.manage` 권한으로 보호한다. 현재 secret rotate는 grant 쪽 timestamp 갱신과 one-time secret 반환만 수행하며 Rauthy Admin/DCR에는 아직 반영하지 않는다.
+
 ## Authz API
 
 외부 서비스는 세 가지 API를 사용한다.
@@ -81,4 +83,5 @@ grant는 외부 provider의 전체 resource 목록을 모른다. 따라서 unbou
 - `role_bindings` scope 의미
 - agreement 검증 규칙
 - application grant action subset 규칙
+- developer console application 설정 권한 규칙
 - authz check/filter 응답 계약

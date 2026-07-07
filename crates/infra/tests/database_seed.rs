@@ -304,6 +304,8 @@ async fn application_grants_round_trip_through_database() {
         first_party: false,
         consent_policy: ApplicationConsentPolicy::Explicit,
         active: true,
+        rauthy_client_id: None,
+        secret_rotated_at: None,
         created_by_user_id: "bootstrap-user".to_owned(),
     })
     .await
@@ -390,6 +392,8 @@ async fn application_actions_reject_non_grantable_actions() {
         first_party: false,
         consent_policy: ApplicationConsentPolicy::Explicit,
         active: true,
+        rauthy_client_id: None,
+        secret_rotated_at: None,
         created_by_user_id: "bootstrap-user".to_owned(),
     })
     .await
@@ -428,6 +432,8 @@ async fn application_grant_actions_must_be_subset_of_application_actions() {
         first_party: false,
         consent_policy: ApplicationConsentPolicy::Explicit,
         active: true,
+        rauthy_client_id: None,
+        secret_rotated_at: None,
         created_by_user_id: "bootstrap-user".to_owned(),
     })
     .await

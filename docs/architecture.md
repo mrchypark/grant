@@ -17,7 +17,7 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 ## 코드 기준 구성 요소
 
 - `crates/domain`
-  - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationGrant`, `Agreement`.
+  - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationRedirectUri`, `ApplicationGrant`, `Agreement`.
 - `crates/infra`
   - 설정 로딩, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, 권한 판정 service layer를 가진다.
 - `crates/api`
@@ -34,6 +34,8 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `GET|POST /api/v1/orgs/{orgId}/apps`
 - `GET|PUT /api/v1/orgs/{orgId}/apps/{appId}`
 - `GET|PUT /api/v1/orgs/{orgId}/apps/{appId}/actions`
+- `GET|POST|DELETE /api/v1/orgs/{orgId}/apps/{appId}/redirect-uris`
+- `POST /api/v1/orgs/{orgId}/apps/{appId}/client-secret/rotate`
 - `GET|POST /api/v1/orgs/{orgId}/app-grants`
 - `PUT /api/v1/orgs/{orgId}/app-grants/{grantId}/actions`
 - `POST /api/v1/orgs/{orgId}/app-grants/{grantId}/revoke`
@@ -54,6 +56,8 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 3. 사용자 요청은 Rauthy bearer token을 OAuth2 introspection과 OIDC userinfo로 확인한 뒤 grant user/org context로 해석한다.
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
 5. service-to-service admin/authz API는 현재 `x-grant-master-key` header로 보호한다.
+
+Developer console foundation은 기존 organization/application 경계 안에 둔다. redirect URI와 client secret rotation metadata는 grant DB에만 반영하며, Rauthy Admin/DCR client provisioning은 아직 호출하지 않는다.
 
 ## Voter And Learner
 

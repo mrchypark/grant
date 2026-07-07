@@ -18,11 +18,13 @@ use authz::{authz_batch_check, authz_check, authz_filter};
 use backups::{list_backups_local, list_backups_s3, trigger_backup};
 use handlers::{
     bootstrap_rauthy_owner, create_agreement, create_application, create_application_grant,
-    create_role, create_role_binding, deactivate_organization, delete_role_binding, get_agreement,
-    get_application, get_current_user, healthz, list_agreements, list_application_actions,
-    list_application_grants, list_applications, list_providers, list_role_bindings, list_roles,
-    reactivate_organization, replace_application_actions, replace_application_grant_actions,
-    replace_provider_actions, replace_role_actions, requires_voter_node, revoke_application_grant,
+    create_application_redirect_uri, create_role, create_role_binding, deactivate_organization,
+    delete_application_redirect_uri, delete_role_binding, get_agreement, get_application,
+    get_current_user, healthz, list_agreements, list_application_actions, list_application_grants,
+    list_application_redirect_uris, list_applications, list_providers, list_role_bindings,
+    list_roles, reactivate_organization, replace_application_actions,
+    replace_application_grant_actions, replace_provider_actions, replace_role_actions,
+    requires_voter_node, revoke_application_grant, rotate_application_client_secret,
     update_agreement, update_application, upsert_provider,
 };
 use rauthy_proxy::{auth_root, proxy_rauthy_passthrough, proxy_rauthy_root};
@@ -45,6 +47,14 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
             put(replace_application_actions),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/redirect-uris",
+            post(create_application_redirect_uri).delete(delete_application_redirect_uri),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/client-secret/rotate",
+            post(rotate_application_client_secret),
         )
         .route(
             "/api/v1/orgs/{organizationId}/app-grants",
@@ -119,6 +129,14 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
             put(requires_voter_node),
         )
         .route(
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/redirect-uris",
+            post(requires_voter_node).delete(requires_voter_node),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/client-secret/rotate",
+            post(requires_voter_node),
+        )
+        .route(
             "/api/v1/orgs/{organizationId}/app-grants",
             post(requires_voter_node),
         )
@@ -187,6 +205,10 @@ fn build_shared_router() -> Router<Arc<AppService>> {
         .route(
             "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
             get(list_application_actions),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/redirect-uris",
+            get(list_application_redirect_uris),
         )
         .route(
             "/api/v1/orgs/{organizationId}/app-grants",
