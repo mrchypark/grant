@@ -19,6 +19,9 @@ key_active = "devkey01"
 [events]
 email = "admin@localhost"
 
+[mfa]
+admin_force_mfa = false
+
 [server]
 scheme = "http"
 pub_url = "localhost:8080"
