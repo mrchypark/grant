@@ -1,0 +1,13 @@
+name: build and push
+
+on:
+  push:
+
+jobs:
+  docker:
+    uses: Conalog/deploy/.github/workflows/buildandpush.yaml@main
+    secrets: inherit
+    with:
+      application-name: 'grant'
+      dockerfile: './Dockerfile'
+      arch: 'linux/amd64'
