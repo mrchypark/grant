@@ -28,12 +28,12 @@ stringData:
 
     [server]
     scheme = "http"
-    pub_url = "grant.local:80"
+    pub_url = "localhost:18080"
     proxy_mode = false
 
     [webauthn]
-    rp_id = "grant.local"
-    rp_origin = "http://grant.local:80"
+    rp_id = "localhost"
+    rp_origin = "http://localhost:18080"
   clients.json: |
     [
       {
@@ -43,13 +43,13 @@ stringData:
           "Plain": "devRauthyClientSecret0000000000000000000000000000000000000000000"
         },
         "redirect_uris": [
-          "http://grant.local:80/auth/callback"
+          "http://localhost:18080/auth/callback"
         ],
         "post_logout_redirect_uris": [
-          "http://grant.local:80/auth/v1"
+          "http://localhost:18080/auth/v1"
         ],
         "allowed_origins": [
-          "http://grant.local:80"
+          "http://localhost:18080"
         ],
         "enabled": true,
         "flows_enabled": [

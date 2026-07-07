@@ -48,12 +48,14 @@ bash ./scripts/ci-local.sh
 
 ## API Smoke 예시
 
-아래 예시는 service가 로컬 `127.0.0.1:18080`으로 포트포워딩된 상태를 전제로 한다.
+아래 예시는 service가 로컬 `localhost:18080`으로 포트포워딩된 상태를 전제로 한다.
+Rauthy의 OIDC issuer와 redirect URI도 이 origin에 맞춰져 있으므로 브라우저와 smoke 테스트에서
+`127.0.0.1:18080` 대신 `localhost:18080`을 사용한다.
 
 필수 변수:
 
 ```bash
-export BASE_URL=http://127.0.0.1:18080
+export BASE_URL=http://localhost:18080
 export MASTER_KEY=dev-only-master-key
 export ORG_ID=conalog-grant
 export TOKEN=<rauthy-access-token>
