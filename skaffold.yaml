@@ -1,13 +1,13 @@
 apiVersion: skaffold/v4beta13
 kind: Config
 metadata:
-  name: certd
+  name: grant
 
 build:
   local:
     useDockerCLI: true
   artifacts:
-    - image: certd
+    - image: grant
       context: .
       docker:
         dockerfile: Dockerfile

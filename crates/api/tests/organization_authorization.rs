@@ -1,135 +1,13 @@
-#[path = "support/auth.rs"]
-mod auth_support;
 mod support;
 
 use axum::{
-    body::Body,
-    http::{Request, StatusCode},
+    Router,
+    http::{Method, StatusCode},
 };
-use domain::{
-    Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingResourceType,
-    RoleBindingState, RoleBindingSubjectType,
-};
-use hiqlite::{Node, NodeConfig, s3::EncKeys};
-use http_body_util::BodyExt;
-use infra::{
-    artifacts::ArtifactStore,
-    config::{
-        AppConfig, ArtifactBackendConfig, ArtifactConfig, HiqliteConfig, LocalNodeRole,
-        ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
-    },
-    database::Database,
-    runtime::HiqliteRuntime,
-    service::AppService,
-};
+use domain::Role;
+use infra::{config::ReadConsistency, database::Database};
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tempfile::TempDir;
 use tower::ServiceExt;
-use uuid::Uuid;
-
-fn free_local_addr() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    addr.to_string()
-}
-
-async fn test_runtime() -> (HiqliteRuntime, TempDir) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let api_addr = free_local_addr();
-    let raft_addr = free_local_addr();
-    let mut cfg = NodeConfig::default();
-    cfg.node_id = 1;
-    cfg.nodes = vec![Node {
-        id: 1,
-        addr_raft: raft_addr.clone(),
-        addr_api: api_addr.clone(),
-    }];
-    cfg.listen_addr_api = "127.0.0.1".into();
-    cfg.listen_addr_raft = "127.0.0.1".into();
-    cfg.data_dir = dir.path().to_string_lossy().into_owned().into();
-    cfg.filename_db = "test.sqlite".into();
-    cfg.secret_api = "0123456789abcdef0123456789abcdef".to_owned();
-    cfg.secret_raft = "fedcba9876543210fedcba9876543210".to_owned();
-    cfg.enc_keys = EncKeys::generate().expect("enc keys");
-    cfg.health_check_delay_secs = 0;
-    cfg.raft_config = NodeConfig::default_raft_config(128);
-
-    let client = hiqlite::start_node(cfg).await.expect("start hiqlite");
-    (
-        HiqliteRuntime::embedded(client, ReadConsistency::Local),
-        dir,
-    )
-}
-
-async fn test_service() -> (Arc<AppService>, Database, TempDir) {
-    let trailbase_base_url = support::start_mock_trailbase().await;
-    let (runtime, dir) = test_runtime().await;
-    let artifacts_root = dir.path().join("artifacts");
-    let app_cfg = AppConfig {
-        server: ServerConfig {
-            bind_addr: free_local_addr(),
-        },
-        security: SecurityConfig {
-            master_key: "dev-only-master-key".to_owned(),
-            bootstrap_user_id: "bootstrap-user".to_owned(),
-            bootstrap_user_name: "Bootstrap User".to_owned(),
-            allow_untrusted_certificates: true,
-            certificate_trust_bundle_path: None,
-        },
-        auth: support::trailbase_auth_config(trailbase_base_url),
-        kms: support::test_kms_config(),
-        artifacts: ArtifactConfig {
-            backend: ArtifactBackendConfig::FileSystem {
-                root_dir: artifacts_root,
-            },
-        },
-        hiqlite: HiqliteConfig {
-            runtime_mode: RuntimeMode::Embedded,
-            local_node_role: LocalNodeRole::Voter,
-            default_read_consistency: ReadConsistency::Local,
-            remote_nodes: vec![],
-            remote_tls: false,
-            remote_tls_no_verify: false,
-            remote_api_secret: None,
-            remote_with_proxy: false,
-        },
-    };
-    let db = Database::new(
-        runtime,
-        app_cfg.security.bootstrap_user_id.clone(),
-        app_cfg.security.bootstrap_user_name.clone(),
-    );
-    let db_for_tests = db.clone();
-    let artifacts = ArtifactStore::new(&app_cfg.artifacts)
-        .await
-        .expect("artifact store");
-    let service = Arc::new(AppService::new(app_cfg, db, artifacts));
-    service.initialize().await.expect("initialize");
-    (service, db_for_tests, dir)
-}
-
-fn app_request(path: &str, token: &str, organization_id: &str, body: Value) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("content-type", "application/json")
-        .header("authorization", auth_support::bearer_header(token))
-        .header("x-organization-id", organization_id)
-        .body(Body::from(body.to_string()))
-        .expect("request")
-}
-
-fn empty_post_request(path: &str, token: &str, organization_id: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("authorization", auth_support::bearer_header(token))
-        .header("x-organization-id", organization_id)
-        .body(Body::empty())
-        .expect("request")
-}
 
 async fn seed_creator_context(db: &Database) {
     db.upsert_organization_with_owner("creator-org", "Creator Org", None, "Creator Org")
@@ -138,69 +16,18 @@ async fn seed_creator_context(db: &Database) {
     db.upsert_organization_with_owner("owner-org", "Owner Org", None, "Owner Org")
         .await
         .expect("owner org");
-
-    db.upsert_role(&Role {
-        id: "role-org-plant-create".to_owned(),
-        organization_id: None,
-        code: "organization.plant.create".to_owned(),
-        name: "Org Plant Create".to_owned(),
-        description: None,
-    })
-    .await
-    .expect("upsert org create role");
-    db.upsert_role_action("role-org-plant-create", "organization.plant.create")
-        .await
-        .expect("upsert create action");
-
-    db.upsert_role(&Role {
-        id: "role-org-plant-create-for-owner".to_owned(),
-        organization_id: None,
-        code: "organization.plant.create_for_owner".to_owned(),
-        name: "Org Plant Create For Owner".to_owned(),
-        description: None,
-    })
-    .await
-    .expect("upsert org create-for-owner role");
-    db.upsert_role_action(
-        "role-org-plant-create-for-owner",
-        "organization.plant.create_for_owner",
-    )
-    .await
-    .expect("upsert create-for-owner action");
-
-    db.save_role_binding(&RoleBinding {
-        id: Uuid::new_v4().simple().to_string(),
-        subject_type: RoleBindingSubjectType::Organization,
-        subject_id: "creator-org".to_owned(),
-        subject_organization_id: "creator-org".to_owned(),
-        resource_type: RoleBindingResourceType::Organization,
-        resource_id: "creator-org".to_owned(),
-        role_id: "role-org-plant-create".to_owned(),
-        agreement_id: None,
-        state: RoleBindingState::Active,
-        created_by_user_id: "bootstrap-user".to_owned(),
-        created_at: "2026-04-03T00:00:00Z".to_owned(),
-        updated_at: "2026-04-03T00:00:00Z".to_owned(),
-    })
-    .await
-    .expect("save org create binding");
 }
 
 async fn bind_user_action(db: &Database, role_id: &str) {
-    db.save_role_binding(&RoleBinding {
-        id: Uuid::new_v4().simple().to_string(),
-        subject_type: RoleBindingSubjectType::User,
-        subject_id: "bootstrap-user".to_owned(),
-        subject_organization_id: "creator-org".to_owned(),
-        resource_type: RoleBindingResourceType::Organization,
-        resource_id: "creator-org".to_owned(),
-        role_id: role_id.to_owned(),
-        agreement_id: None,
-        state: RoleBindingState::Active,
-        created_by_user_id: "bootstrap-user".to_owned(),
-        created_at: "2026-04-03T00:00:00Z".to_owned(),
-        updated_at: "2026-04-03T00:00:00Z".to_owned(),
-    })
+    bind_user_action_for_org(db, role_id, "creator-org").await;
+}
+
+async fn bind_user_action_for_org(db: &Database, role_id: &str, organization_id: &str) {
+    db.save_role_binding(&support::user_org_role_binding(
+        role_id,
+        organization_id,
+        support::BOOTSTRAP_USER_ID,
+    ))
     .await
     .expect("save user org binding");
 }
@@ -223,72 +50,668 @@ async fn seed_org_permission_manage_role(db: &Database) {
     .expect("upsert org permission manage action");
 }
 
-#[tokio::test]
-async fn create_plant_requires_organization_scoped_create() {
-    let (service, db, _dir) = test_service().await;
+async fn compos_reader_fixture() -> support::TestApi {
+    let api = support::TestApi::new().await;
+    let db = api.db.clone();
     seed_creator_context(&db).await;
-    let app = api::build_router(service);
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action(&db, "role-org-permission-manage").await;
+    let app = api.app.clone();
 
-    let response = app
-        .oneshot(app_request(
-            "/api/v1/organizations/creator-org/plants",
+    let provider = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/admin/providers",
+            json!({
+                "id": "compos",
+                "name": "Compos",
+                "description": "Object data provider",
+                "active": true
+            }),
+        ))
+        .await
+        .expect("provider response");
+    assert_eq!(provider.status(), StatusCode::CREATED);
+
+    let actions = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::PUT,
+            "/api/v1/admin/providers/compos/actions",
+            json!({
+                "actions": [{
+                    "id": "compos.object.read",
+                    "code": "compos.object.read",
+                    "name": "Read Compos Object",
+                    "description": null,
+                    "riskLevel": "low",
+                    "visibilityGranting": true,
+                    "grantableToApplications": true,
+                    "consentLabel": "Read Compos Object",
+                    "consentDescription": null
+                }]
+            }),
+        ))
+        .await
+        .expect("actions response");
+    assert_eq!(actions.status(), StatusCode::OK);
+
+    let role = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/roles",
             "bootstrap-user",
             "creator-org",
             json!({
-                "facilityCode": "FAC-001",
-                "name": "Plant One",
-                "contractNo": "CN-001",
-                "address": "Seoul",
-                "installedKw": 100.0,
-                "recStartDate": "2026-01-01",
-                "confirmIssued": "Y"
+                "id": "role-compos-reader",
+                "code": "compos.reader",
+                "name": "Compos Reader",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("role response");
+    assert_eq!(role.status(), StatusCode::CREATED);
+
+    let role_actions = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/roles/role-compos-reader/actions",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "actionIds": ["compos.object.read"]
+            }),
+        ))
+        .await
+        .expect("role actions response");
+    assert_eq!(role_actions.status(), StatusCode::OK);
+
+    let binding = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/bindings",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "binding-compos-reader",
+                "subjectType": "user",
+                "subjectId": "bootstrap-user",
+                "subjectOrganizationId": "creator-org",
+                "providerId": "compos",
+                "resourceType": "object_instance",
+                "resourceId": "obj_1",
+                "roleId": "role-compos-reader",
+                "agreementId": null,
+                "state": "active"
+            }),
+        ))
+        .await
+        .expect("binding response");
+    assert_eq!(binding.status(), StatusCode::CREATED);
+
+    api
+}
+
+async fn authz_check(
+    app: &Router,
+    action: &str,
+    provider: &str,
+    resource_type: &str,
+    resource_id: &str,
+) -> Value {
+    let response = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/authz/check",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": action,
+                "resource": {"provider": provider, "type": resource_type, "id": resource_id}
+            }),
+        ))
+        .await
+        .expect("check response");
+    assert_eq!(response.status(), StatusCode::OK);
+    support::response_json(response).await
+}
+
+#[tokio::test]
+async fn agreement_routes_require_permission_manage_and_round_trip() {
+    let api = support::TestApi::new().await;
+    let db = api.db.clone();
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    let app = api.app.clone();
+    let create_body = json!({
+        "id": "agreement-creator-owner",
+        "agreementType": "delegation",
+        "grantorOrganizationId": "creator-org",
+        "granteeOrganizationId": "owner-org",
+        "status": "draft",
+        "title": "Creator Owner Agreement",
+        "referenceNo": "AGR-1",
+        "startsAt": "2026-07-01T00:00:00Z",
+        "endsAt": null
+    });
+
+    let forbidden = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/agreements",
+            "bootstrap-user",
+            "creator-org",
+            create_body.clone(),
+        ))
+        .await
+        .expect("forbidden response");
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    bind_user_action(&db, "role-org-permission-manage").await;
+    let create = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/agreements",
+            "bootstrap-user",
+            "creator-org",
+            create_body,
+        ))
+        .await
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let created = support::response_json(create).await;
+    assert_eq!(created["id"], "agreement-creator-owner");
+    assert_eq!(created["status"], "draft");
+
+    let list = app
+        .clone()
+        .oneshot(support::empty_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/agreements",
+            "bootstrap-user",
+            "creator-org",
+        ))
+        .await
+        .expect("list response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let listed = support::response_json(list).await;
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+
+    let get = app
+        .clone()
+        .oneshot(support::empty_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "creator-org",
+        ))
+        .await
+        .expect("get response");
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let update = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "agreement-creator-owner",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "creator-org",
+                "granteeOrganizationId": "owner-org",
+                "status": "active",
+                "title": "Creator Owner Agreement",
+                "referenceNo": "AGR-1",
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": null
+            }),
+        ))
+        .await
+        .expect("update response");
+    assert_eq!(update.status(), StatusCode::OK);
+    let updated = support::response_json(update).await;
+    assert_eq!(updated["status"], "active");
+
+    bind_user_action_for_org(&db, "role-org-permission-manage", "owner-org").await;
+    let grantee_extend = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::PUT,
+            "/api/v1/orgs/owner-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "owner-org",
+            json!({
+                "id": "agreement-creator-owner",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "creator-org",
+                "granteeOrganizationId": "owner-org",
+                "status": "active",
+                "title": "Creator Owner Agreement",
+                "referenceNo": "AGR-1",
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": "2027-07-01T00:00:00Z"
+            }),
+        ))
+        .await
+        .expect("grantee extend response");
+    assert_eq!(grantee_extend.status(), StatusCode::FORBIDDEN);
+
+    let rehome = app
+        .oneshot(support::json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/agreements/agreement-creator-owner",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "agreement-creator-owner",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "owner-org",
+                "granteeOrganizationId": "creator-org",
+                "status": "active",
+                "title": "Rehome Attempt",
+                "referenceNo": "AGR-1",
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": null
+            }),
+        ))
+        .await
+        .expect("rehome response");
+    assert_eq!(rehome.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn grantee_cannot_self_issue_cross_org_agreement() {
+    let api = support::TestApi::new().await;
+    let db = api.db.clone();
+    seed_creator_context(&db).await;
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action_for_org(&db, "role-org-permission-manage", "owner-org").await;
+    let app = api.app.clone();
+
+    let response = app
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/owner-org/agreements",
+            "bootstrap-user",
+            "owner-org",
+            json!({
+                "id": "agreement-self-issued",
+                "agreementType": "delegation",
+                "grantorOrganizationId": "creator-org",
+                "granteeOrganizationId": "owner-org",
+                "status": "active",
+                "title": "Self Issued Agreement",
+                "referenceNo": null,
+                "startsAt": "2026-07-01T00:00:00Z",
+                "endsAt": null
             }),
         ))
         .await
         .expect("response");
-
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
-async fn create_for_owner_requires_extra_permission() {
-    let (service, db, _dir) = test_service().await;
+async fn role_create_cannot_rehome_existing_role_id() {
+    let api = support::TestApi::new().await;
+    let db = api.db.clone();
     seed_creator_context(&db).await;
-    bind_user_action(&db, "role-org-plant-create").await;
-    let app = api::build_router(service);
+    seed_org_permission_manage_role(&db).await;
+    bind_user_action(&db, "role-org-permission-manage").await;
+    bind_user_action_for_org(&db, "role-org-permission-manage", "owner-org").await;
+    let app = api.app.clone();
 
-    let response = app
-        .oneshot(app_request(
-            "/api/v1/organizations/creator-org/plants",
+    let create = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/roles",
             "bootstrap-user",
             "creator-org",
             json!({
-                "facilityCode": "FAC-002",
-                "name": "Plant Two",
-                "contractNo": "CN-002",
-                "address": "Busan",
-                "installedKw": 80.0,
-                "recStartDate": "2026-01-01",
-                "confirmIssued": "Y",
-                "ownerOrganizationId": "owner-org"
+                "id": "role-shared-id",
+                "code": "creator.shared",
+                "name": "Creator Shared",
+                "description": null
             }),
         ))
         .await
-        .expect("response");
+        .expect("create response");
+    assert_eq!(create.status(), StatusCode::CREATED);
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let rehome = app
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/owner-org/roles",
+            "bootstrap-user",
+            "owner-org",
+            json!({
+                "id": "role-shared-id",
+                "code": "owner.shared",
+                "name": "Owner Shared",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("rehome response");
+    assert_eq!(rehome.status(), StatusCode::CONFLICT);
+
+    let stored = db
+        .get_role_with_consistency("role-shared-id", Some(ReadConsistency::Strong))
+        .await
+        .expect("stored role");
+    assert_eq!(stored.organization_id.as_deref(), Some("creator-org"));
+    assert_eq!(stored.code, "creator.shared");
+}
+
+#[tokio::test]
+async fn authz_check_and_filter_use_role_binding() {
+    let api = compos_reader_fixture().await;
+    let app = api.app.clone();
+
+    let checked = authz_check(
+        &app,
+        "compos.object.read",
+        "compos",
+        "object_instance",
+        "obj_1",
+    )
+    .await;
+    assert_eq!(checked["allowed"], true);
+    assert_eq!(checked["reason"], "role_binding");
+
+    let filter = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/authz/filter",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "compos.object.read",
+                "resources": [
+                    {"provider": "compos", "type": "object_instance", "id": "obj_1"},
+                    {"provider": "compos", "type": "object_instance", "id": "obj_2"}
+                ]
+            }),
+        ))
+        .await
+        .expect("filter response");
+    assert_eq!(filter.status(), StatusCode::OK);
+    let filtered = support::response_json(filter).await;
+    assert_eq!(filtered["resource_ids"], json!(["obj_1"]));
+
+    let batch = app
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/authz/batch-check",
+            json!({
+                "checks": [
+                    {
+                        "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                        "action": "compos.object.read",
+                        "resource": {"provider": "compos", "type": "object_instance", "id": "obj_1"}
+                    },
+                    {
+                        "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                        "action": "compos.object.read",
+                        "resource": {"provider": "compos", "type": "object_instance", "id": "obj_2"}
+                    }
+                ]
+            }),
+        ))
+        .await
+        .expect("batch response");
+    assert_eq!(batch.status(), StatusCode::OK);
+    let batched = support::response_json(batch).await;
+    assert_eq!(batched["results"][0]["allowed"], true);
+    assert_eq!(batched["results"][1]["allowed"], false);
+}
+
+#[tokio::test]
+async fn duplicate_provider_manifest_is_rejected_without_deleting_existing_actions() {
+    let api = compos_reader_fixture().await;
+    let app = api.app.clone();
+
+    let duplicate_manifest = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::PUT,
+            "/api/v1/admin/providers/compos/actions",
+            json!({
+                "actions": [
+                    {
+                        "id": "compos.object.write",
+                        "code": "compos.object.write",
+                        "name": "Write Compos Object",
+                        "description": null,
+                        "riskLevel": "medium",
+                        "visibilityGranting": false,
+                        "grantableToApplications": true,
+                        "consentLabel": "Write Compos Object",
+                        "consentDescription": null
+                    },
+                    {
+                        "id": "compos.object.write",
+                        "code": "compos.object.write",
+                        "name": "Write Compos Object Duplicate",
+                        "description": null,
+                        "riskLevel": "medium",
+                        "visibilityGranting": false,
+                        "grantableToApplications": true,
+                        "consentLabel": "Write Compos Object Duplicate",
+                        "consentDescription": null
+                    }
+                ]
+            }),
+        ))
+        .await
+        .expect("duplicate manifest response");
+    assert_eq!(duplicate_manifest.status(), StatusCode::BAD_REQUEST);
+    let duplicate_payload = support::response_json(duplicate_manifest).await;
+    assert_eq!(
+        duplicate_payload["error"],
+        "duplicate action code in provider manifest: compos.object.write"
+    );
+
+    let preserved = authz_check(
+        &app,
+        "compos.object.read",
+        "compos",
+        "object_instance",
+        "obj_1",
+    )
+    .await;
+    assert_eq!(preserved["allowed"], true);
+}
+
+#[tokio::test]
+async fn grant_provider_action_does_not_authorize_external_provider_resource() {
+    let api = compos_reader_fixture().await;
+    let app = api.app.clone();
+
+    let grant_action_role = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/roles",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "role-grant-action-on-compos",
+                "code": "grant.action.on.compos",
+                "name": "Grant Action On Compos",
+                "description": null
+            }),
+        ))
+        .await
+        .expect("grant action role response");
+    assert_eq!(grant_action_role.status(), StatusCode::CREATED);
+    let grant_role_actions = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::PUT,
+            "/api/v1/orgs/creator-org/roles/role-grant-action-on-compos/actions",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "actionIds": ["organization.profile.read"]
+            }),
+        ))
+        .await
+        .expect("grant role actions response");
+    assert_eq!(grant_role_actions.status(), StatusCode::OK);
+    let provider_mismatch_binding = app
+        .clone()
+        .oneshot(support::json_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/bindings",
+            "bootstrap-user",
+            "creator-org",
+            json!({
+                "id": "binding-provider-mismatch",
+                "subjectType": "user",
+                "subjectId": "bootstrap-user",
+                "subjectOrganizationId": "creator-org",
+                "providerId": "compos",
+                "resourceType": "object_instance",
+                "resourceId": "obj_2",
+                "roleId": "role-grant-action-on-compos",
+                "agreementId": null,
+                "state": "active"
+            }),
+        ))
+        .await
+        .expect("provider mismatch binding response");
+    assert_eq!(provider_mismatch_binding.status(), StatusCode::CREATED);
+    let provider_mismatch_check = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/authz/check",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "organization.profile.read",
+                "resource": {"provider": "compos", "type": "object_instance", "id": "obj_2"}
+            }),
+        ))
+        .await
+        .expect("provider mismatch check response");
+    assert_eq!(provider_mismatch_check.status(), StatusCode::OK);
+    let provider_mismatch = support::response_json(provider_mismatch_check).await;
+    assert_eq!(provider_mismatch["allowed"], false);
+}
+
+#[tokio::test]
+async fn replacing_provider_manifest_with_empty_actions_revokes_authz() {
+    let api = compos_reader_fixture().await;
+    let app = api.app.clone();
+
+    let replace_with_empty_manifest = app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::PUT,
+            "/api/v1/admin/providers/compos/actions",
+            json!({
+                "actions": []
+            }),
+        ))
+        .await
+        .expect("empty manifest response");
+    assert_eq!(replace_with_empty_manifest.status(), StatusCode::OK);
+    let removed = authz_check(
+        &app,
+        "compos.object.read",
+        "compos",
+        "object_instance",
+        "obj_1",
+    )
+    .await;
+    assert_eq!(removed["allowed"], false);
+}
+
+#[tokio::test]
+async fn authz_batch_check_rejects_too_many_checks() {
+    let api = support::TestApi::new().await;
+    let app = api.app.clone();
+    let checks = (0..1001)
+        .map(|index| {
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "compos.object.read",
+                "resource": {"provider": "compos", "type": "object_instance", "id": format!("obj_{index}")}
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let response = app
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/authz/batch-check",
+            json!({ "checks": checks }),
+        ))
+        .await
+        .expect("batch check response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload = support::response_json(response).await;
+    assert_eq!(payload["error"], "checks must contain at most 1000 items");
+}
+
+#[tokio::test]
+async fn authz_filter_rejects_too_many_resources() {
+    let api = support::TestApi::new().await;
+    let app = api.app.clone();
+    let resources = (0..1001)
+        .map(|index| {
+            json!({
+                "provider": "compos",
+                "type": "object_instance",
+                "id": format!("obj_{index}")
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let response = app
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/authz/filter",
+            json!({
+                "subject": {"type": "user", "id": "bootstrap-user", "org_id": "creator-org"},
+                "action": "compos.object.read",
+                "resources": resources
+            }),
+        ))
+        .await
+        .expect("filter response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload = support::response_json(response).await;
+    assert_eq!(
+        payload["error"],
+        "resources must contain at most 1000 items"
+    );
 }
 
 #[tokio::test]
 async fn deactivate_organization_requires_permission_manage() {
-    let (service, db, _dir) = test_service().await;
+    let api = support::TestApi::new().await;
+    let db = api.db.clone();
     seed_creator_context(&db).await;
     seed_org_permission_manage_role(&db).await;
-    let app = api::build_router(service);
+    let app = api.app.clone();
 
     let response = app
-        .oneshot(empty_post_request(
-            "/api/v1/organizations/creator-org/deactivate",
+        .oneshot(support::empty_post_request(
+            "/api/v1/orgs/creator-org/deactivate",
             "bootstrap-user",
             "creator-org",
         ))
@@ -300,16 +723,17 @@ async fn deactivate_organization_requires_permission_manage() {
 
 #[tokio::test]
 async fn deactivate_and_reactivate_organization_updates_current_user_membership_view() {
-    let (service, db, _dir) = test_service().await;
+    let api = support::TestApi::new().await;
+    let db = api.db.clone();
     seed_creator_context(&db).await;
     seed_org_permission_manage_role(&db).await;
     bind_user_action(&db, "role-org-permission-manage").await;
-    let app = api::build_router(service.clone());
+    let app = api.app.clone();
 
     let deactivate = app
         .clone()
-        .oneshot(empty_post_request(
-            "/api/v1/organizations/creator-org/deactivate",
+        .oneshot(support::empty_post_request(
+            "/api/v1/orgs/creator-org/deactivate",
             "bootstrap-user",
             "creator-org",
         ))
@@ -319,28 +743,15 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
 
     let current_after_deactivate = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/me")
-                .header(
-                    "authorization",
-                    auth_support::bearer_header("bootstrap-user"),
-                )
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(support::auth_empty_request(
+            Method::GET,
+            "/api/v1/me",
+            "bootstrap-user",
+        ))
         .await
         .expect("current user after deactivate");
     assert_eq!(current_after_deactivate.status(), StatusCode::OK);
-    let current_after_deactivate_body = current_after_deactivate
-        .into_body()
-        .collect()
-        .await
-        .expect("collect body")
-        .to_bytes();
-    let current_after_deactivate_json: Value =
-        serde_json::from_slice(&current_after_deactivate_body).expect("json body");
+    let current_after_deactivate_json = support::response_json(current_after_deactivate).await;
     let organizations = current_after_deactivate_json["organizations"]
         .as_array()
         .expect("organizations array");
@@ -352,8 +763,9 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
     );
 
     let reactivate = app
-        .oneshot(empty_post_request(
-            "/api/v1/organizations/creator-org/reactivate",
+        .clone()
+        .oneshot(support::empty_post_request(
+            "/api/v1/orgs/creator-org/reactivate",
             "bootstrap-user",
             "creator-org",
         ))
@@ -361,30 +773,18 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
         .expect("reactivate response");
     assert_eq!(reactivate.status(), StatusCode::OK);
 
-    let current_after_reactivate = api::build_router(service)
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/me")
-                .header(
-                    "authorization",
-                    auth_support::bearer_header("bootstrap-user"),
-                )
-                .header("x-organization-id", "creator-org")
-                .body(Body::empty())
-                .expect("request"),
-        )
+    let current_after_reactivate = app
+        .clone()
+        .oneshot(support::empty_request(
+            Method::GET,
+            "/api/v1/me",
+            "bootstrap-user",
+            "creator-org",
+        ))
         .await
         .expect("current user after reactivate");
     assert_eq!(current_after_reactivate.status(), StatusCode::OK);
-    let current_after_reactivate_body = current_after_reactivate
-        .into_body()
-        .collect()
-        .await
-        .expect("collect body")
-        .to_bytes();
-    let current_after_reactivate_json: Value =
-        serde_json::from_slice(&current_after_reactivate_body).expect("json body");
+    let current_after_reactivate_json = support::response_json(current_after_reactivate).await;
     let organizations = current_after_reactivate_json["organizations"]
         .as_array()
         .expect("organizations array");
@@ -393,93 +793,5 @@ async fn deactivate_and_reactivate_organization_updates_current_user_membership_
             .iter()
             .any(|item| item["id"].as_str() == Some("creator-org")),
         "reactivated organization should reappear in active organization list"
-    );
-}
-
-#[tokio::test]
-async fn create_plant_persists_owner_and_creator_and_bootstraps_visibility() {
-    let (service, db, _dir) = test_service().await;
-    seed_creator_context(&db).await;
-    bind_user_action(&db, "role-org-plant-create").await;
-    bind_user_action(&db, "role-org-plant-create-for-owner").await;
-    db.upsert_agreement(&Agreement {
-        id: "agreement-create-owner".to_owned(),
-        agreement_type: AgreementType::Delegation,
-        grantor_organization_id: "owner-org".to_owned(),
-        grantee_organization_id: "creator-org".to_owned(),
-        status: AgreementStatus::Active,
-        title: "Create Owner Agreement".to_owned(),
-        reference_no: None,
-        starts_at: None,
-        ends_at: None,
-    })
-    .await
-    .expect("agreement");
-
-    let app = api::build_router(service.clone());
-    let response = app
-        .oneshot(app_request(
-            "/api/v1/organizations/creator-org/plants",
-            "bootstrap-user",
-            "creator-org",
-            json!({
-                "facilityCode": "FAC-003",
-                "name": "Plant Three",
-                "contractNo": "CN-003",
-                "address": "Incheon",
-                "installedKw": 65.0,
-                "recStartDate": "2026-01-01",
-                "confirmIssued": "Y",
-                "ownerOrganizationId": "owner-org"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    let payload: Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(payload["facilityCode"], "FAC-003");
-    assert_eq!(payload["ownerOrganizationId"], "owner-org");
-    assert_eq!(payload["createdByOrganizationId"], "creator-org");
-
-    let plant = db
-        .get_plant_by_facility_code("FAC-003")
-        .await
-        .expect("created plant");
-    assert!(plant.id.starts_with("plant-"));
-    assert_ne!(plant.id, plant.facility_code);
-    assert_eq!(plant.owner_organization_id, "owner-org");
-    assert_eq!(
-        plant.created_by_organization_id.as_deref(),
-        Some("creator-org")
-    );
-
-    let visible = service
-        .list_visible_plants("bootstrap-user", "creator-org", None)
-        .await
-        .expect("creator visibility");
-    assert!(
-        visible.iter().any(|plant| plant.facility_code == "FAC-003"),
-        "creator org should retain profile visibility after create"
-    );
-
-    let can_sync = db
-        .has_user_plant_action(
-            "bootstrap-user",
-            "creator-org",
-            &plant.id,
-            "plant.sync.execute",
-        )
-        .await
-        .expect("sync action lookup");
-    assert!(
-        can_sync,
-        "creator should receive plant.sync.execute bootstrap permission after create"
     );
 }

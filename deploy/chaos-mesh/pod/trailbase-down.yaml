@@ -2,13 +2,13 @@ apiVersion: chaos-mesh.org/v1alpha1
 kind: PodChaos
 metadata:
   name: trailbase-down
-  namespace: certd-chaos
+  namespace: grant-chaos
 spec:
   action: pod-failure
   mode: all
   duration: 60s
   selector:
     namespaces:
-      - certd-chaos
+      - grant-chaos
     labelSelectors:
       app: trailbase

@@ -1,26 +1,24 @@
-# Rust certd Backup / Restore
+# Grant Backup / Restore
 
-이 문서는 `hiqlite + 분리된 PDF 저장소` 기준 백업/복구 절차를 정리한다.
+`grant`의 영속 상태는 hiqlite metadata와 TrailBase auth bridge data로 나뉜다.
 
 ## 범위
 
-- 메타데이터:
-  `hiqlite` Raft state machine / logs / snapshots
-- 산출물:
-  PDF 객체 또는 filesystem 파일
-
-JSON 산출물 파일은 별도 보관하지 않는다. 정규화 데이터는 `hiqlite`에 저장한다.
+- grant metadata: hiqlite Raft state machine, logs, snapshots
+- TrailBase identity bridge data: TrailBase SQLite data directory
 
 ## 기본 원칙
 
-- `hiqlite` 메타데이터는 S3 호환 스토리지에 암호화 백업한다.
-- PDF 저장소는 `hiqlite` HA와 분리한다.
-- quorum node는 `StatefulSet`으로 운영한다.
-- local read replica는 `split` 또는 향후 `learner-only` 런타임으로 운영한다.
-- PDF는 굳이 스케일아웃하지 않고 단일 object store로 운영해도 된다.
-- 전체 클러스터 복구는 `hiqlite` restore와 PDF 저장소 복구를 조합한다.
+- repo가 Kubernetes나 Compose 안에 object storage를 배포하지 않는다.
+- hiqlite 원격 백업은 운영자가 준비한 외부 S3 호환 스토리지를 사용한다.
+- 기본 Kubernetes 토폴로지는 `grant-voter` `StatefulSet` 3개다.
+- voter quorum 복구를 먼저 끝낸 뒤 API를 검증한다.
+- restore는 외부 운영 절차로 수행한다. 앱 프로세스가 자동 restore를 판단하지 않는다.
+- TrailBase SQLite 백업/복구는 현재 repo manifest 밖의 운영 절차로 다룬다.
 
-## 필수 환경변수
+## 원격 백업 환경변수
+
+외부 S3 호환 백업을 켤 때만 아래 값을 `grant-config`와 `grant-secrets`에 설정한다.
 
 - `HQL_BACKUP_CRON`
 - `HQL_BACKUP_KEEP_DAYS`
@@ -34,107 +32,54 @@ JSON 산출물 파일은 별도 보관하지 않는다. 정규화 데이터는 `
 - `ENC_KEYS`
 - `ENC_KEY_ACTIVE`
 
-## 정상 운영 시
+예시 버킷 이름은 `grant-backups`다. 로컬 MinIO는 지원하지 않는다.
 
-`hiqlite`는 cron 기준으로 주기 백업을 생성하고, leader가 S3 호환 버킷으로 업로드한다.
+## 정상 운영
 
-운영 토폴로지는 다음을 전제로 한다.
+`hiqlite`는 cron 기준으로 주기 백업을 생성하고, leader가 외부 S3 호환 버킷으로 업로드한다.
 
-- `certd-voter`: `StatefulSet` 3개
-- `certd-learner-{1,2,3}`: `Deployment` 3개
-- artifact 저장과 backup object는 모두 MinIO 사용
+백업 설정과 최근 로그 확인:
 
-voter는 stable pod identity로 quorum을 형성하고, learner는 `split` 런타임의 read replica로 붙는다.
+```bash
+kubectl -n grant get configmap grant-config -o yaml
+kubectl -n grant get secret grant-secrets -o yaml
+kubectl -n grant logs statefulset/grant-voter --tail=200
+aws s3 ls "s3://${HQL_S3_BUCKET}/"
+```
 
-중요:
-
-- `cert-backups` 버킷이 먼저 존재해야 한다.
-- 로컬 `k3d` 검증에서는 [scripts/k3d-bootstrap.sh](/Users/cypark/Documents/work/cert/scripts/k3d-bootstrap.sh) 와 [scripts/k3d-backup-restore.sh](/Users/cypark/Documents/work/cert/scripts/k3d-backup-restore.sh)가 이 버킷을 보장한다.
-- `GET /api/v1/admin/backups`는 local backup 목록을 보여주고, restore 대상 이름도 여기서 읽는다.
-
-PDF 저장소는 배포 형태에 따라 다르게 본다.
-
-- S3 backend:
-  - 버킷 버전닝
-  - 필요 시 site replication 또는 외부 백업 정책
-
-## Pod 재시작
-
-이 문서는 quorum node에 영속 볼륨이 없거나, local read replica가 휘발성인 경우를 같이 고려한다.
-
-즉:
-
-1. 단순 컨테이너 재시작이라 `emptyDir`가 유지되면 서비스는 계속 동작할 수 있다.
-2. Pod 재생성 또는 노드 이동이 일어나면 `HQL_BACKUP_RESTORE` 기반 복구가 필요하다.
-
-`split` 런타임 sidecar는 로컬 read 경로만 잃으면 되므로, 다시 붙은 뒤 `readReady=true`가 될 때까지는 strong read 또는 폴백 정책으로 버틸 수 있다.
-
-`CERTD_LOCAL_NODE_ROLE=learner`를 주면 로컬 `hiqlite`는 learner로만 기동한다. 이 경우 `writeReady`는 원격 quorum 경로 상태를 뜻하고, `readReady`는 로컬 learner 복제본 상태를 뜻한다.
-
-중요:
-
-- `Service/certd`는 voter를 바라본다. 즉 public read/write path는 quorum 경로를 직접 탄다.
-- learner는 다른 시스템 sidecar나 보조 read/authz 평가용 복제본으로 본다.
-- 따라서 learner 장애는 public API 생존성보다 sidecar read/authz 여유 문제에 가깝다.
-
-## 자동 복구 경계
-
-PVC 없는 voter 기준에서는 아래처럼 나눈다.
-
-1. self-heal 기대 가능
-   - voter 1개 장애, 나머지 2개 정상
-   - leader 1개 장애 후 재선출
-   - learner 1개 이상 장애
-2. restore orchestration 필요
-   - voter 2개 이상 동시 손실
-   - voter pod 재생성/노드 이동으로 local raft 상태 유실
-   - 전체 voter cluster 손실
-
-이 경계는 앱 내부에서 자동으로 판단해 restore를 실행하는 문제가 아니라, 외부 절차가 실행해야 하는 문제로 본다.
-
-이유:
-
-- 일시적인 네트워크 단절과 실제 local state 유실을 앱 프로세스가 안전하게 구분하기 어렵다.
-- 잘못된 자동 restore는 살아 있는 더 최신 quorum 상태를 오래된 backup으로 덮어쓸 수 있다.
-- restore는 learner stop, voter full stop, restore target 고정, quorum 회복 확인, restore flag 제거 순서를 요구한다.
+`GET /api/v1/admin/backups`는 local backup 목록을 보여주고, restore 대상 이름도 여기서 읽는다.
 
 ## 전체 클러스터 손실
 
-`hiqlite` 공식 restore 절차:
+복구 순서:
 
-1. learner deployment를 먼저 중지한다.
-2. voter StatefulSet을 중지한다.
-3. 복구할 백업 이름을 `HQL_BACKUP_RESTORE=s3:<backup-name>`로 지정한다.
-4. voter StatefulSet을 다시 시작한다.
-5. quorum이 회복되면 `HQL_BACKUP_RESTORE`를 제거한다.
-6. learner deployment를 다시 시작한다.
+1. voter StatefulSet을 중지한다.
+2. 복구할 백업 이름을 `HQL_BACKUP_RESTORE=s3:<backup-name>`로 지정한다.
+3. voter StatefulSet을 다시 시작한다.
+4. quorum과 `writeReady=true`를 확인한다.
+5. `HQL_BACKUP_RESTORE`를 제거한다.
+6. `/healthz`, `/api/v1/providers`, `/api/v1/authz/check`로 API를 확인한다.
 
-즉 `cert` 배포에서는 voter quorum을 먼저 복원하고, learner는 그 뒤에 다시 붙여야 한다.
+예시 명령:
 
-## 순서
+```bash
+NAMESPACE=grant
+BACKUP_NAME=s3:<backup-name>
 
-1. `cert-backups` 버킷 및 PDF 저장소 상태 확인
-2. `certd-learner-1/2/3` scale down
-3. `certd-voter` scale down
-4. `HQL_BACKUP_RESTORE` 설정
-5. `certd-voter` scale up
-6. quorum health 확인
-7. `HQL_BACKUP_RESTORE` 제거
-8. learner scale up
-9. 앱 health 확인
-10. 최근 `business / plant / sync_runs` 행 확인
-11. 대표 PDF 다운로드 확인
+kubectl -n "${NAMESPACE}" scale statefulset/grant-voter --replicas=0
 
-기존 단일 Deployment 복구 절차는 이 토폴로지에서는 사용하지 않는다.
+kubectl -n "${NAMESPACE}" set env statefulset/grant-voter HQL_BACKUP_RESTORE="${BACKUP_NAME}"
+kubectl -n "${NAMESPACE}" scale statefulset/grant-voter --replicas=3
+kubectl -n "${NAMESPACE}" rollout status statefulset/grant-voter --timeout=15m
+
+kubectl -n "${NAMESPACE}" set env statefulset/grant-voter HQL_BACKUP_RESTORE-
+```
 
 ## 검증 포인트
 
 - `GET /healthz`
-- `readReady` / `writeReady` 값 확인
-- `kubectl -n certd get pods`
-- `statefulset/certd-voter` rollout 상태
-- `deployment/certd-learner-*` rollout 상태
-- `GET /api/v1/plants/{facilityCode}`
-- PDF 저장소 내 문서 개수
-- 대표 PDF HEAD/GET 성공
-- Keploy replay 성공
+- `readReady` / `writeReady`
+- `kubectl -n grant get pods`
+- `statefulset/grant-voter` rollout 상태
+- `GET /api/v1/admin/backups`
+- 대표 `POST /api/v1/authz/check` 응답

@@ -1,6 +1,6 @@
-# 로컬 개발과 API smoke
+# Local Development And API Smoke
 
-로컬 검증 엔트리포인트는 `vind`만 공식 지원한다. `k3d-*` 스크립트는 내부 phase 구현체와 보조 DR 시나리오로 남아 있지만, 직접 진입점으로 보지 않는다.
+이 문서는 현재 grant 경계 기준의 로컬 검증 가이드다. cert-data 인증서 업로드, 발전소 수집, plant/document 조회 smoke는 이 repo에서 제거했다.
 
 ## 준비물
 
@@ -10,145 +10,125 @@
 - `vcluster`
 - `curl`
 - `jq`
-- 공동인증서 4개 파일
-  - `signCert.der`
-  - `signPri.key`
-  - `kmCert.der`
-  - `kmPri.key`
-
-권장 경로:
-
-```bash
-mkdir -p ./secrets/cert
-cp /path/to/signCert.der ./secrets/cert/
-cp /path/to/signPri.key  ./secrets/cert/
-cp /path/to/kmCert.der   ./secrets/cert/
-cp /path/to/kmPri.key    ./secrets/cert/
-```
-
-인증서 비밀번호는 코드나 문서에 저장하지 말고 환경변수나 외부 시크릿 저장소에서 주입한다.
 
 ## 권장 검증 순서
 
 ```bash
-docker buildx build --load -t certd:local .
+cargo test --workspace
+
+docker buildx build --load -t grant:local .
 docker buildx build --load -f Dockerfile.trailbase-auth-bridge -t trailbase-auth-bridge:local .
 bash ./scripts/vind-cluster.sh ensure-context
 bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
-bash ./scripts/vind-exec.sh bash ./scripts/k3d-e2e.sh
-bash ./scripts/vind-exec.sh bash ./scripts/vind-chaos.sh
 ```
 
-단일 엔트리포인트로 e2e/chaos까지 실행하려면:
+단일 엔트리포인트로 이미지 빌드와 `vind` bootstrap까지 실행하려면:
 
 ```bash
-bash ./scripts/ci-chaos-local.sh
+bash ./scripts/ci-local.sh
 ```
 
 ## 주요 스크립트
 
-- `scripts/ci-chaos-local.sh`
+- `scripts/ci-local.sh`
   - 이미지 빌드
   - `vind` cluster lifecycle 관리
-  - bootstrap, e2e, reduced chaos 실행
+  - Kubernetes bootstrap 실행
 - `scripts/vind-cluster.sh`
-  - Colima preflight
   - `vcluster` create/connect/delete
   - control-plane taint normalization
 - `scripts/vind-exec.sh`
   - phase 실행 시점에만 `vcluster connect`를 연다
 - `scripts/vind-bootstrap.sh`
   - Kubernetes 리소스 배포
-  - MinIO, TrailBase, `certd` rollout 대기
-- `scripts/vind-chaos.sh`
-  - `vind` 컨텍스트에서 reduced chaos 시나리오를 실행한다
-
+  - TrailBase, grant service rollout 대기
 주의:
 
 - 로컬/CI 회귀 검증은 `vind` 경로만 신뢰한다.
-- Colima ARM 환경에서 `vind` create가 platform warning으로 실패하면 `docker pull --platform linux/arm64 alpine:latest` 상태를 먼저 확인한다.
+- Docker ARM 환경에서 `vind` create가 platform warning으로 실패하면 `docker pull --platform linux/arm64 alpine:latest` 상태를 먼저 확인한다.
 
-## API smoke 예시
+## API Smoke 예시
 
-`scripts/vind-bootstrap.sh`와 `scripts/k3d-e2e.sh`까지 끝나서 `svc/certd`가 로컬 `127.0.0.1:18080`으로 포트포워딩된 상태를 전제로 한다.
+아래 예시는 service가 로컬 `127.0.0.1:18080`으로 포트포워딩된 상태를 전제로 한다.
 
 필수 변수:
 
 ```bash
-export BUSINESS_NO=2768603291
-export ORGANIZATION_ID=2768603291
-export FACILITY_CODE=PV15-R-090795
-export CERT_PASSWORD='...'
+export BASE_URL=http://127.0.0.1:18080
+export MASTER_KEY=dev-only-master-key
+export ORG_ID=conalog-grant
+export TOKEN=conalog-grant
 ```
 
-### 1. 저장형 인증서 업로드 (escrow)
-
-이 예시는 서버 저장형 인증서 smoke test다. 로컬 실행형 `runEphemeral()` 검증에 이 요청을 사용하면 안 된다.
+### 1. 현재 사용자
 
 ```bash
-SIGN_CERT=$(base64 < ./secrets/cert/signCert.der | tr -d '\n')
-SIGN_PRI=$(base64 < ./secrets/cert/signPri.key | tr -d '\n')
-KM_CERT=$(base64 < ./secrets/cert/kmCert.der | tr -d '\n')
-KM_PRI=$(base64 < ./secrets/cert/kmPri.key | tr -d '\n')
-
-cat > /tmp/cert-upload.json <<JSON
-{
-  "password": "${CERT_PASSWORD}",
-  "signCertDerBase64": "${SIGN_CERT}",
-  "signPriKeyBase64": "${SIGN_PRI}",
-  "kmCertDerBase64": "${KM_CERT}",
-  "kmPriKeyBase64": "${KM_PRI}",
-  "certificateChainDerBase64": []
-}
-JSON
-
-curl -sS -X PUT \
-  "http://127.0.0.1:18080/api/v1/organizations/${ORGANIZATION_ID}/certificate" \
-  -H 'content-type: application/json' \
-  --data-binary "$(jq -c --arg businessNo "${BUSINESS_NO}" '. + {businessNo: $businessNo}' /tmp/cert-upload.json)" | jq
+curl -sS "${BASE_URL}/api/v1/me" \
+  -H "authorization: Bearer ${TOKEN}" \
+  -H "x-organization-id: ${ORG_ID}" | jq
 ```
 
-### 2. 전체 수집
+### 2. Provider 등록
 
 ```bash
-curl -sS -X POST \
-  "http://127.0.0.1:18080/api/v1/organizations/${ORGANIZATION_ID}/sync" \
-  -H 'content-type: application/json' \
-  --data-binary "{\"facilityCode\":\"${FACILITY_CODE}\",\"mode\":\"full\"}" | jq
+curl -sS -X POST "${BASE_URL}/api/v1/admin/providers" \
+  -H "x-grant-master-key: ${MASTER_KEY}" \
+  -H "content-type: application/json" \
+  --data-binary '{
+    "id": "compos",
+    "name": "Compos",
+    "description": "Object data provider",
+    "active": true
+  }' | jq
 ```
 
-### 3. 증분 수집
+### 3. Provider action manifest 교체
 
 ```bash
-curl -sS -X POST \
-  "http://127.0.0.1:18080/api/v1/organizations/${ORGANIZATION_ID}/sync" \
-  -H 'content-type: application/json' \
-  --data-binary "{\"facilityCode\":\"${FACILITY_CODE}\",\"mode\":\"delta\"}" | jq
+curl -sS -X PUT "${BASE_URL}/api/v1/admin/providers/compos/actions" \
+  -H "x-grant-master-key: ${MASTER_KEY}" \
+  -H "content-type: application/json" \
+  --data-binary '{
+    "actions": [{
+      "id": "compos.object.read",
+      "code": "compos.object.read",
+      "name": "Read Compos Object",
+      "description": null,
+      "riskLevel": "low",
+      "visibilityGranting": true,
+      "grantableToApplications": true,
+      "consentLabel": "Read Compos Object",
+      "consentDescription": null
+    }]
+  }' | jq
 ```
 
-### 4. 조회 API
+`PUT`은 manifest replace다. 요청에서 빠진 provider action은 role/application grant 참조와 함께 제거된다.
+
+### 4. Authz 판정
 
 ```bash
-curl -sS "http://127.0.0.1:18080/api/v1/plants/${FACILITY_CODE}" | jq
-curl -sS "http://127.0.0.1:18080/api/v1/plants/${FACILITY_CODE}/generation" | jq
-curl -sS "http://127.0.0.1:18080/api/v1/plants/${FACILITY_CODE}/rates" | jq
-curl -sS "http://127.0.0.1:18080/api/v1/plants/${FACILITY_CODE}/rec" | jq
-curl -sS "http://127.0.0.1:18080/api/v1/plants/${FACILITY_CODE}/documents" | jq
+curl -sS -X POST "${BASE_URL}/api/v1/authz/check" \
+  -H "x-grant-master-key: ${MASTER_KEY}" \
+  -H "content-type: application/json" \
+  --data-binary '{
+    "subject": {"type": "user", "id": "conalog-grant", "org_id": "conalog-grant"},
+    "action": "compos.object.read",
+    "resource": {"provider": "compos", "type": "object_instance", "id": "obj_1"}
+  }' | jq
 ```
 
-### 5. 문서 다운로드
+후보 목록 필터는 `/api/v1/authz/filter`를 사용한다. grant는 외부 provider의 전체 리소스 목록을 소유하지 않으므로 unbounded list API를 제공하지 않는다.
+
+### 5. Backup admin
 
 ```bash
-DOC_ID=$(curl -sS "http://127.0.0.1:18080/api/v1/plants/${FACILITY_CODE}/documents" | jq -r '.[0].id')
-curl -OJ "http://127.0.0.1:18080/api/v1/documents/${DOC_ID}/download"
-```
-
-### 6. backup admin
-
-```bash
-curl -sS -X POST "http://127.0.0.1:18080/api/v1/admin/backups"
-curl -sS "http://127.0.0.1:18080/api/v1/admin/backups" | jq
-curl -sS "http://127.0.0.1:18080/api/v1/admin/backups/s3" | jq
+curl -sS -X POST "${BASE_URL}/api/v1/admin/backups" \
+  -H "x-grant-master-key: ${MASTER_KEY}"
+curl -sS "${BASE_URL}/api/v1/admin/backups" \
+  -H "x-grant-master-key: ${MASTER_KEY}" | jq
+curl -sS "${BASE_URL}/api/v1/admin/backups/s3" \
+  -H "x-grant-master-key: ${MASTER_KEY}" | jq
 ```
 
 복구 절차는 [backup-restore.md](./backup-restore.md)를 본다.

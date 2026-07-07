@@ -124,31 +124,6 @@ pub struct Agreement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgreementDocument {
-    pub id: String,
-    pub agreement_id: String,
-    pub document_type: AgreementDocumentType,
-    pub file_name: String,
-    pub object_key: String,
-    pub content_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub document_no: Option<String>,
-    pub uploaded_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgreementDocumentType {
-    MasterContract,
-    Appendix,
-    Amendment,
-    AuthorizationLetter,
-    InvoiceBasis,
-    Other,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgreementType {
     Delegation,
@@ -156,6 +131,29 @@ pub enum AgreementType {
     Om,
     Distributor,
     Dealer,
+}
+
+impl AgreementType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Delegation => "delegation",
+            Self::Epc => "epc",
+            Self::Om => "om",
+            Self::Distributor => "distributor",
+            Self::Dealer => "dealer",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "delegation" => Ok(Self::Delegation),
+            "epc" => Ok(Self::Epc),
+            "om" => Ok(Self::Om),
+            "distributor" => Ok(Self::Distributor),
+            "dealer" => Ok(Self::Dealer),
+            other => Err(format!("invalid agreement type {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,17 +165,39 @@ pub enum AgreementStatus {
     Terminated,
 }
 
+impl AgreementStatus {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::Terminated => "terminated",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "active" => Ok(Self::Active),
+            "expired" => Ok(Self::Expired),
+            "terminated" => Ok(Self::Terminated),
+            other => Err(format!("invalid agreement status {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Action {
     pub id: String,
+    pub provider_id: String,
     pub code: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub risk_level: ActionRiskLevel,
     pub visibility_granting: bool,
-    pub grantable_to_clients: bool,
+    pub grantable_to_applications: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consent_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,61 +213,137 @@ pub enum ActionRiskLevel {
     Critical,
 }
 
+impl ActionRiskLevel {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            other => Err(format!("invalid action risk level {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct Client {
+pub struct Application {
     pub id: String,
     pub organization_id: String,
     pub slug: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub client_type: ClientType,
-    pub app_type: ClientAppType,
+    pub application_type: ApplicationType,
+    pub app_type: ApplicationAppType,
     pub first_party: bool,
-    pub consent_policy: ClientConsentPolicy,
+    pub consent_policy: ApplicationConsentPolicy,
     pub active: bool,
     pub created_by_user_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientType {
+pub enum ApplicationType {
     Confidential,
     Public,
 }
 
+impl ApplicationType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Confidential => "confidential",
+            Self::Public => "public",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "confidential" => Ok(Self::Confidential),
+            "public" => Ok(Self::Public),
+            other => Err(format!("invalid application type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientAppType {
+pub enum ApplicationAppType {
     Web,
     Mobile,
     Server,
     Internal,
 }
 
+impl ApplicationAppType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Mobile => "mobile",
+            Self::Server => "server",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "web" => Ok(Self::Web),
+            "mobile" => Ok(Self::Mobile),
+            "server" => Ok(Self::Server),
+            "internal" => Ok(Self::Internal),
+            other => Err(format!("invalid application app type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientConsentPolicy {
+pub enum ApplicationConsentPolicy {
     Explicit,
     AutoApprove,
 }
 
+impl ApplicationConsentPolicy {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::AutoApprove => "auto_approve",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "explicit" => Ok(Self::Explicit),
+            "auto_approve" => Ok(Self::AutoApprove),
+            other => Err(format!("invalid application consent policy {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClientAction {
-    pub client_id: String,
+pub struct ApplicationAction {
+    pub application_id: String,
     pub action_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClientGrant {
+pub struct ApplicationGrant {
     pub id: String,
     pub user_id: String,
-    pub client_id: String,
+    pub application_id: String,
     pub organization_id: String,
-    pub status: ClientGrantStatus,
+    pub status: ApplicationGrantStatus,
     pub consented_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
@@ -259,16 +355,35 @@ pub struct ClientGrant {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientGrantStatus {
+pub enum ApplicationGrantStatus {
     Active,
     Revoked,
     Expired,
 }
 
+impl ApplicationGrantStatus {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "active" => Ok(Self::Active),
+            "revoked" => Ok(Self::Revoked),
+            "expired" => Ok(Self::Expired),
+            other => Err(format!("invalid application grant status {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClientGrantAction {
-    pub client_grant_id: String,
+pub struct ApplicationGrantAction {
+    pub application_grant_id: String,
     pub action_id: String,
 }
 
@@ -291,7 +406,8 @@ pub struct RoleBinding {
     pub subject_type: RoleBindingSubjectType,
     pub subject_id: String,
     pub subject_organization_id: String,
-    pub resource_type: RoleBindingResourceType,
+    pub provider_id: String,
+    pub resource_type: String,
     pub resource_id: String,
     pub role_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,12 +426,33 @@ pub enum RoleBindingSubjectType {
     User,
 }
 
+impl RoleBindingSubjectType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Organization => "organization",
+            Self::Group => "group",
+            Self::User => "user",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "organization" => Ok(Self::Organization),
+            "group" => Ok(Self::Group),
+            "user" => Ok(Self::User),
+            other => Err(format!("invalid role binding subject type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RoleBindingResourceType {
-    Organization,
-    Asset,
-    Plant,
+#[serde(rename_all = "camelCase")]
+pub struct ServiceProvider {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -323,6 +460,23 @@ pub enum RoleBindingResourceType {
 pub enum RoleBindingState {
     Active,
     Disabled,
+}
+
+impl RoleBindingState {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "active" => Ok(Self::Active),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(format!("invalid role binding state {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,282 +496,4 @@ pub struct Party {
     pub business_no: String,
     pub legal_name: String,
     pub active: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Asset {
-    pub id: String,
-    pub owner_organization_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by_organization_id: Option<String>,
-    pub name: String,
-    pub country_code: String,
-    pub address: String,
-    pub capacity_kw: f64,
-    pub timezone: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetProfile {
-    pub id: String,
-    pub asset_id: String,
-    pub country_code: String,
-    pub provider: String,
-    pub profile_type: String,
-    pub external_id: String,
-    pub metadata_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Registry {
-    pub id: String,
-    pub registry_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country_code: Option<String>,
-    pub provider: String,
-    pub name: String,
-    pub metadata_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RegistryAccount {
-    pub id: String,
-    pub registry_id: String,
-    pub organization_id: String,
-    pub external_account_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    pub status: String,
-    pub metadata_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RegistryProject {
-    pub id: String,
-    pub registry_id: String,
-    pub asset_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registry_account_id: Option<String>,
-    pub external_project_id: String,
-    pub project_type: String,
-    pub status: String,
-    pub metadata_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DataSource {
-    pub id: String,
-    pub asset_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registry_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registry_project_id: Option<String>,
-    pub source_type: String,
-    pub provider: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_source_id: Option<String>,
-    pub unit: String,
-    pub metadata_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GenerationDatum {
-    pub id: String,
-    pub asset_id: String,
-    pub source_id: String,
-    pub period_start: String,
-    pub period_end: String,
-    pub metric_type: String,
-    pub value: f64,
-    pub unit: String,
-    pub quality: String,
-    pub metadata_json: String,
-    pub recorded_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RateDatum {
-    pub id: String,
-    pub asset_id: String,
-    pub source_id: String,
-    pub period_start: String,
-    pub period_end: String,
-    pub metric_type: String,
-    pub value: String,
-    pub unit: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub currency: Option<String>,
-    pub quality: String,
-    pub metadata_json: String,
-    pub recorded_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct EnergyCertificate {
-    pub id: String,
-    pub certificate_type: String,
-    pub registry_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registry_project_id: Option<String>,
-    pub asset_id: String,
-    pub serial_number: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vintage_start: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vintage_end: Option<String>,
-    pub quantity_mwh: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_account_id: Option<String>,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub issued_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retired_at: Option<String>,
-    pub metadata_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthCredential {
-    pub id: String,
-    pub organization_id: String,
-    pub credential_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country_code: Option<String>,
-    pub provider: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_subject_id: Option<String>,
-    pub active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_used_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialBinding {
-    pub credential_id: String,
-    pub registry_account_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Plant {
-    pub id: String,
-    pub facility_code: String,
-    pub name: String,
-    pub owner_organization_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by_organization_id: Option<String>,
-    pub contract_no: String,
-    pub address: String,
-    pub installed_kw: f64,
-    pub rec_start_date: String,
-    pub confirm_issued: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncMode {
-    Delta,
-    Full,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncRun {
-    pub id: String,
-    pub organization_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plant_id: Option<String>,
-    pub mode: SyncMode,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at: Option<String>,
-    pub duration_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GenerationRecord {
-    pub month: String,
-    pub generation_kwh: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub self_consumption_kwh: Option<f64>,
-    pub supply_kwh: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub application_deadline: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RateRecord {
-    pub month: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub self_rate: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub national_average: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nearby_average: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nearby_highest: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RecRecord {
-    pub month: String,
-    pub application_no: String,
-    pub supply_kwh: i64,
-    pub rec_quantity: i64,
-    pub fee_krw: i64,
-    pub issued_date: String,
-    pub expiry_date: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub virtual_account: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bank_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum DocumentCategory {
-    PlantInfo,
-    Permit,
-    SiteLand,
-    Drawings,
-    Photos,
-    Equipment,
-    Finance,
-    Development,
-    Other,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DocumentArtifact {
-    pub id: String,
-    pub category: DocumentCategory,
-    pub file_class: String,
-    pub file_sec_name: String,
-    pub file_name: String,
-    pub required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_sha256: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_sha256: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub download_url: Option<String>,
 }

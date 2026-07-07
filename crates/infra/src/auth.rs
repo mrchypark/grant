@@ -206,14 +206,7 @@ impl TrailbaseResolver {
             return Ok(identity);
         }
 
-        let url = format!("{}{}", self.base_url, self.introspect_path);
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(token)
-            .header("x-certd-internal-secret", &self.internal_secret)
-            .send()
-            .await;
+        let response = self.send_introspection(token).await;
         let response = match response {
             Ok(response) => response,
             Err(error) => {
@@ -226,11 +219,7 @@ impl TrailbaseResolver {
                 return Err(error).context("call TrailBase introspect");
             }
         };
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED
-            || response.status() == reqwest::StatusCode::FORBIDDEN
-        {
-            anyhow::bail!("unauthorized: trailbase token rejected");
-        }
+        reject_unauthorized_introspection(&response)?;
         let response = match response.error_for_status() {
             Ok(response) => response,
             Err(error) => {
@@ -243,27 +232,7 @@ impl TrailbaseResolver {
                 return Err(error).context("TrailBase introspect returned error status");
             }
         };
-        let payload: TrailbaseIntrospectionResponse = response
-            .json()
-            .await
-            .context("decode TrailBase introspection response")?;
-        if !payload.valid {
-            anyhow::bail!("unauthorized: trailbase token is not valid");
-        }
-        if !payload.active {
-            anyhow::bail!("unauthorized: trailbase user is inactive");
-        }
-        let _ = payload.verified;
-        let _ = payload.expires_at.as_deref();
-        let identity = TrailbaseIdentity {
-            external_user_id: payload.trailbase_user_id,
-            email: payload.email,
-            display_name: payload
-                .display_name
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "TrailBase User".to_owned()),
-            active: payload.active,
-        };
+        let identity = parse_introspection_response(response).await?;
         self.write_cache(cache_key, identity.clone()).await;
         if persist_shared_cache {
             self.write_shared_cache(db, token, &identity).await?;
@@ -277,44 +246,27 @@ impl TrailbaseResolver {
             return Ok(identity);
         }
 
-        let url = format!("{}{}", self.base_url, self.introspect_path);
         let response = self
-            .client
-            .post(url)
-            .bearer_auth(token)
-            .header("x-certd-internal-secret", &self.internal_secret)
-            .send()
+            .send_introspection(token)
             .await
             .context("call TrailBase introspect")?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED
-            || response.status() == reqwest::StatusCode::FORBIDDEN
-        {
-            anyhow::bail!("unauthorized: trailbase token rejected");
-        }
+        reject_unauthorized_introspection(&response)?;
         let response = response
             .error_for_status()
             .context("TrailBase introspect returned error status")?;
-        let payload: TrailbaseIntrospectionResponse = response
-            .json()
-            .await
-            .context("decode TrailBase introspection response")?;
-        if !payload.valid {
-            anyhow::bail!("unauthorized: trailbase token is not valid");
-        }
-        if !payload.active {
-            anyhow::bail!("unauthorized: trailbase user is inactive");
-        }
-        let identity = TrailbaseIdentity {
-            external_user_id: payload.trailbase_user_id,
-            email: payload.email,
-            display_name: payload
-                .display_name
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "TrailBase User".to_owned()),
-            active: payload.active,
-        };
+        let identity = parse_introspection_response(response).await?;
         self.write_cache(cache_key, identity.clone()).await;
         Ok(identity)
+    }
+
+    async fn send_introspection(&self, token: &str) -> reqwest::Result<reqwest::Response> {
+        let url = format!("{}{}", self.base_url, self.introspect_path);
+        self.client
+            .post(url)
+            .bearer_auth(token)
+            .header("x-grant-internal-secret", &self.internal_secret)
+            .send()
+            .await
     }
 
     async fn read_cache(&self, key: &str) -> Option<TrailbaseIdentity> {
@@ -411,6 +363,39 @@ fn should_sync_identity(read_consistency: Option<&ReadConsistency>) -> bool {
     )
 }
 
+fn reject_unauthorized_introspection(response: &reqwest::Response) -> Result<()> {
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        || response.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        anyhow::bail!("unauthorized: trailbase token rejected");
+    }
+    Ok(())
+}
+
+async fn parse_introspection_response(response: reqwest::Response) -> Result<TrailbaseIdentity> {
+    let payload: TrailbaseIntrospectionResponse = response
+        .json()
+        .await
+        .context("decode TrailBase introspection response")?;
+    if !payload.valid {
+        anyhow::bail!("unauthorized: trailbase token is not valid");
+    }
+    if !payload.active {
+        anyhow::bail!("unauthorized: trailbase user is inactive");
+    }
+    let _ = payload.verified;
+    let _ = payload.expires_at.as_deref();
+    Ok(TrailbaseIdentity {
+        external_user_id: payload.trailbase_user_id,
+        email: payload.email,
+        display_name: payload
+            .display_name
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "TrailBase User".to_owned()),
+        active: payload.active,
+    })
+}
+
 pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Error {
     let message = err.to_string();
     if message.contains("unauthorized:") || message.contains("forbidden:") {
@@ -420,6 +405,11 @@ pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Erro
             "unavailable: strong consistency requested but quorum-backed identity sync is unavailable"
         )
     }
+}
+
+fn token_cache_key(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    hex::encode(digest)
 }
 
 #[cfg(test)]
@@ -450,9 +440,4 @@ mod tests {
         assert!(!should_sync_identity(Some(&ReadConsistency::Local)));
         assert!(!should_sync_identity(None));
     }
-}
-
-fn token_cache_key(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    hex::encode(digest)
 }

@@ -19,8 +19,8 @@ use trailbase::{AppState, DataDir, Server, ServerOptions, User};
 use trailbase_sqlite::params;
 use uuid::Uuid;
 
-pub const INTROSPECT_PATH: &str = "/api/certd/introspect";
-pub const INTERNAL_SECRET_HEADER: &str = "x-certd-internal-secret";
+pub const INTROSPECT_PATH: &str = "/api/grant/introspect";
+pub const INTERNAL_SECRET_HEADER: &str = "x-grant-internal-secret";
 pub const LOGIN_CSS_PATH: &str = "/login-assets/login.v1.css";
 pub const LOGIN_JS_PATH: &str = "/login-assets/login.v1.js";
 const LOGIN_CSRF_COOKIE_NAME: &str = "login_csrf";
@@ -109,10 +109,10 @@ impl From<&BridgeConfig> for LoginRouteConfig {
 
 impl BridgeConfig {
     pub fn from_env() -> Result<Self> {
-        let internal_secret = std::env::var("TRAILBASE_CERTD_INTERNAL_SECRET")
-            .context("missing TRAILBASE_CERTD_INTERNAL_SECRET")?;
+        let internal_secret = std::env::var("TRAILBASE_GRANT_INTERNAL_SECRET")
+            .context("missing TRAILBASE_GRANT_INTERNAL_SECRET")?;
         if internal_secret.trim().is_empty() {
-            anyhow::bail!("TRAILBASE_CERTD_INTERNAL_SECRET must not be empty");
+            anyhow::bail!("TRAILBASE_GRANT_INTERNAL_SECRET must not be empty");
         }
         let default_post_login_path = normalize_post_login_path(
             &std::env::var("TRAILBASE_DEFAULT_POST_LOGIN_PATH")

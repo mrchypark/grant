@@ -1,12 +1,12 @@
 apiVersion: chaos-mesh.org/v1alpha1
 kind: PodChaos
 metadata:
-  name: certd-voter-leader-delete
-  namespace: certd-chaos
+  name: grant-voter-leader-delete
+  namespace: grant-chaos
 spec:
   action: pod-kill
   mode: one
   selector:
     pods:
-      certd-chaos:
+      grant-chaos:
         - REPLACE_WITH_LEADER_POD

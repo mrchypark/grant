@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - ".github/workflows/chaos-local.yml"
       - ".github/workflows/e2e-local.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -20,8 +19,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e-local:
+  rust-verification:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust targets
+        run: cargo check --workspace --all-targets
+
+      - name: Test Rust targets
+        run: cargo test --workspace --all-targets
+
+  local-bootstrap:
+    runs-on: ubuntu-latest
+    needs: rust-verification
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
@@ -103,37 +118,26 @@ jobs:
           jq --version
           shellcheck --version
 
-      - name: Verify chaos script wiring
+      - name: Verify local scripts
         run: |
-          bash scripts/test-chaos-vind-default.sh
-          bash -n \
-            scripts/vind-exec.sh \
-            scripts/vind-cluster.sh \
-            scripts/ci-chaos-local.sh \
-            scripts/vind-bootstrap.sh \
-            scripts/vind-chaos.sh \
-            scripts/k3d-chaos.sh \
-            scripts/k3d-chaos-load.sh \
-            scripts/test-chaos-vind-default.sh
-          shellcheck \
-            scripts/vind-exec.sh \
-            scripts/vind-cluster.sh \
-            scripts/ci-chaos-local.sh \
-            scripts/vind-bootstrap.sh \
-            scripts/vind-chaos.sh \
-            scripts/k3d-chaos.sh \
-            scripts/k3d-chaos-load.sh \
-            scripts/test-chaos-vind-default.sh
+          scripts=(
+            scripts/vind-exec.sh
+            scripts/vind-cluster.sh
+            scripts/ci-local.sh
+            scripts/vind-bootstrap.sh
+            scripts/gke-skaffold-run.sh
+            scripts/k8s-secret-helpers.sh
+          )
+          bash -n "${scripts[@]}"
+          shellcheck "${scripts[@]}"
 
-      - name: Run local e2e regression
+      - name: Run local bootstrap regression
         env:
-          CLUSTER_NAME: certd-vind-ci
+          CLUSTER_NAME: grant-vind-ci
           CI_CLUSTER_BACKEND: vind
           CI_DOCKER_BUILDER_PRUNE: "1"
-          CI_RUN_E2E: "1"
-          CI_RUN_CHAOS: "0"
-          NAMESPACE: certd
-          CERTD_MASTER_KEY: local-dev-master-key
+          NAMESPACE: grant
+          GRANT_MASTER_KEY: local-dev-master-key
           RESET_CLUSTER: "1"
           KEEP_CLUSTER: "0"
-        run: bash scripts/ci-chaos-local.sh
+        run: bash scripts/ci-local.sh

@@ -28,8 +28,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: trailbase-config
-            - secretRef:
-                name: trailbase-backup-secret
+          env:
+            - name: TRAILBASE_GRANT_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: grant-secrets
+                  key: TRAILBASE_GRANT_INTERNAL_SECRET
           ports:
             - name: http
               containerPort: 4000
@@ -62,48 +66,9 @@ spec:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 20
-        - name: litestream
-          image: litestream/litestream:0.3.14
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -ec
-          args:
-            - |
-              mkdir -p "$(dirname "${LITESTREAM_DB_PATH}")"
-              cat >/tmp/litestream.yml <<EOF
-              dbs:
-                - path: ${LITESTREAM_DB_PATH}
-                  replicas:
-                    - url: ${LITESTREAM_REPLICA_URL}
-                      endpoint: ${LITESTREAM_ENDPOINT}
-                      region: ${LITESTREAM_REGION}
-                      access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
-                      secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
-              EOF
-              while [ ! -f "${LITESTREAM_DB_PATH}" ]; do
-                sleep 1
-              done
-              exec litestream replicate -config /tmp/litestream.yml
-          envFrom:
-            - configMapRef:
-                name: trailbase-config
-            - secretRef:
-                name: trailbase-backup-secret
-          volumeMounts:
-            - name: traildepot
-              mountPath: /app/traildepot
-          resources:
-            requests:
-              cpu: 25m
-              memory: 64Mi
-              ephemeral-storage: 32Mi
-            limits:
-              memory: 128Mi
-              ephemeral-storage: 128Mi
       initContainers:
-        - name: litestream-restore
-          image: litestream/litestream:0.3.14
+        - name: init-trailbase-data
+          image: busybox:1.36
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -111,27 +76,11 @@ spec:
           args:
             - |
               mkdir -p "${TRAILBASE_DATA_DIR}"
-              mkdir -p "$(dirname "${LITESTREAM_DB_PATH}")"
-              chown -R 65532:65532 "${TRAILBASE_DATA_DIR}"
-              chmod -R 0770 "${TRAILBASE_DATA_DIR}"
-              cat >/tmp/litestream.yml <<EOF
-              dbs:
-                - path: ${LITESTREAM_DB_PATH}
-                  replicas:
-                    - url: ${LITESTREAM_REPLICA_URL}
-                      endpoint: ${LITESTREAM_ENDPOINT}
-                      region: ${LITESTREAM_REGION}
-                      access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
-                      secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
-              EOF
-              litestream restore -config /tmp/litestream.yml -if-db-not-exists -if-replica-exists "${LITESTREAM_DB_PATH}"
               chown -R 65532:65532 "${TRAILBASE_DATA_DIR}"
               chmod -R 0770 "${TRAILBASE_DATA_DIR}"
           envFrom:
             - configMapRef:
                 name: trailbase-config
-            - secretRef:
-                name: trailbase-backup-secret
           volumeMounts:
             - name: traildepot
               mountPath: /app/traildepot

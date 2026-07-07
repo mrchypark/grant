@@ -1,6 +1,5 @@
 use anyhow::Context;
 use infra::{
-    artifacts::ArtifactStore,
     config::{AppConfig, LocalNodeRole, RuntimeMode},
     database::Database,
     runtime::HiqliteRuntime,
@@ -23,13 +22,10 @@ async fn main() -> anyhow::Result<()> {
         config.security.bootstrap_user_id.clone(),
         config.security.bootstrap_user_name.clone(),
     );
-    let artifacts = ArtifactStore::new(&config.artifacts)
-        .await
-        .context("init artifact store")?;
-    let service = Arc::new(AppService::new(config.clone(), db, artifacts));
+    let service = Arc::new(AppService::new(config.clone(), db));
     service.migrate_schema().await.context("migrate schema")?;
     if should_initialize_service(&config) {
-        service.initialize().await.context("initialize service")?;
+        service.bootstrap().await.context("bootstrap service")?;
     } else {
         tracing::info!(
             runtime_mode = config.hiqlite.runtime_mode.as_str(),
@@ -47,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.server.bind_addr)
         .await
         .with_context(|| format!("bind {}", config.server.bind_addr))?;
-    tracing::info!("certd listening on {}", config.server.bind_addr);
+    tracing::info!("grant listening on {}", config.server.bind_addr);
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -73,9 +69,9 @@ fn spawn_k8s_reconcile_task(service: Arc<AppService>, config: &AppConfig) {
                 .await
                 .context("reconcile migrate schema")?;
             service
-                .initialize()
+                .bootstrap()
                 .await
-                .context("reconcile initialize service")
+                .context("reconcile bootstrap service")
         }
         .await
         {
@@ -136,7 +132,7 @@ async fn clear_hiqlite_restore_lock_if_needed() -> anyhow::Result<()> {
     }
 
     let data_dir =
-        std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/certd/hiqlite".to_string());
+        std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/grant/hiqlite".to_string());
     let lock_path = Path::new(&data_dir).join("state_machine").join("lock");
 
     match fs::remove_file(&lock_path).await {
@@ -168,9 +164,9 @@ async fn build_remote_client(config: &AppConfig) -> anyhow::Result<hiqlite::Clie
         .hiqlite
         .remote_api_secret
         .clone()
-        .context("CERTD_REMOTE_API_SECRET is required for remote or split runtime")?;
+        .context("GRANT_REMOTE_API_SECRET is required for remote or split runtime")?;
     if config.hiqlite.remote_nodes.is_empty() {
-        anyhow::bail!("CERTD_REMOTE_NODES is required for remote or split runtime");
+        anyhow::bail!("GRANT_REMOTE_NODES is required for remote or split runtime");
     }
     hiqlite::Client::remote(
         config.hiqlite.remote_nodes.clone(),
@@ -184,8 +180,7 @@ async fn build_remote_client(config: &AppConfig) -> anyhow::Result<hiqlite::Clie
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,aws_config=warn,aws_smithy_runtime=warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt().with_env_filter(filter).with_target(false).init();
 }
 
@@ -224,7 +219,7 @@ fn is_bootstrap_voter_pod() -> bool {
 
 fn needs_bootstrap_initialization() -> bool {
     let data_dir =
-        std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/certd/hiqlite".to_string());
+        std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/grant/hiqlite".to_string());
     let state_machine_dir = Path::new(&data_dir).join("state_machine");
     !state_machine_dir.exists()
 }

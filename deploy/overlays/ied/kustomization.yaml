@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: certd-chaos
+namespace: grant-chaos
 
 resources:
   - ../../k8s
@@ -9,94 +9,17 @@ resources:
 patches:
   - target:
       kind: Namespace
-      name: certd
+      name: grant
     patch: |-
       - op: replace
         path: /metadata/name
-        value: certd-chaos
+        value: grant-chaos
   - target:
       kind: Ingress
-      name: certd
+      name: grant
     patch: |-
       $patch: delete
       apiVersion: networking.k8s.io/v1
       kind: Ingress
       metadata:
-        name: certd
-  - target:
-      kind: ConfigMap
-      name: certd-config
-    patch: |-
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: certd-config
-      data:
-        ARTIFACTS_ENDPOINT: "http://minio.certd-chaos.svc.cluster.local:9000"
-        CERTD_TRAILBASE_BASE_URL: "http://trailbase.certd-chaos.svc.cluster.local:4000"
-        HQL_NODES: |
-          1 certd-voter-0.certd-headless.certd-chaos.svc.cluster.local:8100 certd-voter-0.certd-headless.certd-chaos.svc.cluster.local:8200
-          2 certd-voter-1.certd-headless.certd-chaos.svc.cluster.local:8100 certd-voter-1.certd-headless.certd-chaos.svc.cluster.local:8200
-          3 certd-voter-2.certd-headless.certd-chaos.svc.cluster.local:8100 certd-voter-2.certd-headless.certd-chaos.svc.cluster.local:8200
-          4 certd-learner-1.certd-chaos.svc.cluster.local:8100 certd-learner-1.certd-chaos.svc.cluster.local:8200
-          5 certd-learner-2.certd-chaos.svc.cluster.local:8100 certd-learner-2.certd-chaos.svc.cluster.local:8200
-          6 certd-learner-3.certd-chaos.svc.cluster.local:8100 certd-learner-3.certd-chaos.svc.cluster.local:8200
-        HQL_S3_URL: "http://minio.certd-chaos.svc.cluster.local:9000"
-  - target:
-      kind: ConfigMap
-      name: trailbase-config
-    patch: |-
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: trailbase-config
-      data:
-        LITESTREAM_ENDPOINT: "http://minio.certd-chaos.svc.cluster.local:9000"
-  - target:
-      kind: Deployment
-      name: certd-learner-1
-    patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: certd-learner-1
-      spec:
-        template:
-          spec:
-            containers:
-              - name: certd
-                env:
-                  - name: CERTD_REMOTE_NODES
-                    value: certd-voter-0.certd-headless.certd-chaos.svc.cluster.local:8200,certd-voter-1.certd-headless.certd-chaos.svc.cluster.local:8200,certd-voter-2.certd-headless.certd-chaos.svc.cluster.local:8200
-  - target:
-      kind: Deployment
-      name: certd-learner-2
-    patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: certd-learner-2
-      spec:
-        template:
-          spec:
-            containers:
-              - name: certd
-                env:
-                  - name: CERTD_REMOTE_NODES
-                    value: certd-voter-0.certd-headless.certd-chaos.svc.cluster.local:8200,certd-voter-1.certd-headless.certd-chaos.svc.cluster.local:8200,certd-voter-2.certd-headless.certd-chaos.svc.cluster.local:8200
-  - target:
-      kind: Deployment
-      name: certd-learner-3
-    patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: certd-learner-3
-      spec:
-        template:
-          spec:
-            containers:
-              - name: certd
-                env:
-                  - name: CERTD_REMOTE_NODES
-                    value: certd-voter-0.certd-headless.certd-chaos.svc.cluster.local:8200,certd-voter-1.certd-headless.certd-chaos.svc.cluster.local:8200,certd-voter-2.certd-headless.certd-chaos.svc.cluster.local:8200
+        name: grant

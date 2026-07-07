@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
-use base64::{Engine, engine::general_purpose::STANDARD};
-use std::{env, path::PathBuf};
-
-const LEGACY_MASTER_KEY_ID: &str = "legacy-master-key";
+use std::env::{self, VarError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -14,8 +11,6 @@ pub struct SecurityConfig {
     pub master_key: String,
     pub bootstrap_user_id: String,
     pub bootstrap_user_name: String,
-    pub allow_untrusted_certificates: bool,
-    pub certificate_trust_bundle_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,32 +24,6 @@ pub struct TrailbaseAuthConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
     pub trailbase: TrailbaseAuthConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KmsConfig {
-    pub active_key_id: String,
-    pub master_keys: Vec<(String, Vec<u8>)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArtifactBackendConfig {
-    FileSystem {
-        root_dir: PathBuf,
-    },
-    S3 {
-        bucket: String,
-        region: String,
-        endpoint: String,
-        path_style: bool,
-        access_key: String,
-        secret_key: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactConfig {
-    pub backend: ArtifactBackendConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,159 +63,55 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub security: SecurityConfig,
     pub auth: AuthConfig,
-    pub kms: KmsConfig,
-    pub artifacts: ArtifactConfig,
     pub hiqlite: HiqliteConfig,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
-        let current_dir = env::current_dir().context("resolve current working directory")?;
         let security = SecurityConfig {
-            master_key: env_or("CERTD_MASTER_KEY", "dev-only-master-key"),
-            bootstrap_user_id: env_or("CERTD_BOOTSTRAP_USER_ID", "conalog-account"),
-            bootstrap_user_name: env_or("CERTD_BOOTSTRAP_USER_NAME", "Conalog Account"),
-            allow_untrusted_certificates: env_bool("CERTD_ALLOW_UNTRUSTED_CERTIFICATES", false),
-            certificate_trust_bundle_path: optional_path_env("CERTD_CERT_TRUST_BUNDLE_PATH"),
+            master_key: env_or("GRANT_MASTER_KEY", "dev-only-master-key"),
+            bootstrap_user_id: env_or("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"),
+            bootstrap_user_name: env_or("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant"),
         };
         Ok(Self {
             server: ServerConfig {
-                bind_addr: env_or("CERTD_BIND_ADDR", "0.0.0.0:8080"),
+                bind_addr: env_or("GRANT_BIND_ADDR", "0.0.0.0:8080"),
             },
             security: security.clone(),
             auth: auth_config()?,
-            kms: KmsConfig::from_env()?,
-            artifacts: ArtifactConfig {
-                backend: artifact_backend(&current_dir)?,
-            },
-            hiqlite: hiqlite_config(),
+            hiqlite: hiqlite_config()?,
         })
     }
 }
 
-impl KmsConfig {
-    pub fn from_env() -> Result<Self> {
-        let active_key_id = env::var("CERTD_KMS_ACTIVE_KEY_ID")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let master_keys = env::var("CERTD_KMS_MASTER_KEYS")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-
-        match (active_key_id, master_keys) {
-            (Some(active_key_id), Some(master_keys)) => {
-                let parsed = parse_kms_master_keys(&master_keys)?;
-                if !parsed.iter().any(|(key_id, _)| key_id == &active_key_id) {
-                    anyhow::bail!(
-                        "CERTD_KMS_ACTIVE_KEY_ID {active_key_id} is not present in CERTD_KMS_MASTER_KEYS"
-                    );
-                }
-                Ok(Self {
-                    active_key_id,
-                    master_keys: parsed,
-                })
-            }
-            (None, None) => Ok(Self {
-                active_key_id: LEGACY_MASTER_KEY_ID.to_owned(),
-                master_keys: vec![(
-                    LEGACY_MASTER_KEY_ID.to_owned(),
-                    env_or("CERTD_MASTER_KEY", "dev-only-master-key").into_bytes(),
-                )],
-            }),
-            (None, Some(_)) => {
-                anyhow::bail!("missing required environment variable CERTD_KMS_ACTIVE_KEY_ID")
-            }
-            (Some(_), None) => {
-                anyhow::bail!("missing required environment variable CERTD_KMS_MASTER_KEYS")
-            }
-        }
-    }
-}
-
-fn hiqlite_config() -> HiqliteConfig {
-    HiqliteConfig {
-        runtime_mode: runtime_mode_from_env("CERTD_RUNTIME_MODE"),
-        local_node_role: local_node_role_from_env("CERTD_LOCAL_NODE_ROLE"),
-        default_read_consistency: read_consistency_from_env("CERTD_READ_CONSISTENCY"),
-        remote_nodes: env::var("CERTD_REMOTE_NODES")
+fn hiqlite_config() -> Result<HiqliteConfig> {
+    Ok(HiqliteConfig {
+        runtime_mode: runtime_mode_from_env("GRANT_RUNTIME_MODE")?,
+        local_node_role: local_node_role_from_env("GRANT_LOCAL_NODE_ROLE")?,
+        default_read_consistency: read_consistency_from_env("GRANT_READ_CONSISTENCY")?,
+        remote_nodes: env::var("GRANT_REMOTE_NODES")
             .ok()
             .map(|value| value.split(',').filter_map(normalize_remote_node).collect())
             .unwrap_or_default(),
-        remote_tls: env_bool("CERTD_REMOTE_TLS", false),
-        remote_tls_no_verify: env_bool("CERTD_REMOTE_TLS_NO_VERIFY", false),
-        remote_api_secret: env::var("CERTD_REMOTE_API_SECRET").ok(),
-        remote_with_proxy: env_bool("CERTD_REMOTE_WITH_PROXY", false),
-    }
+        remote_tls: env_bool("GRANT_REMOTE_TLS", false),
+        remote_tls_no_verify: env_bool("GRANT_REMOTE_TLS_NO_VERIFY", false),
+        remote_api_secret: env::var("GRANT_REMOTE_API_SECRET").ok(),
+        remote_with_proxy: env_bool("GRANT_REMOTE_WITH_PROXY", false),
+    })
 }
 
 fn auth_config() -> Result<AuthConfig> {
     Ok(AuthConfig {
         trailbase: TrailbaseAuthConfig {
-            base_url: env_or("CERTD_TRAILBASE_BASE_URL", "http://127.0.0.1:4000"),
-            introspect_path: env_or("CERTD_TRAILBASE_INTROSPECT_PATH", "/api/certd/introspect"),
-            internal_secret: required_env("CERTD_TRAILBASE_INTERNAL_SECRET")?,
-            cache_ttl_seconds: env::var("CERTD_TRAILBASE_CACHE_TTL_SECONDS")
+            base_url: env_or("GRANT_TRAILBASE_BASE_URL", "http://127.0.0.1:4000"),
+            introspect_path: env_or("GRANT_TRAILBASE_INTROSPECT_PATH", "/api/grant/introspect"),
+            internal_secret: required_env("GRANT_TRAILBASE_INTERNAL_SECRET")?,
+            cache_ttl_seconds: env::var("GRANT_TRAILBASE_CACHE_TTL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(30),
         },
     })
-}
-
-fn artifact_backend(current_dir: &PathBuf) -> Result<ArtifactBackendConfig> {
-    let backend = env_or("ARTIFACTS_BACKEND", "fs");
-    match backend.trim().to_ascii_lowercase().as_str() {
-        "fs" | "filesystem" => {
-            let root = PathBuf::from(env_or("ARTIFACTS_ROOT_DIR", "./artifacts"));
-            let resolved = if root.is_absolute() {
-                root
-            } else {
-                current_dir.join(root)
-            };
-            Ok(ArtifactBackendConfig::FileSystem { root_dir: resolved })
-        }
-        "s3" => Ok(ArtifactBackendConfig::S3 {
-            bucket: env_or("ARTIFACTS_BUCKET", "cert-artifacts"),
-            region: env_or("ARTIFACTS_REGION", "us-east-1"),
-            endpoint: env_or("ARTIFACTS_ENDPOINT", "http://127.0.0.1:9000"),
-            path_style: env_bool("ARTIFACTS_PATH_STYLE", true),
-            access_key: env_or_fallback("ARTIFACTS_ACCESS_KEY", "HQL_S3_KEY", "minioadmin"),
-            secret_key: env_or_fallback("ARTIFACTS_SECRET_KEY", "HQL_S3_SECRET", "minioadmin"),
-        }),
-        other => Err(anyhow::anyhow!("unsupported ARTIFACTS_BACKEND: {other}")),
-    }
-}
-
-fn parse_kms_master_keys(value: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut parsed = Vec::new();
-
-    for entry in value
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-    {
-        let (key_id, encoded) = entry.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("CERTD_KMS_MASTER_KEYS entry must be key-id:base64-key")
-        })?;
-        let key_id = key_id.trim();
-        let encoded = encoded.trim();
-        if key_id.is_empty() || encoded.is_empty() {
-            anyhow::bail!("CERTD_KMS_MASTER_KEYS entry must include both key id and key material");
-        }
-
-        let key_material = STANDARD
-            .decode(encoded)
-            .with_context(|| "decode CERTD_KMS_MASTER_KEYS base64 key material")?;
-        parsed.push((key_id.to_owned(), key_material));
-    }
-
-    if parsed.is_empty() {
-        anyhow::bail!("CERTD_KMS_MASTER_KEYS must include at least one entry");
-    }
-
-    Ok(parsed)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -262,20 +127,6 @@ fn required_env(key: &str) -> Result<String> {
     Ok(value)
 }
 
-fn optional_path_env(key: &str) -> Option<PathBuf> {
-    env::var(key)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn env_or_fallback(primary: &str, fallback: &str, default: &str) -> String {
-    env::var(primary)
-        .or_else(|_| env::var(fallback))
-        .unwrap_or_else(|_| default.to_owned())
-}
-
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
@@ -287,42 +138,43 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-fn runtime_mode_from_env(key: &str) -> RuntimeMode {
-    match env::var(key)
-        .unwrap_or_else(|_| "embedded".to_owned())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "remote" => RuntimeMode::Remote,
-        "split" => RuntimeMode::Split,
-        _ => RuntimeMode::Embedded,
+fn runtime_mode_from_env(key: &str) -> Result<RuntimeMode> {
+    match enum_env_value(key, "embedded")?.as_str() {
+        "embedded" => Ok(RuntimeMode::Embedded),
+        "remote" => Ok(RuntimeMode::Remote),
+        "split" => Ok(RuntimeMode::Split),
+        other => anyhow::bail!("{key} must be one of embedded, remote, split; got {other}"),
     }
 }
 
-fn read_consistency_from_env(key: &str) -> ReadConsistency {
-    match env::var(key)
-        .unwrap_or_else(|_| "local".to_owned())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "strong" => ReadConsistency::Strong,
-        "prefer-strong" | "prefer_strong" | "preferstrong" => ReadConsistency::PreferStrong,
-        _ => ReadConsistency::Local,
+fn read_consistency_from_env(key: &str) -> Result<ReadConsistency> {
+    match enum_env_value(key, "local")?.as_str() {
+        "local" => Ok(ReadConsistency::Local),
+        "strong" => Ok(ReadConsistency::Strong),
+        "prefer-strong" | "prefer_strong" | "preferstrong" => Ok(ReadConsistency::PreferStrong),
+        other => anyhow::bail!("{key} must be one of local, strong, prefer-strong; got {other}"),
     }
 }
 
-fn local_node_role_from_env(key: &str) -> LocalNodeRole {
-    match env::var(key)
-        .unwrap_or_else(|_| "voter".to_owned())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "learner" | "learner-only" | "learner_only" => LocalNodeRole::Learner,
-        _ => LocalNodeRole::Voter,
+fn local_node_role_from_env(key: &str) -> Result<LocalNodeRole> {
+    match enum_env_value(key, "voter")?.as_str() {
+        "voter" => Ok(LocalNodeRole::Voter),
+        "learner" | "learner-only" | "learner_only" => Ok(LocalNodeRole::Learner),
+        other => anyhow::bail!("{key} must be one of voter, learner; got {other}"),
     }
+}
+
+fn enum_env_value(key: &str, default: &str) -> Result<String> {
+    let value = match env::var(key) {
+        Ok(value) => value,
+        Err(VarError::NotPresent) => return Ok(default.to_owned()),
+        Err(err) => return Err(err).with_context(|| format!("read {key}")),
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{key} must not be empty");
+    }
+    Ok(trimmed.to_ascii_lowercase())
 }
 
 fn normalize_remote_node(part: &str) -> Option<String> {
