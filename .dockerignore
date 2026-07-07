@@ -3,7 +3,6 @@
 .codex
 .idea
 .DS_Store
-.keploy
 target
 crates/trailbase-auth-bridge/target
 deploy

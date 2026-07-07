@@ -1,6 +1,6 @@
-# certd 런타임 모드
+# grant 런타임 모드
 
-`certd`는 `hiqlite` 접근 방식을 `embedded`, `remote`, `split` 세 가지로 나눈다.
+`grant`는 `hiqlite` 접근 방식을 `embedded`, `remote`, `split` 세 가지로 나눈다.
 
 ## 모드
 
@@ -15,7 +15,7 @@
 
 ## voter 와 learner
 
-`crates/app/src/main.rs`는 `CERTD_LOCAL_NODE_ROLE`에 따라 동작을 나눈다.
+`crates/app/src/main.rs`는 `GRANT_LOCAL_NODE_ROLE`에 따라 동작을 나눈다.
 
 - `voter`
   - 기본 public API 노드다.
@@ -28,18 +28,18 @@
 ## 관련 환경변수
 
 ```bash
-export CERTD_RUNTIME_MODE=embedded   # embedded | remote | split
-export CERTD_LOCAL_NODE_ROLE=voter   # voter | learner
-export CERTD_READ_CONSISTENCY=local  # local | strong | prefer-strong
+export GRANT_RUNTIME_MODE=embedded   # embedded | remote | split
+export GRANT_LOCAL_NODE_ROLE=voter   # voter | learner
+export GRANT_READ_CONSISTENCY=local  # local | strong | prefer-strong
 
-export CERTD_REMOTE_NODES=127.0.0.1:18100,127.0.0.1:18110
-export CERTD_REMOTE_TLS=false
-export CERTD_REMOTE_TLS_NO_VERIFY=false
-export CERTD_REMOTE_API_SECRET=AnotherSecureSecret42
-export CERTD_REMOTE_WITH_PROXY=false
+export GRANT_REMOTE_NODES=127.0.0.1:18100,127.0.0.1:18110
+export GRANT_REMOTE_TLS=false
+export GRANT_REMOTE_TLS_NO_VERIFY=false
+export GRANT_REMOTE_API_SECRET=AnotherSecureSecret42
+export GRANT_REMOTE_WITH_PROXY=false
 ```
 
-`CERTD_REMOTE_NODES`는 `host:port` 형식을 권장한다. 기존 `http://...`, `https://...` 값이 들어와도 앱에서 scheme를 제거하고 `hiqlite`에 전달한다.
+`GRANT_REMOTE_NODES`는 `host:port` 형식을 권장한다. 기존 `http://...`, `https://...` 값이 들어와도 앱에서 scheme를 제거하고 `hiqlite`에 전달한다.
 
 ## 읽기 일관성
 

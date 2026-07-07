@@ -8,11 +8,11 @@ use domain::{
 };
 
 #[test]
-fn serializes_account_models() {
+fn serializes_grant_models() {
     let user = User {
-        id: "conalog-account".into(),
+        id: "conalog-grant".into(),
         email: Some("ops@example.com".into()),
-        display_name: "Conalog Account".into(),
+        display_name: "Conalog Grant".into(),
         active: true,
     };
     let organization = Organization {
@@ -59,7 +59,7 @@ fn serializes_account_models() {
     };
     let action = Action {
         id: "action_1".into(),
-        provider_id: "account".into(),
+        provider_id: "grant".into(),
         code: "organization.application.manage".into(),
         name: "Application Manage".into(),
         description: Some("Manage organization applications".into()),
@@ -114,7 +114,7 @@ fn serializes_account_models() {
         subject_type: RoleBindingSubjectType::Group,
         subject_id: group.id.clone(),
         subject_organization_id: organization.id.clone(),
-        provider_id: "account".into(),
+        provider_id: "grant".into(),
         resource_type: "organization".into(),
         resource_id: organization.id.clone(),
         role_id: role.id.clone(),

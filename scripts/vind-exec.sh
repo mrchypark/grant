@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CLUSTER_NAME="${CLUSTER_NAME:-certd-ci}"
+CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 
 if [[ "$#" -eq 0 ]]; then
   echo "usage: scripts/vind-exec.sh <command> [args...]" >&2
@@ -19,15 +19,5 @@ if docker inspect "$(vcluster_container_name)" >/dev/null 2>&1; then
     -- "$@"
 fi
 
-if command -v k3d >/dev/null 2>&1 && k3d cluster get "${CLUSTER_NAME}" >/dev/null 2>&1; then
-  context_name="k3d-${CLUSTER_NAME}"
-  kubectl config use-context "k3d-${CLUSTER_NAME}" >/dev/null
-  exec env \
-    VIND_EXEC_ACTIVE=1 \
-    KUBECONTEXT="${context_name}" \
-    KUBE_CONTEXT="${context_name}" \
-    "$@"
-fi
-
-echo "vind cluster ${CLUSTER_NAME} not found via vcluster or k3d" >&2
+echo "vind cluster ${CLUSTER_NAME} not found via vcluster" >&2
 exit 1

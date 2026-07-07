@@ -21,6 +21,8 @@ macro_rules! params {
     };
 }
 
+const MAX_AUTHZ_CHECKS_PER_QUERY: usize = 100;
+
 #[derive(Clone)]
 pub struct Database {
     runtime: HiqliteRuntime,
@@ -33,6 +35,28 @@ pub struct BackupEntry {
     pub name: String,
     pub last_modified: i64,
     pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BindIdentityInput<'a> {
+    pub user_id: &'a str,
+    pub provider: &'a str,
+    pub external_user_id: &'a str,
+    pub email: Option<&'a str>,
+    pub display_name: &'a str,
+    pub active: bool,
+    pub allow_rebind: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserActionCheck<'a> {
+    pub user_id: &'a str,
+    pub organization_id: &'a str,
+    pub provider_id: &'a str,
+    pub resource_type: &'a str,
+    pub resource_id: &'a str,
+    pub action_id: &'a str,
+    pub consistency: Option<ReadConsistency>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,8 +234,19 @@ struct ActionLookupRow {
 }
 
 #[derive(Debug, Clone)]
+struct UserActionDecisionRow {
+    idx: i64,
+    allowed: i64,
+}
+
+#[derive(Debug, Clone)]
 struct ColumnNameRow {
     name: String,
+}
+
+#[derive(Debug, Clone)]
+struct TableSqlRow {
+    sql: Option<String>,
 }
 
 impl Database {
@@ -353,7 +388,7 @@ impl Database {
     }
 
     pub async fn ensure_schema_only(&self) -> Result<()> {
-        self.drop_removed_certd_tables().await?;
+        self.drop_removed_grant_tables().await?;
         self.runtime
             .batch(
                 r#"
@@ -456,8 +491,8 @@ impl Database {
                 );
                 CREATE TABLE IF NOT EXISTS actions (
                     id TEXT PRIMARY KEY,
-                    provider_id TEXT NOT NULL DEFAULT 'account',
-                    code TEXT NOT NULL UNIQUE,
+                    provider_id TEXT NOT NULL DEFAULT 'grant',
+                    code TEXT NOT NULL,
                     name TEXT NOT NULL,
                     description TEXT,
                     risk_level TEXT NOT NULL,
@@ -488,7 +523,7 @@ impl Database {
                     subject_type TEXT NOT NULL,
                     subject_id TEXT NOT NULL,
                     subject_organization_id TEXT NOT NULL,
-                    provider_id TEXT NOT NULL DEFAULT 'account',
+                    provider_id TEXT NOT NULL DEFAULT 'grant',
                     resource_type TEXT NOT NULL,
                     resource_id TEXT NOT NULL,
                     role_id TEXT NOT NULL,
@@ -540,17 +575,20 @@ impl Database {
             )
             .await
             .context("create schema")?;
-        self.add_column_if_missing("actions", "provider_id", "TEXT NOT NULL DEFAULT 'account'")
+        self.add_column_if_missing("actions", "provider_id", "TEXT NOT NULL DEFAULT 'grant'")
             .await?;
         self.add_column_if_missing(
             "role_bindings",
             "provider_id",
-            "TEXT NOT NULL DEFAULT 'account'",
+            "TEXT NOT NULL DEFAULT 'grant'",
         )
         .await?;
+        self.migrate_actions_provider_scoped_uniqueness().await?;
+        self.migrate_legacy_account_organization_authorization()
+            .await?;
         self.ensure_indexes().await?;
-        self.drop_removed_certd_tables().await?;
-        self.delete_removed_certd_authorization_rows().await?;
+        self.drop_removed_grant_tables().await?;
+        self.delete_removed_grant_authorization_rows().await?;
         Ok(())
     }
 
@@ -578,7 +616,8 @@ impl Database {
                     ON service_providers (active, id);
                 CREATE INDEX IF NOT EXISTS idx_actions_code
                     ON actions (code);
-                CREATE INDEX IF NOT EXISTS idx_actions_provider
+                DROP INDEX IF EXISTS idx_actions_provider;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_provider_code_unique
                     ON actions (provider_id, code);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_global_code
                     ON roles (code)
@@ -609,6 +648,61 @@ impl Database {
         Ok(())
     }
 
+    async fn migrate_actions_provider_scoped_uniqueness(&self) -> Result<()> {
+        let rows: Vec<TableSqlRow> = self
+            .query_default_rows(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'actions' LIMIT 1",
+                vec![],
+                "actions table sql",
+            )
+            .await?;
+        let table_sql = rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.sql)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !table_sql.contains("code text not null unique") {
+            return Ok(());
+        }
+
+        self.runtime
+            .batch(
+                r#"
+                DROP INDEX IF EXISTS idx_actions_code;
+                DROP INDEX IF EXISTS idx_actions_provider;
+                CREATE TABLE actions_provider_scoped_migration (
+                    id TEXT PRIMARY KEY,
+                    provider_id TEXT NOT NULL DEFAULT 'grant',
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    risk_level TEXT NOT NULL,
+                    visibility_granting INTEGER NOT NULL DEFAULT 0,
+                    grantable_to_applications INTEGER NOT NULL DEFAULT 0,
+                    consent_label TEXT,
+                    consent_description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO actions_provider_scoped_migration (
+                    id, provider_id, code, name, description, risk_level, visibility_granting,
+                    grantable_to_applications, consent_label, consent_description, created_at, updated_at
+                )
+                SELECT
+                    id, provider_id, code, name, description, risk_level, visibility_granting,
+                    grantable_to_applications, consent_label, consent_description, created_at, updated_at
+                FROM actions;
+                DROP TABLE actions;
+                ALTER TABLE actions_provider_scoped_migration RENAME TO actions;
+                "#
+                .to_owned(),
+            )
+            .await
+            .context("migrate actions provider-scoped uniqueness")?;
+        Ok(())
+    }
+
     async fn add_column_if_missing(
         &self,
         table_name: &str,
@@ -636,7 +730,7 @@ impl Database {
         Ok(())
     }
 
-    async fn drop_removed_certd_tables(&self) -> Result<()> {
+    async fn drop_removed_grant_tables(&self) -> Result<()> {
         self.runtime
             .batch(
                 r#"
@@ -674,21 +768,24 @@ impl Database {
                 .to_owned(),
             )
             .await
-            .context("drop removed certd tables")?;
+            .context("drop removed grant tables")?;
         Ok(())
     }
 
-    async fn delete_removed_certd_authorization_rows(&self) -> Result<()> {
+    async fn delete_removed_grant_authorization_rows(&self) -> Result<()> {
         self.runtime
             .batch(
                 r#"
                 DELETE FROM application_grant_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
-                    WHERE provider_id = 'account'
+                    WHERE provider_id IN ('grant', 'account')
                       AND (
                           code LIKE 'plant.%'
                           OR code LIKE 'asset.%'
+                          OR code LIKE 'document.%'
+                          OR code LIKE 'cert-data.%'
+                          OR code LIKE 'cert_data.%'
                           OR code LIKE 'organization.plant.%'
                           OR code = 'organization.credential.use'
                       )
@@ -696,10 +793,13 @@ impl Database {
                 DELETE FROM application_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
-                    WHERE provider_id = 'account'
+                    WHERE provider_id IN ('grant', 'account')
                       AND (
                           code LIKE 'plant.%'
                           OR code LIKE 'asset.%'
+                          OR code LIKE 'document.%'
+                          OR code LIKE 'cert-data.%'
+                          OR code LIKE 'cert_data.%'
                           OR code LIKE 'organization.plant.%'
                           OR code = 'organization.credential.use'
                       )
@@ -707,22 +807,28 @@ impl Database {
                 DELETE FROM role_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
-                    WHERE provider_id = 'account'
+                    WHERE provider_id IN ('grant', 'account')
                       AND (
                           code LIKE 'plant.%'
                           OR code LIKE 'asset.%'
+                          OR code LIKE 'document.%'
+                          OR code LIKE 'cert-data.%'
+                          OR code LIKE 'cert_data.%'
                           OR code LIKE 'organization.plant.%'
                           OR code = 'organization.credential.use'
                       )
                 );
                 DELETE FROM role_bindings
-                WHERE provider_id = 'account'
+                WHERE provider_id IN ('grant', 'account')
                   AND resource_type <> 'organization';
                 DELETE FROM actions
-                WHERE provider_id = 'account'
+                WHERE provider_id IN ('grant', 'account')
                   AND (
                       code LIKE 'plant.%'
                       OR code LIKE 'asset.%'
+                      OR code LIKE 'document.%'
+                      OR code LIKE 'cert-data.%'
+                      OR code LIKE 'cert_data.%'
                       OR code LIKE 'organization.plant.%'
                       OR code = 'organization.credential.use'
                   );
@@ -730,12 +836,253 @@ impl Database {
                 .to_owned(),
             )
             .await
-            .context("delete removed certd authorization rows")?;
+            .context("delete removed grant authorization rows")?;
+        Ok(())
+    }
+
+    async fn migrate_legacy_account_organization_authorization(&self) -> Result<()> {
+        self.runtime
+            .batch(
+                r#"
+                UPDATE OR IGNORE role_actions
+                SET action_id = (
+                    SELECT grant_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.id = role_actions.action_id
+                      AND account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.id = role_actions.action_id
+                      AND account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
+                UPDATE OR IGNORE application_actions
+                SET action_id = (
+                    SELECT grant_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.id = application_actions.action_id
+                      AND account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.id = application_actions.action_id
+                      AND account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
+                UPDATE OR IGNORE application_grant_actions
+                SET action_id = (
+                    SELECT grant_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.id = application_grant_actions.action_id
+                      AND account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.id = application_grant_actions.action_id
+                      AND account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
+                DELETE FROM role_actions
+                WHERE action_id IN (
+                    SELECT account_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
+                DELETE FROM application_actions
+                WHERE action_id IN (
+                    SELECT account_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
+                DELETE FROM application_grant_actions
+                WHERE action_id IN (
+                    SELECT account_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
+                DELETE FROM actions
+                WHERE provider_id = 'account'
+                  AND code LIKE 'organization.%'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM actions AS grant_action
+                      WHERE grant_action.provider_id = 'grant'
+                        AND grant_action.code = actions.code
+                  );
+
+                UPDATE actions
+                SET provider_id = 'grant'
+                WHERE provider_id = 'account'
+                  AND code LIKE 'organization.%';
+
+                UPDATE role_bindings AS grant_binding
+                SET
+                    state = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM role_bindings AS account_binding
+                            WHERE account_binding.subject_type = grant_binding.subject_type
+                              AND account_binding.subject_id = grant_binding.subject_id
+                              AND account_binding.subject_organization_id = grant_binding.subject_organization_id
+                              AND account_binding.provider_id = 'account'
+                              AND account_binding.resource_type = grant_binding.resource_type
+                              AND account_binding.resource_id = grant_binding.resource_id
+                              AND account_binding.role_id = grant_binding.role_id
+                              AND account_binding.state = 'active'
+                        )
+                        THEN 'active'
+                        ELSE grant_binding.state
+                    END,
+                    agreement_id = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM role_bindings AS account_binding
+                            WHERE account_binding.subject_type = grant_binding.subject_type
+                              AND account_binding.subject_id = grant_binding.subject_id
+                              AND account_binding.subject_organization_id = grant_binding.subject_organization_id
+                              AND account_binding.provider_id = 'account'
+                              AND account_binding.resource_type = grant_binding.resource_type
+                              AND account_binding.resource_id = grant_binding.resource_id
+                              AND account_binding.role_id = grant_binding.role_id
+                              AND account_binding.state = 'active'
+                        )
+                        THEN (
+                            SELECT account_binding.agreement_id
+                            FROM role_bindings AS account_binding
+                            WHERE account_binding.subject_type = grant_binding.subject_type
+                              AND account_binding.subject_id = grant_binding.subject_id
+                              AND account_binding.subject_organization_id = grant_binding.subject_organization_id
+                              AND account_binding.provider_id = 'account'
+                              AND account_binding.resource_type = grant_binding.resource_type
+                              AND account_binding.resource_id = grant_binding.resource_id
+                              AND account_binding.role_id = grant_binding.role_id
+                              AND account_binding.state = 'active'
+                            ORDER BY account_binding.updated_at DESC, account_binding.id ASC
+                            LIMIT 1
+                        )
+                        ELSE grant_binding.agreement_id
+                    END,
+                    updated_at = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM role_bindings AS account_binding
+                            WHERE account_binding.subject_type = grant_binding.subject_type
+                              AND account_binding.subject_id = grant_binding.subject_id
+                              AND account_binding.subject_organization_id = grant_binding.subject_organization_id
+                              AND account_binding.provider_id = 'account'
+                              AND account_binding.resource_type = grant_binding.resource_type
+                              AND account_binding.resource_id = grant_binding.resource_id
+                              AND account_binding.role_id = grant_binding.role_id
+                              AND account_binding.updated_at > grant_binding.updated_at
+                        )
+                        THEN (
+                            SELECT account_binding.updated_at
+                            FROM role_bindings AS account_binding
+                            WHERE account_binding.subject_type = grant_binding.subject_type
+                              AND account_binding.subject_id = grant_binding.subject_id
+                              AND account_binding.subject_organization_id = grant_binding.subject_organization_id
+                              AND account_binding.provider_id = 'account'
+                              AND account_binding.resource_type = grant_binding.resource_type
+                              AND account_binding.resource_id = grant_binding.resource_id
+                              AND account_binding.role_id = grant_binding.role_id
+                            ORDER BY account_binding.updated_at DESC, account_binding.id ASC
+                            LIMIT 1
+                        )
+                        ELSE grant_binding.updated_at
+                    END
+                WHERE grant_binding.provider_id = 'grant'
+                  AND grant_binding.resource_type = 'organization'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM role_bindings AS account_binding
+                      WHERE account_binding.subject_type = grant_binding.subject_type
+                        AND account_binding.subject_id = grant_binding.subject_id
+                        AND account_binding.subject_organization_id = grant_binding.subject_organization_id
+                        AND account_binding.provider_id = 'account'
+                        AND account_binding.resource_type = grant_binding.resource_type
+                        AND account_binding.resource_id = grant_binding.resource_id
+                        AND account_binding.role_id = grant_binding.role_id
+                  );
+
+                DELETE FROM role_bindings
+                WHERE provider_id = 'account'
+                  AND resource_type = 'organization'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM role_bindings grant_binding
+                      WHERE grant_binding.subject_type = role_bindings.subject_type
+                        AND grant_binding.subject_id = role_bindings.subject_id
+                        AND grant_binding.subject_organization_id = role_bindings.subject_organization_id
+                        AND grant_binding.provider_id = 'grant'
+                        AND grant_binding.resource_type = role_bindings.resource_type
+                        AND grant_binding.resource_id = role_bindings.resource_id
+                        AND grant_binding.role_id = role_bindings.role_id
+                  );
+
+                UPDATE role_bindings
+                SET provider_id = 'grant'
+                WHERE provider_id = 'account'
+                  AND resource_type = 'organization';
+                "#
+                .to_owned(),
+            )
+            .await
+            .context("migrate legacy account organization authorization")?;
         Ok(())
     }
 
     pub async fn ensure_schema(&self) -> Result<()> {
         self.ensure_schema_only().await?;
+        self.ensure_bootstrap_data().await
+    }
+
+    pub async fn ensure_bootstrap_data(&self) -> Result<()> {
         self.ensure_bootstrap_principals().await?;
         self.ensure_action_catalog().await?;
         self.ensure_bootstrap_authorization().await?;
@@ -829,7 +1176,7 @@ impl Database {
             subject_type: RoleBindingSubjectType::User,
             subject_id: self.bootstrap_user_id.clone(),
             subject_organization_id: self.bootstrap_user_id.clone(),
-            provider_id: "account".to_owned(),
+            provider_id: "grant".to_owned(),
             resource_type: "organization".to_owned(),
             resource_id: self.bootstrap_user_id.clone(),
             role_id: role.id,
@@ -845,9 +1192,9 @@ impl Database {
     async fn ensure_action_catalog(&self) -> Result<()> {
         let now = now_string();
         self.upsert_service_provider(&ServiceProvider {
-            id: "account".to_owned(),
-            name: "Account".to_owned(),
-            description: Some("Account organization and authorization service".to_owned()),
+            id: "grant".to_owned(),
+            name: "Grant".to_owned(),
+            description: Some("Grant organization authorization service".to_owned()),
             active: true,
         })
         .await?;
@@ -902,8 +1249,7 @@ impl Database {
                         grantable_to_applications, consent_label, consent_description, created_at, updated_at
                      )
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                     ON CONFLICT(code) DO UPDATE SET
-                        provider_id = excluded.provider_id,
+                     ON CONFLICT(provider_id, code) DO UPDATE SET
                         name = excluded.name,
                         risk_level = excluded.risk_level,
                         visibility_granting = excluded.visibility_granting,
@@ -913,7 +1259,7 @@ impl Database {
                         updated_at = excluded.updated_at",
                     params!(
                         code.to_owned(),
-                        "account".to_owned(),
+                        "grant".to_owned(),
                         code.to_owned(),
                         name.to_owned(),
                         Option::<String>::None,
@@ -1259,16 +1605,7 @@ impl Database {
         Ok(None)
     }
 
-    pub async fn bind_identity_to_user(
-        &self,
-        user_id: &str,
-        provider: &str,
-        external_user_id: &str,
-        email: Option<&str>,
-        display_name: &str,
-        active: bool,
-        allow_rebind: bool,
-    ) -> Result<User> {
+    pub async fn bind_identity_to_user(&self, input: BindIdentityInput<'_>) -> Result<User> {
         let now = now_string();
         let existing: Option<UserIdentityJoinRow> = self
             .runtime
@@ -1278,29 +1615,29 @@ impl Database {
                         ui.user_id as user_id
                  FROM user_identities ui
                  WHERE ui.provider = $1 AND ui.external_user_id = $2",
-                params!(provider.to_owned(), external_user_id.to_owned()),
+                params!(input.provider.to_owned(), input.external_user_id.to_owned()),
             )
             .await
             .context("query user identity for binding")?
             .into_iter()
             .next();
 
-        if !allow_rebind
+        if !input.allow_rebind
             && let Some(existing) = existing.as_ref()
-            && existing.user_id != user_id
+            && existing.user_id != input.user_id
         {
             anyhow::bail!(
                 "identity {}:{} is already bound to another user {}",
-                provider,
-                external_user_id,
+                input.provider,
+                input.external_user_id,
                 existing.user_id
             );
         }
 
         let target_user = self
-            .find_user_by_id(user_id, None)
+            .find_user_by_id(input.user_id, None)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("target user {} does not exist", user_id))?;
+            .ok_or_else(|| anyhow::anyhow!("target user {} does not exist", input.user_id))?;
 
         let identity_id = existing
             .as_ref()
@@ -1317,9 +1654,12 @@ impl Database {
                     active = excluded.active",
                 params!(
                     target_user.id.clone(),
-                    email.map(ToOwned::to_owned).or(target_user.email.clone()),
-                    display_name.to_owned(),
-                    if active { 1_i64 } else { 0_i64 },
+                    input
+                        .email
+                        .map(ToOwned::to_owned)
+                        .or(target_user.email.clone()),
+                    input.display_name.to_owned(),
+                    if input.active { 1_i64 } else { 0_i64 },
                     now.clone()
                 ),
             )
@@ -1339,11 +1679,11 @@ impl Database {
                     updated_at = excluded.updated_at",
                 params!(
                     identity_id,
-                    user_id.to_owned(),
-                    provider.to_owned(),
-                    external_user_id.to_owned(),
-                    email.map(ToOwned::to_owned),
-                    Some(display_name.to_owned()),
+                    input.user_id.to_owned(),
+                    input.provider.to_owned(),
+                    input.external_user_id.to_owned(),
+                    input.email.map(ToOwned::to_owned),
+                    Some(input.display_name.to_owned()),
                     Some(now.clone()),
                     now.clone(),
                     now.clone()
@@ -1353,10 +1693,10 @@ impl Database {
             .context("bind identity to user")?;
 
         Ok(User {
-            id: user_id.to_owned(),
-            email: email.map(ToOwned::to_owned).or(target_user.email),
-            display_name: display_name.to_owned(),
-            active,
+            id: input.user_id.to_owned(),
+            email: input.email.map(ToOwned::to_owned).or(target_user.email),
+            display_name: input.display_name.to_owned(),
+            active: input.active,
         })
     }
 
@@ -1683,8 +2023,7 @@ impl Database {
                     grantable_to_applications, consent_label, consent_description, created_at, updated_at
                  )
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                 ON CONFLICT(code) DO UPDATE SET
-                    provider_id = excluded.provider_id,
+                 ON CONFLICT(provider_id, code) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
                     risk_level = excluded.risk_level,
@@ -1733,6 +2072,7 @@ impl Database {
         {
             return Err(anyhow!("service provider {provider_id} does not exist"));
         }
+        validate_provider_action_manifest(provider_id, actions)?;
         let keep_ids = actions
             .iter()
             .map(|action| action.id.clone())
@@ -1767,14 +2107,6 @@ impl Database {
                 .with_context(|| format!("remove stale provider action {}", existing.id))?;
         }
         for action in actions {
-            if action.provider_id != provider_id {
-                return Err(anyhow!(
-                    "action {} provider {} does not match path provider {}",
-                    action.id,
-                    action.provider_id,
-                    provider_id
-                ));
-            }
             self.upsert_action(action).await?;
         }
         self.list_actions_for_provider_with_consistency(provider_id, Some(ReadConsistency::Strong))
@@ -1991,41 +2323,36 @@ impl Database {
         Ok(())
     }
 
-    fn validate_application_references<'a>(
-        &'a self,
-        application: &'a Application,
-    ) -> impl std::future::Future<Output = Result<()>> + 'a {
-        async move {
-            if !self
-                .exists_row_with(
-                    ReadConsistency::Strong,
-                    "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
-                    params!(application.organization_id.clone()),
-                    "application organization existence",
-                )
-                .await?
-            {
-                return Err(anyhow!(
-                    "application organization {} does not exist",
-                    application.organization_id
-                ));
-            }
-            if !self
-                .exists_row_with(
-                    ReadConsistency::Strong,
-                    "SELECT COUNT(*) as count FROM users WHERE id = $1",
-                    params!(application.created_by_user_id.clone()),
-                    "application creator existence",
-                )
-                .await?
-            {
-                return Err(anyhow!(
-                    "application creator user {} does not exist",
-                    application.created_by_user_id
-                ));
-            }
-            Ok(())
+    async fn validate_application_references(&self, application: &Application) -> Result<()> {
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
+                params!(application.organization_id.clone()),
+                "application organization existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application organization {} does not exist",
+                application.organization_id
+            ));
         }
+        if !self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) as count FROM users WHERE id = $1",
+                params!(application.created_by_user_id.clone()),
+                "application creator existence",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application creator user {} does not exist",
+                application.created_by_user_id
+            ));
+        }
+        Ok(())
     }
 
     pub async fn insert_application(&self, application: &Application) -> Result<()> {
@@ -2892,7 +3219,6 @@ impl Database {
             )
             .await
             .context("upsert agreement")?;
-        self.rebuild_organization_expansion().await?;
         Ok(())
     }
 
@@ -3068,146 +3394,168 @@ impl Database {
         action_id: &str,
         consistency: Option<ReadConsistency>,
     ) -> Result<bool> {
-        self.has_user_action_with_consistency(
+        self.has_user_action(UserActionCheck {
             user_id,
             organization_id,
-            "account",
-            "organization",
-            target_organization_id,
+            provider_id: "grant",
+            resource_type: "organization",
+            resource_id: target_organization_id,
             action_id,
             consistency,
-        )
+        })
         .await
     }
 
-    pub async fn has_user_action_with_consistency(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        provider_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-        action_id: &str,
-        consistency: Option<ReadConsistency>,
-    ) -> Result<bool> {
-        let consistency = self.default_read_consistency_with_override(consistency);
-        let now = Utc::now().to_rfc3339();
-        let active_agreement = "(
-            rb.agreement_id IS NULL OR (
-                a.status = 'active'
-                AND (a.starts_at IS NULL OR a.starts_at <= $7)
-                AND (a.ends_at IS NULL OR a.ends_at >= $7)
-            )
-        )";
+    pub async fn has_user_actions(&self, checks: &[UserActionCheck<'_>]) -> Result<Vec<bool>> {
+        let mut results = vec![false; checks.len()];
+        for (chunk_number, chunk) in checks.chunks(MAX_AUTHZ_CHECKS_PER_QUERY).enumerate() {
+            let Some(first) = chunk.first() else {
+                continue;
+            };
+            let consistency =
+                self.default_read_consistency_with_override(first.consistency.clone());
+            let validation_time = Utc::now().to_rfc3339();
+            let mut query_params = Vec::with_capacity(chunk.len() * 8);
+            let values = chunk
+                .iter()
+                .enumerate()
+                .map(|(chunk_index, check)| {
+                    let idx = chunk_number * MAX_AUTHZ_CHECKS_PER_QUERY + chunk_index;
+                    let base = query_params.len() + 1;
+                    query_params.push(hiqlite::Param::from(idx as i64));
+                    query_params.push(hiqlite::Param::from(check.user_id.to_owned()));
+                    query_params.push(hiqlite::Param::from(check.organization_id.to_owned()));
+                    query_params.push(hiqlite::Param::from(check.provider_id.to_owned()));
+                    query_params.push(hiqlite::Param::from(check.resource_type.to_owned()));
+                    query_params.push(hiqlite::Param::from(check.resource_id.to_owned()));
+                    query_params.push(hiqlite::Param::from(check.action_id.to_owned()));
+                    query_params.push(hiqlite::Param::from(validation_time.clone()));
+                    format!(
+                        "(${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                        base + 1,
+                        base + 2,
+                        base + 3,
+                        base + 4,
+                        base + 5,
+                        base + 6,
+                        base + 7
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rows: Vec<UserActionDecisionRow> = self
+                .query_rows_with(
+                    consistency,
+                    format!(
+                        r#"
+                        WITH requested (
+                            idx, user_id, organization_id, provider_id, resource_type,
+                            resource_id, action_id, validation_time
+                        ) AS (
+                            VALUES {values}
+                        ),
+                        allowed AS (
+                            SELECT DISTINCT req.idx
+                            FROM requested req
+                            JOIN role_bindings rb
+                              ON rb.subject_type = 'organization'
+                             AND rb.subject_id = req.organization_id
+                             AND rb.subject_organization_id = req.organization_id
+                             AND rb.provider_id = req.provider_id
+                             AND rb.resource_type = req.resource_type
+                             AND rb.resource_id = req.resource_id
+                             AND rb.state = 'active'
+                            JOIN role_actions ra
+                              ON ra.role_id = rb.role_id
+                             AND ra.action_id = req.action_id
+                            JOIN actions act
+                              ON act.id = ra.action_id
+                             AND act.provider_id = rb.provider_id
+                            JOIN organization_memberships om
+                              ON om.organization_id = rb.subject_id
+                             AND om.user_id = req.user_id
+                             AND om.status = 'active'
+                            LEFT JOIN agreements a ON a.id = rb.agreement_id
+                            WHERE rb.agreement_id IS NULL OR (
+                                a.status = 'active'
+                                AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
+                                AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
+                            )
 
-        if self
-            .exists_row_with(
-                consistency.clone(),
-                format!(
-                    "SELECT COUNT(*) as count
-                     FROM role_bindings rb
-                     JOIN role_actions ra ON ra.role_id = rb.role_id
-                     JOIN actions act
-                       ON act.id = ra.action_id
-                      AND act.provider_id = rb.provider_id
-                     JOIN organization_memberships om
-                       ON om.organization_id = rb.subject_id
-                      AND om.user_id = $1
-                      AND om.status = 'active'
-                     LEFT JOIN agreements a ON a.id = rb.agreement_id
-                     WHERE rb.subject_type = 'organization'
-                       AND rb.subject_id = $2
-                       AND rb.subject_organization_id = $2
-                       AND rb.provider_id = $3
-                       AND rb.resource_type = $4
-                       AND rb.resource_id = $5
-                       AND rb.state = 'active'
-                       AND ra.action_id = $6
-                       AND {active_agreement}"
-                ),
-                params!(
-                    user_id.to_owned(),
-                    organization_id.to_owned(),
-                    provider_id.to_owned(),
-                    resource_type.to_owned(),
-                    resource_id.to_owned(),
-                    action_id.to_owned(),
-                    now.clone()
-                ),
-                "organization subject organization action",
-            )
-            .await?
-        {
-            return Ok(true);
+                            UNION
+
+                            SELECT DISTINCT req.idx
+                            FROM requested req
+                            JOIN role_bindings rb
+                              ON rb.subject_type = 'user'
+                             AND rb.subject_id = req.user_id
+                             AND rb.subject_organization_id = req.organization_id
+                             AND rb.provider_id = req.provider_id
+                             AND rb.resource_type = req.resource_type
+                             AND rb.resource_id = req.resource_id
+                             AND rb.state = 'active'
+                            JOIN role_actions ra
+                              ON ra.role_id = rb.role_id
+                             AND ra.action_id = req.action_id
+                            JOIN actions act
+                              ON act.id = ra.action_id
+                             AND act.provider_id = rb.provider_id
+                            JOIN organization_memberships om
+                              ON om.organization_id = rb.subject_organization_id
+                             AND om.user_id = rb.subject_id
+                             AND om.status = 'active'
+
+                            UNION
+
+                            SELECT DISTINCT req.idx
+                            FROM requested req
+                            JOIN role_bindings rb
+                              ON rb.subject_type = 'group'
+                             AND rb.subject_organization_id = req.organization_id
+                             AND rb.provider_id = req.provider_id
+                             AND rb.resource_type = req.resource_type
+                             AND rb.resource_id = req.resource_id
+                             AND rb.state = 'active'
+                            JOIN role_actions ra
+                              ON ra.role_id = rb.role_id
+                             AND ra.action_id = req.action_id
+                            JOIN actions act
+                              ON act.id = ra.action_id
+                             AND act.provider_id = rb.provider_id
+                            JOIN group_memberships gm ON gm.group_id = rb.subject_id
+                            JOIN organization_memberships om
+                              ON om.id = gm.organization_membership_id
+                             AND om.user_id = req.user_id
+                             AND om.organization_id = req.organization_id
+                             AND om.status = 'active'
+                        )
+                        SELECT req.idx,
+                               CASE WHEN allowed.idx IS NULL THEN 0 ELSE 1 END AS allowed
+                        FROM requested req
+                        LEFT JOIN allowed ON allowed.idx = req.idx
+                        ORDER BY req.idx ASC
+                        "#
+                    ),
+                    query_params,
+                    "bulk user organization actions",
+                )
+                .await?;
+            for row in rows {
+                if let Some(result) = results.get_mut(row.idx as usize) {
+                    *result = row.allowed != 0;
+                }
+            }
         }
+        Ok(results)
+    }
 
-        if self
-            .exists_row_with(
-                consistency.clone(),
-                "SELECT COUNT(*) as count
-                 FROM role_bindings rb
-                 JOIN role_actions ra ON ra.role_id = rb.role_id
-                 JOIN actions act
-                   ON act.id = ra.action_id
-                  AND act.provider_id = rb.provider_id
-                 JOIN organization_memberships om
-                   ON om.organization_id = rb.subject_organization_id
-                  AND om.user_id = rb.subject_id
-                  AND om.status = 'active'
-                 WHERE rb.subject_type = 'user'
-                   AND rb.subject_id = $1
-                   AND rb.subject_organization_id = $2
-                   AND rb.provider_id = $3
-                   AND rb.resource_type = $4
-                   AND rb.resource_id = $5
-                   AND rb.state = 'active'
-                   AND ra.action_id = $6",
-                params!(
-                    user_id.to_owned(),
-                    organization_id.to_owned(),
-                    provider_id.to_owned(),
-                    resource_type.to_owned(),
-                    resource_id.to_owned(),
-                    action_id.to_owned()
-                ),
-                "direct user organization action",
-            )
+    pub async fn has_user_action(&self, check: UserActionCheck<'_>) -> Result<bool> {
+        Ok(self
+            .has_user_actions(&[check])
             .await?
-        {
-            return Ok(true);
-        }
-
-        self.exists_row_with(
-            consistency,
-            "SELECT COUNT(*) as count
-             FROM role_bindings rb
-             JOIN role_actions ra ON ra.role_id = rb.role_id
-             JOIN actions act
-               ON act.id = ra.action_id
-              AND act.provider_id = rb.provider_id
-             JOIN group_memberships gm ON gm.group_id = rb.subject_id
-             JOIN organization_memberships om ON om.id = gm.organization_membership_id
-             WHERE rb.subject_type = 'group'
-               AND rb.subject_organization_id = $1
-               AND rb.provider_id = $2
-               AND rb.resource_type = $3
-               AND rb.resource_id = $4
-               AND rb.state = 'active'
-               AND ra.action_id = $5
-               AND om.user_id = $6
-               AND om.organization_id = $1
-               AND om.status = 'active'",
-            params!(
-                organization_id.to_owned(),
-                provider_id.to_owned(),
-                resource_type.to_owned(),
-                resource_id.to_owned(),
-                action_id.to_owned(),
-                user_id.to_owned()
-            ),
-            "group organization action",
-        )
-        .await
+            .into_iter()
+            .next()
+            .unwrap_or(false))
     }
 
     pub async fn save_role_binding(&self, binding: &RoleBinding) -> Result<()> {
@@ -3253,7 +3601,6 @@ impl Database {
             )
             .await
             .context("save role binding")?;
-        self.rebuild_organization_expansion().await?;
         Ok(())
     }
 
@@ -3284,11 +3631,6 @@ impl Database {
             )
             .await
             .context("insert role binding")?;
-        self.rebuild_organization_expansion().await?;
-        Ok(())
-    }
-
-    async fn rebuild_organization_expansion(&self) -> Result<()> {
         Ok(())
     }
 
@@ -3360,7 +3702,7 @@ impl Database {
                         resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
                  FROM role_bindings
                  WHERE subject_organization_id = $1
-                    OR (provider_id = 'account' AND resource_type = 'organization' AND resource_id = $1)
+                    OR (provider_id = 'grant' AND resource_type = 'organization' AND resource_id = $1)
                  ORDER BY id ASC",
                 params!(organization_id.to_owned()),
                 "role bindings by organization",
@@ -3454,8 +3796,8 @@ impl Database {
             .next()
             .ok_or_else(|| anyhow!("role {} does not exist", binding.role_id))?
             .organization_id;
-        if let Some(role_org) = role_org.as_deref() {
-            if role_org != binding.subject_organization_id {
+        match role_org.as_deref() {
+            Some(role_org) if role_org != binding.subject_organization_id => {
                 return Err(anyhow!(
                     "role {} belongs to organization {}, not {}",
                     binding.role_id,
@@ -3463,6 +3805,7 @@ impl Database {
                     binding.subject_organization_id
                 ));
             }
+            _ => {}
         }
 
         if !self
@@ -3512,7 +3855,7 @@ impl Database {
                     validation_time
                 ));
             }
-            if binding.provider_id == "account"
+            if binding.provider_id == "grant"
                 && binding.resource_type == "organization"
                 && binding.resource_id != binding.subject_organization_id
             {
@@ -3601,8 +3944,9 @@ impl Database {
             }
         }
 
-        if binding.provider_id == "account" && binding.resource_type == "organization" {
-            if !self
+        if binding.provider_id == "grant"
+            && binding.resource_type == "organization"
+            && !self
                 .exists_row_with(
                     consistency.clone(),
                     "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
@@ -3610,12 +3954,11 @@ impl Database {
                     "organization resource existence",
                 )
                 .await?
-            {
-                return Err(anyhow!(
-                    "organization resource {} does not exist",
-                    binding.resource_id
-                ));
-            }
+        {
+            return Err(anyhow!(
+                "organization resource {} does not exist",
+                binding.resource_id
+            ));
         }
 
         Ok(())
@@ -3831,10 +4174,27 @@ impl From<&mut Row<'_>> for ActionLookupRow {
     }
 }
 
+impl From<&mut Row<'_>> for UserActionDecisionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            idx: row.get("idx"),
+            allowed: row.get("allowed"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for ColumnNameRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             name: row.get("name"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for TableSqlRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            sql: row.get("sql"),
         }
     }
 }
@@ -3983,6 +4343,36 @@ impl TryFrom<AgreementRow> for Agreement {
     }
 }
 
+fn validate_provider_action_manifest(provider_id: &str, actions: &[Action]) -> Result<()> {
+    let mut ids = HashSet::new();
+    let mut codes = HashSet::new();
+
+    for action in actions {
+        if action.provider_id != provider_id {
+            return Err(anyhow!(
+                "action {} provider {} does not match path provider {}",
+                action.id,
+                action.provider_id,
+                provider_id
+            ));
+        }
+        if !codes.insert(action.code.as_str()) {
+            return Err(anyhow!(
+                "duplicate action code in provider manifest: {}",
+                action.code
+            ));
+        }
+        if !ids.insert(action.id.as_str()) {
+            return Err(anyhow!(
+                "duplicate action id in provider manifest: {}",
+                action.id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
     if binding.subject_organization_id.trim().is_empty() {
         return Err(anyhow!(
@@ -4012,7 +4402,7 @@ fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
             "group/user role bindings must not carry agreement references"
         ));
     }
-    if binding.provider_id == "account"
+    if binding.provider_id == "grant"
         && binding.resource_type == "organization"
         && binding.resource_id != binding.subject_organization_id
         && binding.agreement_id.is_none()
@@ -4025,20 +4415,11 @@ fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
 }
 
 fn role_binding_subject_type_str(subject_type: &RoleBindingSubjectType) -> &'static str {
-    match subject_type {
-        RoleBindingSubjectType::Organization => "organization",
-        RoleBindingSubjectType::Group => "group",
-        RoleBindingSubjectType::User => "user",
-    }
+    subject_type.as_db_str()
 }
 
 fn role_binding_subject_type_from_str(value: &str) -> Result<RoleBindingSubjectType> {
-    match value {
-        "organization" => Ok(RoleBindingSubjectType::Organization),
-        "group" => Ok(RoleBindingSubjectType::Group),
-        "user" => Ok(RoleBindingSubjectType::User),
-        other => Err(anyhow!("invalid role binding subject type {other}")),
-    }
+    RoleBindingSubjectType::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn organization_party_relation_type_str_legal() -> &'static str {
@@ -4046,141 +4427,65 @@ fn organization_party_relation_type_str_legal() -> &'static str {
 }
 
 fn role_binding_state_str(state: &RoleBindingState) -> &'static str {
-    match state {
-        RoleBindingState::Active => "active",
-        RoleBindingState::Disabled => "disabled",
-    }
+    state.as_db_str()
 }
 
 fn role_binding_state_from_str(value: &str) -> Result<RoleBindingState> {
-    match value {
-        "active" => Ok(RoleBindingState::Active),
-        "disabled" => Ok(RoleBindingState::Disabled),
-        other => Err(anyhow!("invalid role binding state {other}")),
-    }
+    RoleBindingState::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn agreement_type_str(agreement_type: &domain::AgreementType) -> &'static str {
-    match agreement_type {
-        domain::AgreementType::Delegation => "delegation",
-        domain::AgreementType::Epc => "epc",
-        domain::AgreementType::Om => "om",
-        domain::AgreementType::Distributor => "distributor",
-        domain::AgreementType::Dealer => "dealer",
-    }
+    agreement_type.as_db_str()
 }
 
 fn agreement_type_from_str(value: &str) -> Result<domain::AgreementType> {
-    match value {
-        "delegation" => Ok(domain::AgreementType::Delegation),
-        "epc" => Ok(domain::AgreementType::Epc),
-        "om" => Ok(domain::AgreementType::Om),
-        "distributor" => Ok(domain::AgreementType::Distributor),
-        "dealer" => Ok(domain::AgreementType::Dealer),
-        other => Err(anyhow!("invalid agreement type {other}")),
-    }
+    domain::AgreementType::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn agreement_status_str(status: &domain::AgreementStatus) -> &'static str {
-    match status {
-        domain::AgreementStatus::Draft => "draft",
-        domain::AgreementStatus::Active => "active",
-        domain::AgreementStatus::Expired => "expired",
-        domain::AgreementStatus::Terminated => "terminated",
-    }
+    status.as_db_str()
 }
 
 fn agreement_status_from_str(value: &str) -> Result<domain::AgreementStatus> {
-    match value {
-        "draft" => Ok(domain::AgreementStatus::Draft),
-        "active" => Ok(domain::AgreementStatus::Active),
-        "expired" => Ok(domain::AgreementStatus::Expired),
-        "terminated" => Ok(domain::AgreementStatus::Terminated),
-        other => Err(anyhow!("invalid agreement status {other}")),
-    }
+    domain::AgreementStatus::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn application_type_str(application_type: &ApplicationType) -> &'static str {
-    match application_type {
-        ApplicationType::Confidential => "confidential",
-        ApplicationType::Public => "public",
-    }
+    application_type.as_db_str()
 }
 
 fn application_app_type_str(app_type: &ApplicationAppType) -> &'static str {
-    match app_type {
-        ApplicationAppType::Web => "web",
-        ApplicationAppType::Mobile => "mobile",
-        ApplicationAppType::Server => "server",
-        ApplicationAppType::Internal => "internal",
-    }
+    app_type.as_db_str()
 }
 
 fn application_consent_policy_str(policy: &ApplicationConsentPolicy) -> &'static str {
-    match policy {
-        ApplicationConsentPolicy::Explicit => "explicit",
-        ApplicationConsentPolicy::AutoApprove => "auto_approve",
-    }
+    policy.as_db_str()
 }
 
 fn application_grant_status_str(status: &ApplicationGrantStatus) -> &'static str {
-    match status {
-        ApplicationGrantStatus::Active => "active",
-        ApplicationGrantStatus::Revoked => "revoked",
-        ApplicationGrantStatus::Expired => "expired",
-    }
+    status.as_db_str()
 }
 
 fn application_grant_status_from_str(value: &str) -> Result<ApplicationGrantStatus> {
-    match value {
-        "active" => Ok(ApplicationGrantStatus::Active),
-        "revoked" => Ok(ApplicationGrantStatus::Revoked),
-        "expired" => Ok(ApplicationGrantStatus::Expired),
-        other => Err(anyhow!("invalid application grant status {other}")),
-    }
+    ApplicationGrantStatus::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn action_risk_level_str(value: &ActionRiskLevel) -> &'static str {
-    match value {
-        ActionRiskLevel::Low => "low",
-        ActionRiskLevel::Medium => "medium",
-        ActionRiskLevel::High => "high",
-        ActionRiskLevel::Critical => "critical",
-    }
+    value.as_db_str()
 }
 
 fn action_risk_level_from_str(value: &str) -> Result<ActionRiskLevel> {
-    match value {
-        "low" => Ok(ActionRiskLevel::Low),
-        "medium" => Ok(ActionRiskLevel::Medium),
-        "high" => Ok(ActionRiskLevel::High),
-        "critical" => Ok(ActionRiskLevel::Critical),
-        other => Err(anyhow!("invalid action risk level {other}")),
-    }
+    ActionRiskLevel::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn application_type_from_str(value: &str) -> Result<ApplicationType> {
-    match value {
-        "confidential" => Ok(ApplicationType::Confidential),
-        "public" => Ok(ApplicationType::Public),
-        other => Err(anyhow!("invalid application type {other}")),
-    }
+    ApplicationType::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn application_app_type_from_str(value: &str) -> Result<ApplicationAppType> {
-    match value {
-        "web" => Ok(ApplicationAppType::Web),
-        "mobile" => Ok(ApplicationAppType::Mobile),
-        "server" => Ok(ApplicationAppType::Server),
-        "internal" => Ok(ApplicationAppType::Internal),
-        other => Err(anyhow!("invalid application app type {other}")),
-    }
+    ApplicationAppType::from_db_str(value).map_err(anyhow::Error::msg)
 }
 
 fn application_consent_policy_from_str(value: &str) -> Result<ApplicationConsentPolicy> {
-    match value {
-        "explicit" => Ok(ApplicationConsentPolicy::Explicit),
-        "auto_approve" => Ok(ApplicationConsentPolicy::AutoApprove),
-        other => Err(anyhow!("invalid application consent policy {other}")),
-    }
+    ApplicationConsentPolicy::from_db_str(value).map_err(anyhow::Error::msg)
 }

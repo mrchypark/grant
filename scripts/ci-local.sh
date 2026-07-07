@@ -2,21 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLUSTER_NAME="${CLUSTER_NAME:-certd-ci}"
+CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 CI_CLUSTER_BACKEND="${CI_CLUSTER_BACKEND:-vind}"
-NAMESPACE="${NAMESPACE:-certd}"
-IMAGE_NAME="${IMAGE_NAME:-certd:local}"
+NAMESPACE="${NAMESPACE:-grant}"
+IMAGE_NAME="${IMAGE_NAME:-grant:local}"
 TRAILBASE_IMAGE="${TRAILBASE_IMAGE:-trailbase-auth-bridge:local}"
-CERTD_MASTER_KEY="${CERTD_MASTER_KEY:-local-dev-master-key}"
+GRANT_MASTER_KEY="${GRANT_MASTER_KEY:-local-dev-master-key}"
 BUILD_NETWORK="${BUILD_NETWORK:-default}"
 RESET_CLUSTER="${RESET_CLUSTER:-1}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
-VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE:-ephemeral}"
 CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"
 CI_SKIP_CLUSTER_DELETE_ON_FAILURE="${CI_SKIP_CLUSTER_DELETE_ON_FAILURE:-0}"
-CI_RUN_E2E="${CI_RUN_E2E:-1}"
-CI_RUN_CHAOS="${CI_RUN_CHAOS:-1}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -71,7 +68,7 @@ cleanup() {
 trap cleanup EXIT
 
 log_storage_state
-run_phase build-certd-image \
+run_phase build-grant-image \
   docker buildx build --load --network "${BUILD_NETWORK}" -t "${IMAGE_NAME}" .
 run_phase build-trailbase-image \
   docker buildx build --load -f Dockerfile.trailbase-auth-bridge --network "${BUILD_NETWORK}" -t "${TRAILBASE_IMAGE}" .
@@ -95,28 +92,5 @@ run_phase bootstrap-vind-cluster \
   NAMESPACE="${NAMESPACE}" \
   IMAGE_NAME="${IMAGE_NAME}" \
   TRAILBASE_IMAGE="${TRAILBASE_IMAGE}" \
-  CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
-  VIND_MINIO_STORAGE_MODE="${VIND_MINIO_STORAGE_MODE}" \
+  GRANT_MASTER_KEY="${GRANT_MASTER_KEY}" \
   bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"
-
-if [[ "${CI_RUN_E2E}" == "1" ]]; then
-  run_phase local-e2e \
-    env \
-    CLUSTER_NAME="${CLUSTER_NAME}" \
-    NAMESPACE="${NAMESPACE}" \
-    CERTD_MASTER_KEY="${CERTD_MASTER_KEY}" \
-    bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/k3d-e2e.sh"
-else
-  echo "[skip] local-e2e disabled via CI_RUN_E2E=${CI_RUN_E2E}"
-fi
-
-if [[ "${CI_RUN_CHAOS}" == "1" ]]; then
-  run_phase local-chaos \
-    env \
-    CLUSTER_NAME="${CLUSTER_NAME}" \
-    NAMESPACE="${NAMESPACE}" \
-    CERTD_CHAOS_WITH_LOAD="${CERTD_CHAOS_WITH_LOAD:-1}" \
-    bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-chaos.sh"
-else
-  echo "[skip] local-chaos disabled via CI_RUN_CHAOS=${CI_RUN_CHAOS}"
-fi

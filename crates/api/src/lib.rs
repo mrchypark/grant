@@ -16,7 +16,7 @@ use domain::{
 use infra::{
     config::ReadConsistency,
     service::{
-        AppService, AuthorizationResource, AuthorizationSubject, BackupInfo,
+        AppService, AuthorizationCheck, AuthorizationResource, AuthorizationSubject, BackupInfo,
         CreateApplicationGrantInput, CreateApplicationInput, CreateRoleBindingInput,
         CreateRoleInput, ServiceError, ServiceErrorKind, UpdateApplicationInput,
         UpsertAgreementInput,
@@ -24,6 +24,9 @@ use infra::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+const MAX_AUTHZ_BATCH_CHECKS: usize = 1000;
+const MAX_AUTHZ_FILTER_RESOURCES: usize = 1000;
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
@@ -910,11 +913,24 @@ async fn authz_batch_check(
     Json(body): Json<AuthzBatchCheckRequest>,
 ) -> ApiResult<Json<AuthzBatchCheckResponse>> {
     require_master_key(service.as_ref(), &headers)?;
-    let read_consistency = read_consistency_override(&query)?;
-    let mut results = Vec::with_capacity(body.checks.len());
-    for check in body.checks {
-        results.push(run_authz_check(service.as_ref(), check, read_consistency.clone()).await?);
+    if body.checks.len() > MAX_AUTHZ_BATCH_CHECKS {
+        return Err(ApiError::bad_request(anyhow!(
+            "checks must contain at most {MAX_AUTHZ_BATCH_CHECKS} items"
+        )));
     }
+    let read_consistency = read_consistency_override(&query)?;
+    let checks = body
+        .checks
+        .into_iter()
+        .map(authz_check_input)
+        .collect::<Vec<_>>();
+    let results = service
+        .check_authorizations(&checks, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?
+        .into_iter()
+        .map(authz_check_response)
+        .collect();
     Ok(Json(AuthzBatchCheckResponse { results }))
 }
 
@@ -925,24 +941,43 @@ async fn authz_filter(
     Json(body): Json<AuthzFilterRequest>,
 ) -> ApiResult<Json<AuthzFilterResponse>> {
     require_master_key(service.as_ref(), &headers)?;
-    let read_consistency = read_consistency_override(&query)?;
-    let mut resource_ids = Vec::new();
-    for resource in body.resources {
-        let resource_id = resource.id.clone();
-        let check = AuthzCheckRequest {
-            subject: AuthzSubjectRequest {
-                subject_type: body.subject.subject_type.clone(),
-                id: body.subject.id.clone(),
-                organization_id: body.subject.organization_id.clone(),
-            },
-            action: body.action.clone(),
-            resource,
-        };
-        let decision = run_authz_check(service.as_ref(), check, read_consistency.clone()).await?;
-        if decision.allowed {
-            resource_ids.push(resource_id);
-        }
+    if body.resources.len() > MAX_AUTHZ_FILTER_RESOURCES {
+        return Err(ApiError::bad_request(anyhow!(
+            "resources must contain at most {MAX_AUTHZ_FILTER_RESOURCES} items"
+        )));
     }
+    let read_consistency = read_consistency_override(&query)?;
+    let subject = authz_subject_input(body.subject);
+    let action = body.action;
+    let mut requested_resource_ids = Vec::with_capacity(body.resources.len());
+    let checks = body
+        .resources
+        .into_iter()
+        .map(|resource| {
+            let resource_id = resource.id.clone();
+            requested_resource_ids.push(resource_id);
+            AuthorizationCheck {
+                subject: subject.clone(),
+                action: action.clone(),
+                resource: authz_resource_input(resource),
+            }
+        })
+        .collect::<Vec<_>>();
+    let decisions = service
+        .check_authorizations(&checks, read_consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    let resource_ids = requested_resource_ids
+        .into_iter()
+        .zip(decisions)
+        .filter_map(|(resource_id, decision)| {
+            if decision.allowed {
+                Some(resource_id)
+            } else {
+                None
+            }
+        })
+        .collect();
     Ok(Json(AuthzFilterResponse { resource_ids }))
 }
 
@@ -1161,26 +1196,44 @@ async fn run_authz_check(
     read_consistency: Option<ReadConsistency>,
 ) -> ApiResult<AuthzCheckResponse> {
     let decision = service
-        .check_authorization(
-            &AuthorizationSubject {
-                subject_type: body.subject.subject_type,
-                id: body.subject.id,
-                organization_id: body.subject.organization_id,
-            },
-            &body.action,
-            &AuthorizationResource {
-                provider_id: body.resource.provider,
-                resource_type: body.resource.resource_type,
-                id: body.resource.id,
-            },
-            read_consistency,
-        )
+        .check_authorizations(&[authz_check_input(body)], read_consistency)
         .await
-        .map_err(ApiError::from_domain)?;
-    Ok(AuthzCheckResponse {
+        .map_err(ApiError::from_domain)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::internal("authorization check failed"))?;
+    Ok(authz_check_response(decision))
+}
+
+fn authz_check_input(body: AuthzCheckRequest) -> AuthorizationCheck {
+    AuthorizationCheck {
+        subject: authz_subject_input(body.subject),
+        action: body.action,
+        resource: authz_resource_input(body.resource),
+    }
+}
+
+fn authz_subject_input(body: AuthzSubjectRequest) -> AuthorizationSubject {
+    AuthorizationSubject {
+        subject_type: body.subject_type,
+        id: body.id,
+        organization_id: body.organization_id,
+    }
+}
+
+fn authz_resource_input(body: AuthzResourceRequest) -> AuthorizationResource {
+    AuthorizationResource {
+        provider_id: body.provider,
+        resource_type: body.resource_type,
+        id: body.id,
+    }
+}
+
+fn authz_check_response(decision: infra::service::AuthorizationDecision) -> AuthzCheckResponse {
+    AuthzCheckResponse {
         allowed: decision.allowed,
         reason: decision.reason,
-    })
+    }
 }
 
 async fn request_context(
@@ -1211,31 +1264,17 @@ async fn request_context_for_inactive_organization(
     read_consistency: Option<ReadConsistency>,
 ) -> ApiResult<RequestContext> {
     let bearer_token = bearer_token(headers)?;
-    let current = service
-        .current_user(bearer_token.as_deref(), None, read_consistency.clone())
-        .await
-        .map_err(ApiError::from_auth)?;
-    let has_membership = service
-        .db()
-        .has_organization_membership_with_consistency(
-            &current.user.id,
+    let principal = service
+        .authenticate_request_for_inactive_organization(
+            bearer_token.as_deref(),
             target_organization_id,
             read_consistency,
         )
         .await
-        .map_err(ApiError::internal)?;
-    if !has_membership {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "forbidden: user {} is not an active member of organization {}",
-                current.user.id, target_organization_id
-            ),
-        });
-    }
+        .map_err(ApiError::from_domain)?;
     Ok(RequestContext {
-        user_id: current.user.id,
-        organization_id: target_organization_id.to_owned(),
+        user_id: principal.user_id,
+        organization_id: principal.organization_id,
     })
 }
 
@@ -1275,7 +1314,7 @@ fn ensure_request_context_organization(
 }
 
 fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
-    let provided = header_value(headers, "x-certd-master-key")?;
+    let provided = header_value(headers, "x-grant-master-key")?;
     if provided != service.master_key() {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
@@ -1390,6 +1429,8 @@ impl ApiError {
             StatusCode::NOT_FOUND
         } else if contains_chain("must not be empty")
             || contains_chain("is not grantable to applications")
+            || contains_chain("duplicate action code in provider manifest")
+            || contains_chain("duplicate action id in provider manifest")
             || contains_chain("expired")
             || contains_chain("consumed")
             || contains_chain("payload mismatch")

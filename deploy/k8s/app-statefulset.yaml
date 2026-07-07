@@ -1,19 +1,19 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: certd-voter
+  name: grant-voter
 spec:
-  serviceName: certd-headless
+  serviceName: grant-headless
   podManagementPolicy: Parallel
   replicas: 3
   selector:
     matchLabels:
-      app: certd
+      app: grant
       role: voter
   template:
     metadata:
       labels:
-        app: certd
+        app: grant
         role: voter
     spec:
       securityContext:
@@ -26,9 +26,9 @@ spec:
             - sh
             - -lc
             - |
-              mkdir -p /var/lib/certd
-              chown -R 10001:10001 /var/lib/certd || true
-              chmod -R ug+rwX /var/lib/certd || true
+              mkdir -p /var/lib/grant
+              chown -R 10001:10001 /var/lib/grant || true
+              chmod -R ug+rwX /var/lib/grant || true
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -38,7 +38,7 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - name: data
-              mountPath: /var/lib/certd
+              mountPath: /var/lib/grant
       terminationGracePeriodSeconds: 30
       topologySpreadConstraints:
         - maxSkew: 1
@@ -46,7 +46,7 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app: certd
+              app: grant
               role: voter
       affinity:
         podAntiAffinity:
@@ -56,10 +56,10 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    app: certd
+                    app: grant
                     role: voter
       containers:
-        - name: certd
+        - name: grant
           securityContext:
             runAsUser: 10001
             runAsGroup: 10001
@@ -68,25 +68,25 @@ spec:
             capabilities:
               drop: ["ALL"]
             readOnlyRootFilesystem: false
-          image: certd:local
+          image: grant:local
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
-                name: certd-config
+                name: grant-config
             - secretRef:
-                name: certd-secrets
+                name: grant-secrets
           env:
-            - name: CERTD_RUNTIME_MODE
+            - name: GRANT_RUNTIME_MODE
               value: embedded
-            - name: CERTD_LOCAL_NODE_ROLE
+            - name: GRANT_LOCAL_NODE_ROLE
               value: voter
-            - name: CERTD_READ_CONSISTENCY
+            - name: GRANT_READ_CONSISTENCY
               value: strong
-            - name: CERTD_TRAILBASE_INTERNAL_SECRET
+            - name: GRANT_TRAILBASE_INTERNAL_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: certd-secrets
-                  key: TRAILBASE_CERTD_INTERNAL_SECRET
+                  name: grant-secrets
+                  key: TRAILBASE_GRANT_INTERNAL_SECRET
             - name: HQL_NODE_ID_FROM
               value: k8s
           ports:
@@ -98,7 +98,7 @@ spec:
               containerPort: 8200
           volumeMounts:
             - name: data
-              mountPath: /var/lib/certd
+              mountPath: /var/lib/grant
           resources:
             requests:
               cpu: 100m

@@ -45,7 +45,7 @@ impl Drop for EnvSnapshot {
 fn with_env<T>(updates: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
     let _guard = env_lock();
     let snapshot = EnvSnapshot::capture(&[
-        "TRAILBASE_CERTD_INTERNAL_SECRET",
+        "TRAILBASE_GRANT_INTERNAL_SECRET",
         "TRAILBASE_PUBLIC_DIR",
         "TRAILBASE_CUSTOM_LOGIN_ENABLED",
         "TRAILBASE_LOGIN_FALLBACK_ENABLED",
@@ -121,7 +121,7 @@ fn active_custom_login_routes() -> LoginRouteConfig {
 fn from_env_defaults_bridge_login_config_fields() {
     let config = with_env(
         &[
-            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
             ("TRAILBASE_PUBLIC_DIR", None),
             ("TRAILBASE_CUSTOM_LOGIN_ENABLED", None),
             ("TRAILBASE_LOGIN_FALLBACK_ENABLED", None),
@@ -157,7 +157,7 @@ fn from_env_reads_bridge_login_config_env_overrides() {
 
     let config = with_env(
         &[
-            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
             (
                 "TRAILBASE_PUBLIC_DIR",
                 Some(public_dir.to_str().expect("utf8")),
@@ -204,7 +204,7 @@ fn from_env_rejects_malformed_login_flag_values() {
     ] {
         let err = with_env(
             &[
-                ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+                ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
                 (key, Some("definitely-not-a-bool")),
             ],
             || BridgeConfig::from_env().expect_err("malformed flag should fail"),
@@ -221,7 +221,7 @@ fn from_env_rejects_malformed_login_flag_values() {
 fn from_env_rejects_external_default_post_login_path() {
     let err = with_env(
         &[
-            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
             (
                 "TRAILBASE_DEFAULT_POST_LOGIN_PATH",
                 Some("https://evil.example/steal"),
@@ -241,7 +241,7 @@ fn from_env_rejects_external_default_post_login_path() {
 fn from_env_rejects_auth_api_default_post_login_path() {
     let err = with_env(
         &[
-            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
             (
                 "TRAILBASE_DEFAULT_POST_LOGIN_PATH",
                 Some("/api/auth/v1/login"),
@@ -261,7 +261,7 @@ fn from_env_rejects_auth_api_default_post_login_path() {
 fn from_env_rejects_dot_segment_default_post_login_path() {
     let err = with_env(
         &[
-            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
             (
                 "TRAILBASE_DEFAULT_POST_LOGIN_PATH",
                 Some("/workspaces/../login"),
@@ -281,7 +281,7 @@ fn from_env_rejects_dot_segment_default_post_login_path() {
 fn from_env_rejects_login_path_with_query_default_post_login_path() {
     let err = with_env(
         &[
-            ("TRAILBASE_CERTD_INTERNAL_SECRET", Some("bridge-secret")),
+            ("TRAILBASE_GRANT_INTERNAL_SECRET", Some("bridge-secret")),
             (
                 "TRAILBASE_DEFAULT_POST_LOGIN_PATH",
                 Some("/login?return_to=/teams"),

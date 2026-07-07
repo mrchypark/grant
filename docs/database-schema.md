@@ -4,7 +4,7 @@
 
 ## 프로젝트 경계
 
-현재 repo의 프로젝트 경계는 `account`다. `account`는 계정, 로그인, 조직, 법인 식별, 권한, application consent를 가진다.
+현재 repo의 프로젝트 경계는 `grant`다. `grant`는 조직, 법인 식별, 조직 내부 권한, 조직 간 권한 근거, application consent, service-provider action catalog, authz 판정을 가진다.
 
 공동인증서를 받아 발전소 데이터를 수집/저장하는 `cert-data` 경계는 이 repo에서 제거한다.
 
@@ -12,13 +12,13 @@
 
 - `organization`이 테넌트 겸 권한 평가의 기본 단위다.
 - `organization.id`와 `business_no`는 다른 값이다. 법인 식별은 `parties`와 `organization_party_links`로 분리한다.
-- 로그인 주체(`users`, `user_identities`, `auth_identity_cache`)는 account 보안 경계라 동적 object로 내리지 않는다.
+- 로그인 주체(`users`, `user_identities`, `auth_identity_cache`)는 identity/authz 보안 경계라 동적 object로 내리지 않는다.
 - 공동인증서 credential, 저장 인증서, gateway challenge, crawl task token은 `cert-data` 경계라 이 repo에서 제거한다.
 - 권한 원본은 `role_bindings`다. plant/asset 전개 cache였던 `effective_*` 테이블은 cert-data 분리와 함께 제거한다.
-- `service_providers`가 compos/certd 같은 외부 서비스와 account 자체의 action catalog 경계를 선언한다.
+- `service_providers`가 compos 같은 외부 서비스와 grant 자체의 action catalog 경계를 선언한다.
 - SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.
 
-## Account 테이블
+## Grant 테이블
 
 ### `users`
 
@@ -50,28 +50,30 @@
 
 ### `groups`, `group_memberships`
 
-조직 내부 권한 그룹과 membership 연결. 권한 전개 입력이라 account 경계에 남긴다.
+조직 내부 권한 그룹과 membership 연결. 권한 전개 입력이라 grant 경계에 남긴다.
 
 ### `service_providers`
 
-account가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. 기본 provider는 `account`이며, compos/certd 같은 first-party 서비스도 이 테이블에 등록한 뒤 action manifest를 넣는다.
+grant가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. 기본 provider는 `grant`이며, compos 같은 first-party 서비스도 이 테이블에 등록한 뒤 action manifest를 넣는다.
 
 ### `actions`, `roles`, `role_actions`, `role_bindings`
 
-권한 엔진의 원본 데이터. `actions.provider_id`는 action을 제공하는 `service_providers.id`를 가리킨다.
+권한 엔진의 원본 데이터. `actions.provider_id`는 action을 제공하는 `service_providers.id`를 가리킨다. `actions.code`는 provider 안에서만 unique이며, 같은 code를 서로 다른 provider가 재사용할 수 있다. 실제 참조 key인 `actions.id`는 전역 PK라 grant provider는 기존처럼 code를 id로 쓰고, 외부 provider action은 provider/code 조합에서 정규화한 id를 사용한다.
 
-`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. account 내부 조직 권한은 `provider_id = account`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. compos/certd 리소스는 해당 provider의 resource type/id를 그대로 저장하며, account는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다.
+`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. compos 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다.
 
 `agreements`는 별도 테이블로 다시 살아났지만, `role_bindings.agreement_id`는 물리 FK 없이 앱 레벨로 검증한다.
-account 조직 간 권한은 active `agreements`가 있어야 cross-org binding을 만들 수 있다.
+grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을 만들 수 있다.
+
+과거 `account` provider에 남아 있던 `organization.*` action과 `organization` resource binding은 schema migration에서 `grant` provider로 이동한다. 동일 logical binding이 이미 `grant`에 있으면 legacy `account` row의 active 상태와 agreement 참조를 `grant` row에 병합한 뒤 legacy row를 삭제한다.
 
 ### `applications`, `application_actions`, `application_grants`, `application_grant_actions`
 
-API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 account 경계에 남긴다.
+API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 grant 경계에 남긴다.
 
 ## 제거된 테이블
 
-`ensure_schema_only()`는 아래 테이블을 더 이상 생성하지 않고, 기존 DB에 남아 있으면 삭제한다. 이 테이블들이 사용하던 `plant.*`, `asset.*`, `organization.plant.*`, `organization.credential.use` action catalog와 role/application 참조도 함께 삭제한다.
+`ensure_schema_only()`는 아래 테이블을 더 이상 생성하지 않고, 기존 DB에 남아 있으면 삭제한다. 이 테이블들이 사용하던 `plant.*`, `asset.*`, `document.*`, `cert-data.*`, `cert_data.*`, `organization.plant.*`, `organization.credential.use` action catalog와 role/application 참조도 함께 삭제한다. 이 cleanup은 과거 이름인 `account` provider에 남아 있는 동일 범위의 stale 권한 row도 함께 제거한다.
 
 - `agreement_documents`
 - `assets`
@@ -82,6 +84,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `data_sources`
 - `generation_data`
 - `rate_data`
+- `rate_data_old_real_value`
 - `energy_certificates`
 - `auth_credentials`
 - `certificates`
@@ -134,4 +137,4 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 ## 주의할 점
 
 - `cert-data` 저장/실행 모델은 별도 프로젝트에서 다시 정한다.
-- `role_bindings.resource_type`은 `provider_id`와 함께 해석한다. `account/organization`만 account가 직접 존재 검증하고, 외부 provider resource는 해당 서비스가 후보 목록을 넘긴 뒤 `/api/v1/authz/filter`로 걸러야 한다.
+- `role_bindings.resource_type`은 `provider_id`와 함께 해석한다. `grant/organization`만 grant가 직접 존재 검증하고, 외부 provider resource는 해당 서비스가 후보 목록을 넘긴 뒤 `/api/v1/authz/filter`로 걸러야 한다.

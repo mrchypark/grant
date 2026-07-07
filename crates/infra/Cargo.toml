@@ -5,24 +5,17 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-aes-gcm.workspace = true
-aws-config.workspace = true
-aws-credential-types.workspace = true
-aws-sdk-s3.workspace = true
-base64.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 domain = { path = "../domain" }
 hex.workspace = true
 hiqlite.workspace = true
-rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 rusqlite = "0.39"
 serde_json.workspace = true
+tempfile.workspace = true

@@ -1,6 +1,6 @@
-# Account Architecture
+# Grant Architecture
 
-이 repo의 현재 경계는 `account`다. account는 로그인, 조직, 법인 식별, 조직 내부 권한, 조직 간 권한 근거, application consent, service-provider action catalog, authz 판정을 담당한다.
+이 repo의 현재 경계는 `grant`다. grant는 조직, 법인 식별, 조직 내부 권한, 조직 간 권한 근거, application consent, service-provider action catalog, authz 판정을 담당한다.
 
 cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 조회 API는 이 repo의 런타임 경계에서 제거했다.
 
@@ -8,16 +8,16 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 
 - `organizations.id`가 tenant와 권한 평가의 기본 키다.
 - 법인/사업자 식별은 `parties`와 `organization_party_links`에 분리한다.
-- `service_providers`는 account, compos, certd 같은 권한 provider를 선언한다.
+- `service_providers`는 grant, compos 같은 권한 provider를 선언한다.
 - `actions`는 provider별 action catalog다.
 - `role_bindings`는 `provider_id + resource_type + resource_id` scope에 role을 부여한다.
-- account는 외부 provider 리소스 목록을 소유하지 않으므로 unbounded authz list API를 제공하지 않는다.
+- grant는 외부 provider 리소스 목록을 소유하지 않으므로 unbounded authz list API를 제공하지 않는다.
 - 외부 서비스는 후보 리소스를 넘기고 `/api/v1/authz/filter`로 허용된 항목만 걸러간다.
 
 ## 코드 기준 구성 요소
 
 - `crates/domain`
-  - account 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationGrant`, `Agreement`.
+  - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationGrant`, `Agreement`.
 - `crates/infra`
   - 설정 로딩, TrailBase identity 연동, hiqlite runtime, schema/seed, 권한 판정 service layer를 가진다.
 - `crates/api`
@@ -25,7 +25,7 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `crates/app`
   - 환경변수로 설정을 읽고 voter/learner 역할에 맞는 Axum router를 띄운다.
 - `crates/trailbase-auth-bridge`
-  - 별도 TrailBase auth service로 동작하며 account가 사용할 introspection endpoint를 제공한다.
+  - 별도 TrailBase auth service로 동작하며 grant가 사용할 introspection endpoint를 제공한다.
 
 ## Public API Shape
 
@@ -53,9 +53,9 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 
 1. `crates/app/src/main.rs`가 설정을 읽고 `AppService`를 초기화한다.
 2. `crates/api/src/lib.rs`가 shared read/authz 라우트와 voter-only write/admin 라우트를 조립한다.
-3. 사용자 요청은 TrailBase bearer token을 account user/org context로 해석한다.
+3. 사용자 요청은 TrailBase bearer token을 grant user/org context로 해석한다.
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
-5. service-to-service admin/authz API는 현재 `x-certd-master-key` header로 보호한다.
+5. service-to-service admin/authz API는 현재 `x-grant-master-key` header로 보호한다.
 
 ## Voter And Learner
 

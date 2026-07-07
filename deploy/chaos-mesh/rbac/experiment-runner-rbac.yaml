@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: certd-chaos-runner
-  namespace: certd-chaos
+  name: grant-chaos-runner
+  namespace: grant-chaos
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: certd-chaos-runner
-  namespace: certd-chaos
+  name: grant-chaos-runner
+  namespace: grant-chaos
 rules:
   - apiGroups: [""]
     resources:
@@ -32,13 +32,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: certd-chaos-runner
-  namespace: certd-chaos
+  name: grant-chaos-runner
+  namespace: grant-chaos
 subjects:
   - kind: ServiceAccount
-    name: certd-chaos-runner
-    namespace: certd-chaos
+    name: grant-chaos-runner
+    namespace: grant-chaos
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: certd-chaos-runner
+  name: grant-chaos-runner

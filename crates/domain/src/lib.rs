@@ -133,6 +133,29 @@ pub enum AgreementType {
     Dealer,
 }
 
+impl AgreementType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Delegation => "delegation",
+            Self::Epc => "epc",
+            Self::Om => "om",
+            Self::Distributor => "distributor",
+            Self::Dealer => "dealer",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "delegation" => Ok(Self::Delegation),
+            "epc" => Ok(Self::Epc),
+            "om" => Ok(Self::Om),
+            "distributor" => Ok(Self::Distributor),
+            "dealer" => Ok(Self::Dealer),
+            other => Err(format!("invalid agreement type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgreementStatus {
@@ -140,6 +163,27 @@ pub enum AgreementStatus {
     Active,
     Expired,
     Terminated,
+}
+
+impl AgreementStatus {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::Terminated => "terminated",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "active" => Ok(Self::Active),
+            "expired" => Ok(Self::Expired),
+            "terminated" => Ok(Self::Terminated),
+            other => Err(format!("invalid agreement status {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +213,27 @@ pub enum ActionRiskLevel {
     Critical,
 }
 
+impl ActionRiskLevel {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            other => Err(format!("invalid action risk level {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Application {
@@ -193,6 +258,23 @@ pub enum ApplicationType {
     Public,
 }
 
+impl ApplicationType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Confidential => "confidential",
+            Self::Public => "public",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "confidential" => Ok(Self::Confidential),
+            "public" => Ok(Self::Public),
+            other => Err(format!("invalid application type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationAppType {
@@ -202,11 +284,49 @@ pub enum ApplicationAppType {
     Internal,
 }
 
+impl ApplicationAppType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Mobile => "mobile",
+            Self::Server => "server",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "web" => Ok(Self::Web),
+            "mobile" => Ok(Self::Mobile),
+            "server" => Ok(Self::Server),
+            "internal" => Ok(Self::Internal),
+            other => Err(format!("invalid application app type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationConsentPolicy {
     Explicit,
     AutoApprove,
+}
+
+impl ApplicationConsentPolicy {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::AutoApprove => "auto_approve",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "explicit" => Ok(Self::Explicit),
+            "auto_approve" => Ok(Self::AutoApprove),
+            other => Err(format!("invalid application consent policy {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +359,25 @@ pub enum ApplicationGrantStatus {
     Active,
     Revoked,
     Expired,
+}
+
+impl ApplicationGrantStatus {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "active" => Ok(Self::Active),
+            "revoked" => Ok(Self::Revoked),
+            "expired" => Ok(Self::Expired),
+            other => Err(format!("invalid application grant status {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -287,6 +426,25 @@ pub enum RoleBindingSubjectType {
     User,
 }
 
+impl RoleBindingSubjectType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Organization => "organization",
+            Self::Group => "group",
+            Self::User => "user",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "organization" => Ok(Self::Organization),
+            "group" => Ok(Self::Group),
+            "user" => Ok(Self::User),
+            other => Err(format!("invalid role binding subject type {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceProvider {
@@ -302,6 +460,23 @@ pub struct ServiceProvider {
 pub enum RoleBindingState {
     Active,
     Disabled,
+}
+
+impl RoleBindingState {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "active" => Ok(Self::Active),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(format!("invalid role binding state {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

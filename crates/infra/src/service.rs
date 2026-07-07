@@ -1,10 +1,9 @@
 use crate::{
-    artifacts::ArtifactStore,
     auth::{
         AuthResolver, AuthenticatedPrincipal, ExternalIdentity, map_strong_identity_sync_error,
     },
     config::{AppConfig, ReadConsistency},
-    database::{BackupEntry, Database},
+    database::{BackupEntry, BindIdentityInput, Database, UserActionCheck},
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -14,7 +13,7 @@ use domain::{
     HealthStatus, Organization, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
     ServiceProvider, User,
 };
-use std::{error::Error as StdError, fmt};
+use std::{collections::HashSet, error::Error as StdError, fmt};
 
 const MAX_APPLICATION_ACTION_IDS_PER_REQUEST: usize = 999;
 const MAX_ACTION_IDS_PER_REQUEST: usize = 999;
@@ -146,6 +145,13 @@ pub struct AuthorizationResource {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuthorizationCheck {
+    pub subject: AuthorizationSubject,
+    pub action: String,
+    pub resource: AuthorizationResource,
+}
+
+#[derive(Debug, Clone)]
 pub struct AuthorizationDecision {
     pub allowed: bool,
     pub reason: String,
@@ -168,7 +174,7 @@ pub struct CurrentUserView {
 }
 
 impl AppService {
-    pub fn new(cfg: AppConfig, db: Database, _artifacts: ArtifactStore) -> Self {
+    pub fn new(cfg: AppConfig, db: Database) -> Self {
         let auth = AuthResolver::new(&cfg.auth);
         Self { cfg, db, auth }
     }
@@ -179,6 +185,10 @@ impl AppService {
 
     pub async fn initialize(&self) -> Result<()> {
         self.db.ensure_schema().await
+    }
+
+    pub async fn bootstrap(&self) -> Result<()> {
+        self.db.ensure_bootstrap_data().await
     }
 
     pub async fn health_status(&self) -> HealthStatus {
@@ -193,10 +203,6 @@ impl AppService {
         &self.cfg.auth.trailbase.base_url
     }
 
-    pub fn db(&self) -> &Database {
-        &self.db
-    }
-
     pub async fn authenticate_request(
         &self,
         bearer_token: Option<&str>,
@@ -206,6 +212,36 @@ impl AppService {
         self.auth
             .resolve(&self.db, bearer_token, organization_id, read_consistency)
             .await
+    }
+
+    pub async fn authenticate_request_for_inactive_organization(
+        &self,
+        bearer_token: Option<&str>,
+        target_organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<AuthenticatedPrincipal> {
+        let target_organization_id = require_non_empty("organizationId", target_organization_id)?;
+        let current = self
+            .current_user(bearer_token, None, read_consistency.clone())
+            .await?;
+        let has_membership = self
+            .db
+            .has_organization_membership_with_consistency(
+                &current.user.id,
+                &target_organization_id,
+                read_consistency,
+            )
+            .await?;
+        if !has_membership {
+            return Err(forbidden_error(format!(
+                "forbidden: user {} is not an active member of organization {}",
+                current.user.id, target_organization_id
+            )));
+        }
+        Ok(AuthenticatedPrincipal {
+            user_id: current.user.id,
+            organization_id: target_organization_id,
+        })
     }
 
     pub async fn bootstrap_trailbase_owner(
@@ -218,15 +254,15 @@ impl AppService {
             .await?;
         let user = self
             .db
-            .bind_identity_to_user(
-                &self.cfg.security.bootstrap_user_id,
-                &identity.provider,
-                &identity.external_user_id,
-                identity.email.as_deref(),
-                &identity.display_name,
-                identity.active,
-                true,
-            )
+            .bind_identity_to_user(BindIdentityInput {
+                user_id: &self.cfg.security.bootstrap_user_id,
+                provider: &identity.provider,
+                external_user_id: &identity.external_user_id,
+                email: identity.email.as_deref(),
+                display_name: &identity.display_name,
+                active: identity.active,
+                allow_rebind: true,
+            })
             .await?;
         Ok(AuthenticatedPrincipal {
             user_id: user.id,
@@ -355,37 +391,42 @@ impl AppService {
                 "actions must contain at most {MAX_ACTION_IDS_PER_REQUEST} items"
             )));
         }
-        let actions = actions
-            .into_iter()
-            .map(|action| {
-                let id = require_non_empty("action.id", &action.id)?;
-                let code = require_non_empty("action.code", &action.code)?;
-                if id != code {
-                    return Err(bad_request_error(
-                        "action.id must match action.code for manifest actions",
-                    ));
-                }
-                if action.provider_id != provider_id {
-                    return Err(bad_request_error(format!(
-                        "action {id} providerId must match path providerId"
-                    )));
-                }
-                Ok(Action {
-                    id,
-                    provider_id: provider_id.clone(),
-                    code,
-                    name: require_non_empty("action.name", &action.name)?,
-                    description: normalize_optional_text(action.description),
-                    risk_level: action.risk_level,
-                    visibility_granting: action.visibility_granting,
-                    grantable_to_applications: action.grantable_to_applications,
-                    consent_label: normalize_optional_text(action.consent_label),
-                    consent_description: normalize_optional_text(action.consent_description),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut normalized_actions = Vec::with_capacity(actions.len());
+        let mut ids = HashSet::new();
+        let mut codes = HashSet::new();
+        for action in actions {
+            let code = require_non_empty("action.code", &action.code)?;
+            let id = normalize_action_id(&provider_id, &code, &action.id)?;
+            if action.provider_id != provider_id {
+                return Err(bad_request_error(format!(
+                    "action {id} providerId must match path providerId"
+                )));
+            }
+            if !codes.insert(code.clone()) {
+                return Err(bad_request_error(format!(
+                    "duplicate action code in provider manifest: {code}"
+                )));
+            }
+            if !ids.insert(id.clone()) {
+                return Err(bad_request_error(format!(
+                    "duplicate action id in provider manifest: {id}"
+                )));
+            }
+            normalized_actions.push(Action {
+                id,
+                provider_id: provider_id.clone(),
+                code,
+                name: require_non_empty("action.name", &action.name)?,
+                description: normalize_optional_text(action.description),
+                risk_level: action.risk_level,
+                visibility_granting: action.visibility_granting,
+                grantable_to_applications: action.grantable_to_applications,
+                consent_label: normalize_optional_text(action.consent_label),
+                consent_description: normalize_optional_text(action.consent_description),
+            });
+        }
         self.db
-            .replace_provider_actions(&provider_id, &actions)
+            .replace_provider_actions(&provider_id, &normalized_actions)
             .await
     }
 
@@ -1000,35 +1041,56 @@ impl AppService {
         resource: &AuthorizationResource,
         read_consistency: Option<ReadConsistency>,
     ) -> Result<AuthorizationDecision> {
-        if subject.subject_type != "user" {
-            return Err(bad_request_error("only user authz subjects are supported"));
-        }
-        let subject_id = require_non_empty("subject.id", &subject.id)?;
-        let organization_id = require_non_empty("subject.orgId", &subject.organization_id)?;
-        let action = require_non_empty("action", action)?;
-        let provider_id = require_non_empty("resource.provider", &resource.provider_id)?;
-        let resource_type = require_non_empty("resource.type", &resource.resource_type)?;
-        let resource_id = require_non_empty("resource.id", &resource.id)?;
-        let allowed = self
-            .db
-            .has_user_action_with_consistency(
-                &subject_id,
-                &organization_id,
-                &provider_id,
-                &resource_type,
-                &resource_id,
-                &action,
-                read_consistency,
-            )
-            .await?;
-        Ok(AuthorizationDecision {
-            allowed,
-            reason: if allowed {
-                "role_binding".to_owned()
-            } else {
-                "no_matching_binding".to_owned()
-            },
-        })
+        self.check_authorizations(
+            &[AuthorizationCheck {
+                subject: subject.clone(),
+                action: action.to_owned(),
+                resource: resource.clone(),
+            }],
+            read_consistency,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| service_error(ServiceErrorKind::Unavailable, "authorization check failed"))
+    }
+
+    pub async fn check_authorizations(
+        &self,
+        checks: &[AuthorizationCheck],
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<AuthorizationDecision>> {
+        let normalized = checks
+            .iter()
+            .map(normalize_authorization_check)
+            .collect::<Result<Vec<_>>>()?;
+        let db_checks = normalized
+            .iter()
+            .map(|check| UserActionCheck {
+                user_id: &check.subject_id,
+                organization_id: &check.organization_id,
+                provider_id: &check.provider_id,
+                resource_type: &check.resource_type,
+                resource_id: &check.resource_id,
+                action_id: &check.action_id,
+                consistency: read_consistency.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.db
+            .has_user_actions(&db_checks)
+            .await?
+            .into_iter()
+            .map(|allowed| {
+                Ok(AuthorizationDecision {
+                    allowed,
+                    reason: if allowed {
+                        "role_binding".to_owned()
+                    } else {
+                        "no_matching_binding".to_owned()
+                    },
+                })
+            })
+            .collect()
     }
 
     pub async fn deactivate_organization(
@@ -1129,12 +1191,10 @@ impl AppService {
             )
             .await?;
         if !allowed {
-            anyhow::bail!(
+            return Err(forbidden_error(format!(
                 "forbidden: user {} in organization {} cannot {}",
-                user_id,
-                organization_id,
-                action_label
-            );
+                user_id, organization_id, action_label
+            )));
         }
         Ok(())
     }
@@ -1149,6 +1209,31 @@ fn map_backups(items: Vec<BackupEntry>) -> Result<Vec<BackupInfo>> {
             size: item.size,
         })
         .collect())
+}
+
+struct NormalizedAuthorizationCheck {
+    subject_id: String,
+    organization_id: String,
+    provider_id: String,
+    resource_type: String,
+    resource_id: String,
+    action_id: String,
+}
+
+fn normalize_authorization_check(
+    check: &AuthorizationCheck,
+) -> Result<NormalizedAuthorizationCheck> {
+    if check.subject.subject_type != "user" {
+        return Err(bad_request_error("only user authz subjects are supported"));
+    }
+    Ok(NormalizedAuthorizationCheck {
+        subject_id: require_non_empty("subject.id", &check.subject.id)?,
+        organization_id: require_non_empty("subject.orgId", &check.subject.organization_id)?,
+        provider_id: require_non_empty("resource.provider", &check.resource.provider_id)?,
+        resource_type: require_non_empty("resource.type", &check.resource.resource_type)?,
+        resource_id: require_non_empty("resource.id", &check.resource.id)?,
+        action_id: require_non_empty("action", &check.action)?,
+    })
 }
 
 fn normalize_active_organization(
@@ -1177,6 +1262,25 @@ fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
         return Err(bad_request_error(format!("{field_name} must not be empty")));
     }
     Ok(trimmed.to_owned())
+}
+
+fn normalize_action_id(provider_id: &str, code: &str, provided_id: &str) -> Result<String> {
+    let provided_id = require_non_empty("action.id", provided_id)?;
+    let normalized = action_id_for_provider(provider_id, code);
+    if provided_id == code || provided_id == normalized {
+        return Ok(normalized);
+    }
+    Err(bad_request_error(format!(
+        "action.id must match normalized action id {normalized}"
+    )))
+}
+
+fn action_id_for_provider(provider_id: &str, code: &str) -> String {
+    if provider_id == "grant" || code.starts_with(&format!("{provider_id}.")) {
+        code.to_owned()
+    } else {
+        format!("{provider_id}.{code}")
+    }
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {

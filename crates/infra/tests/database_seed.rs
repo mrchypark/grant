@@ -120,22 +120,24 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let api_addr = free_local_addr();
     let raft_addr = free_local_addr();
-    let mut cfg = NodeConfig::default();
-    cfg.node_id = 1;
-    cfg.nodes = vec![Node {
-        id: 1,
-        addr_raft: raft_addr,
-        addr_api: api_addr,
-    }];
-    cfg.listen_addr_api = "127.0.0.1".into();
-    cfg.listen_addr_raft = "127.0.0.1".into();
-    cfg.data_dir = dir.path().to_string_lossy().into_owned().into();
-    cfg.filename_db = "test.sqlite".into();
-    cfg.secret_api = "0123456789abcdef0123456789abcdef".to_owned();
-    cfg.secret_raft = "fedcba9876543210fedcba9876543210".to_owned();
-    cfg.enc_keys = EncKeys::generate().expect("enc keys");
-    cfg.health_check_delay_secs = 0;
-    cfg.raft_config = NodeConfig::default_raft_config(128);
+    let cfg = NodeConfig {
+        node_id: 1,
+        nodes: vec![Node {
+            id: 1,
+            addr_raft: raft_addr,
+            addr_api: api_addr,
+        }],
+        listen_addr_api: "127.0.0.1".into(),
+        listen_addr_raft: "127.0.0.1".into(),
+        data_dir: dir.path().to_string_lossy().into_owned().into(),
+        filename_db: "test.sqlite".into(),
+        secret_api: "0123456789abcdef0123456789abcdef".to_owned(),
+        secret_raft: "fedcba9876543210fedcba9876543210".to_owned(),
+        enc_keys: EncKeys::generate().expect("enc keys"),
+        health_check_delay_secs: 0,
+        raft_config: NodeConfig::default_raft_config(128),
+        ..Default::default()
+    };
 
     let application = hiqlite::start_node(cfg).await.expect("start hiqlite");
     (
@@ -145,12 +147,12 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 #[tokio::test]
-async fn ensure_schema_seeds_bootstrap_organization_and_account_actions() {
+async fn ensure_schema_seeds_bootstrap_organization_and_grant_actions() {
     let (runtime, _dir) = test_runtime().await;
     let db = Database::new(
         runtime.clone(),
-        "conalog-account".to_owned(),
-        "Conalog Account".to_owned(),
+        "conalog-grant".to_owned(),
+        "Conalog Grant".to_owned(),
     );
 
     db.ensure_schema().await.expect("ensure schema");
@@ -169,9 +171,9 @@ async fn ensure_schema_seeds_bootstrap_organization_and_account_actions() {
         .await
         .expect("organizations");
     assert_eq!(organizations.len(), 1);
-    assert_eq!(organizations[0].id, "conalog-account");
+    assert_eq!(organizations[0].id, "conalog-grant");
     assert_eq!(organizations[0].party_id, None);
-    assert_eq!(organizations[0].name, "Conalog Account");
+    assert_eq!(organizations[0].name, "Conalog Grant");
 
     let memberships: Vec<MembershipRow> = runtime
         .query_rows(
@@ -182,8 +184,8 @@ async fn ensure_schema_seeds_bootstrap_organization_and_account_actions() {
         .await
         .expect("memberships");
     assert_eq!(memberships.len(), 1);
-    assert_eq!(memberships[0].organization_id, "conalog-account");
-    assert_eq!(memberships[0].user_id, "conalog-account");
+    assert_eq!(memberships[0].organization_id, "conalog-grant");
+    assert_eq!(memberships[0].user_id, "conalog-grant");
     assert_eq!(memberships[0].membership_role, "owner");
     assert_eq!(memberships[0].status, "active");
 
@@ -496,7 +498,7 @@ async fn agreement_backed_organization_binding_grants_cross_org_action() {
             subject_type: RoleBindingSubjectType::Organization,
             subject_id: "grantee-org".to_owned(),
             subject_organization_id: "grantee-org".to_owned(),
-            provider_id: "account".to_owned(),
+            provider_id: "grant".to_owned(),
             resource_type: "organization".to_owned(),
             resource_id: "grantor-org".to_owned(),
             role_id: "role-organization-profile-reader".to_owned(),
@@ -532,7 +534,7 @@ async fn agreement_backed_organization_binding_grants_cross_org_action() {
         subject_type: RoleBindingSubjectType::Organization,
         subject_id: "grantee-org".to_owned(),
         subject_organization_id: "grantee-org".to_owned(),
-        provider_id: "account".to_owned(),
+        provider_id: "grant".to_owned(),
         resource_type: "organization".to_owned(),
         resource_id: "grantor-org".to_owned(),
         role_id: "role-organization-profile-reader".to_owned(),

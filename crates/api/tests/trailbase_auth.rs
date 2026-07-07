@@ -1,5 +1,3 @@
-#[path = "support/auth.rs"]
-mod auth_support;
 mod support;
 
 use std::sync::Arc;
@@ -11,10 +9,9 @@ use axum::{
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
-    artifacts::ArtifactStore,
     config::{
-        AppConfig, ArtifactBackendConfig, ArtifactConfig, HiqliteConfig, LocalNodeRole,
-        ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
+        AppConfig, HiqliteConfig, LocalNodeRole, ReadConsistency, RuntimeMode, SecurityConfig,
+        ServerConfig,
     },
     database::Database,
     runtime::HiqliteRuntime,
@@ -63,22 +60,24 @@ async fn test_runtime(default_read_consistency: ReadConsistency) -> (HiqliteRunt
     let dir = tempfile::tempdir().expect("tempdir");
     let api_addr = free_local_addr();
     let raft_addr = free_local_addr();
-    let mut cfg = NodeConfig::default();
-    cfg.node_id = 1;
-    cfg.nodes = vec![Node {
-        id: 1,
-        addr_raft: raft_addr.clone(),
-        addr_api: api_addr.clone(),
-    }];
-    cfg.listen_addr_api = "127.0.0.1".into();
-    cfg.listen_addr_raft = "127.0.0.1".into();
-    cfg.data_dir = dir.path().to_string_lossy().into_owned().into();
-    cfg.filename_db = "test.sqlite".into();
-    cfg.secret_api = "0123456789abcdef0123456789abcdef".to_owned();
-    cfg.secret_raft = "fedcba9876543210fedcba9876543210".to_owned();
-    cfg.enc_keys = EncKeys::generate().expect("enc keys");
-    cfg.health_check_delay_secs = 0;
-    cfg.raft_config = NodeConfig::default_raft_config(128);
+    let cfg = NodeConfig {
+        node_id: 1,
+        nodes: vec![Node {
+            id: 1,
+            addr_raft: raft_addr.clone(),
+            addr_api: api_addr.clone(),
+        }],
+        listen_addr_api: "127.0.0.1".into(),
+        listen_addr_raft: "127.0.0.1".into(),
+        data_dir: dir.path().to_string_lossy().into_owned().into(),
+        filename_db: "test.sqlite".into(),
+        secret_api: "0123456789abcdef0123456789abcdef".to_owned(),
+        secret_raft: "fedcba9876543210fedcba9876543210".to_owned(),
+        enc_keys: EncKeys::generate().expect("enc keys"),
+        health_check_delay_secs: 0,
+        raft_config: NodeConfig::default_raft_config(128),
+        ..Default::default()
+    };
 
     let client = hiqlite::start_node(cfg).await.expect("start hiqlite");
     (
@@ -87,16 +86,15 @@ async fn test_runtime(default_read_consistency: ReadConsistency) -> (HiqliteRunt
     )
 }
 
-async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir, TempDir) {
+async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
     build_service_with_default_consistency(ReadConsistency::Local).await
 }
 
 async fn build_service_with_default_consistency(
     default_read_consistency: ReadConsistency,
-) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir, TempDir) {
+) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
     let trailbase_base_url = support::start_mock_trailbase().await;
     let (runtime, db_dir) = test_runtime(default_read_consistency.clone()).await;
-    let artifacts_dir = tempfile::tempdir().expect("artifact tempdir");
     let cfg = AppConfig {
         server: ServerConfig {
             bind_addr: "127.0.0.1:0".to_owned(),
@@ -107,12 +105,6 @@ async fn build_service_with_default_consistency(
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
         auth: support::trailbase_auth_config(trailbase_base_url),
-        kms: support::test_kms_config(),
-        artifacts: ArtifactConfig {
-            backend: ArtifactBackendConfig::FileSystem {
-                root_dir: artifacts_dir.path().to_path_buf(),
-            },
-        },
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
@@ -129,12 +121,9 @@ async fn build_service_with_default_consistency(
         cfg.security.bootstrap_user_id.clone(),
         cfg.security.bootstrap_user_name.clone(),
     );
-    let artifacts = ArtifactStore::new(&cfg.artifacts)
-        .await
-        .expect("artifact store");
-    let service = Arc::new(AppService::new(cfg, db.clone(), artifacts));
+    let service = Arc::new(AppService::new(cfg, db.clone()));
     service.initialize().await.expect("initialize service");
-    (service, db, runtime, db_dir, artifacts_dir)
+    (service, db, runtime, db_dir)
 }
 
 async fn query_count(runtime: &HiqliteRuntime, sql: &str, params: Vec<hiqlite::Param>) -> i64 {
@@ -170,7 +159,7 @@ async fn query_identity_meta(
 
 #[tokio::test]
 async fn current_user_returns_local_user_and_active_organizations() {
-    let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, runtime, _db_dir) = build_service().await;
     db.upsert_organization_with_owner("alpha-org", "Alpha Org", None, "Alpha Org")
         .await
         .expect("upsert alpha org");
@@ -212,7 +201,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("me-user"))
+                .header("authorization", support::auth::bearer_header("me-user"))
                 .header("x-organization-id", "alpha-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -239,7 +228,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
 
 #[tokio::test]
 async fn trailbase_identity_relinks_same_email_after_restore() {
-    let (service, db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, db, runtime, _db_dir) = build_service().await;
     db.upsert_organization_with_owner("restore-org", "Restore Org", None, "Restore Org")
         .await
         .expect("upsert restore org");
@@ -292,7 +281,7 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
                 .uri("/api/v1/me")
                 .header(
                     "authorization",
-                    auth_support::bearer_header("restored-trailbase-user"),
+                    support::auth::bearer_header("restored-trailbase-user"),
                 )
                 .header("x-organization-id", "restore-org")
                 .body(Body::empty())
@@ -317,7 +306,7 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
 
 #[tokio::test]
 async fn learner_router_rejects_mutation_and_admin_endpoints() {
-    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, _db, _runtime, _db_dir) = build_service().await;
     let app = api::build_learner_router(service);
 
     for (method, uri) in [
@@ -351,7 +340,7 @@ async fn learner_router_rejects_mutation_and_admin_endpoints() {
 
 #[tokio::test]
 async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, _db, runtime, _db_dir) = build_service().await;
     runtime
         .execute(
             "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
@@ -404,7 +393,7 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("local-user"))
+                .header("authorization", support::auth::bearer_header("local-user"))
                 .header("x-organization-id", "local-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -438,7 +427,7 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
 
 #[tokio::test]
 async fn learner_local_current_user_uses_existing_identity_without_mutation() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, _db, runtime, _db_dir) = build_service().await;
     runtime
         .execute(
             "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
@@ -511,7 +500,7 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("linked-user"))
+                .header("authorization", support::auth::bearer_header("linked-user"))
                 .header("x-organization-id", "linked-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -537,7 +526,7 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
 
 #[tokio::test]
 async fn learner_strong_current_user_persists_identity_and_shared_cache() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, _db, runtime, _db_dir) = build_service().await;
     runtime
         .execute(
             "INSERT INTO organizations (id, business_no, name, inactivated_at, created_at, updated_at)
@@ -590,7 +579,7 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me?consistency=strong")
-                .header("authorization", auth_support::bearer_header("strong-user"))
+                .header("authorization", support::auth::bearer_header("strong-user"))
                 .header("x-organization-id", "strong-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -624,7 +613,7 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
 
 #[tokio::test]
 async fn voter_default_strong_current_user_syncs_identity_without_query_override() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) =
+    let (service, _db, runtime, _db_dir) =
         build_service_with_default_consistency(ReadConsistency::Strong).await;
     runtime
         .execute(
@@ -678,7 +667,7 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("strong-user"))
+                .header("authorization", support::auth::bearer_header("strong-user"))
                 .header("x-organization-id", "strong-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -712,7 +701,7 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
 
 #[tokio::test]
 async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_override() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) =
+    let (service, _db, runtime, _db_dir) =
         build_service_with_default_consistency(ReadConsistency::PreferStrong).await;
     runtime
         .execute(
@@ -768,7 +757,7 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
                 .uri("/api/v1/me")
                 .header(
                     "authorization",
-                    auth_support::bearer_header("prefer-strong-user"),
+                    support::auth::bearer_header("prefer-strong-user"),
                 )
                 .header("x-organization-id", "prefer-strong-org")
                 .body(Body::empty())
@@ -803,7 +792,7 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
 
 #[tokio::test]
 async fn voter_default_strong_authenticated_read_syncs_identity_without_query_override() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) =
+    let (service, _db, runtime, _db_dir) =
         build_service_with_default_consistency(ReadConsistency::Strong).await;
     runtime
         .execute(
@@ -857,7 +846,7 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/me")
-                .header("authorization", auth_support::bearer_header("strong-user"))
+                .header("authorization", support::auth::bearer_header("strong-user"))
                 .header("x-organization-id", "strong-org")
                 .body(Body::empty())
                 .expect("request"),
@@ -881,7 +870,7 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
 
 #[tokio::test]
 async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_query_override() {
-    let (service, _db, runtime, _db_dir, _artifacts_dir) =
+    let (service, _db, runtime, _db_dir) =
         build_service_with_default_consistency(ReadConsistency::PreferStrong).await;
     runtime
         .execute(
@@ -937,7 +926,7 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
                 .uri("/api/v1/me")
                 .header(
                     "authorization",
-                    auth_support::bearer_header("prefer-strong-user"),
+                    support::auth::bearer_header("prefer-strong-user"),
                 )
                 .header("x-organization-id", "prefer-strong-org")
                 .body(Body::empty())
@@ -962,7 +951,7 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
 
 #[tokio::test]
 async fn read_routes_reject_invalid_consistency_query() {
-    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, _db, _runtime, _db_dir) = build_service().await;
     let app = api::build_router(service);
 
     let response = app
@@ -972,7 +961,7 @@ async fn read_routes_reject_invalid_consistency_query() {
                 .uri("/api/v1/me?consistency=bogus")
                 .header(
                     "authorization",
-                    auth_support::bearer_header("invalid-consistency-user"),
+                    support::auth::bearer_header("invalid-consistency-user"),
                 )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())
@@ -994,7 +983,7 @@ async fn read_routes_reject_invalid_consistency_query() {
 
 #[tokio::test]
 async fn read_routes_allow_explicit_strong_consistency() {
-    let (service, _db, _runtime, _db_dir, _artifacts_dir) = build_service().await;
+    let (service, _db, _runtime, _db_dir) = build_service().await;
     let app = api::build_router(service);
 
     let bootstrap = app
@@ -1005,9 +994,9 @@ async fn read_routes_allow_explicit_strong_consistency() {
                 .uri("/api/v1/admin/bootstrap/trailbase-owner")
                 .header(
                     "authorization",
-                    auth_support::bearer_header("strong-consistency-user"),
+                    support::auth::bearer_header("strong-consistency-user"),
                 )
-                .header("x-certd-master-key", "dev-only-master-key")
+                .header("x-grant-master-key", "dev-only-master-key")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1022,7 +1011,7 @@ async fn read_routes_allow_explicit_strong_consistency() {
                 .uri("/api/v1/me?consistency=strong")
                 .header(
                     "authorization",
-                    auth_support::bearer_header("strong-consistency-user"),
+                    support::auth::bearer_header("strong-consistency-user"),
                 )
                 .header("x-organization-id", "bootstrap-user")
                 .body(Body::empty())

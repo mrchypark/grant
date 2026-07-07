@@ -1,16 +1,16 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: certd
+  name: grant
 spec:
   rules:
-    - host: certd.local
+    - host: grant.local
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: certd
+                name: grant
                 port:
                   number: 80
