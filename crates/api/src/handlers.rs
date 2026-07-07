@@ -494,14 +494,14 @@ pub(crate) async fn reactivate_organization(
     Ok(Json(organization))
 }
 
-pub(crate) async fn bootstrap_trailbase_owner(
+pub(crate) async fn bootstrap_rauthy_owner(
     State(service): State<Arc<AppService>>,
     headers: HeaderMap,
 ) -> ApiResult<(StatusCode, Json<BootstrapOwnerResponse>)> {
     require_master_key(service.as_ref(), &headers)?;
     let bearer_token = bearer_token(&headers)?;
     let principal = service
-        .bootstrap_trailbase_owner(bearer_token.as_deref())
+        .bootstrap_rauthy_owner(bearer_token.as_deref())
         .await
         .map_err(ApiError::from_auth)?;
     Ok((

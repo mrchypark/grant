@@ -82,11 +82,16 @@ spec:
               value: voter
             - name: GRANT_READ_CONSISTENCY
               value: strong
-            - name: GRANT_TRAILBASE_INTERNAL_SECRET
+            - name: GRANT_RAUTHY_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: grant-secrets
-                  key: TRAILBASE_GRANT_INTERNAL_SECRET
+                  key: GRANT_RAUTHY_CLIENT_ID
+            - name: GRANT_RAUTHY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: grant-secrets
+                  key: GRANT_RAUTHY_CLIENT_SECRET
             - name: HQL_NODE_ID_FROM
               value: k8s
           ports:

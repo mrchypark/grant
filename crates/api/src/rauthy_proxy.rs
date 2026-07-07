@@ -10,37 +10,26 @@ use std::sync::Arc;
 use crate::error::{ApiError, ApiResult};
 
 pub(crate) async fn auth_root() -> Redirect {
-    Redirect::temporary("/auth/login")
+    Redirect::temporary("/auth/v1")
 }
 
-pub(crate) async fn proxy_trailbase_auth_ui(
+pub(crate) async fn proxy_rauthy_root(
     State(service): State<Arc<AppService>>,
-    Path(trailbase_path): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
-    proxy_trailbase_request(
-        service.as_ref(),
-        request,
-        &format!("/_/auth/{}", trailbase_path.trim_start_matches('/')),
-    )
-    .await
+    proxy_rauthy_request(service.as_ref(), request, "/auth/v1").await
 }
 
-pub(crate) async fn proxy_trailbase_passthrough(
+pub(crate) async fn proxy_rauthy_passthrough(
     State(service): State<Arc<AppService>>,
-    Path(trailbase_path): Path<String>,
+    Path(rauthy_path): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
-    let original_path = request.uri().path();
-    let upstream_path = if original_path.starts_with("/_/auth/") {
-        format!("/_/auth/{}", trailbase_path.trim_start_matches('/'))
-    } else {
-        format!("/api/auth/v1/{}", trailbase_path.trim_start_matches('/'))
-    };
-    proxy_trailbase_request(service.as_ref(), request, &upstream_path).await
+    let upstream_path = format!("/auth/v1/{}", rauthy_path.trim_start_matches('/'));
+    proxy_rauthy_request(service.as_ref(), request, &upstream_path).await
 }
 
-async fn proxy_trailbase_request(
+async fn proxy_rauthy_request(
     service: &AppService,
     request: axum::extract::Request,
     upstream_path: &str,
@@ -48,7 +37,7 @@ async fn proxy_trailbase_request(
     let (parts, body) = request.into_parts();
     let mut url = format!(
         "{}{}",
-        service.trailbase_base_url().trim_end_matches('/'),
+        service.rauthy_base_url().trim_end_matches('/'),
         upstream_path
     );
     if let Some(query) = parts.uri.query() {

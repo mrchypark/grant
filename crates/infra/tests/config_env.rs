@@ -16,10 +16,12 @@ fn clear_grant_env() {
         "GRANT_REMOTE_TLS_NO_VERIFY",
         "GRANT_REMOTE_API_SECRET",
         "GRANT_REMOTE_WITH_PROXY",
-        "GRANT_TRAILBASE_BASE_URL",
-        "GRANT_TRAILBASE_INTROSPECT_PATH",
-        "GRANT_TRAILBASE_INTERNAL_SECRET",
-        "GRANT_TRAILBASE_CACHE_TTL_SECONDS",
+        "GRANT_RAUTHY_BASE_URL",
+        "GRANT_RAUTHY_INTROSPECT_PATH",
+        "GRANT_RAUTHY_USERINFO_PATH",
+        "GRANT_RAUTHY_CLIENT_ID",
+        "GRANT_RAUTHY_CLIENT_SECRET",
+        "GRANT_RAUTHY_CACHE_TTL_SECONDS",
         "GRANT_MASTER_KEY",
     ] {
         unsafe { std::env::remove_var(key) };
@@ -51,55 +53,62 @@ impl Drop for EnvGuard {
 #[test]
 fn loads_default_config() {
     let env = EnvGuard::new();
-    env.set("GRANT_TRAILBASE_INTERNAL_SECRET", "default-secret");
+    env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
+    env.set("GRANT_RAUTHY_CLIENT_SECRET", "default-secret");
     let cfg = AppConfig::from_env().expect("config");
 
     assert_eq!(cfg.server.bind_addr, "0.0.0.0:8080");
     assert_eq!(cfg.security.bootstrap_user_id, "conalog-grant");
-    assert_eq!(cfg.auth.trailbase.base_url, "http://127.0.0.1:4000");
-    assert_eq!(
-        cfg.auth.trailbase.internal_secret,
-        "default-secret".to_owned()
-    );
+    assert_eq!(cfg.auth.rauthy.base_url, "http://127.0.0.1:8080");
+    assert_eq!(cfg.auth.rauthy.client_id, "grant".to_owned());
+    assert_eq!(cfg.auth.rauthy.client_secret, "default-secret".to_owned());
     assert_eq!(cfg.hiqlite.runtime_mode, RuntimeMode::Embedded);
     assert_eq!(cfg.hiqlite.local_node_role, LocalNodeRole::Voter);
     assert_eq!(cfg.hiqlite.default_read_consistency, ReadConsistency::Local);
 }
 
 #[test]
-fn loads_trailbase_auth_config_from_env() {
+fn loads_rauthy_auth_config_from_env() {
     let env = EnvGuard::new();
-    env.set("GRANT_TRAILBASE_BASE_URL", "http://trailbase.internal:4000");
-    env.set("GRANT_TRAILBASE_INTROSPECT_PATH", "/api/grant/introspect");
-    env.set("GRANT_TRAILBASE_INTERNAL_SECRET", "shared-secret");
-    env.set("GRANT_TRAILBASE_CACHE_TTL_SECONDS", "45");
+    env.set("GRANT_RAUTHY_BASE_URL", "http://rauthy.internal:8080");
+    env.set("GRANT_RAUTHY_INTROSPECT_PATH", "/auth/v1/oidc/introspect");
+    env.set("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo");
+    env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
+    env.set("GRANT_RAUTHY_CLIENT_SECRET", "shared-secret");
+    env.set("GRANT_RAUTHY_CACHE_TTL_SECONDS", "45");
 
     let cfg = AppConfig::from_env().expect("config");
 
-    assert_eq!(
-        cfg.auth.trailbase.base_url,
-        "http://trailbase.internal:4000"
-    );
-    assert_eq!(cfg.auth.trailbase.introspect_path, "/api/grant/introspect");
-    assert_eq!(
-        cfg.auth.trailbase.internal_secret,
-        "shared-secret".to_owned()
-    );
-    assert_eq!(cfg.auth.trailbase.cache_ttl_seconds, 45);
+    assert_eq!(cfg.auth.rauthy.base_url, "http://rauthy.internal:8080");
+    assert_eq!(cfg.auth.rauthy.introspect_path, "/auth/v1/oidc/introspect");
+    assert_eq!(cfg.auth.rauthy.userinfo_path, "/auth/v1/oidc/userinfo");
+    assert_eq!(cfg.auth.rauthy.client_id, "grant");
+    assert_eq!(cfg.auth.rauthy.client_secret, "shared-secret".to_owned());
+    assert_eq!(cfg.auth.rauthy.cache_ttl_seconds, 45);
 }
 
 #[test]
-fn missing_trailbase_internal_secret_is_rejected() {
+fn missing_rauthy_client_id_is_rejected() {
     let _env = EnvGuard::new();
 
-    let err = AppConfig::from_env().expect_err("missing internal secret should fail");
-    assert!(err.to_string().contains("GRANT_TRAILBASE_INTERNAL_SECRET"));
+    let err = AppConfig::from_env().expect_err("missing client id should fail");
+    assert!(err.to_string().contains("GRANT_RAUTHY_CLIENT_ID"));
+}
+
+#[test]
+fn missing_rauthy_client_secret_is_rejected() {
+    let env = EnvGuard::new();
+    env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
+
+    let err = AppConfig::from_env().expect_err("missing client secret should fail");
+    assert!(err.to_string().contains("GRANT_RAUTHY_CLIENT_SECRET"));
 }
 
 #[test]
 fn loads_split_runtime_config_from_env() {
     let env = EnvGuard::new();
-    env.set("GRANT_TRAILBASE_INTERNAL_SECRET", "split-secret");
+    env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
+    env.set("GRANT_RAUTHY_CLIENT_SECRET", "split-secret");
     env.set("GRANT_RUNTIME_MODE", "split");
     env.set("GRANT_LOCAL_NODE_ROLE", "learner");
     env.set("GRANT_READ_CONSISTENCY", "prefer-strong");
@@ -135,7 +144,8 @@ fn rejects_invalid_runtime_mode() {
     let _guard = env_lock().lock().expect("env lock");
     clear_grant_env();
     unsafe {
-        std::env::set_var("GRANT_TRAILBASE_INTERNAL_SECRET", "runtime-secret");
+        std::env::set_var("GRANT_RAUTHY_CLIENT_ID", "grant");
+        std::env::set_var("GRANT_RAUTHY_CLIENT_SECRET", "runtime-secret");
         std::env::set_var("GRANT_RUNTIME_MODE", "invalid");
     }
 
@@ -148,7 +158,8 @@ fn rejects_invalid_read_consistency() {
     let _guard = env_lock().lock().expect("env lock");
     clear_grant_env();
     unsafe {
-        std::env::set_var("GRANT_TRAILBASE_INTERNAL_SECRET", "consistency-secret");
+        std::env::set_var("GRANT_RAUTHY_CLIENT_ID", "grant");
+        std::env::set_var("GRANT_RAUTHY_CLIENT_SECRET", "consistency-secret");
         std::env::set_var("GRANT_READ_CONSISTENCY", "eventual");
     }
 
@@ -161,7 +172,8 @@ fn rejects_invalid_local_node_role() {
     let _guard = env_lock().lock().expect("env lock");
     clear_grant_env();
     unsafe {
-        std::env::set_var("GRANT_TRAILBASE_INTERNAL_SECRET", "role-secret");
+        std::env::set_var("GRANT_RAUTHY_CLIENT_ID", "grant");
+        std::env::set_var("GRANT_RAUTHY_CLIENT_SECRET", "role-secret");
         std::env::set_var("GRANT_LOCAL_NODE_ROLE", "observer");
     }
 
@@ -172,7 +184,8 @@ fn rejects_invalid_local_node_role() {
 #[test]
 fn normalizes_remote_nodes_without_scheme_changes() {
     let env = EnvGuard::new();
-    env.set("GRANT_TRAILBASE_INTERNAL_SECRET", "remote-secret");
+    env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
+    env.set("GRANT_RAUTHY_CLIENT_SECRET", "remote-secret");
     env.set("GRANT_RUNTIME_MODE", "remote");
     env.set(
         "GRANT_REMOTE_NODES",

@@ -6,7 +6,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 CI_CLUSTER_BACKEND="${CI_CLUSTER_BACKEND:-vind}"
 NAMESPACE="${NAMESPACE:-grant}"
 IMAGE_NAME="${IMAGE_NAME:-grant:local}"
-TRAILBASE_IMAGE="${TRAILBASE_IMAGE:-trailbase-auth-bridge:local}"
+RAUTHY_IMAGE="${RAUTHY_IMAGE:-ghcr.io/sebadob/rauthy:0.36.0}"
 GRANT_MASTER_KEY="${GRANT_MASTER_KEY:-local-dev-master-key}"
 BUILD_NETWORK="${BUILD_NETWORK:-default}"
 RESET_CLUSTER="${RESET_CLUSTER:-1}"
@@ -70,8 +70,8 @@ trap cleanup EXIT
 log_storage_state
 run_phase build-grant-image \
   docker buildx build --load --network "${BUILD_NETWORK}" -t "${IMAGE_NAME}" .
-run_phase build-trailbase-image \
-  docker buildx build --load -f Dockerfile.trailbase-auth-bridge --network "${BUILD_NETWORK}" -t "${TRAILBASE_IMAGE}" .
+run_phase pull-rauthy-image \
+  docker pull "${RAUTHY_IMAGE}"
 if [[ "${CI_DOCKER_BUILDER_PRUNE}" == "1" ]]; then
   echo "[storage] pruning buildkit cache before cluster bootstrap"
   docker builder prune -af >/dev/null || true
@@ -91,6 +91,6 @@ run_phase bootstrap-vind-cluster \
   CLUSTER_NAME="${CLUSTER_NAME}" \
   NAMESPACE="${NAMESPACE}" \
   IMAGE_NAME="${IMAGE_NAME}" \
-  TRAILBASE_IMAGE="${TRAILBASE_IMAGE}" \
+  RAUTHY_IMAGE="${RAUTHY_IMAGE}" \
   GRANT_MASTER_KEY="${GRANT_MASTER_KEY}" \
   bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"

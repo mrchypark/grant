@@ -1,7 +1,7 @@
 apiVersion: chaos-mesh.org/v1alpha1
 kind: PodChaos
 metadata:
-  name: trailbase-down
+  name: rauthy-down
   namespace: grant-chaos
 spec:
   action: pod-failure
@@ -11,4 +11,4 @@ spec:
     namespaces:
       - grant-chaos
     labelSelectors:
-      app: trailbase
+      app: rauthy

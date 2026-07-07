@@ -13,7 +13,7 @@ It is intentionally conservative:
 These manifests target the current deployment labels:
 
 - `app=grant`, `role=voter` on `grant-voter` `StatefulSet`
-- `app=trailbase` on the `trailbase` `Deployment`
+- `app=rauthy` on the `rauthy` `StatefulSet`
 
 ## Install Chaos Mesh on GKE
 
@@ -65,8 +65,8 @@ kubectl --context gke_ied-cluster apply -f \
 
 These manifests are directly usable after Chaos Mesh is installed:
 
-- TrailBase outage:
-  [pod/trailbase-down.yaml](pod/trailbase-down.yaml)
+- Rauthy outage:
+  [pod/rauthy-down.yaml](pod/rauthy-down.yaml)
 
 ## Voter delete: do not guess leader or follower
 
@@ -86,7 +86,7 @@ Leader/follower selection procedure:
 
 ## Recommended usage
 
-1. Start with `trailbase-down.yaml`.
+1. Start with `rauthy-down.yaml`.
 2. For voter deletion, identify the actual pod first and then apply the matching
    template.
 3. Keep `leader-delete` outside a static workflow until you have a reliable leader

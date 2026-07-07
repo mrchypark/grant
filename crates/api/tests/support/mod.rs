@@ -3,7 +3,7 @@
 pub mod auth;
 
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     body::Body,
     extract::State,
     http::{HeaderMap, Method, Request, StatusCode, header},
@@ -15,13 +15,14 @@ use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
     config::{
-        AppConfig, AuthConfig, HiqliteConfig, LocalNodeRole, ReadConsistency, RuntimeMode,
-        SecurityConfig, ServerConfig, TrailbaseAuthConfig,
+        AppConfig, AuthConfig, HiqliteConfig, LocalNodeRole, RauthyAuthConfig, ReadConsistency,
+        RuntimeMode, SecurityConfig, ServerConfig,
     },
     database::Database,
     runtime::HiqliteRuntime,
     service::AppService,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -33,14 +34,21 @@ pub const BOOTSTRAP_USER_NAME: &str = "Bootstrap User";
 pub const FIXED_TEST_TIME: &str = "2026-04-03T00:00:00Z";
 
 #[derive(Clone)]
-struct MockTrailbaseState;
+struct MockRauthyState;
 
-pub fn trailbase_auth_config(base_url: String) -> AuthConfig {
+#[derive(Debug, Deserialize)]
+struct IntrospectionForm {
+    token: String,
+}
+
+pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
     AuthConfig {
-        trailbase: TrailbaseAuthConfig {
+        rauthy: RauthyAuthConfig {
             base_url,
-            introspect_path: "/api/grant/introspect".to_owned(),
-            internal_secret: "test-trailbase-secret".to_owned(),
+            introspect_path: "/auth/v1/oidc/introspect".to_owned(),
+            userinfo_path: "/auth/v1/oidc/userinfo".to_owned(),
+            client_id: "grant".to_owned(),
+            client_secret: "test-rauthy-secret".to_owned(),
             cache_ttl_seconds: 30,
         },
     }
@@ -90,7 +98,7 @@ pub async fn test_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempD
 pub async fn test_service_with_default_consistency(
     default_read_consistency: ReadConsistency,
 ) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
-    let trailbase_base_url = start_mock_trailbase().await;
+    let rauthy_base_url = start_mock_rauthy().await;
     let (runtime, dir) = test_runtime(default_read_consistency.clone()).await;
     let app_cfg = AppConfig {
         server: ServerConfig {
@@ -101,7 +109,7 @@ pub async fn test_service_with_default_consistency(
             bootstrap_user_id: BOOTSTRAP_USER_ID.to_owned(),
             bootstrap_user_name: BOOTSTRAP_USER_NAME.to_owned(),
         },
-        auth: trailbase_auth_config(trailbase_base_url),
+        auth: rauthy_auth_config(rauthy_base_url),
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
@@ -283,7 +291,7 @@ pub async fn seed_identity(
     display_name: &str,
     active: bool,
 ) -> User {
-    db.resolve_or_create_user_identity("trailbase", external_user_id, email, display_name, active)
+    db.resolve_or_create_user_identity("rauthy", external_user_id, email, display_name, active)
         .await
         .expect("seed identity")
 }
@@ -325,7 +333,7 @@ pub async fn seed_org_with_user(
     let user = seed_identity(
         db,
         external_user_id,
-        Some(&format!("{external_user_id}@trailbase.test")),
+        Some(&format!("{external_user_id}@rauthy.test")),
         display_name,
         true,
     )
@@ -362,17 +370,17 @@ pub fn user_org_role_binding(
     }
 }
 
-pub async fn start_mock_trailbase() -> String {
+pub async fn start_mock_rauthy() -> String {
     async fn login_ui() -> Html<&'static str> {
         Html(
             r#"<!doctype html>
 <html><body>
-<h1>TrailBase Login</h1>
-<form method="post" action="/api/auth/v1/login">
+<h1>Rauthy Login</h1>
+<form method="post" action="/auth/v1/oidc/authorize">
   <input name="email" />
   <input name="password" type="password" />
 </form>
-<link rel="stylesheet" href="/_/auth/app.css">
+<link rel="stylesheet" href="/auth/v1/assets/app.css">
 </body></html>"#,
         )
     }
@@ -384,22 +392,26 @@ pub async fn start_mock_trailbase() -> String {
         )
     }
 
-    async fn login_api() -> Json<serde_json::Value> {
+    async fn introspect(
+        State(_state): State<MockRauthyState>,
+        headers: HeaderMap,
+        Form(form): Form<IntrospectionForm>,
+    ) -> Json<serde_json::Value> {
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(authorization, "Basic Z3JhbnQ6dGVzdC1yYXV0aHktc2VjcmV0");
         Json(json!({
-            "authToken": "mock-auth-token",
-            "refreshToken": "mock-refresh-token"
+            "active": true,
+            "sub": form.token,
+            "scope": "openid email profile",
+            "client_id": "grant",
+            "exp": 4_102_444_800i64
         }))
     }
 
-    async fn introspect(
-        State(_state): State<MockTrailbaseState>,
-        headers: HeaderMap,
-    ) -> Json<serde_json::Value> {
-        let secret = headers
-            .get("x-grant-internal-secret")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        assert_eq!(secret, "test-trailbase-secret");
+    async fn userinfo(headers: HeaderMap) -> Json<serde_json::Value> {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -412,28 +424,28 @@ pub async fn start_mock_trailbase() -> String {
             })
             .unwrap_or("anonymous");
         Json(json!({
-            "valid": true,
-            "trailbaseUserId": token,
-            "email": format!("{token}@trailbase.test"),
-            "displayName": token,
-            "verified": true,
-            "active": true,
-            "expiresAt": "2099-01-01T00:00:00Z"
+            "id": token,
+            "sub": token,
+            "name": token,
+            "email": format!("{token}@rauthy.test"),
+            "email_verified": true,
+            "roles": [],
+            "mfa_enabled": false
         }))
     }
 
     let app = Router::new()
-        .route("/_/auth/login", get(login_ui))
-        .route("/_/auth/{*path}", get(asset))
-        .route("/api/auth/v1/login", post(login_api))
-        .route("/api/grant/introspect", post(introspect))
-        .with_state(MockTrailbaseState);
+        .route("/auth/v1", get(login_ui))
+        .route("/auth/v1/assets/{*path}", get(asset))
+        .route("/auth/v1/oidc/introspect", post(introspect))
+        .route("/auth/v1/oidc/userinfo", get(userinfo))
+        .with_state(MockRauthyState);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind trailbase");
+        .expect("bind rauthy");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve trailbase");
+        axum::serve(listener, app).await.expect("serve rauthy");
     });
     format!("http://{}", addr)
 }

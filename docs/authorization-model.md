@@ -1,6 +1,6 @@
 # Grant Authorization Model
 
-`grant`는 identity provider가 아니다. 사용자의 로그인과 외부 identity 확인은 TrailBase/Rauthy 같은 앞단이 맡고, `grant`는 조직, 애플리케이션, service provider, resource scope에 대한 권한 부여와 판정을 맡는다.
+`grant`는 identity provider가 아니다. 사용자의 로그인과 외부 identity 확인은 Rauthy 같은 OIDC provider가 맡고, `grant`는 조직, 애플리케이션, service provider, resource scope에 대한 권한 부여와 판정을 맡는다.
 
 ## 핵심 객체
 

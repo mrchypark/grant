@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 NAMESPACE="${NAMESPACE:-grant}"
 IMAGE_NAME="${IMAGE_NAME:-grant:local}"
-TRAILBASE_IMAGE="${TRAILBASE_IMAGE:-trailbase-auth-bridge:local}"
+RAUTHY_IMAGE="${RAUTHY_IMAGE:-ghcr.io/sebadob/rauthy:0.36.0}"
 KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/k8s}"
 KUBECONTEXT="${KUBECONTEXT:-}"
 VIND_EXEC_ACTIVE="${VIND_EXEC_ACTIVE:-0}"
@@ -86,7 +86,8 @@ ensure_runtime_image() {
 GRANT_MASTER_KEY="${GRANT_MASTER_KEY:-local-dev-master-key}"
 HQL_SECRET_RAFT="${HQL_SECRET_RAFT:-SuperSecureSecret1337}"
 HQL_SECRET_API="${HQL_SECRET_API:-AnotherSecureSecret42}"
-TRAILBASE_GRANT_INTERNAL_SECRET="${TRAILBASE_GRANT_INTERNAL_SECRET:-dev-trailbase-internal-secret}"
+GRANT_RAUTHY_CLIENT_ID="${GRANT_RAUTHY_CLIENT_ID:-grant}"
+GRANT_RAUTHY_CLIENT_SECRET="${GRANT_RAUTHY_CLIENT_SECRET:-dev-rauthy-client-secret-000000000000000000000000000000000000000000}"
 ENC_KEYS="${ENC_KEYS:-devkey01/MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}"
 ENC_KEY_ACTIVE="${ENC_KEY_ACTIVE:-devkey01}"
 
@@ -106,24 +107,22 @@ docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1 || {
   exit 1
 }
 
-docker image inspect "${TRAILBASE_IMAGE}" >/dev/null 2>&1 || {
-  echo "missing image ${TRAILBASE_IMAGE}. run: docker build -f Dockerfile.trailbase-auth-bridge -t ${TRAILBASE_IMAGE} ." >&2
-  exit 1
-}
+docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 || docker pull "${RAUTHY_IMAGE}"
 
 ensure_runtime_image "${IMAGE_NAME}"
-ensure_runtime_image "${TRAILBASE_IMAGE}"
+ensure_runtime_image "${RAUTHY_IMAGE}"
 
 apply_resource() {
   kubectl -n "${NAMESPACE}" apply -f "$1"
 }
 
-dump_trailbase_debug() {
-  echo "[trailbase-debug] deployment state" >&2
+dump_rauthy_debug() {
+  echo "[rauthy-debug] statefulset state" >&2
   kubectl -n "${NAMESPACE}" get deploy,pods >&2 || true
-  kubectl -n "${NAMESPACE}" describe deployment/trailbase >&2 || true
-  kubectl -n "${NAMESPACE}" describe pod -l app=trailbase >&2 || true
-  kubectl -n "${NAMESPACE}" logs -l app=trailbase --all-containers --tail=200 >&2 || true
+  kubectl -n "${NAMESPACE}" get statefulset,pods >&2 || true
+  kubectl -n "${NAMESPACE}" describe statefulset/rauthy >&2 || true
+  kubectl -n "${NAMESPACE}" describe pod -l app=rauthy >&2 || true
+  kubectl -n "${NAMESPACE}" logs -l app=rauthy --all-containers --tail=200 >&2 || true
   kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 60 >&2 || true
 }
 
@@ -154,12 +153,12 @@ wait_for_resource() {
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 apply_grant_secret
 
-apply_resource "${KUSTOMIZE_DIR}/trailbase-configmap.yaml"
-apply_resource "${KUSTOMIZE_DIR}/trailbase-service.yaml"
-apply_resource "${KUSTOMIZE_DIR}/trailbase-deployment.yaml"
-wait_for_resource deployment trailbase
-if ! kubectl -n "${NAMESPACE}" rollout status deployment/trailbase --timeout=15m; then
-  dump_trailbase_debug
+apply_resource "${KUSTOMIZE_DIR}/rauthy-config.yaml"
+apply_resource "${KUSTOMIZE_DIR}/rauthy-service.yaml"
+apply_resource "${KUSTOMIZE_DIR}/rauthy-statefulset.yaml"
+wait_for_resource statefulset rauthy
+if ! kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m; then
+  dump_rauthy_debug
   exit 1
 fi
 
@@ -181,7 +180,7 @@ vind bootstrap completed.
 Context: ${KUBECONTEXT:-$(kubectl config current-context)}
 Namespace: ${NAMESPACE}
 Image: ${IMAGE_NAME}
-TrailBase Image: ${TRAILBASE_IMAGE}
+Rauthy Image: ${RAUTHY_IMAGE}
 
 Next:
   export GRANT_MASTER_KEY=${GRANT_MASTER_KEY}

@@ -8,7 +8,7 @@ resources:
   - app-service.yaml
   - app-pdb.yaml
   - app-statefulset.yaml
-  - trailbase-service.yaml
-  - trailbase-deployment.yaml
+  - rauthy-service.yaml
+  - rauthy-statefulset.yaml
   - ingress.yaml
-  - trailbase-configmap.yaml
+  - rauthy-config.yaml

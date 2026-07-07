@@ -93,7 +93,7 @@ async fn build_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempDir)
 async fn build_service_with_default_consistency(
     default_read_consistency: ReadConsistency,
 ) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
-    let trailbase_base_url = support::start_mock_trailbase().await;
+    let rauthy_base_url = support::start_mock_rauthy().await;
     let (runtime, db_dir) = test_runtime(default_read_consistency.clone()).await;
     let cfg = AppConfig {
         server: ServerConfig {
@@ -104,7 +104,7 @@ async fn build_service_with_default_consistency(
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
-        auth: support::trailbase_auth_config(trailbase_base_url),
+        auth: support::rauthy_auth_config(rauthy_base_url),
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
@@ -148,7 +148,7 @@ async fn query_identity_meta(
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2"
                 .to_owned(),
-            vec!["trailbase".into(), external_user_id.into()],
+            vec!["rauthy".into(), external_user_id.into()],
         )
         .await
         .expect("query identity meta")
@@ -168,9 +168,9 @@ async fn current_user_returns_local_user_and_active_organizations() {
         .expect("upsert beta org");
     let user = db
         .resolve_or_create_user_identity(
-            "trailbase",
+            "rauthy",
             "me-user",
-            Some("me-user@trailbase.test"),
+            Some("me-user@rauthy.test"),
             "Me User",
             true,
         )
@@ -217,7 +217,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
         .expect("body")
         .to_bytes();
     let json: Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(json["provider"], "trailbase");
+    assert_eq!(json["provider"], "rauthy");
     assert_eq!(json["externalUserId"], "me-user");
     assert_eq!(json["user"]["id"], Value::String(user.id.clone()));
     assert_eq!(json["activeOrganizationId"], "alpha-org");
@@ -227,7 +227,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
 }
 
 #[tokio::test]
-async fn trailbase_identity_relinks_same_email_after_restore() {
+async fn rauthy_identity_relinks_same_email_after_restore() {
     let (service, db, runtime, _db_dir) = build_service().await;
     db.upsert_organization_with_owner("restore-org", "Restore Org", None, "Restore Org")
         .await
@@ -235,9 +235,9 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
 
     let original_user = db
         .resolve_or_create_user_identity(
-            "trailbase",
-            "original-trailbase-user",
-            Some("restore-user@trailbase.test"),
+            "rauthy",
+            "original-rauthy-user",
+            Some("restore-user@rauthy.test"),
             "Restore User",
             true,
         )
@@ -262,9 +262,9 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
 
     let relinked_user = db
         .resolve_or_create_user_identity(
-            "trailbase",
-            "restored-trailbase-user",
-            Some("restore-user@trailbase.test"),
+            "rauthy",
+            "restored-rauthy-user",
+            Some("restore-user@rauthy.test"),
             "Restore User",
             true,
         )
@@ -281,7 +281,7 @@ async fn trailbase_identity_relinks_same_email_after_restore() {
                 .uri("/api/v1/me")
                 .header(
                     "authorization",
-                    support::auth::bearer_header("restored-trailbase-user"),
+                    support::auth::bearer_header("restored-rauthy-user"),
                 )
                 .header("x-organization-id", "restore-org")
                 .body(Body::empty())
@@ -311,7 +311,7 @@ async fn learner_router_rejects_mutation_and_admin_endpoints() {
 
     for (method, uri) in [
         ("POST", "/api/v1/orgs/bootstrap-user/apps"),
-        ("POST", "/api/v1/admin/bootstrap/trailbase-owner"),
+        ("POST", "/api/v1/admin/bootstrap/rauthy-owner"),
         ("GET", "/api/v1/admin/backups/s3"),
     ] {
         let response = app
@@ -362,7 +362,7 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "local-user".into(),
-                "local-user@trailbase.test".into(),
+                "local-user@rauthy.test".into(),
                 "local-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -408,7 +408,7 @@ async fn learner_local_current_user_rejects_unlinked_identity_without_writes() {
             "SELECT COUNT(*) as count
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2",
-            vec!["trailbase".into(), "local-user".into()],
+            vec!["rauthy".into(), "local-user".into()],
         )
         .await,
         0
@@ -449,7 +449,7 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "linked-user".into(),
-                "linked-user@trailbase.test".into(),
+                "linked-user@rauthy.test".into(),
                 "linked-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -465,9 +465,9 @@ async fn learner_local_current_user_uses_existing_identity_without_mutation() {
             vec![
                 "identity-linked-user".into(),
                 "linked-user".into(),
-                "trailbase".into(),
+                "rauthy".into(),
                 "linked-user".into(),
-                "linked-user@trailbase.test".into(),
+                "linked-user@rauthy.test".into(),
                 "linked-user".into(),
                 Option::<String>::Some("2026-04-05T00:00:00Z".to_owned()).into(),
                 "2026-04-05T00:00:00Z".into(),
@@ -548,7 +548,7 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "strong-user".into(),
-                "strong-user@trailbase.test".into(),
+                "strong-user@rauthy.test".into(),
                 "strong-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -594,7 +594,7 @@ async fn learner_strong_current_user_persists_identity_and_shared_cache() {
             "SELECT COUNT(*) as count
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2",
-            vec!["trailbase".into(), "strong-user".into()],
+            vec!["rauthy".into(), "strong-user".into()],
         )
         .await,
         1
@@ -636,7 +636,7 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "strong-user".into(),
-                "strong-user@trailbase.test".into(),
+                "strong-user@rauthy.test".into(),
                 "strong-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -682,7 +682,7 @@ async fn voter_default_strong_current_user_syncs_identity_without_query_override
             "SELECT COUNT(*) as count
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2",
-            vec!["trailbase".into(), "strong-user".into()],
+            vec!["rauthy".into(), "strong-user".into()],
         )
         .await,
         1
@@ -724,7 +724,7 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "prefer-strong-user".into(),
-                "prefer-strong-user@trailbase.test".into(),
+                "prefer-strong-user@rauthy.test".into(),
                 "prefer-strong-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -773,7 +773,7 @@ async fn voter_default_prefer_strong_current_user_syncs_identity_without_query_o
             "SELECT COUNT(*) as count
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2",
-            vec!["trailbase".into(), "prefer-strong-user".into()],
+            vec!["rauthy".into(), "prefer-strong-user".into()],
         )
         .await,
         1
@@ -815,7 +815,7 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "strong-user".into(),
-                "strong-user@trailbase.test".into(),
+                "strong-user@rauthy.test".into(),
                 "strong-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -861,7 +861,7 @@ async fn voter_default_strong_authenticated_read_syncs_identity_without_query_ov
             "SELECT COUNT(*) as count
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2",
-            vec!["trailbase".into(), "strong-user".into()],
+            vec!["rauthy".into(), "strong-user".into()],
         )
         .await,
         1
@@ -893,7 +893,7 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
              VALUES ($1, $2, $3, $4, $5)",
             vec![
                 "prefer-strong-user".into(),
-                "prefer-strong-user@trailbase.test".into(),
+                "prefer-strong-user@rauthy.test".into(),
                 "prefer-strong-user".into(),
                 1_i64.into(),
                 "2026-04-06T00:00:00Z".into(),
@@ -942,7 +942,7 @@ async fn voter_default_prefer_strong_authenticated_read_syncs_identity_without_q
             "SELECT COUNT(*) as count
              FROM user_identities
              WHERE provider = $1 AND external_user_id = $2",
-            vec!["trailbase".into(), "prefer-strong-user".into()],
+            vec!["rauthy".into(), "prefer-strong-user".into()],
         )
         .await,
         1
@@ -991,7 +991,7 @@ async fn read_routes_allow_explicit_strong_consistency() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/admin/bootstrap/trailbase-owner")
+                .uri("/api/v1/admin/bootstrap/rauthy-owner")
                 .header(
                     "authorization",
                     support::auth::bearer_header("strong-consistency-user"),

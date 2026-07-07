@@ -26,11 +26,11 @@
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. `(provider, external_user_id)`는 unique index로 관리한다.
+외부 인증 공급자와 내부 사용자 매핑. 현재 런타임 provider 값은 Rauthy 연동의 `rauthy`이며, `(provider, external_user_id)`는 unique index로 관리한다.
 
 ### `auth_identity_cache`
 
-외부 토큰 introspection 캐시. `token_hash`가 PK이고 `expires_at` 기준으로 만료된다.
+외부 토큰 introspection 캐시. 현재 Rauthy bearer token 확인 결과를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다.
 
 ### `parties`
 

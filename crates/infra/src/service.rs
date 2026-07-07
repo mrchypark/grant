@@ -199,8 +199,8 @@ impl AppService {
         &self.cfg.security.master_key
     }
 
-    pub fn trailbase_base_url(&self) -> &str {
-        &self.cfg.auth.trailbase.base_url
+    pub fn rauthy_base_url(&self) -> &str {
+        &self.cfg.auth.rauthy.base_url
     }
 
     pub async fn authenticate_request(
@@ -244,7 +244,7 @@ impl AppService {
         })
     }
 
-    pub async fn bootstrap_trailbase_owner(
+    pub async fn bootstrap_rauthy_owner(
         &self,
         bearer_token: Option<&str>,
     ) -> Result<AuthenticatedPrincipal> {
@@ -1251,7 +1251,7 @@ fn normalize_active_organization(
         return Ok(Some(requested.to_owned()));
     }
     Err(forbidden_error(format!(
-        "forbidden: trailbase user {} is not an active member of organization {}",
+        "forbidden: rauthy user {} is not an active member of organization {}",
         identity.external_user_id, requested
     )))
 }

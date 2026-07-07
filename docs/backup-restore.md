@@ -1,20 +1,21 @@
 # Grant Backup / Restore
 
-`grant`의 영속 상태는 hiqlite metadata와 TrailBase auth bridge data로 나뉜다.
+`grant`의 영속 상태는 grant hiqlite metadata와 Rauthy identity data로 나뉜다.
 
 ## 범위
 
 - grant metadata: hiqlite Raft state machine, logs, snapshots
-- TrailBase identity bridge data: TrailBase SQLite data directory
+- Rauthy identity data: Rauthy `/app/data` directory or the production database/backend chosen for Rauthy
 
 ## 기본 원칙
 
 - repo가 Kubernetes나 Compose 안에 object storage를 배포하지 않는다.
 - hiqlite 원격 백업은 운영자가 준비한 외부 S3 호환 스토리지를 사용한다.
 - 기본 Kubernetes 토폴로지는 `grant-voter` `StatefulSet` 3개다.
+- 기본 Rauthy manifest는 로컬 검증용 단일 `StatefulSet`이며 `/app/data`를 `emptyDir`에 둔다. 운영 배포에서는 PVC나 Rauthy가 지원하는 별도 영속 backend로 교체한다.
 - voter quorum 복구를 먼저 끝낸 뒤 API를 검증한다.
 - restore는 외부 운영 절차로 수행한다. 앱 프로세스가 자동 restore를 판단하지 않는다.
-- TrailBase SQLite 백업/복구는 현재 repo manifest 밖의 운영 절차로 다룬다.
+- Rauthy data 백업/복구는 Rauthy 운영 절차로 다룬다.
 
 ## 원격 백업 환경변수
 

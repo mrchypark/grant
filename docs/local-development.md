@@ -17,7 +17,6 @@
 cargo test --workspace
 
 docker buildx build --load -t grant:local .
-docker buildx build --load -f Dockerfile.trailbase-auth-bridge -t trailbase-auth-bridge:local .
 bash ./scripts/vind-cluster.sh ensure-context
 bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
 ```
@@ -31,7 +30,7 @@ bash ./scripts/ci-local.sh
 ## 주요 스크립트
 
 - `scripts/ci-local.sh`
-  - 이미지 빌드
+  - grant 이미지 빌드와 Rauthy 공식 이미지 pull
   - `vind` cluster lifecycle 관리
   - Kubernetes bootstrap 실행
 - `scripts/vind-cluster.sh`
@@ -41,7 +40,7 @@ bash ./scripts/ci-local.sh
   - phase 실행 시점에만 `vcluster connect`를 연다
 - `scripts/vind-bootstrap.sh`
   - Kubernetes 리소스 배포
-  - TrailBase, grant service rollout 대기
+  - Rauthy, grant service rollout 대기
 주의:
 
 - 로컬/CI 회귀 검증은 `vind` 경로만 신뢰한다.
@@ -57,7 +56,15 @@ bash ./scripts/ci-local.sh
 export BASE_URL=http://127.0.0.1:18080
 export MASTER_KEY=dev-only-master-key
 export ORG_ID=conalog-grant
-export TOKEN=conalog-grant
+export TOKEN=<rauthy-access-token>
+```
+
+Rauthy로 로그인한 첫 운영자는 master key와 Rauthy bearer token으로 한 번 bootstrap해야 한다.
+
+```bash
+curl -sS -X POST "${BASE_URL}/api/v1/admin/bootstrap/rauthy-owner" \
+  -H "authorization: Bearer ${TOKEN}" \
+  -H "x-grant-master-key: ${MASTER_KEY}" | jq
 ```
 
 ### 1. 현재 사용자
