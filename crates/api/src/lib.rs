@@ -4,26 +4,23 @@ use axum::{
     body::{Body, to_bytes},
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    response::{Redirect, Response},
     routing::{any, delete, get, post, put},
 };
 use domain::{
-    Action, ActionRiskLevel, Agreement, AgreementStatus, AgreementType, Application,
-    ApplicationAppType, ApplicationConsentPolicy, ApplicationGrant, ApplicationType, HealthStatus,
-    Organization, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType, ServiceProvider,
-    User,
+    Action, Agreement, Application, ApplicationGrant, HealthStatus, Organization, Role,
+    RoleBinding, ServiceProvider,
 };
-use infra::{
-    config::ReadConsistency,
-    service::{
-        AppService, AuthorizationCheck, AuthorizationResource, AuthorizationSubject, BackupInfo,
-        CreateApplicationGrantInput, CreateApplicationInput, CreateRoleBindingInput,
-        CreateRoleInput, ServiceError, ServiceErrorKind, UpdateApplicationInput,
-        UpsertAgreementInput,
-    },
-};
-use serde::{Deserialize, Serialize};
+use infra::{config::ReadConsistency, service::AppService};
 use std::sync::Arc;
+
+mod dto;
+mod error;
+mod mappers;
+
+use dto::*;
+use error::{ApiError, ApiResult};
+use mappers::*;
 
 const MAX_AUTHZ_BATCH_CHECKS: usize = 1000;
 const MAX_AUTHZ_FILTER_RESOURCES: usize = 1000;
@@ -223,204 +220,10 @@ async fn auth_root() -> Redirect {
     Redirect::temporary("/auth/login")
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateApplicationRequest {
-    id: String,
-    slug: String,
-    name: String,
-    description: Option<String>,
-    application_type: ApplicationType,
-    app_type: ApplicationAppType,
-    first_party: bool,
-    consent_policy: ApplicationConsentPolicy,
-    active: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateApplicationRequest {
-    slug: String,
-    name: String,
-    description: Option<String>,
-    application_type: ApplicationType,
-    app_type: ApplicationAppType,
-    first_party: bool,
-    consent_policy: ApplicationConsentPolicy,
-    active: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReplaceApplicationActionsRequest {
-    action_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReplaceActionsRequest {
-    action_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReplaceProviderActionsRequest {
-    actions: Vec<ProviderActionRequest>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderActionRequest {
-    id: String,
-    code: String,
-    name: String,
-    description: Option<String>,
-    risk_level: ActionRiskLevel,
-    visibility_granting: bool,
-    grantable_to_applications: bool,
-    consent_label: Option<String>,
-    consent_description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateApplicationGrantRequest {
-    id: String,
-    user_id: String,
-    application_id: String,
-    action_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpsertAgreementRequest {
-    id: String,
-    agreement_type: AgreementType,
-    grantor_organization_id: String,
-    grantee_organization_id: String,
-    status: AgreementStatus,
-    title: String,
-    reference_no: Option<String>,
-    starts_at: Option<String>,
-    ends_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateRoleRequest {
-    id: String,
-    code: String,
-    name: String,
-    description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateRoleBindingRequest {
-    id: String,
-    subject_type: RoleBindingSubjectType,
-    subject_id: String,
-    subject_organization_id: String,
-    provider_id: String,
-    resource_type: String,
-    resource_id: String,
-    role_id: String,
-    agreement_id: Option<String>,
-    state: RoleBindingState,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthzSubjectRequest {
-    #[serde(rename = "type")]
-    subject_type: String,
-    id: String,
-    #[serde(rename = "org_id", alias = "orgId")]
-    organization_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct AuthzResourceRequest {
-    provider: String,
-    #[serde(rename = "type")]
-    resource_type: String,
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthzCheckRequest {
-    subject: AuthzSubjectRequest,
-    action: String,
-    resource: AuthzResourceRequest,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthzBatchCheckRequest {
-    checks: Vec<AuthzCheckRequest>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthzFilterRequest {
-    subject: AuthzSubjectRequest,
-    action: String,
-    resources: Vec<AuthzResourceRequest>,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthzCheckResponse {
-    allowed: bool,
-    reason: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthzBatchCheckResponse {
-    results: Vec<AuthzCheckResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthzFilterResponse {
-    resource_ids: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BackupListResponse {
-    items: Vec<BackupItemResponse>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BackupItemResponse {
-    name: String,
-    last_modified: i64,
-    size: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BootstrapOwnerResponse {
-    user_id: String,
-    organization_id: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CurrentUserResponse {
-    provider: String,
-    external_user_id: String,
-    user: User,
-    organizations: Vec<Organization>,
-    active_organization_id: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 struct RequestContext {
     user_id: String,
     organization_id: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ReadConsistencyQuery {
-    consistency: Option<String>,
 }
 
 async fn get_current_user(
@@ -520,17 +323,7 @@ async fn create_application(
         .create_application(
             &ctx.user_id,
             &ctx.organization_id,
-            CreateApplicationInput {
-                id: body.id,
-                slug: body.slug,
-                name: body.name,
-                description: body.description,
-                application_type: body.application_type,
-                app_type: body.app_type,
-                first_party: body.first_party,
-                consent_policy: body.consent_policy,
-                active: body.active,
-            },
+            create_application_input(body),
         )
         .await
         .map_err(ApiError::from_domain)?;
@@ -571,16 +364,7 @@ async fn update_application(
             &ctx.user_id,
             &ctx.organization_id,
             &application_id,
-            UpdateApplicationInput {
-                slug: body.slug,
-                name: body.name,
-                description: body.description,
-                application_type: body.application_type,
-                app_type: body.app_type,
-                first_party: body.first_party,
-                consent_policy: body.consent_policy,
-                active: body.active,
-            },
+            update_application_input(body),
         )
         .await
         .map_err(ApiError::from_domain)?;
@@ -656,12 +440,7 @@ async fn create_application_grant(
         .create_application_grant_authorized(
             &ctx.user_id,
             &ctx.organization_id,
-            CreateApplicationGrantInput {
-                id: body.id,
-                user_id: body.user_id,
-                application_id: body.application_id,
-                action_ids: body.action_ids,
-            },
+            create_application_grant_input(body),
         )
         .await
         .map_err(ApiError::from_domain)?;
@@ -799,16 +578,7 @@ async fn create_role(
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
     let role = service
-        .create_role_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            CreateRoleInput {
-                id: body.id,
-                code: body.code,
-                name: body.name,
-                description: body.description,
-            },
-        )
+        .create_role_authorized(&ctx.user_id, &ctx.organization_id, create_role_input(body))
         .await
         .map_err(ApiError::from_domain)?;
     Ok((StatusCode::CREATED, Json(role)))
@@ -862,18 +632,7 @@ async fn create_role_binding(
         .create_role_binding_authorized(
             &ctx.user_id,
             &ctx.organization_id,
-            CreateRoleBindingInput {
-                id: body.id,
-                subject_type: body.subject_type,
-                subject_id: body.subject_id,
-                subject_organization_id: body.subject_organization_id,
-                provider_id: body.provider_id,
-                resource_type: body.resource_type,
-                resource_id: body.resource_id,
-                role_id: body.role_id,
-                agreement_id: body.agreement_id,
-                state: body.state,
-            },
+            create_role_binding_input(body),
         )
         .await
         .map_err(ApiError::from_domain)?;
@@ -947,22 +706,7 @@ async fn authz_filter(
         )));
     }
     let read_consistency = read_consistency_override(&query)?;
-    let subject = authz_subject_input(body.subject);
-    let action = body.action;
-    let mut requested_resource_ids = Vec::with_capacity(body.resources.len());
-    let checks = body
-        .resources
-        .into_iter()
-        .map(|resource| {
-            let resource_id = resource.id.clone();
-            requested_resource_ids.push(resource_id);
-            AuthorizationCheck {
-                subject: subject.clone(),
-                action: action.clone(),
-                resource: authz_resource_input(resource),
-            }
-        })
-        .collect::<Vec<_>>();
+    let (requested_resource_ids, checks) = authz_filter_inputs(body);
     let decisions = service
         .check_authorizations(&checks, read_consistency)
         .await
@@ -1153,43 +897,6 @@ async fn proxy_trailbase_request(
     Ok(response)
 }
 
-fn map_backup(item: BackupInfo) -> BackupItemResponse {
-    BackupItemResponse {
-        name: item.name,
-        last_modified: item.last_modified,
-        size: item.size,
-    }
-}
-
-fn provider_action_input(provider_id: &str, body: ProviderActionRequest) -> Action {
-    Action {
-        id: body.id,
-        provider_id: provider_id.to_owned(),
-        code: body.code,
-        name: body.name,
-        description: body.description,
-        risk_level: body.risk_level,
-        visibility_granting: body.visibility_granting,
-        grantable_to_applications: body.grantable_to_applications,
-        consent_label: body.consent_label,
-        consent_description: body.consent_description,
-    }
-}
-
-fn agreement_input(body: UpsertAgreementRequest) -> UpsertAgreementInput {
-    UpsertAgreementInput {
-        id: body.id,
-        agreement_type: body.agreement_type,
-        grantor_organization_id: body.grantor_organization_id,
-        grantee_organization_id: body.grantee_organization_id,
-        status: body.status,
-        title: body.title,
-        reference_no: body.reference_no,
-        starts_at: body.starts_at,
-        ends_at: body.ends_at,
-    }
-}
-
 async fn run_authz_check(
     service: &AppService,
     body: AuthzCheckRequest,
@@ -1203,37 +910,6 @@ async fn run_authz_check(
         .next()
         .ok_or_else(|| ApiError::internal("authorization check failed"))?;
     Ok(authz_check_response(decision))
-}
-
-fn authz_check_input(body: AuthzCheckRequest) -> AuthorizationCheck {
-    AuthorizationCheck {
-        subject: authz_subject_input(body.subject),
-        action: body.action,
-        resource: authz_resource_input(body.resource),
-    }
-}
-
-fn authz_subject_input(body: AuthzSubjectRequest) -> AuthorizationSubject {
-    AuthorizationSubject {
-        subject_type: body.subject_type,
-        id: body.id,
-        organization_id: body.organization_id,
-    }
-}
-
-fn authz_resource_input(body: AuthzResourceRequest) -> AuthorizationResource {
-    AuthorizationResource {
-        provider_id: body.provider,
-        resource_type: body.resource_type,
-        id: body.id,
-    }
-}
-
-fn authz_check_response(decision: infra::service::AuthorizationDecision) -> AuthzCheckResponse {
-    AuthzCheckResponse {
-        allowed: decision.allowed,
-        reason: decision.reason,
-    }
 }
 
 async fn request_context(
@@ -1373,128 +1049,9 @@ fn bearer_token(headers: &HeaderMap) -> ApiResult<Option<String>> {
     Ok(Some(token.to_owned()))
 }
 
-type ApiResult<T> = Result<T, ApiError>;
-
-#[derive(Debug)]
-struct ApiError {
-    status: StatusCode,
-    message: String,
-}
-
-impl ApiError {
-    fn requires_voter() -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "endpoint requires voter node".to_owned(),
-        }
-    }
-
-    fn bad_request(err: anyhow::Error) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: err.to_string(),
-        }
-    }
-
-    fn internal<E>(err: E) -> Self
-    where
-        E: ToString,
-    {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: err.to_string(),
-        }
-    }
-
-    fn from_domain(err: anyhow::Error) -> Self {
-        if let Some(status) = structured_status(&err) {
-            return Self {
-                status,
-                message: err.to_string(),
-            };
-        }
-        let message = err.to_string();
-        let contains_chain =
-            |needle: &str| err.chain().any(|cause| cause.to_string().contains(needle));
-        let status = if message.contains("forbidden:") {
-            StatusCode::FORBIDDEN
-        } else if contains_chain("already exists")
-            || contains_chain("UNIQUE constraint failed")
-            || contains_chain("unique constraint failed")
-        {
-            StatusCode::CONFLICT
-        } else if message.contains("unavailable:") {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else if contains_chain("not found") {
-            StatusCode::NOT_FOUND
-        } else if contains_chain("must not be empty")
-            || contains_chain("is not grantable to applications")
-            || contains_chain("duplicate action code in provider manifest")
-            || contains_chain("duplicate action id in provider manifest")
-            || contains_chain("expired")
-            || contains_chain("consumed")
-            || contains_chain("payload mismatch")
-            || contains_chain("mismatch")
-            || contains_chain("must be included")
-            || contains_chain("already used")
-        {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        Self { status, message }
-    }
-
-    fn from_auth(err: anyhow::Error) -> Self {
-        if let Some(status) = structured_status(&err) {
-            return Self {
-                status,
-                message: err.to_string(),
-            };
-        }
-        let message = err.to_string();
-        let status = if message.contains("unauthorized:") {
-            StatusCode::UNAUTHORIZED
-        } else if message.contains("forbidden:") {
-            StatusCode::FORBIDDEN
-        } else if message.contains("unavailable:") {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else if message.contains("missing ") || message.contains("header") {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        Self { status, message }
-    }
-}
-
-fn structured_status(err: &anyhow::Error) -> Option<StatusCode> {
-    err.chain().find_map(|cause| {
-        cause
-            .downcast_ref::<ServiceError>()
-            .map(|err| match err.kind() {
-                ServiceErrorKind::BadRequest => StatusCode::BAD_REQUEST,
-                ServiceErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
-                ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
-                ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
-                ServiceErrorKind::Conflict => StatusCode::CONFLICT,
-                ServiceErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            })
-    })
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let body = Json(serde_json::json!({
-            "error": self.message,
-        }));
-        (self.status, body).into_response()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ApiError, ensure_active_organization_path_matches};
+    use super::{ensure_active_organization_path_matches, error::ApiError};
     use anyhow::anyhow;
     use axum::http::StatusCode;
     use infra::service::{ServiceError, ServiceErrorKind};
