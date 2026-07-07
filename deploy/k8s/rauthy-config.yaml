@@ -40,7 +40,7 @@ stringData:
         "id": "grant",
         "name": "Grant",
         "secret": {
-          "Plain": "dev-rauthy-client-secret-000000000000000000000000000000000000000000"
+          "Plain": "devRauthyClientSecret0000000000000000000000000000000000000000000"
         },
         "redirect_uris": [
           "http://grant.local:80/auth/callback"
