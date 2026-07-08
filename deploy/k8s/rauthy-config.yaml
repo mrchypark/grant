@@ -77,3 +77,30 @@ stringData:
         "force_mfa": false
       }
     ]
+  api_keys.json: |
+    [
+      {
+        "name": "grant-admin",
+        "exp": 4070905200,
+        "secret": {
+          "Plain": "devRauthyAdminApiKeySecret000000000000000000000000000000000000000"
+        },
+        "access": [
+          {
+            "group": "Clients",
+            "access_rights": [
+              "read",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "group": "Secrets",
+            "access_rights": [
+              "read",
+              "update"
+            ]
+          }
+        ]
+      }
+    ]

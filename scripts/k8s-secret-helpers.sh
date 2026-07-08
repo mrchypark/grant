@@ -23,6 +23,7 @@ apply_grant_secret() {
     --from-literal=HQL_SECRET_API="${HQL_SECRET_API}" \
     --from-literal=GRANT_RAUTHY_CLIENT_ID="${GRANT_RAUTHY_CLIENT_ID}" \
     --from-literal=GRANT_RAUTHY_CLIENT_SECRET="${GRANT_RAUTHY_CLIENT_SECRET}" \
+    --from-literal=GRANT_RAUTHY_ADMIN_API_KEY="${GRANT_RAUTHY_ADMIN_API_KEY}" \
     --from-literal=ENC_KEYS="${ENC_KEYS}" \
     --from-literal=ENC_KEY_ACTIVE="${ENC_KEY_ACTIVE}"
 }

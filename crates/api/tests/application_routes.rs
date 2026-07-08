@@ -252,6 +252,19 @@ async fn application_redirect_uri_routes_create_list_and_delete() {
     let listed: Value = serde_json::from_slice(&list_body).expect("json");
     assert_eq!(listed.as_array().map(Vec::len), Some(1));
 
+    let create_second = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/second-callback" })),
+        ))
+        .await
+        .expect("create second redirect uri response");
+    assert_eq!(create_second.status(), StatusCode::CREATED);
+
     let delete = app
         .clone()
         .oneshot(app_request(
@@ -283,7 +296,11 @@ async fn application_redirect_uri_routes_create_list_and_delete() {
         .expect("body")
         .to_bytes();
     let listed_after_delete: Value = serde_json::from_slice(&list_after_delete_body).expect("json");
-    assert_eq!(listed_after_delete.as_array().map(Vec::len), Some(0));
+    assert_eq!(listed_after_delete.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        listed_after_delete[0]["redirectUri"],
+        "https://client.example/second-callback"
+    );
 }
 
 #[tokio::test]
@@ -320,6 +337,19 @@ async fn application_client_secret_rotate_returns_secret_and_updates_application
     let app = api::build_router(service);
     create_application_via_api(app.clone(), "creator-org", "application-secret-rotation").await;
 
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-secret-rotation/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(redirect.status(), StatusCode::CREATED);
+
     let rotate = app
         .clone()
         .oneshot(app_request(
@@ -342,7 +372,7 @@ async fn application_client_secret_rotate_returns_secret_and_updates_application
     assert!(
         rotated["clientSecret"]
             .as_str()
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(|value| value == "rotated-application-secret-rotation")
     );
     let rotated_at = rotated["secretRotatedAt"]
         .as_str()
@@ -363,6 +393,31 @@ async fn application_client_secret_rotate_returns_secret_and_updates_application
     let get_body = get.into_body().collect().await.expect("body").to_bytes();
     let application: Value = serde_json::from_slice(&get_body).expect("json");
     assert_eq!(application["secretRotatedAt"], rotated_at);
+}
+
+#[tokio::test]
+async fn application_client_secret_rotate_requires_provisioned_rauthy_client() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(
+        app.clone(),
+        "creator-org",
+        "application-secret-not-provisioned",
+    )
+    .await;
+
+    let rotate = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-secret-not-provisioned/client-secret/rotate",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("rotate response");
+    assert_eq!(rotate.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

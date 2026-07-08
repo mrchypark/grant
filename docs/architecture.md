@@ -57,7 +57,7 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
 5. service-to-service admin/authz API는 현재 `x-grant-master-key` header로 보호한다.
 
-Developer console foundation은 기존 organization/application 경계 안에 둔다. redirect URI와 client secret rotation metadata는 grant DB에만 반영하며, Rauthy Admin/DCR client provisioning은 아직 호출하지 않는다.
+Developer console은 기존 organization/application 경계 안에 둔다. 외부 provider는 Grant API만 호출하고, Grant backend가 제한된 Rauthy Admin API key로 해당 application의 Rauthy client redirect URI와 client secret rotation을 동기화한다.
 
 ## Voter And Learner
 

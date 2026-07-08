@@ -21,6 +21,7 @@ fn clear_grant_env() {
         "GRANT_RAUTHY_USERINFO_PATH",
         "GRANT_RAUTHY_CLIENT_ID",
         "GRANT_RAUTHY_CLIENT_SECRET",
+        "GRANT_RAUTHY_ADMIN_API_KEY",
         "GRANT_RAUTHY_CACHE_TTL_SECONDS",
         "GRANT_MASTER_KEY",
     ] {
@@ -55,6 +56,7 @@ fn loads_default_config() {
     let env = EnvGuard::new();
     env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
     env.set("GRANT_RAUTHY_CLIENT_SECRET", "default-secret");
+    env.set("GRANT_RAUTHY_ADMIN_API_KEY", "grant-admin-key");
     let cfg = AppConfig::from_env().expect("config");
 
     assert_eq!(cfg.server.bind_addr, "0.0.0.0:8080");
@@ -62,6 +64,7 @@ fn loads_default_config() {
     assert_eq!(cfg.auth.rauthy.base_url, "http://127.0.0.1:8080");
     assert_eq!(cfg.auth.rauthy.client_id, "grant".to_owned());
     assert_eq!(cfg.auth.rauthy.client_secret, "default-secret".to_owned());
+    assert_eq!(cfg.auth.rauthy.admin_api_key, "grant-admin-key".to_owned());
     assert_eq!(cfg.hiqlite.runtime_mode, RuntimeMode::Embedded);
     assert_eq!(cfg.hiqlite.local_node_role, LocalNodeRole::Voter);
     assert_eq!(cfg.hiqlite.default_read_consistency, ReadConsistency::Local);
@@ -75,6 +78,7 @@ fn loads_rauthy_auth_config_from_env() {
     env.set("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo");
     env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
     env.set("GRANT_RAUTHY_CLIENT_SECRET", "shared-secret");
+    env.set("GRANT_RAUTHY_ADMIN_API_KEY", "shared-admin-key");
     env.set("GRANT_RAUTHY_CACHE_TTL_SECONDS", "45");
 
     let cfg = AppConfig::from_env().expect("config");
@@ -84,6 +88,7 @@ fn loads_rauthy_auth_config_from_env() {
     assert_eq!(cfg.auth.rauthy.userinfo_path, "/auth/v1/oidc/userinfo");
     assert_eq!(cfg.auth.rauthy.client_id, "grant");
     assert_eq!(cfg.auth.rauthy.client_secret, "shared-secret".to_owned());
+    assert_eq!(cfg.auth.rauthy.admin_api_key, "shared-admin-key".to_owned());
     assert_eq!(cfg.auth.rauthy.cache_ttl_seconds, 45);
 }
 
@@ -105,10 +110,21 @@ fn missing_rauthy_client_secret_is_rejected() {
 }
 
 #[test]
+fn missing_rauthy_admin_api_key_is_rejected() {
+    let env = EnvGuard::new();
+    env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
+    env.set("GRANT_RAUTHY_CLIENT_SECRET", "shared-secret");
+
+    let err = AppConfig::from_env().expect_err("missing admin api key should fail");
+    assert!(err.to_string().contains("GRANT_RAUTHY_ADMIN_API_KEY"));
+}
+
+#[test]
 fn loads_split_runtime_config_from_env() {
     let env = EnvGuard::new();
     env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
     env.set("GRANT_RAUTHY_CLIENT_SECRET", "split-secret");
+    env.set("GRANT_RAUTHY_ADMIN_API_KEY", "split-admin-key");
     env.set("GRANT_RUNTIME_MODE", "split");
     env.set("GRANT_LOCAL_NODE_ROLE", "learner");
     env.set("GRANT_READ_CONSISTENCY", "prefer-strong");
@@ -146,6 +162,7 @@ fn rejects_invalid_runtime_mode() {
     unsafe {
         std::env::set_var("GRANT_RAUTHY_CLIENT_ID", "grant");
         std::env::set_var("GRANT_RAUTHY_CLIENT_SECRET", "runtime-secret");
+        std::env::set_var("GRANT_RAUTHY_ADMIN_API_KEY", "runtime-admin-key");
         std::env::set_var("GRANT_RUNTIME_MODE", "invalid");
     }
 
@@ -160,6 +177,7 @@ fn rejects_invalid_read_consistency() {
     unsafe {
         std::env::set_var("GRANT_RAUTHY_CLIENT_ID", "grant");
         std::env::set_var("GRANT_RAUTHY_CLIENT_SECRET", "consistency-secret");
+        std::env::set_var("GRANT_RAUTHY_ADMIN_API_KEY", "consistency-admin-key");
         std::env::set_var("GRANT_READ_CONSISTENCY", "eventual");
     }
 
@@ -174,6 +192,7 @@ fn rejects_invalid_local_node_role() {
     unsafe {
         std::env::set_var("GRANT_RAUTHY_CLIENT_ID", "grant");
         std::env::set_var("GRANT_RAUTHY_CLIENT_SECRET", "role-secret");
+        std::env::set_var("GRANT_RAUTHY_ADMIN_API_KEY", "role-admin-key");
         std::env::set_var("GRANT_LOCAL_NODE_ROLE", "observer");
     }
 
@@ -186,6 +205,7 @@ fn normalizes_remote_nodes_without_scheme_changes() {
     let env = EnvGuard::new();
     env.set("GRANT_RAUTHY_CLIENT_ID", "grant");
     env.set("GRANT_RAUTHY_CLIENT_SECRET", "remote-secret");
+    env.set("GRANT_RAUTHY_ADMIN_API_KEY", "remote-admin-key");
     env.set("GRANT_RUNTIME_MODE", "remote");
     env.set(
         "GRANT_REMOTE_NODES",

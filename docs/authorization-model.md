@@ -60,7 +60,7 @@ application은 조직이 만든 실행 주체다. 조직 owner/관리자는 appl
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
-developer console의 redirect URI와 client secret rotation은 기존 `applications`에 붙은 설정이다. 별도 partner 테이블을 만들지 않고, create/list/delete redirect URI와 secret rotate API는 기존 `organization.application.manage` 권한으로 보호한다. 현재 secret rotate는 grant 쪽 timestamp 갱신과 one-time secret 반환만 수행하며 Rauthy Admin/DCR에는 아직 반영하지 않는다.
+developer console의 redirect URI와 client secret rotation은 기존 `applications`에 붙은 설정이다. 별도 partner 테이블을 만들지 않고, create/list/delete redirect URI와 secret rotate API는 기존 `organization.application.manage` 권한으로 보호한다. Grant backend는 제한된 Rauthy Admin API key로 해당 application의 Rauthy client를 생성/수정하고, secret rotation 결과만 one-time 응답으로 반환한다.
 
 ## Authz API
 

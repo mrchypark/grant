@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, Method, Request, StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use domain::{RoleBinding, RoleBindingState, RoleBindingSubjectType, User};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
@@ -22,9 +22,12 @@ use infra::{
     runtime::HiqliteRuntime,
     service::AppService,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -34,11 +37,52 @@ pub const BOOTSTRAP_USER_NAME: &str = "Bootstrap User";
 pub const FIXED_TEST_TIME: &str = "2026-04-03T00:00:00Z";
 
 #[derive(Clone)]
-struct MockRauthyState;
+struct MockRauthyState {
+    clients: Arc<Mutex<HashMap<String, MockClient>>>,
+}
+
+#[derive(Clone)]
+struct MockClient {
+    id: String,
+    name: Option<String>,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+}
 
 #[derive(Debug, Deserialize)]
 struct IntrospectionForm {
     token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MockClientRequest {
+    id: String,
+    name: Option<String>,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MockClientUpdateRequest {
+    name: Option<String>,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MockClientResponse {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MockClientSecretResponse {
+    id: String,
+    confidential: bool,
+    secret: String,
 }
 
 pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
@@ -49,6 +93,7 @@ pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
             userinfo_path: "/auth/v1/oidc/userinfo".to_owned(),
             client_id: "grant".to_owned(),
             client_secret: "test-rauthy-secret".to_owned(),
+            admin_api_key: "grant-rauthy-api-key".to_owned(),
             cache_ttl_seconds: 30,
         },
     }
@@ -392,6 +437,91 @@ pub async fn start_mock_rauthy() -> String {
         )
     }
 
+    fn require_admin_api_key(headers: &HeaderMap) {
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(authorization, "API-Key grant-rauthy-api-key");
+    }
+
+    async fn create_client(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        Json(body): Json<MockClientRequest>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        assert!(!body.redirect_uris.is_empty());
+        let client = MockClient {
+            id: body.id.clone(),
+            name: body.name,
+            confidential: body.confidential,
+            redirect_uris: body.redirect_uris,
+        };
+        state
+            .clients
+            .lock()
+            .expect("clients")
+            .insert(body.id.clone(), client.clone());
+        Json(MockClientResponse {
+            id: client.id,
+            name: client.name,
+            enabled: true,
+            confidential: client.confidential,
+            redirect_uris: client.redirect_uris,
+        })
+    }
+
+    async fn update_client(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        axum::extract::Path(client_id): axum::extract::Path<String>,
+        Json(body): Json<MockClientUpdateRequest>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        let mut clients = state.clients.lock().expect("clients");
+        let Some(client) = clients.get_mut(&client_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        };
+        client.name = body.name;
+        client.confidential = body.confidential;
+        client.redirect_uris = body.redirect_uris;
+        Json(MockClientResponse {
+            id: client.id.clone(),
+            name: client.name.clone(),
+            enabled: true,
+            confidential: client.confidential,
+            redirect_uris: client.redirect_uris.clone(),
+        })
+        .into_response()
+    }
+
+    async fn rotate_client_secret(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        axum::extract::Path(client_id): axum::extract::Path<String>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        let clients = state.clients.lock().expect("clients");
+        let Some(client) = clients.get(&client_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        };
+        Json(MockClientSecretResponse {
+            id: client.id.clone(),
+            confidential: client.confidential,
+            secret: format!("rotated-{}", client.id),
+        })
+        .into_response()
+    }
+
     async fn introspect(
         State(_state): State<MockRauthyState>,
         headers: HeaderMap,
@@ -434,12 +564,21 @@ pub async fn start_mock_rauthy() -> String {
         }))
     }
 
+    let state = MockRauthyState {
+        clients: Arc::new(Mutex::new(HashMap::new())),
+    };
     let app = Router::new()
         .route("/auth/v1", get(login_ui))
         .route("/auth/v1/assets/{*path}", get(asset))
+        .route("/auth/v1/clients", post(create_client))
+        .route("/auth/v1/clients/{clientId}", put(update_client))
+        .route(
+            "/auth/v1/clients/{clientId}/secret",
+            put(rotate_client_secret),
+        )
         .route("/auth/v1/oidc/introspect", post(introspect))
         .route("/auth/v1/oidc/userinfo", get(userinfo))
-        .with_state(MockRauthyState);
+        .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind rauthy");

@@ -20,6 +20,7 @@ pub struct RauthyAuthConfig {
     pub userinfo_path: String,
     pub client_id: String,
     pub client_secret: String,
+    pub admin_api_key: String,
     pub cache_ttl_seconds: u64,
 }
 
@@ -110,6 +111,7 @@ fn auth_config() -> Result<AuthConfig> {
             userinfo_path: env_or("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo"),
             client_id: required_env("GRANT_RAUTHY_CLIENT_ID")?,
             client_secret: required_env("GRANT_RAUTHY_CLIENT_SECRET")?,
+            admin_api_key: required_env("GRANT_RAUTHY_ADMIN_API_KEY")?,
             cache_ttl_seconds: env::var("GRANT_RAUTHY_CACHE_TTL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())

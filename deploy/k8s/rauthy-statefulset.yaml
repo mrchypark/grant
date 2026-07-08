@@ -81,5 +81,7 @@ spec:
             items:
               - key: clients.json
                 path: clients.json
+              - key: api_keys.json
+                path: api_keys.json
         - name: rauthy-data
           emptyDir: {}
