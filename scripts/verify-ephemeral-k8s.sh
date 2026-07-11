@@ -49,39 +49,48 @@ assert_no_pvc_references() {
 assert_restricted_bootstrap() {
   manifest=$1
   label=$2
-  kubectl create --dry-run=client -f "${manifest}" -o json \
-    | jq -s -e '
-        [ .[] | select(.kind == "StatefulSet" and .metadata.name == "rauthy") ] as $sets
-        | ($sets | length) == 1
-          and $sets[0].spec.template.spec.securityContext.seccompProfile.type == "RuntimeDefault"
-          and ([ $sets[0].spec.template.spec.initContainers[]
-                 | select(.name == "render-bootstrap")
-                 | select(.securityContext.runAsUser == 10001
-                          and .securityContext.runAsGroup == 10001
-                          and .securityContext.runAsNonRoot == true
-                          and .securityContext.allowPrivilegeEscalation == false
-                          and (.securityContext.capabilities.drop | index("ALL") != null))
-                 | select(((.envFrom // []) | length) == 0)
-                 | select(([ .env[]
-                              | { name,
-                                  secretName: .valueFrom.secretKeyRef.name,
-                                  secretKey: .valueFrom.secretKeyRef.key } ]
-                            | sort_by(.name))
-                          == [ { name: "GRANT_RAUTHY_ADMIN_API_KEY",
-                                 secretName: "grant-secrets",
-                                 secretKey: "GRANT_RAUTHY_ADMIN_API_KEY" },
-                               { name: "GRANT_RAUTHY_CLIENT_SECRET",
-                                 secretName: "grant-secrets",
-                                 secretKey: "GRANT_RAUTHY_CLIENT_SECRET" } ]) ]
-               | length) == 1
-      ' >/dev/null \
-    || fail "${label} render does not harden the bootstrap init container"
+  rauthy_manifest="${TMP_DIR}/${label}-rauthy.yaml"
+  init_manifest="${TMP_DIR}/${label}-rauthy-init.yaml"
+  awk '
+    $0 == "  serviceName: rauthy-headless" { emit = 1 }
+    emit && /^---$/ { exit }
+    emit { print }
+  ' "${manifest}" >"${rauthy_manifest}"
+  awk '
+    $0 == "      initContainers:" { emit = 1; next }
+    emit && $0 == "      securityContext:" { exit }
+    emit { print }
+  ' "${rauthy_manifest}" >"${init_manifest}"
+
+  count_line() {
+    [ "$(grep -cFx "$2" "$1" || true)" -eq "$3" ]
+  }
+  if ! {
+    count_line "${rauthy_manifest}" '        seccompProfile:' 1 \
+    && count_line "${rauthy_manifest}" '          type: RuntimeDefault' 1 \
+    && count_line "${init_manifest}" '        name: render-bootstrap' 1 \
+    && count_line "${init_manifest}" '        securityContext:' 1 \
+    && count_line "${init_manifest}" '          runAsUser: 10001' 1 \
+    && count_line "${init_manifest}" '          runAsGroup: 10001' 1 \
+    && count_line "${init_manifest}" '          runAsNonRoot: true' 1 \
+    && count_line "${init_manifest}" '          allowPrivilegeEscalation: false' 1 \
+    && count_line "${init_manifest}" '            - ALL' 1 \
+    && count_line "${init_manifest}" '        envFrom:' 0 \
+    && [ "$(grep -c '^        - name: ' "${init_manifest}" || true)" -eq 2 ] \
+    && count_line "${init_manifest}" '        - name: GRANT_RAUTHY_CLIENT_SECRET' 1 \
+    && count_line "${init_manifest}" '        - name: GRANT_RAUTHY_ADMIN_API_KEY' 1 \
+    && count_line "${init_manifest}" '            secretKeyRef:' 2 \
+    && count_line "${init_manifest}" '              key: GRANT_RAUTHY_CLIENT_SECRET' 1 \
+    && count_line "${init_manifest}" '              key: GRANT_RAUTHY_ADMIN_API_KEY' 1 \
+    && count_line "${init_manifest}" '              name: grant-secrets' 2
+  }; then
+    fail "${label} render does not harden the bootstrap init container"
+  fi
 }
 
 verify_static() {
   need kubectl
   need grep
-  need jq
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-kustomize.XXXXXX")
 
   kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/production.yaml"
