@@ -71,7 +71,7 @@ grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을
 
 API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 grant 경계에 남긴다.
 
-`applications.rauthy_client_id`는 Rauthy client id와 연결되는 선택 필드다. developer console에서 redirect URI를 처음 추가하면 Grant backend가 같은 id로 Rauthy client를 생성하고, 이후 redirect URI 변경은 Rauthy client update로 동기화한다. `applications.secret_rotated_at`은 Rauthy client secret이 마지막으로 회전된 시각만 저장한다. secret 원문은 저장하지 않고 rotate 응답에서 한 번만 반환한다.
+`applications.rauthy_client_id`는 Rauthy client id와 연결된다. 기존 application은 schema migration에서 application id로 backfill된다. developer console에서 redirect URI를 처음 추가하면 Grant backend가 같은 id로 Rauthy client를 생성하고, 이후 application 또는 redirect URI 변경은 Rauthy client update로 동기화한다. `applications.secret_rotated_at`은 Rauthy client secret이 마지막으로 회전된 시각만 저장한다. secret 원문은 저장하지 않고 rotate 응답에서 한 번만 반환한다.
 
 `application_redirect_uris`는 application별 허용 redirect URI 목록이다. key는 `(application_id, redirect_uri)`이고, API에서는 `http`/`https` scheme과 non-empty host만 허용한다.
 

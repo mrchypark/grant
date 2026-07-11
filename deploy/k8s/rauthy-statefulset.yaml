@@ -83,5 +83,12 @@ spec:
                 path: clients.json
               - key: api_keys.json
                 path: api_keys.json
-        - name: rauthy-data
-          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: rauthy-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

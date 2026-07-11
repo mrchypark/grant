@@ -210,6 +210,15 @@ impl Database {
             .await?;
         self.add_column_if_missing("applications", "secret_rotated_at", "TEXT")
             .await?;
+        self.runtime
+            .batch(
+                "UPDATE applications
+                 SET rauthy_client_id = id
+                 WHERE rauthy_client_id IS NULL OR TRIM(rauthy_client_id) = '';"
+                    .to_owned(),
+            )
+            .await
+            .context("backfill application Rauthy client ids")?;
         self.migrate_actions_provider_scoped_uniqueness().await?;
         self.migrate_legacy_account_organization_authorization()
             .await?;

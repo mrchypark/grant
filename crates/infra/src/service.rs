@@ -533,6 +533,7 @@ impl AppService {
                 Some(ReadConsistency::Strong),
             )
             .await?;
+        let previous = existing.clone();
         let slug = require_non_empty("slug", &input.slug)?;
         let slug_changed = existing.slug != slug;
         let application = Application {
@@ -550,9 +551,27 @@ impl AppService {
             secret_rotated_at: existing.secret_rotated_at,
             created_by_user_id: existing.created_by_user_id,
         };
+        let redirect_uris = self
+            .db
+            .list_application_redirect_uris_with_consistency(
+                application_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?
+            .into_iter()
+            .map(|item| item.redirect_uri)
+            .collect::<Vec<_>>();
         self.db
             .update_application(&application, slug_changed)
             .await?;
+        if !redirect_uris.is_empty()
+            && let Err(err) = self
+                .sync_rauthy_application_client(&application, redirect_uris, false)
+                .await
+        {
+            let _ = self.db.update_application(&previous, slug_changed).await;
+            return Err(err);
+        }
         Ok(application)
     }
 
@@ -1617,7 +1636,7 @@ fn normalize_redirect_uri(value: &str) -> Result<String> {
         ));
     }
     let authority = rest
-        .split(|ch| matches!(ch, '/' | '?' | '#'))
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or_default()
         .rsplit('@')

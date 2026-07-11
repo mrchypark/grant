@@ -331,6 +331,55 @@ async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
 }
 
 #[tokio::test]
+async fn application_update_sync_failure_rolls_back_local_state() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-sync-rollback";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(redirect.status(), StatusCode::CREATED);
+
+    let update = app
+        .oneshot(app_request(
+            Method::PUT,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "slug": "sync-rollback",
+                "name": "reject-sync",
+                "applicationType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": false
+            })),
+        ))
+        .await
+        .expect("update response");
+    assert_eq!(update.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let stored = db
+        .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+        .await
+        .expect("stored application");
+    assert_eq!(stored.name, application_id);
+    assert!(stored.active);
+}
+
+#[tokio::test]
 async fn application_client_secret_rotate_returns_secret_and_updates_application() {
     let (service, db, _dir) = test_service().await;
     seed_application_manager(&db, "creator-org").await;

@@ -479,6 +479,13 @@ pub async fn start_mock_rauthy() -> String {
         Json(body): Json<MockClientUpdateRequest>,
     ) -> impl IntoResponse {
         require_admin_api_key(&headers);
+        if body.name.as_deref() == Some("reject-sync") {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "sync rejected" })),
+            )
+                .into_response();
+        }
         let mut clients = state.clients.lock().expect("clients");
         let Some(client) = clients.get_mut(&client_id) else {
             return (

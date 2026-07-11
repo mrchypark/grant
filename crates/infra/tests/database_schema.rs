@@ -795,6 +795,14 @@ async fn ensure_schema_adds_developer_console_columns_to_existing_applications()
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            INSERT INTO applications (
+                id, organization_id, slug, name, description, application_type, app_type,
+                first_party, consent_policy, active, created_by_user_id, created_at, updated_at
+            ) VALUES (
+                'legacy-app', 'legacy-org', 'legacy-app', 'Legacy App', NULL, 'confidential',
+                'web', 0, 'explicit', 1, 'legacy-user',
+                '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'
+            );
             "#
             .to_owned(),
         )
@@ -807,4 +815,9 @@ async fn ensure_schema_adds_developer_console_columns_to_existing_applications()
     let columns = support::table_columns(&runtime, "applications").await;
     assert!(columns.contains(&"rauthy_client_id".to_owned()));
     assert!(columns.contains(&"secret_rotated_at".to_owned()));
+    let application = db
+        .get_application_with_consistency("legacy-app", Some(ReadConsistency::Strong))
+        .await
+        .expect("legacy application");
+    assert_eq!(application.rauthy_client_id.as_deref(), Some("legacy-app"));
 }

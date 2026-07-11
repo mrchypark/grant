@@ -66,6 +66,7 @@ struct RauthyIdentity {
 #[derive(Debug, Deserialize)]
 struct RauthyIntrospectionResponse {
     sub: String,
+    exp: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,10 +244,11 @@ impl RauthyResolver {
                 return Err(error).context("Rauthy introspect returned error status");
             }
         };
-        let identity = self.identity_from_introspection(token, response).await?;
-        self.write_cache(cache_key, identity.clone()).await;
+        let (identity, ttl) = self.identity_from_introspection(token, response).await?;
+        self.write_cache_until(cache_key, identity.clone(), Instant::now() + ttl)
+            .await;
         if persist_shared_cache {
-            self.write_shared_cache(db, token, &identity).await?;
+            self.write_shared_cache(db, token, &identity, ttl).await?;
         }
         Ok(identity)
     }
@@ -265,8 +267,9 @@ impl RauthyResolver {
         let response = response
             .error_for_status()
             .context("Rauthy introspect returned error status")?;
-        let identity = self.identity_from_introspection(token, response).await?;
-        self.write_cache(cache_key, identity.clone()).await;
+        let (identity, ttl) = self.identity_from_introspection(token, response).await?;
+        self.write_cache_until(cache_key, identity.clone(), Instant::now() + ttl)
+            .await;
         Ok(identity)
     }
 
@@ -284,9 +287,11 @@ impl RauthyResolver {
         &self,
         token: &str,
         response: reqwest::Response,
-    ) -> Result<RauthyIdentity> {
+    ) -> Result<(RauthyIdentity, Duration)> {
         let token_info = parse_introspection_response(response).await?;
-        self.fetch_userinfo(token, &token_info.sub).await
+        let ttl = cache_ttl_for_exp(self.cache_ttl, token_info.exp, Utc::now().timestamp())?;
+        let identity = self.fetch_userinfo(token, &token_info.sub).await?;
+        Ok((identity, ttl))
     }
 
     async fn fetch_userinfo(&self, token: &str, expected_sub: &str) -> Result<RauthyIdentity> {
@@ -309,7 +314,7 @@ impl RauthyResolver {
         if payload.sub != expected_sub && payload.id.as_deref() != Some(expected_sub) {
             anyhow::bail!("unauthorized: rauthy userinfo subject mismatch");
         }
-        let email = payload.email.filter(|value| !value.trim().is_empty());
+        let email = verified_email(payload.email, payload.email_verified);
         let composed_name = display_name_from_parts(
             payload.given_name.as_deref(),
             payload.family_name.as_deref(),
@@ -322,7 +327,6 @@ impl RauthyResolver {
             Some(&payload.sub),
         ])
         .unwrap_or_else(|| "Rauthy User".to_owned());
-        let _ = payload.email_verified;
         Ok(RauthyIdentity {
             external_user_id: payload.sub,
             email,
@@ -338,11 +342,6 @@ impl RauthyResolver {
             return None;
         }
         Some(cached.identity.clone())
-    }
-
-    async fn write_cache(&self, key: String, identity: RauthyIdentity) {
-        self.write_cache_until(key, identity, Instant::now() + self.cache_ttl)
-            .await;
     }
 
     async fn write_cache_until(&self, key: String, identity: RauthyIdentity, expires_at: Instant) {
@@ -397,9 +396,10 @@ impl RauthyResolver {
         db: &Database,
         token: &str,
         identity: &RauthyIdentity,
+        ttl: Duration,
     ) -> Result<()> {
         let token_hash = token_cache_key(token);
-        let expires_at = Utc::now() + ChronoDuration::seconds(self.cache_ttl.as_secs() as i64);
+        let expires_at = Utc::now() + ChronoDuration::seconds(ttl.as_secs() as i64);
         db.put_cached_external_identity(
             &token_hash,
             &CachedExternalIdentity {
@@ -456,8 +456,10 @@ async fn parse_introspection_response(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("unauthorized: rauthy token has no subject"))?
         .to_owned();
-    let _ = payload.exp;
-    Ok(RauthyIntrospectionResponse { sub })
+    Ok(RauthyIntrospectionResponse {
+        sub,
+        exp: payload.exp,
+    })
 }
 
 fn first_non_empty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
@@ -484,6 +486,25 @@ fn display_name_from_parts(given_name: Option<&str>, family_name: Option<&str>) 
     }
 }
 
+fn verified_email(email: Option<String>, verified: Option<bool>) -> Option<String> {
+    verified
+        .is_some_and(|verified| verified)
+        .then_some(email)
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn cache_ttl_for_exp(configured: Duration, exp: Option<i64>, now: i64) -> Result<Duration> {
+    let Some(exp) = exp else {
+        return Ok(configured);
+    };
+    let remaining = exp - now;
+    if remaining <= 0 {
+        anyhow::bail!("unauthorized: rauthy token is expired");
+    }
+    Ok(configured.min(Duration::from_secs(remaining as u64)))
+}
+
 pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Error {
     let message = err.to_string();
     if message.contains("unauthorized:") || message.contains("forbidden:") {
@@ -502,9 +523,12 @@ fn token_cache_key(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_strong_identity_sync_error, should_sync_identity};
+    use super::{
+        cache_ttl_for_exp, map_strong_identity_sync_error, should_sync_identity, verified_email,
+    };
     use crate::config::ReadConsistency;
     use anyhow::anyhow;
+    use std::time::Duration;
 
     #[test]
     fn wraps_internal_identity_sync_failures_with_quorum_message() {
@@ -527,5 +551,26 @@ mod tests {
         assert!(should_sync_identity(Some(&ReadConsistency::PreferStrong)));
         assert!(!should_sync_identity(Some(&ReadConsistency::Local)));
         assert!(!should_sync_identity(None));
+    }
+
+    #[test]
+    fn only_verified_email_is_eligible_for_identity_linking() {
+        assert_eq!(
+            verified_email(Some("user@example.com".to_owned()), Some(true)).as_deref(),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            verified_email(Some("user@example.com".to_owned()), Some(false)),
+            None
+        );
+    }
+
+    #[test]
+    fn token_expiry_caps_cache_ttl() {
+        assert_eq!(
+            cache_ttl_for_exp(Duration::from_secs(30), Some(110), 100).expect("ttl"),
+            Duration::from_secs(10)
+        );
+        assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(100), 100).is_err());
     }
 }
