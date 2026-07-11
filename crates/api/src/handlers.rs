@@ -50,7 +50,7 @@ pub(crate) async fn get_current_user(
             read_consistency,
         )
         .await
-        .map_err(ApiError::from_domain)?;
+        .map_err(ApiError::from_auth)?;
     Ok(Json(CurrentUserResponse {
         provider: current.provider,
         external_user_id: current.external_user_id,

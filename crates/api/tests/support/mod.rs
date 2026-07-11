@@ -578,9 +578,14 @@ pub async fn start_mock_rauthy() -> String {
                     .and_then(|value| value.strip_prefix("bearer "))
             })
             .unwrap_or("anonymous");
+        let sub = if token == "userinfo-sub-mismatch" {
+            "different-subject"
+        } else {
+            token
+        };
         Json(json!({
             "id": token,
-            "sub": token,
+            "sub": sub,
             "name": token,
             "email": format!("{token}@rauthy.test"),
             "email_verified": true,

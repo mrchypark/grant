@@ -70,7 +70,6 @@ struct RauthyIntrospectionResponse {
 
 #[derive(Debug, Deserialize)]
 struct RauthyUserinfoResponse {
-    id: Option<String>,
     sub: String,
     name: Option<String>,
     email: Option<String>,
@@ -310,7 +309,7 @@ impl RauthyResolver {
             .json()
             .await
             .context("decode Rauthy userinfo response")?;
-        if payload.sub != expected_sub && payload.id.as_deref() != Some(expected_sub) {
+        if payload.sub != expected_sub {
             anyhow::bail!("unauthorized: rauthy userinfo subject mismatch");
         }
         let email = verified_email(payload.email, payload.email_verified);
@@ -323,11 +322,11 @@ impl RauthyResolver {
             payload.preferred_username.as_deref(),
             composed_name.as_deref(),
             email.as_deref(),
-            Some(&payload.sub),
+            Some(expected_sub),
         ])
         .unwrap_or_else(|| "Rauthy User".to_owned());
         Ok(RauthyIdentity {
-            external_user_id: payload.sub,
+            external_user_id: expected_sub.to_owned(),
             email,
             display_name,
             active: true,
@@ -501,7 +500,7 @@ fn cache_ttl_for_exp(configured: Duration, exp: Option<i64>, now: i64) -> Result
         .checked_sub(now)
         .ok_or_else(|| anyhow!("unauthorized: invalid token expiration"))?;
     if remaining <= 0 {
-        anyhow::bail!("unauthorized: rauthy token is expired");
+        return Ok(Duration::ZERO);
     }
     Ok(configured.min(Duration::from_secs(remaining as u64)))
 }
@@ -572,7 +571,10 @@ mod tests {
             cache_ttl_for_exp(Duration::from_secs(30), Some(110), 100).expect("ttl"),
             Duration::from_secs(10)
         );
-        assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(100), 100).is_err());
+        assert_eq!(
+            cache_ttl_for_exp(Duration::from_secs(30), Some(100), 100).expect("ttl"),
+            Duration::ZERO
+        );
         assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(i64::MAX), i64::MIN).is_err());
     }
 }

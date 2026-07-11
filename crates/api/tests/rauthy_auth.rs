@@ -227,6 +227,47 @@ async fn current_user_returns_local_user_and_active_organizations() {
 }
 
 #[tokio::test]
+async fn current_user_rejects_userinfo_subject_mismatch() {
+    let (service, _db, runtime, _db_dir) = build_service().await;
+    let app = api::build_router(service);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header(
+                    "authorization",
+                    support::auth::bearer_header("userinfo-sub-mismatch"),
+                )
+                .header("x-organization-id", "bootstrap-user")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{json}");
+    assert_eq!(
+        query_count(
+            &runtime,
+            "SELECT COUNT(*) as count FROM user_identities WHERE provider = $1",
+            vec!["rauthy".into()],
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn rauthy_identity_relinks_same_email_after_restore() {
     let (service, db, runtime, _db_dir) = build_service().await;
     db.upsert_organization_with_owner("restore-org", "Restore Org", None, "Restore Org")
