@@ -8,12 +8,21 @@ NAMESPACE="${NAMESPACE:-grant}"
 IMAGE_NAME="${IMAGE_NAME:-grant:local}"
 RAUTHY_IMAGE="${RAUTHY_IMAGE:-ghcr.io/sebadob/rauthy:0.36.0}"
 GRANT_MASTER_KEY="${GRANT_MASTER_KEY:-local-dev-master-key}"
+GRANT_RAUTHY_CLIENT_ID="${GRANT_RAUTHY_CLIENT_ID:-grant}"
+GRANT_RAUTHY_CLIENT_SECRET="${GRANT_RAUTHY_CLIENT_SECRET:-devRauthyClientSecret0000000000000000000000000000000000000000000}"
+GRANT_RAUTHY_ADMIN_API_KEY="${GRANT_RAUTHY_ADMIN_API_KEY:-grant-admin\$devRauthyAdminApiKeySecret000000000000000000000000000000000000000}"
+KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/overlays/ephemeral}"
 BUILD_NETWORK="${BUILD_NETWORK:-default}"
 RESET_CLUSTER="${RESET_CLUSTER:-1}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
 CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"
 CI_SKIP_CLUSTER_DELETE_ON_FAILURE="${CI_SKIP_CLUSTER_DELETE_ON_FAILURE:-0}"
+
+if [[ "${NAMESPACE}" != "grant" ]]; then
+  echo "local validation uses a Kustomization fixed to namespace grant; got NAMESPACE=${NAMESPACE}" >&2
+  exit 1
+fi
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -67,6 +76,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+run_phase verify-kubernetes-storage-profiles \
+  sh "${ROOT_DIR}/scripts/verify-ephemeral-k8s.sh" static
+
 log_storage_state
 run_phase build-grant-image \
   docker buildx build --load --network "${BUILD_NETWORK}" -t "${IMAGE_NAME}" .
@@ -93,4 +105,18 @@ run_phase bootstrap-vind-cluster \
   IMAGE_NAME="${IMAGE_NAME}" \
   RAUTHY_IMAGE="${RAUTHY_IMAGE}" \
   GRANT_MASTER_KEY="${GRANT_MASTER_KEY}" \
+  GRANT_RAUTHY_CLIENT_ID="${GRANT_RAUTHY_CLIENT_ID}" \
+  GRANT_RAUTHY_CLIENT_SECRET="${GRANT_RAUTHY_CLIENT_SECRET}" \
+  GRANT_RAUTHY_ADMIN_API_KEY="${GRANT_RAUTHY_ADMIN_API_KEY}" \
+  KUSTOMIZE_DIR="${KUSTOMIZE_DIR}" \
   bash "${ROOT_DIR}/scripts/vind-exec.sh" bash "${ROOT_DIR}/scripts/vind-bootstrap.sh"
+
+run_phase verify-ephemeral-runtime \
+  env \
+  CLUSTER_NAME="${CLUSTER_NAME}" \
+  NAMESPACE="${NAMESPACE}" \
+  GRANT_RAUTHY_CLIENT_ID="${GRANT_RAUTHY_CLIENT_ID}" \
+  GRANT_RAUTHY_CLIENT_SECRET="${GRANT_RAUTHY_CLIENT_SECRET}" \
+  GRANT_RAUTHY_ADMIN_API_KEY="${GRANT_RAUTHY_ADMIN_API_KEY}" \
+  REPLACE_RAUTHY_POD=1 \
+  bash "${ROOT_DIR}/scripts/vind-exec.sh" sh "${ROOT_DIR}/scripts/verify-ephemeral-k8s.sh" live

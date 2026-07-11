@@ -334,9 +334,10 @@ impl RauthyResolver {
     }
 
     async fn read_cache(&self, key: &str) -> Option<RauthyIdentity> {
-        let cache = self.cache.lock().expect("Rauthy auth cache poisoned");
+        let mut cache = self.cache.lock().expect("Rauthy auth cache poisoned");
         let cached = cache.get(key)?;
         if cached.expires_at <= Instant::now() {
+            cache.remove(key);
             return None;
         }
         Some(cached.identity.clone())
@@ -344,6 +345,8 @@ impl RauthyResolver {
 
     async fn write_cache_until(&self, key: String, identity: RauthyIdentity, expires_at: Instant) {
         let mut cache = self.cache.lock().expect("Rauthy auth cache poisoned");
+        let now = Instant::now();
+        cache.retain(|_, cached| cached.expires_at > now);
         cache.insert(
             key,
             CachedRauthyIdentity {
@@ -524,11 +527,12 @@ fn token_cache_key(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_ttl_for_exp, map_strong_identity_sync_error, should_sync_identity, verified_email,
+        CachedRauthyIdentity, RauthyIdentity, cache_ttl_for_exp, map_strong_identity_sync_error,
+        should_sync_identity, verified_email,
     };
-    use crate::config::ReadConsistency;
+    use crate::config::{AuthConfig, RauthyAuthConfig, ReadConsistency};
     use anyhow::anyhow;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn wraps_internal_identity_sync_failures_with_quorum_message() {
@@ -576,5 +580,46 @@ mod tests {
             Duration::ZERO
         );
         assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(i64::MAX), i64::MIN).is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_write_sweeps_unqueried_expired_entries() {
+        let resolver = super::AuthResolver::new(&AuthConfig {
+            rauthy: RauthyAuthConfig {
+                base_url: "http://localhost".to_owned(),
+                introspect_path: "/introspect".to_owned(),
+                userinfo_path: "/userinfo".to_owned(),
+                client_id: "client".to_owned(),
+                client_secret: "secret".to_owned(),
+                admin_api_key: "admin".to_owned(),
+                cache_ttl_seconds: 30,
+            },
+        })
+        .rauthy;
+        let identity = RauthyIdentity {
+            external_user_id: "user".to_owned(),
+            email: None,
+            display_name: "User".to_owned(),
+            active: true,
+        };
+        resolver.cache.lock().expect("cache").insert(
+            "expired".to_owned(),
+            CachedRauthyIdentity {
+                identity: identity.clone(),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        resolver
+            .write_cache_until(
+                "fresh".to_owned(),
+                identity,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await;
+
+        let cache = resolver.cache.lock().expect("cache");
+        assert!(!cache.contains_key("expired"));
+        assert!(cache.contains_key("fresh"));
     }
 }

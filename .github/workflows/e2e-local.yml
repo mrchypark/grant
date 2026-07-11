@@ -124,6 +124,7 @@ jobs:
             scripts/vind-cluster.sh
             scripts/ci-local.sh
             scripts/vind-bootstrap.sh
+            scripts/verify-ephemeral-k8s.sh
             scripts/gke-skaffold-run.sh
             scripts/k8s-secret-helpers.sh
           )

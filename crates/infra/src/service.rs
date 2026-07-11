@@ -767,6 +767,12 @@ impl AppService {
         create: bool,
     ) -> Result<()> {
         let client_id = rauthy_client_id(application)?;
+        let flows_enabled = if matches!(application.application_type, ApplicationType::Confidential)
+        {
+            vec!["authorization_code", "client_credentials", "refresh_token"]
+        } else {
+            vec!["authorization_code", "refresh_token"]
+        };
         let response = if create {
             self.http_client
                 .post(self.rauthy_admin_url("/auth/v1/clients"))
@@ -799,7 +805,7 @@ impl AppService {
                     "post_logout_redirect_uris": null,
                     "allowed_origins": null,
                     "enabled": application.active,
-                    "flows_enabled": ["authorization_code", "client_credentials", "refresh_token"],
+                    "flows_enabled": flows_enabled,
                     "access_token_alg": "EdDSA",
                     "id_token_alg": "EdDSA",
                     "auth_code_lifetime": 60,
@@ -1675,6 +1681,9 @@ fn normalize_redirect_uri(value: &str) -> Result<String> {
         return Err(bad_request_error(
             "redirectUri must use http or https scheme and include a host",
         ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(bad_request_error("redirectUri must not contain a fragment"));
     }
     Ok(parsed.to_string())
 }

@@ -163,6 +163,16 @@ async fn create_application_via_api(
     organization_id: &str,
     application_id: &str,
 ) {
+    create_application_with_type_via_api(app, organization_id, application_id, "confidential")
+        .await;
+}
+
+async fn create_application_with_type_via_api(
+    app: axum::Router,
+    organization_id: &str,
+    application_id: &str,
+    application_type: &str,
+) {
     let response = app
         .oneshot(app_request(
             Method::POST,
@@ -173,7 +183,7 @@ async fn create_application_via_api(
                 "id": application_id,
                 "slug": application_id.trim_start_matches("application-"),
                 "name": application_id,
-                "applicationType": "confidential",
+                "applicationType": application_type,
                 "appType": "web",
                 "firstParty": false,
                 "consentPolicy": "explicit",
@@ -210,6 +220,34 @@ async fn seed_application_without_manage(
     })
     .await
     .expect("application");
+}
+
+#[tokio::test]
+async fn public_application_sync_excludes_client_credentials_flow() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-public-client";
+    create_application_with_type_via_api(app.clone(), "creator-org", application_id, "public")
+        .await;
+
+    for redirect_uri in [
+        "https://public.example/callback",
+        "https://public.example/second-callback",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": redirect_uri })),
+            ))
+            .await
+            .expect("create public redirect uri response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
 }
 
 #[tokio::test]
@@ -328,6 +366,7 @@ async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
         "https:///callback",
         "https://client.example:bad/callback",
         "https://[::1/callback",
+        "https://client.example/callback#fragment",
         "http://",
     ] {
         let response = app

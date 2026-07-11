@@ -67,6 +67,7 @@ struct MockClientUpdateRequest {
     name: Option<String>,
     confidential: bool,
     redirect_uris: Vec<String>,
+    flows_enabled: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -497,6 +498,12 @@ pub async fn start_mock_rauthy() -> String {
         Json(body): Json<MockClientUpdateRequest>,
     ) -> impl IntoResponse {
         require_admin_api_key(&headers);
+        let expected_flows = if body.confidential {
+            vec!["authorization_code", "client_credentials", "refresh_token"]
+        } else {
+            vec!["authorization_code", "refresh_token"]
+        };
+        assert_eq!(body.flows_enabled, expected_flows);
         if body.name.as_deref() == Some("reject-sync") {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,

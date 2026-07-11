@@ -6,9 +6,14 @@ CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 NAMESPACE="${NAMESPACE:-grant}"
 IMAGE_NAME="${IMAGE_NAME:-grant:local}"
 RAUTHY_IMAGE="${RAUTHY_IMAGE:-ghcr.io/sebadob/rauthy:0.36.0}"
-KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/k8s}"
+KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/overlays/ephemeral}"
 KUBECONTEXT="${KUBECONTEXT:-}"
 VIND_EXEC_ACTIVE="${VIND_EXEC_ACTIVE:-0}"
+
+if [[ "${NAMESPACE}" != "grant" ]]; then
+  echo "vind bootstrap uses a Kustomization fixed to namespace grant; got NAMESPACE=${NAMESPACE}" >&2
+  exit 1
+fi
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -113,10 +118,6 @@ docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 || docker pull "${RAUTHY_
 ensure_runtime_image "${IMAGE_NAME}"
 ensure_runtime_image "${RAUTHY_IMAGE}"
 
-apply_resource() {
-  kubectl -n "${NAMESPACE}" apply -f "$1"
-}
-
 dump_rauthy_debug() {
   echo "[rauthy-debug] statefulset state" >&2
   kubectl -n "${NAMESPACE}" get deploy,pods >&2 || true
@@ -153,21 +154,13 @@ wait_for_resource() {
 
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 apply_grant_secret
+kubectl apply -k "${KUSTOMIZE_DIR}"
 
-apply_resource "${KUSTOMIZE_DIR}/rauthy-config.yaml"
-apply_resource "${KUSTOMIZE_DIR}/rauthy-service.yaml"
-apply_resource "${KUSTOMIZE_DIR}/rauthy-statefulset.yaml"
 wait_for_resource statefulset rauthy
 if ! kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m; then
   dump_rauthy_debug
   exit 1
 fi
-
-apply_resource "${KUSTOMIZE_DIR}/app-configmap.yaml"
-apply_resource "${KUSTOMIZE_DIR}/app-headless-service.yaml"
-apply_resource "${KUSTOMIZE_DIR}/app-service.yaml"
-apply_resource "${KUSTOMIZE_DIR}/app-pdb.yaml"
-apply_resource "${KUSTOMIZE_DIR}/app-statefulset.yaml"
 
 wait_for_resource statefulset grant-voter
 if ! kubectl -n "${NAMESPACE}" rollout status statefulset/grant-voter --timeout=15m; then
@@ -185,5 +178,5 @@ Rauthy Image: ${RAUTHY_IMAGE}
 
 Next:
   export GRANT_MASTER_KEY=${GRANT_MASTER_KEY}
-  kubectl -n ${NAMESPACE} port-forward svc/grant 18080:8080
+  kubectl -n ${NAMESPACE} port-forward svc/grant 18080:80
 EOF
