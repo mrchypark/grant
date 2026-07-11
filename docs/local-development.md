@@ -27,6 +27,10 @@ bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
 bash ./scripts/ci-local.sh
 ```
 
+Docker Compose와 Kubernetes bootstrap은 `GRANT_RAUTHY_CLIENT_SECRET` 및
+`GRANT_RAUTHY_ADMIN_API_KEY`에서 Rauthy bootstrap 파일을 생성한다. Grant와 Rauthy가 항상 같은
+credential을 사용하므로 두 값은 각각 64자 이상의 영숫자 secret을 사용해야 한다.
+
 ## 주요 스크립트
 
 - `scripts/ci-local.sh`

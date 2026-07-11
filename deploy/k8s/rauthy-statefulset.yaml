@@ -19,6 +19,26 @@ spec:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
       terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: render-bootstrap
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - /renderer/render-rauthy-bootstrap.sh
+            - /bootstrap-template
+            - /bootstrap
+          envFrom:
+            - secretRef:
+                name: grant-secrets
+          volumeMounts:
+            - name: rauthy-bootstrap-template
+              mountPath: /bootstrap-template
+              readOnly: true
+            - name: rauthy-bootstrap-renderer
+              mountPath: /renderer
+              readOnly: true
+            - name: rauthy-bootstrap
+              mountPath: /bootstrap
       containers:
         - name: rauthy
           image: ghcr.io/sebadob/rauthy:0.36.0
@@ -76,6 +96,8 @@ spec:
           secret:
             secretName: rauthy-config
         - name: rauthy-bootstrap
+          emptyDir: {}
+        - name: rauthy-bootstrap-template
           secret:
             secretName: rauthy-config
             items:
@@ -83,6 +105,10 @@ spec:
                 path: clients.json
               - key: api_keys.json
                 path: api_keys.json
+        - name: rauthy-bootstrap-renderer
+          configMap:
+            name: rauthy-bootstrap-renderer
+            defaultMode: 0555
   volumeClaimTemplates:
     - metadata:
         name: rauthy-data

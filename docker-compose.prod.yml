@@ -9,8 +9,15 @@ services:
         mkdir -p /app/data
         chown -R 10001:10001 /app/data
         chmod -R 0770 /app/data
+        sh /renderer/render-rauthy-bootstrap.sh /bootstrap-template /app/bootstrap
+    environment:
+      GRANT_RAUTHY_CLIENT_SECRET: ${GRANT_RAUTHY_CLIENT_SECRET}
+      GRANT_RAUTHY_ADMIN_API_KEY: ${GRANT_RAUTHY_ADMIN_API_KEY}
     volumes:
       - rauthy_data:/app/data
+      - rauthy_bootstrap:/app/bootstrap
+      - ./deploy/rauthy:/bootstrap-template:ro
+      - ./deploy/k8s/render-rauthy-bootstrap.sh:/renderer/render-rauthy-bootstrap.sh:ro
     read_only: true
     cap_drop:
       - ALL
@@ -28,7 +35,7 @@ services:
     volumes:
       - rauthy_data:/app/data
       - ./deploy/rauthy/config.toml:/app/config.toml:ro
-      - ./deploy/rauthy:/app/bootstrap:ro
+      - rauthy_bootstrap:/app/bootstrap:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
     expose:
@@ -105,4 +112,5 @@ services:
 
 volumes:
   rauthy_data:
+  rauthy_bootstrap:
   grant_data:

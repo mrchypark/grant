@@ -3,7 +3,7 @@
     "id": "grant",
     "name": "Grant",
     "secret": {
-      "Plain": "devRauthyClientSecret0000000000000000000000000000000000000000000"
+      "Plain": "__GRANT_RAUTHY_CLIENT_SECRET__"
     },
     "redirect_uris": [
       "http://localhost:8080/auth/callback"

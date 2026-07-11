@@ -43,7 +43,7 @@ stringData:
         "id": "grant",
         "name": "Grant",
         "secret": {
-          "Plain": "devRauthyClientSecret0000000000000000000000000000000000000000000"
+          "Plain": "__GRANT_RAUTHY_CLIENT_SECRET__"
         },
         "redirect_uris": [
           "http://localhost:18080/auth/callback"
@@ -80,10 +80,10 @@ stringData:
   api_keys.json: |
     [
       {
-        "name": "grant-admin",
+        "name": "__GRANT_RAUTHY_ADMIN_API_KEY_NAME__",
         "exp": 4070905200,
         "secret": {
-          "Plain": "devRauthyAdminApiKeySecret000000000000000000000000000000000000000"
+          "Plain": "__GRANT_RAUTHY_ADMIN_API_KEY_SECRET__"
         },
         "access": [
           {

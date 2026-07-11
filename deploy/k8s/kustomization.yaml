@@ -12,3 +12,7 @@ resources:
   - rauthy-statefulset.yaml
   - ingress.yaml
   - rauthy-config.yaml
+configMapGenerator:
+  - name: rauthy-bootstrap-renderer
+    files:
+      - render-rauthy-bootstrap.sh

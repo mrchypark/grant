@@ -1,9 +1,9 @@
 [
   {
-    "name": "grant-admin",
+    "name": "__GRANT_RAUTHY_ADMIN_API_KEY_NAME__",
     "exp": 4070905200,
     "secret": {
-      "Plain": "devRauthyAdminApiKeySecret000000000000000000000000000000000000000"
+      "Plain": "__GRANT_RAUTHY_ADMIN_API_KEY_SECRET__"
     },
     "access": [
       {

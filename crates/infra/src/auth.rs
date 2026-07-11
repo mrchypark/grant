@@ -10,10 +10,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
 
 const AUTH_PROVIDER: &str = "rauthy";
 
@@ -336,7 +335,7 @@ impl RauthyResolver {
     }
 
     async fn read_cache(&self, key: &str) -> Option<RauthyIdentity> {
-        let cache = self.cache.lock().await;
+        let cache = self.cache.lock().expect("Rauthy auth cache poisoned");
         let cached = cache.get(key)?;
         if cached.expires_at <= Instant::now() {
             return None;
@@ -345,7 +344,7 @@ impl RauthyResolver {
     }
 
     async fn write_cache_until(&self, key: String, identity: RauthyIdentity, expires_at: Instant) {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.lock().expect("Rauthy auth cache poisoned");
         cache.insert(
             key,
             CachedRauthyIdentity {
