@@ -15,6 +15,8 @@ use std::{
 };
 
 const AUTH_PROVIDER: &str = "rauthy";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPrincipal {
@@ -89,7 +91,11 @@ impl AuthResolver {
                 client_id: cfg.rauthy.client_id.clone(),
                 client_secret: cfg.rauthy.client_secret.clone(),
                 cache_ttl: Duration::from_secs(cfg.rauthy.cache_ttl_seconds),
-                client: Client::new(),
+                client: Client::builder()
+                    .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                    .timeout(HTTP_REQUEST_TIMEOUT)
+                    .build()
+                    .expect("build Rauthy auth client"),
                 cache: Arc::new(Mutex::new(HashMap::new())),
             },
         }
@@ -226,7 +232,11 @@ impl RauthyResolver {
                 {
                     return Ok(identity);
                 }
-                return Err(error).context("call Rauthy introspect");
+                return Err(map_rauthy_request_error(
+                    "introspection",
+                    "call Rauthy introspect",
+                    error,
+                ));
             }
         };
         reject_unauthorized_introspection(&response)?;
@@ -257,10 +267,9 @@ impl RauthyResolver {
             return Ok(identity);
         }
 
-        let response = self
-            .send_introspection(token)
-            .await
-            .context("call Rauthy introspect")?;
+        let response = self.send_introspection(token).await.map_err(|error| {
+            map_rauthy_request_error("introspection", "call Rauthy introspect", error)
+        })?;
         reject_unauthorized_introspection(&response)?;
         let response = response
             .error_for_status()
@@ -300,15 +309,14 @@ impl RauthyResolver {
             .bearer_auth(token)
             .send()
             .await
-            .context("call Rauthy userinfo")?;
+            .map_err(|error| map_rauthy_request_error("userinfo", "call Rauthy userinfo", error))?;
         reject_unauthorized_introspection(&response)?;
         let response = response
             .error_for_status()
             .context("Rauthy userinfo returned error status")?;
-        let payload: RauthyUserinfoResponse = response
-            .json()
-            .await
-            .context("decode Rauthy userinfo response")?;
+        let payload: RauthyUserinfoResponse = response.json().await.map_err(|error| {
+            map_rauthy_request_error("userinfo", "decode Rauthy userinfo response", error)
+        })?;
         if payload.sub != expected_sub {
             anyhow::bail!("unauthorized: rauthy userinfo subject mismatch");
         }
@@ -443,10 +451,13 @@ struct RauthyIntrospectionPayload {
 async fn parse_introspection_response(
     response: reqwest::Response,
 ) -> Result<RauthyIntrospectionResponse> {
-    let payload: RauthyIntrospectionPayload = response
-        .json()
-        .await
-        .context("decode Rauthy introspection response")?;
+    let payload: RauthyIntrospectionPayload = response.json().await.map_err(|error| {
+        map_rauthy_request_error(
+            "introspection",
+            "decode Rauthy introspection response",
+            error,
+        )
+    })?;
     if !payload.active {
         anyhow::bail!("unauthorized: rauthy token is not valid");
     }
@@ -461,6 +472,18 @@ async fn parse_introspection_response(
         sub,
         exp: payload.exp,
     })
+}
+
+fn map_rauthy_request_error(
+    operation: &str,
+    context: &'static str,
+    error: reqwest::Error,
+) -> anyhow::Error {
+    if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body() {
+        anyhow!("unavailable: Rauthy {operation} request failed")
+    } else {
+        anyhow::Error::new(error).context(context)
+    }
 }
 
 fn first_non_empty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {

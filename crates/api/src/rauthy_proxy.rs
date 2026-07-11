@@ -60,14 +60,14 @@ async fn proxy_rauthy_request(
         .body(body_bytes.clone())
         .send()
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(|err| upstream_failure(err.is_timeout()))?;
 
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
     let bytes = upstream_response
         .bytes()
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(|err| upstream_failure(err.is_timeout()))?;
 
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = StatusCode::from_u16(status.as_u16()).map_err(ApiError::internal)?;
@@ -79,4 +79,35 @@ async fn proxy_rauthy_request(
         response_headers.append(name, value.clone());
     }
     Ok(response)
+}
+
+fn upstream_failure(timed_out: bool) -> ApiError {
+    if timed_out {
+        ApiError {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            message: "Rauthy upstream request timed out".to_owned(),
+        }
+    } else {
+        ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: "Rauthy upstream request failed".to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_failure;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn classifies_upstream_failures_without_exposing_transport_details() {
+        let timeout = upstream_failure(true);
+        assert_eq!(timeout.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(timeout.message, "Rauthy upstream request timed out");
+
+        let transport = upstream_failure(false);
+        assert_eq!(transport.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(transport.message, "Rauthy upstream request failed");
+    }
 }

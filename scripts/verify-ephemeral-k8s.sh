@@ -46,9 +46,42 @@ assert_no_pvc_references() {
     || fail "${label} render does not use emptyDir for rauthy-data"
 }
 
+assert_restricted_bootstrap() {
+  manifest=$1
+  label=$2
+  kubectl create --dry-run=client -f "${manifest}" -o json \
+    | jq -s -e '
+        [ .[] | select(.kind == "StatefulSet" and .metadata.name == "rauthy") ] as $sets
+        | ($sets | length) == 1
+          and $sets[0].spec.template.spec.securityContext.seccompProfile.type == "RuntimeDefault"
+          and ([ $sets[0].spec.template.spec.initContainers[]
+                 | select(.name == "render-bootstrap")
+                 | select(.securityContext.runAsUser == 10001
+                          and .securityContext.runAsGroup == 10001
+                          and .securityContext.runAsNonRoot == true
+                          and .securityContext.allowPrivilegeEscalation == false
+                          and (.securityContext.capabilities.drop | index("ALL") != null))
+                 | select(((.envFrom // []) | length) == 0)
+                 | select(([ .env[]
+                              | { name,
+                                  secretName: .valueFrom.secretKeyRef.name,
+                                  secretKey: .valueFrom.secretKeyRef.key } ]
+                            | sort_by(.name))
+                          == [ { name: "GRANT_RAUTHY_ADMIN_API_KEY",
+                                 secretName: "grant-secrets",
+                                 secretKey: "GRANT_RAUTHY_ADMIN_API_KEY" },
+                               { name: "GRANT_RAUTHY_CLIENT_SECRET",
+                                 secretName: "grant-secrets",
+                                 secretKey: "GRANT_RAUTHY_CLIENT_SECRET" } ]) ]
+               | length) == 1
+      ' >/dev/null \
+    || fail "${label} render does not harden the bootstrap init container"
+}
+
 verify_static() {
   need kubectl
   need grep
+  need jq
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-kustomize.XXXXXX")
 
   kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/production.yaml"
@@ -57,6 +90,9 @@ verify_static() {
 
   grep -q 'volumeClaimTemplates:' "${TMP_DIR}/production.yaml" \
     || fail "production render must retain the Rauthy PVC template"
+  assert_restricted_bootstrap "${TMP_DIR}/production.yaml" production
+  assert_restricted_bootstrap "${TMP_DIR}/ephemeral.yaml" ephemeral
+  assert_restricted_bootstrap "${TMP_DIR}/ied.yaml" ied
   assert_no_pvc_references "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_no_pvc_references "${TMP_DIR}/ied.yaml" ied
   grep -Eq 'name: rauthy-bootstrap-renderer-[a-z0-9]+' "${TMP_DIR}/ephemeral.yaml" \

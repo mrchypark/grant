@@ -67,7 +67,14 @@ struct MockClientUpdateRequest {
     name: Option<String>,
     confidential: bool,
     redirect_uris: Vec<String>,
+    post_logout_redirect_uris: Option<Vec<String>>,
+    allowed_origins: Option<Vec<String>>,
     flows_enabled: Vec<String>,
+    auth_code_lifetime: i32,
+    access_token_lifetime: i32,
+    challenges: Option<Vec<String>>,
+    client_uri: Option<String>,
+    claims: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -495,19 +502,52 @@ pub async fn start_mock_rauthy() -> String {
         State(state): State<MockRauthyState>,
         headers: HeaderMap,
         axum::extract::Path(client_id): axum::extract::Path<String>,
-        Json(body): Json<MockClientUpdateRequest>,
+        Json(raw_body): Json<Value>,
     ) -> impl IntoResponse {
         require_admin_api_key(&headers);
+        assert!(
+            raw_body.get("id").is_none(),
+            "PUT must not include client id"
+        );
+        if client_id == "application-unknown-rauthy-field" {
+            return (
+                StatusCode::IM_A_TEAPOT,
+                Json(json!({ "error": "unexpected put" })),
+            )
+                .into_response();
+        }
+        let body: MockClientUpdateRequest =
+            serde_json::from_value(raw_body).expect("valid client update");
         let expected_flows = if body.confidential {
             vec!["authorization_code", "client_credentials", "refresh_token"]
         } else {
             vec!["authorization_code", "refresh_token"]
         };
         assert_eq!(body.flows_enabled, expected_flows);
+        assert_eq!(
+            body.post_logout_redirect_uris,
+            Some(vec!["https://admin.example/logout".to_owned()])
+        );
+        assert_eq!(
+            body.allowed_origins,
+            Some(vec!["https://admin.example".to_owned()])
+        );
+        assert_eq!(body.auth_code_lifetime, 90);
+        assert_eq!(body.access_token_lifetime, 7_200);
+        assert_eq!(body.challenges, Some(vec!["S256".to_owned()]));
+        assert_eq!(
+            body.client_uri.as_deref(),
+            Some("https://admin.example/client")
+        );
+        assert_eq!(body.claims, Some(json!({ "admin": "customized" })));
         if body.name.as_deref() == Some("reject-sync") {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "sync rejected" })),
+                Json(json!({
+                    "error": "BadRequest",
+                    "message": "sync rejected",
+                    "client_secret": "must-not-leak"
+                })),
             )
                 .into_response();
         }
@@ -530,6 +570,53 @@ pub async fn start_mock_rauthy() -> String {
             redirect_uris: client.redirect_uris.clone(),
         })
         .into_response()
+    }
+
+    async fn get_client(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        axum::extract::Path(client_id): axum::extract::Path<String>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        let clients = state.clients.lock().expect("clients");
+        let Some(client) = clients.get(&client_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        };
+        let mut body = json!({
+            "id": client.id,
+            "name": client.name,
+            "enabled": true,
+            "confidential": client.confidential,
+            "redirect_uris": client.redirect_uris,
+            "post_logout_redirect_uris": ["https://admin.example/logout"],
+            "allowed_origins": ["https://admin.example"],
+            "flows_enabled": ["authorization_code"],
+            "access_token_alg": "EdDSA",
+            "id_token_alg": "EdDSA",
+            "auth_code_lifetime": 90,
+            "access_token_lifetime": 7200,
+            "scopes": ["openid", "profile", "email"],
+            "default_scopes": ["openid", "profile", "email"],
+            "challenges": ["S256"],
+            "force_mfa": false,
+            "client_uri": "https://admin.example/client",
+            "contacts": null,
+            "backchannel_logout_uri": null,
+            "restrict_group_prefix": null,
+            "claims": { "admin": "customized" },
+            "claims_at_root": false,
+            "allowed_resources": null,
+            "default_aud": null,
+            "scim": null
+        });
+        if client_id == "application-unknown-rauthy-field" {
+            body["future_setting"] = json!(true);
+        }
+        Json(body).into_response()
     }
 
     async fn rotate_client_secret(
@@ -611,7 +698,10 @@ pub async fn start_mock_rauthy() -> String {
         .route("/auth/v1/echo/{*path}", get(echo_path))
         .route("/auth/v1/assets/{*path}", get(asset))
         .route("/auth/v1/clients", post(create_client))
-        .route("/auth/v1/clients/{clientId}", put(update_client))
+        .route(
+            "/auth/v1/clients/{clientId}",
+            get(get_client).put(update_client),
+        )
         .route(
             "/auth/v1/clients/{clientId}/secret",
             put(rotate_client_secret),

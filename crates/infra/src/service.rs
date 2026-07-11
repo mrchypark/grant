@@ -14,11 +14,14 @@ use domain::{
     RoleBindingSubjectType, ServiceProvider, User,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::{collections::HashSet, error::Error as StdError, fmt};
+use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
 
 const MAX_APPLICATION_ACTION_IDS_PER_REQUEST: usize = 999;
 const MAX_ACTION_IDS_PER_REQUEST: usize = 999;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RAUTHY_ERROR_BODY_BYTES: usize = 4 * 1024;
+const MAX_RAUTHY_ERROR_FIELD_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -126,6 +129,104 @@ struct RauthyNewClientRequest {
     redirect_uris: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RauthyClientResponse {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+    post_logout_redirect_uris: Option<Vec<String>>,
+    allowed_origins: Option<Vec<String>>,
+    flows_enabled: Vec<String>,
+    access_token_alg: String,
+    id_token_alg: String,
+    auth_code_lifetime: i32,
+    access_token_lifetime: i32,
+    scopes: Vec<String>,
+    default_scopes: Vec<String>,
+    challenges: Option<Vec<String>>,
+    force_mfa: bool,
+    client_uri: Option<String>,
+    contacts: Option<Vec<String>>,
+    backchannel_logout_uri: Option<String>,
+    restrict_group_prefix: Option<String>,
+    claims: Option<serde_json::Value>,
+    claims_at_root: bool,
+    allowed_resources: Option<Vec<String>>,
+    default_aud: Option<Vec<String>>,
+    scim: Option<RauthyScimClient>,
+}
+
+#[derive(Debug, Serialize)]
+struct RauthyClientUpdateRequest {
+    name: Option<String>,
+    enabled: bool,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+    post_logout_redirect_uris: Option<Vec<String>>,
+    allowed_origins: Option<Vec<String>>,
+    flows_enabled: Vec<String>,
+    access_token_alg: String,
+    id_token_alg: String,
+    auth_code_lifetime: i32,
+    access_token_lifetime: i32,
+    scopes: Vec<String>,
+    default_scopes: Vec<String>,
+    challenges: Option<Vec<String>>,
+    force_mfa: bool,
+    client_uri: Option<String>,
+    contacts: Option<Vec<String>>,
+    backchannel_logout_uri: Option<String>,
+    restrict_group_prefix: Option<String>,
+    claims: Option<serde_json::Value>,
+    claims_at_root: bool,
+    allowed_resources: Option<Vec<String>>,
+    default_aud: Option<Vec<String>>,
+    scim: Option<RauthyScimClient>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RauthyScimClient {
+    bearer_token: String,
+    base_uri: String,
+    sync_groups: bool,
+    group_sync_prefix: Option<String>,
+}
+
+impl From<RauthyClientResponse> for RauthyClientUpdateRequest {
+    fn from(client: RauthyClientResponse) -> Self {
+        Self {
+            name: client.name,
+            enabled: client.enabled,
+            confidential: client.confidential,
+            redirect_uris: client.redirect_uris,
+            post_logout_redirect_uris: client.post_logout_redirect_uris,
+            allowed_origins: client.allowed_origins,
+            flows_enabled: client.flows_enabled,
+            access_token_alg: client.access_token_alg,
+            id_token_alg: client.id_token_alg,
+            auth_code_lifetime: client.auth_code_lifetime,
+            access_token_lifetime: client.access_token_lifetime,
+            scopes: client.scopes,
+            default_scopes: client.default_scopes,
+            challenges: client.challenges,
+            force_mfa: client.force_mfa,
+            client_uri: client.client_uri,
+            contacts: client.contacts,
+            backchannel_logout_uri: client.backchannel_logout_uri,
+            restrict_group_prefix: client.restrict_group_prefix,
+            claims: client.claims,
+            claims_at_root: client.claims_at_root,
+            allowed_resources: client.allowed_resources,
+            default_aud: client.default_aud,
+            scim: client.scim,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RauthyClientSecretRequest {}
 
@@ -202,9 +303,15 @@ pub struct CurrentUserView {
 impl AppService {
     pub fn new(cfg: AppConfig, db: Database) -> Self {
         let auth = AuthResolver::new(&cfg.auth);
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .build()
+            .expect("build Rauthy HTTP client");
         let proxy_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .build()
             .expect("build Rauthy proxy client");
         Self {
@@ -792,38 +899,51 @@ impl AppService {
                 .send()
                 .await
         } else {
-            self.http_client
-                .put(self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}")))
+            let url = self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}"));
+            let response = self
+                .http_client
+                .get(&url)
                 .header(
                     "authorization",
                     format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
                 )
-                .json(&json!({
-                    "name": application.name,
-                    "confidential": matches!(application.application_type, ApplicationType::Confidential),
-                    "redirect_uris": redirect_uris,
-                    "post_logout_redirect_uris": null,
-                    "allowed_origins": null,
-                    "enabled": application.active,
-                    "flows_enabled": flows_enabled,
-                    "access_token_alg": "EdDSA",
-                    "id_token_alg": "EdDSA",
-                    "auth_code_lifetime": 60,
-                    "access_token_lifetime": 3600,
-                    "scopes": ["openid", "profile", "email"],
-                    "default_scopes": ["openid", "profile", "email"],
-                    "challenges": null,
-                    "force_mfa": false,
-                    "client_uri": null,
-                    "contacts": null,
-                    "backchannel_logout_uri": null,
-                    "restrict_group_prefix": null,
-                    "claims": null,
-                    "claims_at_root": false,
-                    "allowed_resources": null,
-                    "default_aud": null,
-                    "scim": null
-                }))
+                .send()
+                .await
+                .map_err(|err| {
+                    service_error(
+                        ServiceErrorKind::Unavailable,
+                        format!("rauthy client fetch failed: {err}"),
+                    )
+                })?;
+            if !response.status().is_success() {
+                return Err(rauthy_admin_response_error("rauthy client fetch", response).await);
+            }
+            let existing: RauthyClientResponse = response.json().await.map_err(|err| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    format!("invalid rauthy client response: {err}"),
+                )
+            })?;
+            if existing.id != client_id {
+                return Err(service_error(
+                    ServiceErrorKind::Unavailable,
+                    "invalid rauthy client response: client id mismatch",
+                ));
+            }
+            let mut request = RauthyClientUpdateRequest::from(existing);
+            request.name = Some(application.name.clone());
+            request.confidential =
+                matches!(application.application_type, ApplicationType::Confidential);
+            request.redirect_uris = redirect_uris;
+            request.enabled = application.active;
+            request.flows_enabled = flows_enabled.into_iter().map(str::to_owned).collect();
+            self.http_client
+                .put(url)
+                .header(
+                    "authorization",
+                    format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
+                )
+                .json(&request)
                 .send()
                 .await
         }
@@ -834,10 +954,7 @@ impl AppService {
             )
         })?;
         if !response.status().is_success() {
-            return Err(service_error(
-                ServiceErrorKind::Unavailable,
-                format!("rauthy client sync failed with {}", response.status()),
-            ));
+            return Err(rauthy_admin_response_error("rauthy client sync", response).await);
         }
         Ok(())
     }
@@ -864,13 +981,9 @@ impl AppService {
                 )
             })?;
         if !response.status().is_success() {
-            return Err(service_error(
-                ServiceErrorKind::Unavailable,
-                format!(
-                    "rauthy client secret rotation failed with {}",
-                    response.status()
-                ),
-            ));
+            return Err(
+                rauthy_admin_response_error("rauthy client secret rotation", response).await,
+            );
         }
         let body: RauthyClientSecretResponse = response.json().await.map_err(|err| {
             service_error(
@@ -1725,6 +1838,67 @@ fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::
     anyhow::Error::new(ServiceError::new(kind, message))
 }
 
+async fn rauthy_admin_response_error(
+    operation: &str,
+    mut response: reqwest::Response,
+) -> anyhow::Error {
+    let status = response.status();
+    let mut body = Vec::new();
+    while body.len() < MAX_RAUTHY_ERROR_BODY_BYTES {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let remaining = MAX_RAUTHY_ERROR_BODY_BYTES - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+
+    let detail = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|body| {
+            ["message", "error"].into_iter().find_map(|field| {
+                body.get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(sanitize_rauthy_error_field)
+                    .map(|value| format!("; {field}: {value}"))
+            })
+        })
+        .unwrap_or_default();
+    service_error(
+        ServiceErrorKind::Unavailable,
+        format!("{operation} failed with {status}{detail}"),
+    )
+}
+
+fn sanitize_rauthy_error_field(value: &str) -> Option<String> {
+    let value = value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(MAX_RAUTHY_ERROR_FIELD_CHARS)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if value.is_empty() {
+        return None;
+    }
+    let lowercase = value.to_ascii_lowercase();
+    if [
+        "secret",
+        "token",
+        "authorization",
+        "api-key",
+        "api_key",
+        "bearer",
+        "password",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker))
+    {
+        return Some("[redacted]".to_owned());
+    }
+    Some(value)
+}
+
 fn bad_request_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::BadRequest, message)
 }
@@ -1735,4 +1909,17 @@ fn not_found_error(message: impl Into<String>) -> anyhow::Error {
 
 fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::Forbidden, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_rauthy_error_field;
+
+    #[test]
+    fn redacts_sensitive_rauthy_error_messages() {
+        let message = "request rejected: token=top-secret";
+        let sanitized = sanitize_rauthy_error_field(message).expect("sanitized message");
+        assert_eq!(sanitized, "[redacted]");
+        assert!(!sanitized.contains("top-secret"));
+    }
 }

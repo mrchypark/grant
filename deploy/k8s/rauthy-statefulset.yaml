@@ -18,18 +18,35 @@ spec:
       securityContext:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       terminationGracePeriodSeconds: 30
       initContainers:
         - name: render-bootstrap
           image: busybox:1.36
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command:
             - /bin/sh
             - /renderer/render-rauthy-bootstrap.sh
             - /bootstrap-template
             - /bootstrap
-          envFrom:
-            - secretRef:
-                name: grant-secrets
+          env:
+            - name: GRANT_RAUTHY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: grant-secrets
+                  key: GRANT_RAUTHY_CLIENT_SECRET
+            - name: GRANT_RAUTHY_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: grant-secrets
+                  key: GRANT_RAUTHY_ADMIN_API_KEY
           volumeMounts:
             - name: rauthy-bootstrap-template
               mountPath: /bootstrap-template

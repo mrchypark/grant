@@ -94,6 +94,13 @@ async fn build_service_with_default_consistency(
     default_read_consistency: ReadConsistency,
 ) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
     let rauthy_base_url = support::start_mock_rauthy().await;
+    build_service_with_rauthy(default_read_consistency, rauthy_base_url).await
+}
+
+async fn build_service_with_rauthy(
+    default_read_consistency: ReadConsistency,
+    rauthy_base_url: String,
+) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
     let (runtime, db_dir) = test_runtime(default_read_consistency.clone()).await;
     let cfg = AppConfig {
         server: ServerConfig {
@@ -224,6 +231,37 @@ async fn current_user_returns_local_user_and_active_organizations() {
     let organizations = json["organizations"].as_array().expect("organizations");
     assert!(organizations.iter().any(|org| org["id"] == "alpha-org"));
     assert!(organizations.iter().any(|org| org["id"] == "beta-org"));
+}
+
+#[tokio::test]
+async fn current_user_reports_unreachable_rauthy_as_unavailable() {
+    let rauthy_base_url = format!("http://{}", free_local_addr());
+    let (service, _db, _runtime, _db_dir) =
+        build_service_with_rauthy(ReadConsistency::Local, rauthy_base_url).await;
+    let response = api::build_router(service)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/me")
+                .header("authorization", support::auth::bearer_header("unreachable"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        json["error"],
+        "unavailable: Rauthy introspection request failed"
+    );
 }
 
 #[tokio::test]

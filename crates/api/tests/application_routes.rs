@@ -463,7 +463,71 @@ async fn application_update_sync_failure_rolls_back_local_state() {
         ))
         .await
         .expect("update response");
-    assert_eq!(update.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let update_status = update.status();
+    let update_body = update.into_body().collect().await.expect("body").to_bytes();
+    let update_payload: Value = serde_json::from_slice(&update_body).expect("json");
+    assert_eq!(update_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        update_payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("sync rejected"))
+    );
+    assert!(!update_payload.to_string().contains("must-not-leak"));
+
+    let stored = db
+        .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+        .await
+        .expect("stored application");
+    assert_eq!(stored.name, application_id);
+    assert!(stored.active);
+}
+
+#[tokio::test]
+async fn application_update_rejects_unknown_rauthy_fields_before_put_and_rolls_back() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-unknown-rauthy-field";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(redirect.status(), StatusCode::CREATED);
+
+    let update = app
+        .oneshot(app_request(
+            Method::PUT,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "slug": "unknown-rauthy-field",
+                "name": "Updated Name",
+                "applicationType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": false
+            })),
+        ))
+        .await
+        .expect("update response");
+    let update_status = update.status();
+    let update_body = update.into_body().collect().await.expect("body").to_bytes();
+    let update_payload: Value = serde_json::from_slice(&update_body).expect("json");
+    let error = update_payload["error"].as_str().expect("error");
+    assert_eq!(update_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(error.contains("invalid rauthy client response"));
+    assert!(!error.contains("unexpected put"));
 
     let stored = db
         .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
