@@ -1881,22 +1881,101 @@ fn sanitize_rauthy_error_field(value: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let lowercase = value.to_ascii_lowercase();
-    if [
-        "secret",
-        "token",
-        "authorization",
-        "api-key",
-        "api_key",
-        "bearer",
-        "password",
-    ]
-    .iter()
-    .any(|marker| lowercase.contains(marker))
-    {
-        return Some("[redacted]".to_owned());
+
+    let words = value.split_whitespace().collect::<Vec<_>>();
+    let mut sanitized = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index];
+        if word.eq_ignore_ascii_case("bearer") {
+            sanitized.push(word.to_owned());
+            index += 1;
+            redact_following_rauthy_value(&words, &mut index, &mut sanitized, false);
+            continue;
+        }
+
+        if let Some(separator) = word.find(['=', ':']) {
+            let label = &word[..separator];
+            if is_sensitive_rauthy_label(label) {
+                let field_value = &word[separator + 1..];
+                let authorization = label.eq_ignore_ascii_case("authorization");
+                if authorization && is_rauthy_auth_scheme(field_value) {
+                    sanitized.push(word.to_owned());
+                    index += 1;
+                    redact_following_rauthy_value(&words, &mut index, &mut sanitized, false);
+                } else if field_value.is_empty() {
+                    sanitized.push(word.to_owned());
+                    index += 1;
+                    redact_following_rauthy_value(
+                        &words,
+                        &mut index,
+                        &mut sanitized,
+                        authorization,
+                    );
+                } else {
+                    sanitized.push(format!("{}[redacted]", &word[..=separator]));
+                    index += 1;
+                }
+                continue;
+            }
+        }
+
+        if is_sensitive_rauthy_label(word)
+            && words
+                .get(index + 1)
+                .is_some_and(|separator| matches!(*separator, "=" | ":"))
+        {
+            sanitized.push(word.to_owned());
+            sanitized.push(words[index + 1].to_owned());
+            index += 2;
+            redact_following_rauthy_value(
+                &words,
+                &mut index,
+                &mut sanitized,
+                word.eq_ignore_ascii_case("authorization"),
+            );
+            continue;
+        }
+
+        sanitized.push(word.to_owned());
+        index += 1;
     }
-    Some(value)
+    Some(sanitized.join(" "))
+}
+
+fn is_sensitive_rauthy_label(label: &str) -> bool {
+    let label = label.to_ascii_lowercase();
+    matches!(
+        label.as_str(),
+        "token" | "secret" | "password" | "api-key" | "api_key" | "authorization"
+    ) || label.ends_with("_token")
+        || label.ends_with("_secret")
+}
+
+fn is_rauthy_auth_scheme(value: &str) -> bool {
+    ["bearer", "basic", "api-key"]
+        .iter()
+        .any(|scheme| value.eq_ignore_ascii_case(scheme))
+}
+
+fn redact_following_rauthy_value(
+    words: &[&str],
+    index: &mut usize,
+    sanitized: &mut Vec<String>,
+    preserve_auth_scheme: bool,
+) {
+    if preserve_auth_scheme
+        && words
+            .get(*index)
+            .is_some_and(|value| is_rauthy_auth_scheme(value))
+    {
+        sanitized.push(words[*index].to_owned());
+        *index += 1;
+    }
+    if *index < words.len() {
+        sanitized.push("[redacted]".to_owned());
+        *index += 1;
+    }
 }
 
 fn bad_request_error(message: impl Into<String>) -> anyhow::Error {
@@ -1916,10 +1995,53 @@ mod tests {
     use super::sanitize_rauthy_error_field;
 
     #[test]
-    fn redacts_sensitive_rauthy_error_messages() {
-        let message = "request rejected: token=top-secret";
-        let sanitized = sanitize_rauthy_error_field(message).expect("sanitized message");
-        assert_eq!(sanitized, "[redacted]");
-        assert!(!sanitized.contains("top-secret"));
+    fn preserves_benign_rauthy_error_messages() {
+        for message in [
+            "token expired",
+            "invalid_token",
+            "missing authorization header",
+        ] {
+            assert_eq!(
+                sanitize_rauthy_error_field(message).as_deref(),
+                Some(message)
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_only_sensitive_rauthy_error_values() {
+        for (message, expected) in [
+            ("token=abc", "token=[redacted]"),
+            ("password: abc", "password: [redacted]"),
+            ("api_key=abc", "api_key=[redacted]"),
+            (
+                "Authorization: Bearer abc",
+                "Authorization: Bearer [redacted]",
+            ),
+            (
+                "Authorization: Basic abc",
+                "Authorization: Basic [redacted]",
+            ),
+            (
+                "Authorization: API-Key abc",
+                "Authorization: API-Key [redacted]",
+            ),
+            ("Authorization: abc", "Authorization: [redacted]"),
+            ("Authorization=abc", "Authorization=[redacted]"),
+            ("Bearer abc", "Bearer [redacted]"),
+            ("token = abc", "token = [redacted]"),
+            (
+                "Authorization : Basic abc",
+                "Authorization : Basic [redacted]",
+            ),
+            (
+                "request rejected: token=abc",
+                "request rejected: token=[redacted]",
+            ),
+        ] {
+            let sanitized = sanitize_rauthy_error_field(message).expect("sanitized message");
+            assert_eq!(sanitized, expected);
+            assert!(!sanitized.contains("abc"));
+        }
     }
 }
