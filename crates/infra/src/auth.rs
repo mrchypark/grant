@@ -497,7 +497,9 @@ fn cache_ttl_for_exp(configured: Duration, exp: Option<i64>, now: i64) -> Result
     let Some(exp) = exp else {
         return Ok(configured);
     };
-    let remaining = exp - now;
+    let remaining = exp
+        .checked_sub(now)
+        .ok_or_else(|| anyhow!("unauthorized: invalid token expiration"))?;
     if remaining <= 0 {
         anyhow::bail!("unauthorized: rauthy token is expired");
     }
@@ -571,5 +573,6 @@ mod tests {
             Duration::from_secs(10)
         );
         assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(100), 100).is_err());
+        assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(i64::MAX), i64::MIN).is_err());
     }
 }

@@ -1676,7 +1676,7 @@ fn normalize_redirect_uri(value: &str) -> Result<String> {
             "redirectUri must use http or https scheme and include a host",
         ));
     }
-    Ok(redirect_uri)
+    Ok(parsed.to_string())
 }
 
 fn rauthy_client_id(application: &Application) -> Result<&str> {

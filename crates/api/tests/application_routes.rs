@@ -350,6 +350,42 @@ async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
 }
 
 #[tokio::test]
+async fn application_redirect_uri_routes_canonicalize_before_duplicate_check() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-canonical-redirect").await;
+
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-canonical-redirect/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://CLIENT.EXAMPLE" })),
+        ))
+        .await
+        .expect("create canonical redirect uri response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_body = create.into_body().collect().await.expect("body").to_bytes();
+    let created: Value = serde_json::from_slice(&create_body).expect("json");
+    assert_eq!(created["redirectUri"], "https://client.example/");
+
+    let duplicate = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-canonical-redirect/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/" })),
+        ))
+        .await
+        .expect("duplicate canonical redirect uri response");
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn application_update_sync_failure_rolls_back_local_state() {
     let (service, db, _dir) = test_service().await;
     seed_application_manager(&db, "creator-org").await;
