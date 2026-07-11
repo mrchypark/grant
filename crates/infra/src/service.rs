@@ -60,6 +60,23 @@ impl fmt::Display for ServiceError {
 
 impl StdError for ServiceError {}
 
+enum RedirectMutationSyncError {
+    BeforeCommit(anyhow::Error),
+    AfterCommit(anyhow::Error),
+}
+
+impl RedirectMutationSyncError {
+    fn should_rollback(&self) -> bool {
+        matches!(self, Self::BeforeCommit(_))
+    }
+
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::BeforeCommit(err) | Self::AfterCommit(err) => err,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppService {
     cfg: AppConfig,
@@ -688,12 +705,9 @@ impl AppService {
         self.db
             .update_application(&application, slug_changed)
             .await?;
-        let sync_result = if redirect_uris.is_empty() {
-            Ok(())
-        } else {
-            self.sync_rauthy_application_client(&application, redirect_uris, false)
-                .await
-        };
+        let sync_result = self
+            .sync_rauthy_application_client(&application, redirect_uris)
+            .await;
         if let Err(err) = sync_result {
             let _ = self.db.update_application(&previous, slug_changed).await;
             return Err(err);
@@ -752,7 +766,6 @@ impl AppService {
                 "redirectUri already exists for this application",
             ));
         }
-        let create_client = existing.is_empty();
         let item = ApplicationRedirectUri {
             application_id: application_id.to_owned(),
             redirect_uri: redirect_uri.clone(),
@@ -763,14 +776,16 @@ impl AppService {
             existing.into_iter().map(|item| item.redirect_uri).collect();
         redirect_uris.push(redirect_uri);
         if let Err(err) = self
-            .sync_rauthy_application_client(&application, redirect_uris, create_client)
+            .sync_rauthy_application_client_after_redirect_mutation(&application, redirect_uris)
             .await
         {
-            let _ = self
-                .db
-                .delete_application_redirect_uri(application_id, &item.redirect_uri)
-                .await;
-            return Err(err);
+            if err.should_rollback() {
+                let _ = self
+                    .db
+                    .delete_application_redirect_uri(application_id, &item.redirect_uri)
+                    .await;
+            }
+            return Err(err.into_error());
         }
         Ok(item)
     }
@@ -817,13 +832,15 @@ impl AppService {
             return Ok(());
         }
         if let Err(err) = self
-            .sync_rauthy_application_client(&application, redirect_uris, false)
+            .sync_rauthy_application_client_after_redirect_mutation(&application, redirect_uris)
             .await
         {
-            if let Some(item) = removed {
+            if err.should_rollback()
+                && let Some(item) = removed
+            {
                 let _ = self.db.insert_application_redirect_uri(&item).await;
             }
-            return Err(err);
+            return Err(err.into_error());
         }
         Ok(())
     }
@@ -867,21 +884,50 @@ impl AppService {
         })
     }
 
+    async fn sync_rauthy_application_client_after_redirect_mutation(
+        &self,
+        application: &Application,
+        mut attempted_redirect_uris: Vec<String>,
+    ) -> std::result::Result<(), RedirectMutationSyncError> {
+        self.sync_rauthy_application_client(application, attempted_redirect_uris.clone())
+            .await
+            .map_err(RedirectMutationSyncError::BeforeCommit)?;
+        let fresh_redirect_uris = self
+            .db
+            .list_application_redirect_uris_with_consistency(
+                &application.id,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+            .map_err(RedirectMutationSyncError::AfterCommit)?
+            .into_iter()
+            .map(|item| item.redirect_uri)
+            .collect::<Vec<_>>();
+        let mut fresh_for_comparison = fresh_redirect_uris.clone();
+        attempted_redirect_uris.sort_unstable();
+        fresh_for_comparison.sort_unstable();
+        if attempted_redirect_uris != fresh_for_comparison {
+            self.sync_rauthy_application_client(application, fresh_redirect_uris)
+                .await
+                .map_err(RedirectMutationSyncError::AfterCommit)?;
+        }
+        Ok(())
+    }
+
     async fn sync_rauthy_application_client(
         &self,
         application: &Application,
         redirect_uris: Vec<String>,
-        create: bool,
     ) -> Result<()> {
         let client_id = rauthy_client_id(application)?;
-        let flows_enabled = if matches!(application.application_type, ApplicationType::Confidential)
-        {
-            vec!["authorization_code", "client_credentials", "refresh_token"]
-        } else {
-            vec!["authorization_code", "refresh_token"]
-        };
-        let response = if create {
-            self.http_client
+        let url = self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}"));
+        let existing_response = self.fetch_rauthy_application_client(&url).await?;
+        if existing_response.status() == reqwest::StatusCode::NOT_FOUND {
+            if redirect_uris.is_empty() {
+                return Ok(());
+            }
+            let response = self
+                .http_client
                 .post(self.rauthy_admin_url("/auth/v1/clients"))
                 .header(
                     "authorization",
@@ -894,65 +940,108 @@ impl AppService {
                         application.application_type,
                         ApplicationType::Confidential
                     ),
-                    redirect_uris,
+                    redirect_uris: redirect_uris.clone(),
                 })
-                .send()
-                .await
-        } else {
-            let url = self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}"));
-            let response = self
-                .http_client
-                .get(&url)
-                .header(
-                    "authorization",
-                    format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
-                )
                 .send()
                 .await
                 .map_err(|err| {
                     service_error(
                         ServiceErrorKind::Unavailable,
-                        format!("rauthy client fetch failed: {err}"),
+                        format!("rauthy client sync failed: {err}"),
                     )
                 })?;
-            if !response.status().is_success() {
-                return Err(rauthy_admin_response_error("rauthy client fetch", response).await);
+            if response.status() == reqwest::StatusCode::CONFLICT {
+                let retry_response = self.fetch_rauthy_application_client(&url).await?;
+                if !retry_response.status().is_success() {
+                    return Err(
+                        rauthy_admin_response_error("rauthy client fetch", retry_response).await,
+                    );
+                }
+                return self
+                    .put_rauthy_application_client(application, redirect_uris, &url, retry_response)
+                    .await;
             }
-            let existing: RauthyClientResponse = response.json().await.map_err(|err| {
+            if !response.status().is_success() {
+                return Err(rauthy_admin_response_error("rauthy client sync", response).await);
+            }
+            return Ok(());
+        }
+        if !existing_response.status().is_success() {
+            return Err(
+                rauthy_admin_response_error("rauthy client fetch", existing_response).await,
+            );
+        }
+        self.put_rauthy_application_client(application, redirect_uris, &url, existing_response)
+            .await
+    }
+
+    async fn fetch_rauthy_application_client(&self, url: &str) -> Result<reqwest::Response> {
+        self.http_client
+            .get(url)
+            .header(
+                "authorization",
+                format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
+            )
+            .send()
+            .await
+            .map_err(|err| {
                 service_error(
                     ServiceErrorKind::Unavailable,
-                    format!("invalid rauthy client response: {err}"),
+                    format!("rauthy client fetch failed: {err}"),
                 )
-            })?;
-            if existing.id != client_id {
-                return Err(service_error(
-                    ServiceErrorKind::Unavailable,
-                    "invalid rauthy client response: client id mismatch",
-                ));
-            }
-            let mut request = RauthyClientUpdateRequest::from(existing);
-            request.name = Some(application.name.clone());
-            request.confidential =
-                matches!(application.application_type, ApplicationType::Confidential);
-            request.redirect_uris = redirect_uris;
-            request.enabled = application.active;
-            request.flows_enabled = flows_enabled.into_iter().map(str::to_owned).collect();
-            self.http_client
-                .put(url)
-                .header(
-                    "authorization",
-                    format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
-                )
-                .json(&request)
-                .send()
-                .await
-        }
-        .map_err(|err| {
+            })
+    }
+
+    async fn put_rauthy_application_client(
+        &self,
+        application: &Application,
+        redirect_uris: Vec<String>,
+        url: &str,
+        response: reqwest::Response,
+    ) -> Result<()> {
+        let client_id = rauthy_client_id(application)?;
+        let existing: RauthyClientResponse = response.json().await.map_err(|err| {
             service_error(
                 ServiceErrorKind::Unavailable,
-                format!("rauthy client sync failed: {err}"),
+                format!("invalid rauthy client response: {err}"),
             )
         })?;
+        if existing.id != client_id {
+            return Err(service_error(
+                ServiceErrorKind::Unavailable,
+                "invalid rauthy client response: client id mismatch",
+            ));
+        }
+        let mut request = RauthyClientUpdateRequest::from(existing);
+        request.name = Some(application.name.clone());
+        request.confidential =
+            matches!(application.application_type, ApplicationType::Confidential);
+        request.redirect_uris = redirect_uris;
+        request.enabled = application.active;
+        request.flows_enabled = if request.confidential {
+            vec!["authorization_code", "client_credentials", "refresh_token"]
+        } else {
+            vec!["authorization_code", "refresh_token"]
+        }
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let response = self
+            .http_client
+            .put(url)
+            .header(
+                "authorization",
+                format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
+            )
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    format!("rauthy client sync failed: {err}"),
+                )
+            })?;
         if !response.status().is_success() {
             return Err(rauthy_admin_response_error("rauthy client sync", response).await);
         }
@@ -1992,7 +2081,17 @@ fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_rauthy_error_field;
+    use super::{RedirectMutationSyncError, sanitize_rauthy_error_field};
+
+    #[test]
+    fn only_pre_commit_redirect_sync_errors_request_local_rollback() {
+        assert!(
+            RedirectMutationSyncError::BeforeCommit(anyhow::anyhow!("before")).should_rollback()
+        );
+        assert!(
+            !RedirectMutationSyncError::AfterCommit(anyhow::anyhow!("after")).should_rollback()
+        );
+    }
 
     #[test]
     fn preserves_benign_rauthy_error_messages() {

@@ -26,9 +26,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tempfile::TempDir;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub const MASTER_KEY: &str = "dev-only-master-key";
@@ -39,14 +43,20 @@ pub const FIXED_TEST_TIME: &str = "2026-04-03T00:00:00Z";
 #[derive(Clone)]
 struct MockRauthyState {
     clients: Arc<Mutex<HashMap<String, MockClient>>>,
+    reconcile_blocked: Arc<AtomicBool>,
+    reconcile_started: Arc<Notify>,
+    reconcile_release: Arc<Notify>,
+    update_counts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[derive(Clone)]
 struct MockClient {
     id: String,
     name: Option<String>,
+    enabled: bool,
     confidential: bool,
     redirect_uris: Vec<String>,
+    flows_enabled: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +75,7 @@ struct MockClientRequest {
 #[derive(Debug, Deserialize)]
 struct MockClientUpdateRequest {
     name: Option<String>,
+    enabled: bool,
     confidential: bool,
     redirect_uris: Vec<String>,
     post_logout_redirect_uris: Option<Vec<String>>,
@@ -481,14 +492,20 @@ pub async fn start_mock_rauthy() -> String {
         let client = MockClient {
             id: body.id.clone(),
             name: body.name,
+            enabled: true,
             confidential: body.confidential,
             redirect_uris: body.redirect_uris,
+            flows_enabled: vec!["authorization_code".to_owned()],
         };
-        state
-            .clients
-            .lock()
-            .expect("clients")
-            .insert(body.id.clone(), client.clone());
+        let mut clients = state.clients.lock().expect("clients");
+        if clients.contains_key(&body.id) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "client already exists" })),
+            )
+                .into_response();
+        }
+        clients.insert(body.id.clone(), client.clone());
         Json(MockClientResponse {
             id: client.id,
             name: client.name,
@@ -496,6 +513,7 @@ pub async fn start_mock_rauthy() -> String {
             confidential: client.confidential,
             redirect_uris: client.redirect_uris,
         })
+        .into_response()
     }
 
     async fn update_client(
@@ -540,6 +558,29 @@ pub async fn start_mock_rauthy() -> String {
             Some("https://admin.example/client")
         );
         assert_eq!(body.claims, Some(json!({ "admin": "customized" })));
+        if matches!(
+            client_id.as_str(),
+            "application-reconcile-stale"
+                | "application-reconcile-read-failure"
+                | "application-reconcile-second-failure"
+        ) && !state.reconcile_blocked.swap(true, Ordering::SeqCst)
+        {
+            state.reconcile_started.notify_one();
+            state.reconcile_release.notified().await;
+        }
+        let update_count = {
+            let mut counts = state.update_counts.lock().expect("update counts");
+            let count = counts.entry(client_id.clone()).or_default();
+            *count += 1;
+            *count
+        };
+        if client_id == "application-reconcile-second-failure" && update_count == 2 {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "second reconciliation failed" })),
+            )
+                .into_response();
+        }
         if body.name.as_deref() == Some("reject-sync") {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -560,8 +601,10 @@ pub async fn start_mock_rauthy() -> String {
                 .into_response();
         };
         client.name = body.name;
+        client.enabled = body.enabled;
         client.confidential = body.confidential;
         client.redirect_uris = body.redirect_uris;
+        client.flows_enabled = body.flows_enabled;
         Json(MockClientResponse {
             id: client.id.clone(),
             name: client.name.clone(),
@@ -578,7 +621,25 @@ pub async fn start_mock_rauthy() -> String {
         axum::extract::Path(client_id): axum::extract::Path<String>,
     ) -> impl IntoResponse {
         require_admin_api_key(&headers);
-        let clients = state.clients.lock().expect("clients");
+        let mut clients = state.clients.lock().expect("clients");
+        if client_id == "application-create-race" && !clients.contains_key(&client_id) {
+            clients.insert(
+                client_id.clone(),
+                MockClient {
+                    id: client_id.clone(),
+                    name: Some("Concurrent Client".to_owned()),
+                    enabled: true,
+                    confidential: true,
+                    redirect_uris: vec!["https://concurrent.example/callback".to_owned()],
+                    flows_enabled: vec!["authorization_code".to_owned()],
+                },
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        }
         let Some(client) = clients.get(&client_id) else {
             return (
                 StatusCode::NOT_FOUND,
@@ -589,12 +650,12 @@ pub async fn start_mock_rauthy() -> String {
         let mut body = json!({
             "id": client.id,
             "name": client.name,
-            "enabled": true,
+            "enabled": client.enabled,
             "confidential": client.confidential,
             "redirect_uris": client.redirect_uris,
             "post_logout_redirect_uris": ["https://admin.example/logout"],
             "allowed_origins": ["https://admin.example"],
-            "flows_enabled": ["authorization_code"],
+            "flows_enabled": client.flows_enabled,
             "access_token_alg": "EdDSA",
             "id_token_alg": "EdDSA",
             "auth_code_lifetime": 90,
@@ -617,6 +678,16 @@ pub async fn start_mock_rauthy() -> String {
             body["future_setting"] = json!(true);
         }
         Json(body).into_response()
+    }
+
+    async fn wait_for_reconcile(State(state): State<MockRauthyState>) -> StatusCode {
+        state.reconcile_started.notified().await;
+        StatusCode::NO_CONTENT
+    }
+
+    async fn release_reconcile(State(state): State<MockRauthyState>) -> StatusCode {
+        state.reconcile_release.notify_one();
+        StatusCode::NO_CONTENT
     }
 
     async fn rotate_client_secret(
@@ -690,6 +761,10 @@ pub async fn start_mock_rauthy() -> String {
 
     let state = MockRauthyState {
         clients: Arc::new(Mutex::new(HashMap::new())),
+        reconcile_blocked: Arc::new(AtomicBool::new(false)),
+        reconcile_started: Arc::new(Notify::new()),
+        reconcile_release: Arc::new(Notify::new()),
+        update_counts: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/auth/v1", get(login_ui))
@@ -697,6 +772,8 @@ pub async fn start_mock_rauthy() -> String {
         .route("/auth/v1/redirect-target", get(redirect_target))
         .route("/auth/v1/echo/{*path}", get(echo_path))
         .route("/auth/v1/assets/{*path}", get(asset))
+        .route("/_test/reconcile-started", get(wait_for_reconcile))
+        .route("/_test/reconcile-release", post(release_reconcile))
         .route("/auth/v1/clients", post(create_client))
         .route(
             "/auth/v1/clients/{clientId}",
