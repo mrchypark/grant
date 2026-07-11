@@ -62,6 +62,8 @@ pub struct AppService {
     cfg: AppConfig,
     db: Database,
     auth: AuthResolver,
+    http_client: reqwest::Client,
+    proxy_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -200,7 +202,18 @@ pub struct CurrentUserView {
 impl AppService {
     pub fn new(cfg: AppConfig, db: Database) -> Self {
         let auth = AuthResolver::new(&cfg.auth);
-        Self { cfg, db, auth }
+        let http_client = reqwest::Client::new();
+        let proxy_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build Rauthy proxy client");
+        Self {
+            cfg,
+            db,
+            auth,
+            http_client,
+            proxy_client,
+        }
     }
 
     pub async fn migrate_schema(&self) -> Result<()> {
@@ -225,6 +238,10 @@ impl AppService {
 
     pub fn rauthy_base_url(&self) -> &str {
         &self.cfg.auth.rauthy.base_url
+    }
+
+    pub fn rauthy_proxy_client(&self) -> &reqwest::Client {
+        &self.proxy_client
     }
 
     pub async fn authenticate_request(
@@ -564,11 +581,13 @@ impl AppService {
         self.db
             .update_application(&application, slug_changed)
             .await?;
-        if !redirect_uris.is_empty()
-            && let Err(err) = self
-                .sync_rauthy_application_client(&application, redirect_uris, false)
+        let sync_result = if redirect_uris.is_empty() {
+            Ok(())
+        } else {
+            self.sync_rauthy_application_client(&application, redirect_uris, false)
                 .await
-        {
+        };
+        if let Err(err) = sync_result {
             let _ = self.db.update_application(&previous, slug_changed).await;
             return Err(err);
         }
@@ -617,6 +636,15 @@ impl AppService {
                 Some(ReadConsistency::Strong),
             )
             .await?;
+        if existing
+            .iter()
+            .any(|item| item.redirect_uri == redirect_uri)
+        {
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                "redirectUri already exists for this application",
+            ));
+        }
         let create_client = existing.is_empty();
         let item = ApplicationRedirectUri {
             application_id: application_id.to_owned(),
@@ -739,9 +767,8 @@ impl AppService {
         create: bool,
     ) -> Result<()> {
         let client_id = rauthy_client_id(application)?;
-        let client = reqwest::Client::new();
         let response = if create {
-            client
+            self.http_client
                 .post(self.rauthy_admin_url("/auth/v1/clients"))
                 .header(
                     "authorization",
@@ -759,7 +786,7 @@ impl AppService {
                 .send()
                 .await
         } else {
-            client
+            self.http_client
                 .put(self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}")))
                 .header(
                     "authorization",
@@ -814,7 +841,8 @@ impl AppService {
         application: &Application,
     ) -> Result<String> {
         let client_id = rauthy_client_id(application)?;
-        let response = reqwest::Client::new()
+        let response = self
+            .http_client
             .put(self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}/secret")))
             .header(
                 "authorization",
@@ -1625,32 +1653,25 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 fn normalize_redirect_uri(value: &str) -> Result<String> {
     let redirect_uri = require_non_empty("redirectUri", value)?;
-    let Some((scheme, rest)) = redirect_uri.split_once("://") else {
-        return Err(bad_request_error(
-            "redirectUri must use http or https scheme and include a host",
-        ));
-    };
-    if !matches!(scheme, "http" | "https") {
+    let authority = redirect_uri
+        .strip_prefix("http://")
+        .or_else(|| redirect_uri.strip_prefix("https://"))
+        .ok_or_else(|| {
+            bad_request_error("redirectUri must use http or https scheme and include a host")
+        })?;
+    if authority.starts_with('/') {
         return Err(bad_request_error(
             "redirectUri must use http or https scheme and include a host",
         ));
     }
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit('@')
-        .next()
-        .unwrap_or_default();
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed
-            .split_once(']')
-            .map(|(host, _)| host)
-            .unwrap_or_default()
-    } else {
-        authority.split(':').next().unwrap_or_default()
-    };
-    if host.trim().is_empty() {
+    let parsed = reqwest::Url::parse(&redirect_uri)
+        .map_err(|_| bad_request_error("redirectUri must be a valid absolute URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(bad_request_error(
+            "redirectUri must use http or https scheme and include a host",
+        ));
+    }
+    if parsed.host_str().is_none_or(|host| host.trim().is_empty()) {
         return Err(bad_request_error(
             "redirectUri must use http or https scheme and include a host",
         ));

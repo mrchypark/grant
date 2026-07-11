@@ -58,6 +58,30 @@ async fn auth_proxy_forwards_redirects_and_cookies_to_the_browser() {
     );
 }
 
+#[tokio::test]
+async fn auth_proxy_preserves_percent_encoded_upstream_paths() {
+    let app = build_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/v1/echo/encoded%2Fsegment")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(body.as_ref(), b"/auth/v1/echo/encoded%2Fsegment");
+}
+
 async fn test_runtime() -> (HiqliteRuntime, TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let api_addr = free_local_addr();

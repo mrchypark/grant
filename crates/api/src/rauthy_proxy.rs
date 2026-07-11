@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, to_bytes},
-    extract::{Path, State},
+    extract::State,
     http::{StatusCode, header},
     response::{Redirect, Response},
 };
@@ -22,10 +22,9 @@ pub(crate) async fn proxy_rauthy_root(
 
 pub(crate) async fn proxy_rauthy_passthrough(
     State(service): State<Arc<AppService>>,
-    Path(rauthy_path): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
-    let upstream_path = format!("/auth/v1/{}", rauthy_path.trim_start_matches('/'));
+    let upstream_path = request.uri().path().to_owned();
     proxy_rauthy_request(service.as_ref(), request, &upstream_path).await
 }
 
@@ -48,11 +47,9 @@ async fn proxy_rauthy_request(
     let body_bytes = to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(ApiError::internal)?;
-    let http_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(ApiError::internal)?;
-    let mut upstream = http_client.request(parts.method.clone(), url);
+    let mut upstream = service
+        .rauthy_proxy_client()
+        .request(parts.method.clone(), url);
     for (name, value) in &parts.headers {
         if name == header::HOST || name == header::CONTENT_LENGTH {
             continue;

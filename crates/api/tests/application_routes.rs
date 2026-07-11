@@ -236,6 +236,19 @@ async fn application_redirect_uri_routes_create_list_and_delete() {
     assert_eq!(created["applicationId"], "application-developer-console");
     assert_eq!(created["redirectUri"], "https://client.example/callback");
 
+    let duplicate = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("duplicate redirect uri response");
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
     let list = app
         .clone()
         .oneshot(app_request(
@@ -313,6 +326,8 @@ async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
     for redirect_uri in [
         "ftp://client.example/callback",
         "https:///callback",
+        "https://client.example:bad/callback",
+        "https://[::1/callback",
         "http://",
     ] {
         let response = app
@@ -326,7 +341,11 @@ async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
             ))
             .await
             .expect("invalid redirect uri response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "redirect URI should be rejected: {redirect_uri}"
+        );
     }
 }
 

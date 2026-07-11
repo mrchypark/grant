@@ -451,6 +451,10 @@ pub async fn start_mock_rauthy() -> String {
         "redirect was followed upstream"
     }
 
+    async fn echo_path(uri: axum::http::Uri) -> String {
+        uri.path().to_owned()
+    }
+
     fn require_admin_api_key(headers: &HeaderMap) {
         let authorization = headers
             .get(header::AUTHORIZATION)
@@ -592,6 +596,7 @@ pub async fn start_mock_rauthy() -> String {
         .route("/auth/v1", get(login_ui))
         .route("/auth/v1/redirect", get(redirect_response))
         .route("/auth/v1/redirect-target", get(redirect_target))
+        .route("/auth/v1/echo/{*path}", get(echo_path))
         .route("/auth/v1/assets/{*path}", get(asset))
         .route("/auth/v1/clients", post(create_client))
         .route("/auth/v1/clients/{clientId}", put(update_client))
