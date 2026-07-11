@@ -437,6 +437,20 @@ pub async fn start_mock_rauthy() -> String {
         )
     }
 
+    async fn redirect_response() -> impl IntoResponse {
+        (
+            StatusCode::FOUND,
+            [
+                (header::LOCATION, "/auth/v1/redirect-target"),
+                (header::SET_COOKIE, "rauthy_session=test; Path=/; HttpOnly"),
+            ],
+        )
+    }
+
+    async fn redirect_target() -> &'static str {
+        "redirect was followed upstream"
+    }
+
     fn require_admin_api_key(headers: &HeaderMap) {
         let authorization = headers
             .get(header::AUTHORIZATION)
@@ -576,6 +590,8 @@ pub async fn start_mock_rauthy() -> String {
     };
     let app = Router::new()
         .route("/auth/v1", get(login_ui))
+        .route("/auth/v1/redirect", get(redirect_response))
+        .route("/auth/v1/redirect-target", get(redirect_target))
         .route("/auth/v1/assets/{*path}", get(asset))
         .route("/auth/v1/clients", post(create_client))
         .route("/auth/v1/clients/{clientId}", put(update_client))

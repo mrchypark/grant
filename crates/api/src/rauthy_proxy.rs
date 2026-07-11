@@ -48,7 +48,10 @@ async fn proxy_rauthy_request(
     let body_bytes = to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(ApiError::internal)?;
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ApiError::internal)?;
     let mut upstream = http_client.request(parts.method.clone(), url);
     for (name, value) in &parts.headers {
         if name == header::HOST || name == header::CONTENT_LENGTH {

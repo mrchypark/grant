@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -25,6 +25,37 @@ fn free_local_addr() -> String {
     let addr = listener.local_addr().expect("local addr");
     drop(listener);
     addr.to_string()
+}
+
+#[tokio::test]
+async fn auth_proxy_forwards_redirects_and_cookies_to_the_browser() {
+    let app = build_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/v1/redirect")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/auth/v1/redirect-target")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok()),
+        Some("rauthy_session=test; Path=/; HttpOnly")
+    );
 }
 
 async fn test_runtime() -> (HiqliteRuntime, TempDir) {
