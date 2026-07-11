@@ -14,13 +14,11 @@
 - `crates/domain`
   - 도메인 타입과 공용 모델
 - `crates/infra`
-  - 설정, TrailBase identity 연동, hiqlite runtime, schema/seed, 권한 판정 서비스 레이어
+  - 설정, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, 권한 판정 서비스 레이어
 - `crates/api`
   - Axum HTTP 라우터와 API 계약
 - `crates/app`
   - `grant` 실행 바이너리
-- `crates/trailbase-auth-bridge`
-  - 별도 TrailBase auth bridge 서비스
 - `scripts/`
   - `vind` 기반 로컬 bootstrap과 운영 검증 보조 스크립트
 
@@ -30,7 +28,6 @@
 
 ```bash
 docker buildx build --load -t grant:local .
-docker buildx build --load -f Dockerfile.trailbase-auth-bridge -t trailbase-auth-bridge:local .
 bash ./scripts/ci-local.sh
 ```
 
@@ -44,7 +41,6 @@ bash ./scripts/ci-local.sh
 - [로컬 개발과 API smoke](./docs/local-development.md)
 - [데이터베이스 스키마](./docs/database-schema.md)
 - [백업과 복구](./docs/backup-restore.md)
-- [TrailBase Auth Bridge README](./crates/trailbase-auth-bridge/README.md)
 
 ## 참고
 

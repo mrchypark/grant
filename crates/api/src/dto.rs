@@ -39,6 +39,19 @@ pub(crate) struct ReplaceApplicationActionsRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ApplicationRedirectUriRequest {
+    pub(crate) redirect_uri: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RotateClientSecretResponse {
+    pub(crate) client_secret: String,
+    pub(crate) secret_rotated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ReplaceActionsRequest {
     pub(crate) action_ids: Vec<String>,
 }

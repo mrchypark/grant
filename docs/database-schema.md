@@ -26,11 +26,11 @@
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. `(provider, external_user_id)`는 unique index로 관리한다.
+외부 인증 공급자와 내부 사용자 매핑. 현재 런타임 provider 값은 Rauthy 연동의 `rauthy`이며, `(provider, external_user_id)`는 unique index로 관리한다.
 
 ### `auth_identity_cache`
 
-외부 토큰 introspection 캐시. `token_hash`가 PK이고 `expires_at` 기준으로 만료된다.
+외부 토큰 introspection 캐시. 현재 Rauthy bearer token 확인 결과를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다.
 
 ### `parties`
 
@@ -67,9 +67,13 @@ grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을
 
 과거 `account` provider에 남아 있던 `organization.*` action과 `organization` resource binding은 schema migration에서 `grant` provider로 이동한다. 동일 logical binding이 이미 `grant`에 있으면 legacy `account` row의 active 상태와 agreement 참조를 `grant` row에 병합한 뒤 legacy row를 삭제한다.
 
-### `applications`, `application_actions`, `application_grants`, `application_grant_actions`
+### `applications`, `application_redirect_uris`, `application_actions`, `application_grants`, `application_grant_actions`
 
 API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 grant 경계에 남긴다.
+
+`applications.rauthy_client_id`는 Rauthy client id와 연결된다. 기존 application은 schema migration에서 application id로 backfill된다. developer console에서 redirect URI를 처음 추가하면 Grant backend가 같은 id로 Rauthy client를 생성하고, 이후 application 또는 redirect URI 변경은 Rauthy client update로 동기화한다. `applications.secret_rotated_at`은 Rauthy client secret이 마지막으로 회전된 시각만 저장한다. secret 원문은 저장하지 않고 rotate 응답에서 한 번만 반환한다.
+
+`application_redirect_uris`는 application별 허용 redirect URI 목록이다. key는 `(application_id, redirect_uri)`이고, API에서는 `http`/`https` scheme과 non-empty host만 허용한다.
 
 ## 제거된 테이블
 
@@ -126,6 +130,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `role_bindings.agreement_id` -> `agreements.id`
 - `role_bindings.subject_organization_id` -> `organizations.id`
 - `role_bindings.provider_id` -> `service_providers.id`
+- `application_redirect_uris.application_id` -> `applications.id`
 - `application_actions.application_id` -> `applications.id`
 - `application_actions.action_id` -> `actions.id`
 - `application_grants.user_id` -> `users.id`

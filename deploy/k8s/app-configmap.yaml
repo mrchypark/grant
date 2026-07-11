@@ -4,9 +4,10 @@ metadata:
   name: grant-config
 data:
   GRANT_BIND_ADDR: "0.0.0.0:8080"
-  GRANT_TRAILBASE_BASE_URL: "http://trailbase:4000"
-  GRANT_TRAILBASE_INTROSPECT_PATH: "/api/grant/introspect"
-  GRANT_TRAILBASE_CACHE_TTL_SECONDS: "45"
+  GRANT_RAUTHY_BASE_URL: "http://rauthy:8080"
+  GRANT_RAUTHY_INTROSPECT_PATH: "/auth/v1/oidc/introspect"
+  GRANT_RAUTHY_USERINFO_PATH: "/auth/v1/oidc/userinfo"
+  GRANT_RAUTHY_CACHE_TTL_SECONDS: "45"
   HQL_NODES: |
     1 grant-voter-0.grant-headless:8100 grant-voter-0.grant-headless:8200
     2 grant-voter-1.grant-headless:8100 grant-voter-1.grant-headless:8200

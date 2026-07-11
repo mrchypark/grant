@@ -21,6 +21,7 @@ const AUTHORIZATION_TABLES: &[&str] = &[
     "role_actions",
     "role_bindings",
     "applications",
+    "application_redirect_uris",
     "application_actions",
     "application_grants",
     "application_grant_actions",
@@ -139,10 +140,19 @@ async fn ensure_schema_creates_authorization_columns() {
             "first_party",
             "consent_policy",
             "active",
+            "rauthy_client_id",
+            "secret_rotated_at",
             "created_by_user_id",
             "created_at",
             "updated_at",
         ],
+    )
+    .await;
+
+    support::assert_table_columns(
+        &runtime,
+        "application_redirect_uris",
+        &["application_id", "redirect_uri", "created_at"],
     )
     .await;
 
@@ -238,6 +248,15 @@ async fn ensure_schema_creates_authorization_indexes() {
     assert!(
         support::has_unique_index_on_columns(&runtime, "applications", &["slug"]).await,
         "applications.slug must have a unique index"
+    );
+    assert!(
+        support::has_unique_index_on_columns(
+            &runtime,
+            "application_redirect_uris",
+            &["application_id", "redirect_uri"],
+        )
+        .await,
+        "application_redirect_uris(application_id, redirect_uri) must be unique"
     );
     assert!(
         support::has_unique_index_on_columns(&runtime, "actions", &["provider_id", "code"]).await,
@@ -753,4 +772,52 @@ async fn ensure_schema_adds_provider_columns_to_existing_authorization_tables() 
             "missing {table}.{column}"
         );
     }
+}
+
+#[tokio::test]
+async fn ensure_schema_adds_developer_console_columns_to_existing_applications() {
+    let (runtime, _dir) = test_runtime().await;
+    runtime
+        .batch(
+            r#"
+            CREATE TABLE applications (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT,
+                application_type TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                first_party INTEGER NOT NULL DEFAULT 0,
+                consent_policy TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_by_user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO applications (
+                id, organization_id, slug, name, description, application_type, app_type,
+                first_party, consent_policy, active, created_by_user_id, created_at, updated_at
+            ) VALUES (
+                'legacy-app', 'legacy-org', 'legacy-app', 'Legacy App', NULL, 'confidential',
+                'web', 0, 'explicit', 1, 'legacy-user',
+                '2026-04-12T00:00:00Z', '2026-04-12T00:00:00Z'
+            );
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed legacy applications table");
+
+    let db = support::test_database(runtime.clone());
+    db.ensure_schema_only().await.expect("ensure schema only");
+
+    let columns = support::table_columns(&runtime, "applications").await;
+    assert!(columns.contains(&"rauthy_client_id".to_owned()));
+    assert!(columns.contains(&"secret_rotated_at".to_owned()));
+    let application = db
+        .get_application_with_consistency("legacy-app", Some(ReadConsistency::Strong))
+        .await
+        .expect("legacy application");
+    assert_eq!(application.rauthy_client_id.as_deref(), Some("legacy-app"));
 }

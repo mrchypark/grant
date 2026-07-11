@@ -1,33 +1,54 @@
 services:
-  trailbase:
-    build:
-      context: .
-      dockerfile: Dockerfile.trailbase-auth-bridge
-    container_name: grant-trailbase
-    init: true
+  rauthy-init:
+    image: busybox:1.36
+    container_name: grant-rauthy-init
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /app/data
+        chown -R 10001:10001 /app/data
+        chmod -R 0770 /app/data
+        sh /renderer/render-rauthy-bootstrap.sh /bootstrap-template /app/bootstrap
     environment:
-      TRAILBASE_GRANT_INTERNAL_SECRET: ${TRAILBASE_GRANT_INTERNAL_SECRET}
-      TRAILBASE_DATA_DIR: /data/trailbase
-      TRAILBASE_ADDRESS: 0.0.0.0:4000
-      TRAILBASE_DEV: ${TRAILBASE_DEV:-false}
-      TRAILBASE_LOG_RESPONSES: ${TRAILBASE_LOG_RESPONSES:-false}
+      GRANT_RAUTHY_CLIENT_SECRET: ${GRANT_RAUTHY_CLIENT_SECRET}
+      GRANT_RAUTHY_ADMIN_API_KEY: ${GRANT_RAUTHY_ADMIN_API_KEY}
     volumes:
-      - trailbase_data:/data/trailbase
+      - rauthy_data:/app/data
+      - rauthy_bootstrap:/app/bootstrap
+      - ./deploy/rauthy:/bootstrap-template:ro
+      - ./deploy/k8s/render-rauthy-bootstrap.sh:/renderer/render-rauthy-bootstrap.sh:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  rauthy:
+    image: ghcr.io/sebadob/rauthy:0.36.0
+    container_name: grant-rauthy
+    depends_on:
+      rauthy-init:
+        condition: service_completed_successfully
+    init: true
+    volumes:
+      - rauthy_data:/app/data
+      - ./deploy/rauthy/config.toml:/app/config.toml:ro
+      - rauthy_bootstrap:/app/bootstrap:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
     expose:
-      - "4000"
+      - "8080"
+      - "8443"
+      - "8100"
+      - "8200"
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
     restart: unless-stopped
 
   grant:
@@ -36,18 +57,21 @@ services:
       dockerfile: Dockerfile
     container_name: grant-app
     depends_on:
-      trailbase:
-        condition: service_healthy
+      rauthy:
+        condition: service_started
     init: true
     environment:
       GRANT_BIND_ADDR: 0.0.0.0:8080
       GRANT_MASTER_KEY: ${GRANT_MASTER_KEY}
       GRANT_BOOTSTRAP_USER_ID: ${GRANT_BOOTSTRAP_USER_ID:-conalog-grant}
       GRANT_BOOTSTRAP_USER_NAME: ${GRANT_BOOTSTRAP_USER_NAME:-Conalog Grant}
-      GRANT_TRAILBASE_BASE_URL: http://trailbase:4000
-      GRANT_TRAILBASE_INTROSPECT_PATH: /api/grant/introspect
-      GRANT_TRAILBASE_INTERNAL_SECRET: ${TRAILBASE_GRANT_INTERNAL_SECRET}
-      GRANT_TRAILBASE_CACHE_TTL_SECONDS: ${GRANT_TRAILBASE_CACHE_TTL_SECONDS:-30}
+      GRANT_RAUTHY_BASE_URL: http://rauthy:8080
+      GRANT_RAUTHY_INTROSPECT_PATH: /auth/v1/oidc/introspect
+      GRANT_RAUTHY_USERINFO_PATH: /auth/v1/oidc/userinfo
+      GRANT_RAUTHY_CLIENT_ID: ${GRANT_RAUTHY_CLIENT_ID:-grant}
+      GRANT_RAUTHY_CLIENT_SECRET: ${GRANT_RAUTHY_CLIENT_SECRET}
+      GRANT_RAUTHY_ADMIN_API_KEY: ${GRANT_RAUTHY_ADMIN_API_KEY}
+      GRANT_RAUTHY_CACHE_TTL_SECONDS: ${GRANT_RAUTHY_CACHE_TTL_SECONDS:-30}
       GRANT_RUNTIME_MODE: ${GRANT_RUNTIME_MODE:-embedded}
       GRANT_LOCAL_NODE_ROLE: ${GRANT_LOCAL_NODE_ROLE:-voter}
       GRANT_READ_CONSISTENCY: ${GRANT_READ_CONSISTENCY:-local}
@@ -87,5 +111,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  trailbase_data:
+  rauthy_data:
+  rauthy_bootstrap:
   grant_data:

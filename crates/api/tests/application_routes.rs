@@ -4,7 +4,10 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
-use domain::{Role, RoleBinding, RoleBindingState, RoleBindingSubjectType};
+use domain::{
+    Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationRedirectUri,
+    ApplicationType, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
+};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
@@ -59,8 +62,8 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
     )
 }
 
-async fn test_service() -> (Arc<AppService>, Database, TempDir) {
-    let trailbase_base_url = support::start_mock_trailbase().await;
+async fn test_service_with_rauthy_url() -> (Arc<AppService>, Database, TempDir, String) {
+    let rauthy_base_url = support::start_mock_rauthy().await;
     let (runtime, dir) = test_runtime().await;
     let app_cfg = AppConfig {
         server: ServerConfig {
@@ -71,7 +74,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
-        auth: support::trailbase_auth_config(trailbase_base_url),
+        auth: support::rauthy_auth_config(rauthy_base_url.clone()),
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
@@ -91,7 +94,12 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
     let db_for_tests = db.clone();
     let service = Arc::new(AppService::new(app_cfg, db));
     service.initialize().await.expect("initialize");
-    (service, db_for_tests, dir)
+    (service, db_for_tests, dir, rauthy_base_url)
+}
+
+async fn test_service() -> (Arc<AppService>, Database, TempDir) {
+    let (service, db, dir, _) = test_service_with_rauthy_url().await;
+    (service, db, dir)
 }
 
 fn app_request(
@@ -115,6 +123,18 @@ fn app_request(
             None => Body::empty(),
         })
         .expect("request")
+}
+
+async fn mock_rauthy_client(base_url: &str, application_id: &str) -> Value {
+    reqwest::Client::new()
+        .get(format!("{base_url}/auth/v1/clients/{application_id}"))
+        .header("authorization", "API-Key grant-rauthy-api-key")
+        .send()
+        .await
+        .expect("mock Rauthy client response")
+        .json()
+        .await
+        .expect("mock Rauthy client JSON")
 }
 
 async fn seed_application_manager(db: &Database, organization_id: &str) {
@@ -155,6 +175,785 @@ async fn seed_application_manager(db: &Database, organization_id: &str) {
     .expect("save application manage binding");
 }
 
+async fn create_application_via_api(
+    app: axum::Router,
+    organization_id: &str,
+    application_id: &str,
+) {
+    create_application_with_type_via_api(app, organization_id, application_id, "confidential")
+        .await;
+}
+
+async fn create_application_with_type_via_api(
+    app: axum::Router,
+    organization_id: &str,
+    application_id: &str,
+    application_type: &str,
+) {
+    let response = app
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/{organization_id}/apps"),
+            "bootstrap-user",
+            organization_id,
+            Some(json!({
+                "id": application_id,
+                "slug": application_id.trim_start_matches("application-"),
+                "name": application_id,
+                "applicationType": application_type,
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": true
+            })),
+        ))
+        .await
+        .expect("create application response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+async fn seed_application_without_manage(
+    db: &Database,
+    organization_id: &str,
+    application_id: &str,
+) {
+    db.upsert_organization_with_owner(organization_id, organization_id, None, organization_id)
+        .await
+        .expect("organization");
+    db.insert_application(&Application {
+        id: application_id.to_owned(),
+        organization_id: organization_id.to_owned(),
+        slug: application_id.trim_start_matches("application-").to_owned(),
+        name: application_id.to_owned(),
+        description: None,
+        application_type: ApplicationType::Confidential,
+        app_type: ApplicationAppType::Web,
+        first_party: false,
+        consent_policy: ApplicationConsentPolicy::Explicit,
+        active: true,
+        rauthy_client_id: None,
+        secret_rotated_at: None,
+        created_by_user_id: "bootstrap-user".to_owned(),
+    })
+    .await
+    .expect("application");
+}
+
+#[tokio::test]
+async fn public_application_sync_excludes_client_credentials_flow() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-public-client";
+    create_application_with_type_via_api(app.clone(), "creator-org", application_id, "public")
+        .await;
+
+    for redirect_uri in [
+        "https://public.example/callback",
+        "https://public.example/second-callback",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": redirect_uri })),
+            ))
+            .await
+            .expect("create public redirect uri response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+}
+
+#[tokio::test]
+async fn application_redirect_uri_routes_create_list_and_delete() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-developer-console").await;
+
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_body = create.into_body().collect().await.expect("body").to_bytes();
+    let created: Value = serde_json::from_slice(&create_body).expect("json");
+    assert_eq!(created["applicationId"], "application-developer-console");
+    assert_eq!(created["redirectUri"], "https://client.example/callback");
+
+    let duplicate = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("duplicate redirect uri response");
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+    let list = app
+        .clone()
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list redirect uri response");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = list.into_body().collect().await.expect("body").to_bytes();
+    let listed: Value = serde_json::from_slice(&list_body).expect("json");
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+
+    let create_second = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/second-callback" })),
+        ))
+        .await
+        .expect("create second redirect uri response");
+    assert_eq!(create_second.status(), StatusCode::CREATED);
+
+    let delete = app
+        .clone()
+        .oneshot(app_request(
+            Method::DELETE,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("delete redirect uri response");
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    let list_after_delete = app
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-developer-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list after delete response");
+    assert_eq!(list_after_delete.status(), StatusCode::OK);
+    let list_after_delete_body = list_after_delete
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let listed_after_delete: Value = serde_json::from_slice(&list_after_delete_body).expect("json");
+    assert_eq!(listed_after_delete.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        listed_after_delete[0]["redirectUri"],
+        "https://client.example/second-callback"
+    );
+}
+
+#[tokio::test]
+async fn application_redirect_uri_can_be_readded_after_deleting_the_last_uri() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-redirect-readd";
+    let path = format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris");
+    let redirect_uri = "https://client.example/callback";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &path,
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": redirect_uri })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let delete = app
+        .clone()
+        .oneshot(app_request(
+            Method::DELETE,
+            &path,
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": redirect_uri })),
+        ))
+        .await
+        .expect("delete redirect uri response");
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    let readd = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &path,
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": redirect_uri })),
+        ))
+        .await
+        .expect("re-add redirect uri response");
+    assert_eq!(readd.status(), StatusCode::CREATED);
+
+    let list = app
+        .oneshot(app_request(
+            Method::GET,
+            &path,
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list redirect uri response");
+    let body = list.into_body().collect().await.expect("body").to_bytes();
+    let listed: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    assert_eq!(listed[0]["redirectUri"], redirect_uri);
+}
+
+#[tokio::test]
+async fn application_update_syncs_existing_rauthy_client_with_zero_redirect_uris() {
+    let (service, db, _dir, rauthy_base_url) = test_service_with_rauthy_url().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-zero-uri-update";
+    let path = format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris");
+    let redirect_uri = "https://client.example/callback";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+    for (method, expected_status) in [
+        (Method::POST, StatusCode::CREATED),
+        (Method::DELETE, StatusCode::NO_CONTENT),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                method,
+                &path,
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": redirect_uri })),
+            ))
+            .await
+            .expect("redirect URI mutation response");
+        assert_eq!(response.status(), expected_status);
+    }
+
+    let update = app
+        .oneshot(app_request(
+            Method::PUT,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "slug": "zero-uri-update",
+                "name": "Zero URI Updated",
+                "applicationType": "public",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": false
+            })),
+        ))
+        .await
+        .expect("application update response");
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let client = mock_rauthy_client(&rauthy_base_url, application_id).await;
+    assert_eq!(client["name"], "Zero URI Updated");
+    assert_eq!(client["enabled"], false);
+    assert_eq!(client["confidential"], false);
+    assert_eq!(client["redirect_uris"], json!([]));
+    assert_eq!(
+        client["flows_enabled"],
+        json!(["authorization_code", "refresh_token"])
+    );
+}
+
+#[tokio::test]
+async fn application_redirect_uri_reconciles_a_fresh_db_set_after_sync() {
+    let (service, db, _dir, rauthy_base_url) = test_service_with_rauthy_url().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-reconcile-stale";
+    let path = format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris");
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+
+    let first = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &path,
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/first" })),
+        ))
+        .await
+        .expect("first redirect URI response");
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let add_app = app.clone();
+    let add_path = path.clone();
+    let add = tokio::spawn(async move {
+        add_app
+            .oneshot(app_request(
+                Method::POST,
+                &add_path,
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": "https://client.example/second" })),
+            ))
+            .await
+            .expect("second redirect URI response")
+    });
+    reqwest::get(format!("{rauthy_base_url}/_test/reconcile-started"))
+        .await
+        .expect("wait for first Rauthy PUT");
+    db.insert_application_redirect_uri(&ApplicationRedirectUri {
+        application_id: application_id.to_owned(),
+        redirect_uri: "https://client.example/concurrent".to_owned(),
+        created_at: "2026-07-11T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("concurrent redirect URI");
+    reqwest::Client::new()
+        .post(format!("{rauthy_base_url}/_test/reconcile-release"))
+        .send()
+        .await
+        .expect("release first Rauthy PUT");
+    assert_eq!(
+        add.await.expect("join add redirect URI").status(),
+        StatusCode::CREATED
+    );
+
+    let client = mock_rauthy_client(&rauthy_base_url, application_id).await;
+    let redirect_uris = client["redirect_uris"].as_array().expect("redirect URIs");
+    assert_eq!(redirect_uris.len(), 3);
+    assert!(
+        redirect_uris
+            .iter()
+            .any(|uri| uri == "https://client.example/concurrent")
+    );
+}
+
+#[tokio::test]
+async fn application_redirect_uri_keeps_local_add_when_second_reconciliation_fails() {
+    let (service, db, _dir, rauthy_base_url) = test_service_with_rauthy_url().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-reconcile-second-failure";
+    let path = format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris");
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+    let first = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &path,
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/first" })),
+        ))
+        .await
+        .expect("first redirect URI response");
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let add_app = app.clone();
+    let add_path = path.clone();
+    let add = tokio::spawn(async move {
+        add_app
+            .oneshot(app_request(
+                Method::POST,
+                &add_path,
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": "https://client.example/second" })),
+            ))
+            .await
+            .expect("second redirect URI response")
+    });
+    reqwest::get(format!("{rauthy_base_url}/_test/reconcile-started"))
+        .await
+        .expect("wait for first Rauthy PUT");
+    db.insert_application_redirect_uri(&ApplicationRedirectUri {
+        application_id: application_id.to_owned(),
+        redirect_uri: "https://client.example/concurrent".to_owned(),
+        created_at: "2026-07-11T00:00:00Z".to_owned(),
+    })
+    .await
+    .expect("concurrent redirect URI");
+    reqwest::Client::new()
+        .post(format!("{rauthy_base_url}/_test/reconcile-release"))
+        .send()
+        .await
+        .expect("release first Rauthy PUT");
+    assert_eq!(
+        add.await.expect("join add redirect URI").status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let redirect_uris = db
+        .list_application_redirect_uris_with_consistency(
+            application_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("redirect URIs");
+    assert!(
+        redirect_uris
+            .iter()
+            .any(|item| item.redirect_uri == "https://client.example/second")
+    );
+}
+
+#[tokio::test]
+async fn application_redirect_uri_recovers_from_create_conflict_race() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-create-race";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+    let response = app
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("redirect URI response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn application_redirect_uri_routes_reject_invalid_redirect_uris() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-invalid-redirect").await;
+
+    for redirect_uri in [
+        "ftp://client.example/callback",
+        "https:///callback",
+        "https://client.example:bad/callback",
+        "https://[::1/callback",
+        "https://client.example/callback#fragment",
+        "http://",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/orgs/creator-org/apps/application-invalid-redirect/redirect-uris",
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({ "redirectUri": redirect_uri })),
+            ))
+            .await
+            .expect("invalid redirect uri response");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "redirect URI should be rejected: {redirect_uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn application_redirect_uri_routes_canonicalize_before_duplicate_check() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-canonical-redirect").await;
+
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-canonical-redirect/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://CLIENT.EXAMPLE" })),
+        ))
+        .await
+        .expect("create canonical redirect uri response");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_body = create.into_body().collect().await.expect("body").to_bytes();
+    let created: Value = serde_json::from_slice(&create_body).expect("json");
+    assert_eq!(created["redirectUri"], "https://client.example/");
+
+    let duplicate = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-canonical-redirect/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/" })),
+        ))
+        .await
+        .expect("duplicate canonical redirect uri response");
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn application_update_sync_failure_rolls_back_local_state() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-sync-rollback";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(redirect.status(), StatusCode::CREATED);
+
+    let update = app
+        .oneshot(app_request(
+            Method::PUT,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "slug": "sync-rollback",
+                "name": "reject-sync",
+                "applicationType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": false
+            })),
+        ))
+        .await
+        .expect("update response");
+    let update_status = update.status();
+    let update_body = update.into_body().collect().await.expect("body").to_bytes();
+    let update_payload: Value = serde_json::from_slice(&update_body).expect("json");
+    assert_eq!(update_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        update_payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("sync rejected"))
+    );
+    assert!(!update_payload.to_string().contains("must-not-leak"));
+
+    let stored = db
+        .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+        .await
+        .expect("stored application");
+    assert_eq!(stored.name, application_id);
+    assert!(stored.active);
+}
+
+#[tokio::test]
+async fn application_update_rejects_unknown_rauthy_fields_before_put_and_rolls_back() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let application_id = "application-unknown-rauthy-field";
+    create_application_via_api(app.clone(), "creator-org", application_id).await;
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}/redirect-uris"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(redirect.status(), StatusCode::CREATED);
+
+    let update = app
+        .oneshot(app_request(
+            Method::PUT,
+            &format!("/api/v1/orgs/creator-org/apps/{application_id}"),
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "slug": "unknown-rauthy-field",
+                "name": "Updated Name",
+                "applicationType": "confidential",
+                "appType": "web",
+                "firstParty": false,
+                "consentPolicy": "explicit",
+                "active": false
+            })),
+        ))
+        .await
+        .expect("update response");
+    let update_status = update.status();
+    let update_body = update.into_body().collect().await.expect("body").to_bytes();
+    let update_payload: Value = serde_json::from_slice(&update_body).expect("json");
+    let error = update_payload["error"].as_str().expect("error");
+    assert_eq!(update_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(error.contains("invalid rauthy client response"));
+    assert!(!error.contains("unexpected put"));
+
+    let stored = db
+        .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+        .await
+        .expect("stored application");
+    assert_eq!(stored.name, application_id);
+    assert!(stored.active);
+}
+
+#[tokio::test]
+async fn application_client_secret_rotate_returns_secret_and_updates_application() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(app.clone(), "creator-org", "application-secret-rotation").await;
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-secret-rotation/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("create redirect uri response");
+    assert_eq!(redirect.status(), StatusCode::CREATED);
+
+    let rotate = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-secret-rotation/client-secret/rotate",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("rotate response");
+    let rotate_status = rotate.status();
+    let rotate_body = rotate.into_body().collect().await.expect("body").to_bytes();
+    let rotated: Value = serde_json::from_slice(&rotate_body).expect("json");
+    assert_eq!(
+        rotate_status,
+        StatusCode::OK,
+        "rotate response body: {rotated}"
+    );
+    assert!(
+        rotated["clientSecret"]
+            .as_str()
+            .is_some_and(|value| value == "rotated-application-secret-rotation")
+    );
+    let rotated_at = rotated["secretRotatedAt"]
+        .as_str()
+        .expect("secretRotatedAt")
+        .to_owned();
+
+    let get = app
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-secret-rotation",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("get response");
+    assert_eq!(get.status(), StatusCode::OK);
+    let get_body = get.into_body().collect().await.expect("body").to_bytes();
+    let application: Value = serde_json::from_slice(&get_body).expect("json");
+    assert_eq!(application["secretRotatedAt"], rotated_at);
+}
+
+#[tokio::test]
+async fn application_client_secret_rotate_requires_provisioned_rauthy_client() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    create_application_via_api(
+        app.clone(),
+        "creator-org",
+        "application-secret-not-provisioned",
+    )
+    .await;
+
+    let rotate = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-secret-not-provisioned/client-secret/rotate",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("rotate response");
+    assert_eq!(rotate.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn application_developer_console_routes_require_manage_permission() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_without_manage(&db, "creator-org", "application-forbidden-console").await;
+    let app = api::build_router(service);
+
+    let redirect = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-forbidden-console/redirect-uris",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({ "redirectUri": "https://client.example/callback" })),
+        ))
+        .await
+        .expect("redirect response");
+    assert_eq!(redirect.status(), StatusCode::FORBIDDEN);
+
+    let rotate = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps/application-forbidden-console/client-secret/rotate",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("rotate response");
+    assert_eq!(rotate.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn application_routes_create_list_get_and_replace_actions() {
     let (service, db, _dir) = test_service().await;
@@ -188,6 +987,7 @@ async fn application_routes_create_list_get_and_replace_actions() {
     let payload: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(payload["id"], "application-awesome-dashboard");
     assert_eq!(payload["organizationId"], "creator-org");
+    assert_eq!(payload["rauthyClientId"], "application-awesome-dashboard");
     assert_eq!(payload["createdByUserId"], "bootstrap-user");
 
     let list = app

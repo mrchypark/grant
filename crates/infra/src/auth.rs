@@ -10,10 +10,13 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+
+const AUTH_PROVIDER: &str = "rauthy";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPrincipal {
@@ -32,27 +35,29 @@ pub struct ExternalIdentity {
 
 #[derive(Clone)]
 pub struct AuthResolver {
-    trailbase: TrailbaseResolver,
+    rauthy: RauthyResolver,
 }
 
 #[derive(Clone)]
-struct TrailbaseResolver {
+struct RauthyResolver {
     base_url: String,
     introspect_path: String,
-    internal_secret: String,
+    userinfo_path: String,
+    client_id: String,
+    client_secret: String,
     cache_ttl: Duration,
     client: Client,
-    cache: Arc<Mutex<HashMap<String, CachedTrailbaseIdentity>>>,
+    cache: Arc<Mutex<HashMap<String, CachedRauthyIdentity>>>,
 }
 
 #[derive(Debug, Clone)]
-struct CachedTrailbaseIdentity {
-    identity: TrailbaseIdentity,
+struct CachedRauthyIdentity {
+    identity: RauthyIdentity,
     expires_at: Instant,
 }
 
 #[derive(Debug, Clone)]
-struct TrailbaseIdentity {
+struct RauthyIdentity {
     external_user_id: String,
     email: Option<String>,
     display_name: String,
@@ -60,26 +65,37 @@ struct TrailbaseIdentity {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TrailbaseIntrospectionResponse {
-    valid: bool,
-    trailbase_user_id: String,
+struct RauthyIntrospectionResponse {
+    sub: String,
+    exp: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RauthyUserinfoResponse {
+    sub: String,
+    name: Option<String>,
     email: Option<String>,
-    display_name: Option<String>,
-    verified: bool,
-    active: bool,
-    expires_at: Option<String>,
+    preferred_username: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+    email_verified: Option<bool>,
 }
 
 impl AuthResolver {
     pub fn new(cfg: &AuthConfig) -> Self {
         Self {
-            trailbase: TrailbaseResolver {
-                base_url: cfg.trailbase.base_url.trim_end_matches('/').to_owned(),
-                introspect_path: cfg.trailbase.introspect_path.clone(),
-                internal_secret: cfg.trailbase.internal_secret.clone(),
-                cache_ttl: Duration::from_secs(cfg.trailbase.cache_ttl_seconds),
-                client: Client::new(),
+            rauthy: RauthyResolver {
+                base_url: cfg.rauthy.base_url.trim_end_matches('/').to_owned(),
+                introspect_path: cfg.rauthy.introspect_path.clone(),
+                userinfo_path: cfg.rauthy.userinfo_path.clone(),
+                client_id: cfg.rauthy.client_id.clone(),
+                client_secret: cfg.rauthy.client_secret.clone(),
+                cache_ttl: Duration::from_secs(cfg.rauthy.cache_ttl_seconds),
+                client: Client::builder()
+                    .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                    .timeout(HTTP_REQUEST_TIMEOUT)
+                    .build()
+                    .expect("build Rauthy auth client"),
                 cache: Arc::new(Mutex::new(HashMap::new())),
             },
         }
@@ -106,7 +122,7 @@ impl AuthResolver {
         let effective_read_consistency_override = Some(effective_read_consistency.clone());
         let should_sync = should_sync_identity(Some(&effective_read_consistency));
         let identity = self
-            .trailbase
+            .rauthy
             .introspect(
                 db,
                 token,
@@ -116,7 +132,7 @@ impl AuthResolver {
             .await?;
         let user = if should_sync {
             db.resolve_or_create_user_identity_with_consistency(
-                "trailbase",
+                AUTH_PROVIDER,
                 &identity.external_user_id,
                 identity.email.as_deref(),
                 &identity.display_name,
@@ -127,14 +143,14 @@ impl AuthResolver {
             .map_err(map_strong_identity_sync_error)?
         } else {
             db.resolve_existing_user_identity_with_consistency(
-                "trailbase",
+                AUTH_PROVIDER,
                 &identity.external_user_id,
                 effective_read_consistency_override.clone(),
             )
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "forbidden: no local user identity available for trailbase user {}",
+                    "forbidden: no local user identity available for rauthy user {}",
                     identity.external_user_id
                 )
             })?
@@ -172,7 +188,7 @@ impl AuthResolver {
         let identity = if let Some(db) = db {
             let effective_read_consistency =
                 db.default_read_consistency_with_override(read_consistency.clone());
-            self.trailbase
+            self.rauthy
                 .introspect(
                     db,
                     token,
@@ -181,10 +197,10 @@ impl AuthResolver {
                 )
                 .await?
         } else {
-            self.trailbase.introspect_without_db(token).await?
+            self.rauthy.introspect_without_db(token).await?
         };
         Ok(ExternalIdentity {
-            provider: "trailbase".to_owned(),
+            provider: AUTH_PROVIDER.to_owned(),
             external_user_id: identity.external_user_id,
             email: identity.email,
             display_name: identity.display_name,
@@ -193,14 +209,14 @@ impl AuthResolver {
     }
 }
 
-impl TrailbaseResolver {
+impl RauthyResolver {
     async fn introspect(
         &self,
         db: &Database,
         token: &str,
         read_consistency: Option<ReadConsistency>,
         persist_shared_cache: bool,
-    ) -> Result<TrailbaseIdentity> {
+    ) -> Result<RauthyIdentity> {
         let cache_key = token_cache_key(token);
         if let Some(identity) = self.read_cache(&cache_key).await {
             return Ok(identity);
@@ -216,7 +232,11 @@ impl TrailbaseResolver {
                 {
                     return Ok(identity);
                 }
-                return Err(error).context("call TrailBase introspect");
+                return Err(map_rauthy_request_error(
+                    "introspection",
+                    "call Rauthy introspect",
+                    error,
+                ));
             }
         };
         reject_unauthorized_introspection(&response)?;
@@ -229,33 +249,34 @@ impl TrailbaseResolver {
                 {
                     return Ok(identity);
                 }
-                return Err(error).context("TrailBase introspect returned error status");
+                return Err(error).context("Rauthy introspect returned error status");
             }
         };
-        let identity = parse_introspection_response(response).await?;
-        self.write_cache(cache_key, identity.clone()).await;
+        let (identity, ttl) = self.identity_from_introspection(token, response).await?;
+        self.write_cache_until(cache_key, identity.clone(), Instant::now() + ttl)
+            .await;
         if persist_shared_cache {
-            self.write_shared_cache(db, token, &identity).await?;
+            self.write_shared_cache(db, token, &identity, ttl).await?;
         }
         Ok(identity)
     }
 
-    async fn introspect_without_db(&self, token: &str) -> Result<TrailbaseIdentity> {
+    async fn introspect_without_db(&self, token: &str) -> Result<RauthyIdentity> {
         let cache_key = token_cache_key(token);
         if let Some(identity) = self.read_cache(&cache_key).await {
             return Ok(identity);
         }
 
-        let response = self
-            .send_introspection(token)
-            .await
-            .context("call TrailBase introspect")?;
+        let response = self.send_introspection(token).await.map_err(|error| {
+            map_rauthy_request_error("introspection", "call Rauthy introspect", error)
+        })?;
         reject_unauthorized_introspection(&response)?;
         let response = response
             .error_for_status()
-            .context("TrailBase introspect returned error status")?;
-        let identity = parse_introspection_response(response).await?;
-        self.write_cache(cache_key, identity.clone()).await;
+            .context("Rauthy introspect returned error status")?;
+        let (identity, ttl) = self.identity_from_introspection(token, response).await?;
+        self.write_cache_until(cache_key, identity.clone(), Instant::now() + ttl)
+            .await;
         Ok(identity)
     }
 
@@ -263,36 +284,80 @@ impl TrailbaseResolver {
         let url = format!("{}{}", self.base_url, self.introspect_path);
         self.client
             .post(url)
-            .bearer_auth(token)
-            .header("x-grant-internal-secret", &self.internal_secret)
+            .basic_auth(&self.client_id, Some(&self.client_secret))
+            .form(&[("token", token)])
             .send()
             .await
     }
 
-    async fn read_cache(&self, key: &str) -> Option<TrailbaseIdentity> {
-        let cache = self.cache.lock().await;
+    async fn identity_from_introspection(
+        &self,
+        token: &str,
+        response: reqwest::Response,
+    ) -> Result<(RauthyIdentity, Duration)> {
+        let token_info = parse_introspection_response(response).await?;
+        let ttl = cache_ttl_for_exp(self.cache_ttl, token_info.exp, Utc::now().timestamp())?;
+        let identity = self.fetch_userinfo(token, &token_info.sub).await?;
+        Ok((identity, ttl))
+    }
+
+    async fn fetch_userinfo(&self, token: &str, expected_sub: &str) -> Result<RauthyIdentity> {
+        let url = format!("{}{}", self.base_url, self.userinfo_path);
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| map_rauthy_request_error("userinfo", "call Rauthy userinfo", error))?;
+        reject_unauthorized_introspection(&response)?;
+        let response = response
+            .error_for_status()
+            .context("Rauthy userinfo returned error status")?;
+        let payload: RauthyUserinfoResponse = response.json().await.map_err(|error| {
+            map_rauthy_request_error("userinfo", "decode Rauthy userinfo response", error)
+        })?;
+        if payload.sub != expected_sub {
+            anyhow::bail!("unauthorized: rauthy userinfo subject mismatch");
+        }
+        let email = verified_email(payload.email, payload.email_verified);
+        let composed_name = display_name_from_parts(
+            payload.given_name.as_deref(),
+            payload.family_name.as_deref(),
+        );
+        let display_name = first_non_empty([
+            payload.name.as_deref(),
+            payload.preferred_username.as_deref(),
+            composed_name.as_deref(),
+            email.as_deref(),
+            Some(expected_sub),
+        ])
+        .unwrap_or_else(|| "Rauthy User".to_owned());
+        Ok(RauthyIdentity {
+            external_user_id: expected_sub.to_owned(),
+            email,
+            display_name,
+            active: true,
+        })
+    }
+
+    async fn read_cache(&self, key: &str) -> Option<RauthyIdentity> {
+        let mut cache = self.cache.lock().expect("Rauthy auth cache poisoned");
         let cached = cache.get(key)?;
         if cached.expires_at <= Instant::now() {
+            cache.remove(key);
             return None;
         }
         Some(cached.identity.clone())
     }
 
-    async fn write_cache(&self, key: String, identity: TrailbaseIdentity) {
-        self.write_cache_until(key, identity, Instant::now() + self.cache_ttl)
-            .await;
-    }
-
-    async fn write_cache_until(
-        &self,
-        key: String,
-        identity: TrailbaseIdentity,
-        expires_at: Instant,
-    ) {
-        let mut cache = self.cache.lock().await;
+    async fn write_cache_until(&self, key: String, identity: RauthyIdentity, expires_at: Instant) {
+        let mut cache = self.cache.lock().expect("Rauthy auth cache poisoned");
+        let now = Instant::now();
+        cache.retain(|_, cached| cached.expires_at > now);
         cache.insert(
             key,
-            CachedTrailbaseIdentity {
+            CachedRauthyIdentity {
                 identity,
                 expires_at,
             },
@@ -304,7 +369,7 @@ impl TrailbaseResolver {
         db: &Database,
         token_hash: &str,
         read_consistency: Option<ReadConsistency>,
-    ) -> Result<Option<TrailbaseIdentity>> {
+    ) -> Result<Option<RauthyIdentity>> {
         let now = Utc::now();
         let cached = db
             .get_cached_external_identity(token_hash, now, read_consistency)
@@ -312,7 +377,10 @@ impl TrailbaseResolver {
         let Some(cached) = cached else {
             return Ok(None);
         };
-        let identity = TrailbaseIdentity {
+        if cached.provider != AUTH_PROVIDER {
+            return Ok(None);
+        }
+        let identity = RauthyIdentity {
             external_user_id: cached.external_user_id,
             email: cached.email,
             display_name: cached.display_name,
@@ -336,14 +404,15 @@ impl TrailbaseResolver {
         &self,
         db: &Database,
         token: &str,
-        identity: &TrailbaseIdentity,
+        identity: &RauthyIdentity,
+        ttl: Duration,
     ) -> Result<()> {
         let token_hash = token_cache_key(token);
-        let expires_at = Utc::now() + ChronoDuration::seconds(self.cache_ttl.as_secs() as i64);
+        let expires_at = Utc::now() + ChronoDuration::seconds(ttl.as_secs() as i64);
         db.put_cached_external_identity(
             &token_hash,
             &CachedExternalIdentity {
-                provider: "trailbase".to_owned(),
+                provider: AUTH_PROVIDER.to_owned(),
                 external_user_id: identity.external_user_id.clone(),
                 email: identity.email.clone(),
                 display_name: identity.display_name.clone(),
@@ -367,33 +436,99 @@ fn reject_unauthorized_introspection(response: &reqwest::Response) -> Result<()>
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
-        anyhow::bail!("unauthorized: trailbase token rejected");
+        anyhow::bail!("unauthorized: rauthy token rejected");
     }
     Ok(())
 }
 
-async fn parse_introspection_response(response: reqwest::Response) -> Result<TrailbaseIdentity> {
-    let payload: TrailbaseIntrospectionResponse = response
-        .json()
-        .await
-        .context("decode TrailBase introspection response")?;
-    if !payload.valid {
-        anyhow::bail!("unauthorized: trailbase token is not valid");
-    }
+#[derive(Debug, Deserialize)]
+struct RauthyIntrospectionPayload {
+    active: bool,
+    sub: Option<String>,
+    exp: Option<i64>,
+}
+
+async fn parse_introspection_response(
+    response: reqwest::Response,
+) -> Result<RauthyIntrospectionResponse> {
+    let payload: RauthyIntrospectionPayload = response.json().await.map_err(|error| {
+        map_rauthy_request_error(
+            "introspection",
+            "decode Rauthy introspection response",
+            error,
+        )
+    })?;
     if !payload.active {
-        anyhow::bail!("unauthorized: trailbase user is inactive");
+        anyhow::bail!("unauthorized: rauthy token is not valid");
     }
-    let _ = payload.verified;
-    let _ = payload.expires_at.as_deref();
-    Ok(TrailbaseIdentity {
-        external_user_id: payload.trailbase_user_id,
-        email: payload.email,
-        display_name: payload
-            .display_name
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "TrailBase User".to_owned()),
-        active: payload.active,
+    let sub = payload
+        .sub
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("unauthorized: rauthy token has no subject"))?
+        .to_owned();
+    Ok(RauthyIntrospectionResponse {
+        sub,
+        exp: payload.exp,
     })
+}
+
+fn map_rauthy_request_error(
+    operation: &str,
+    context: &'static str,
+    error: reqwest::Error,
+) -> anyhow::Error {
+    if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body() {
+        anyhow!("unavailable: Rauthy {operation} request failed")
+    } else {
+        anyhow::Error::new(error).context(context)
+    }
+}
+
+fn first_non_empty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn display_name_from_parts(given_name: Option<&str>, family_name: Option<&str>) -> Option<String> {
+    let joined = [given_name, family_name]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
+fn verified_email(email: Option<String>, verified: Option<bool>) -> Option<String> {
+    verified
+        .is_some_and(|verified| verified)
+        .then_some(email)
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn cache_ttl_for_exp(configured: Duration, exp: Option<i64>, now: i64) -> Result<Duration> {
+    let Some(exp) = exp else {
+        return Ok(configured);
+    };
+    let remaining = exp
+        .checked_sub(now)
+        .ok_or_else(|| anyhow!("unauthorized: invalid token expiration"))?;
+    if remaining <= 0 {
+        return Ok(Duration::ZERO);
+    }
+    Ok(configured.min(Duration::from_secs(remaining as u64)))
 }
 
 pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Error {
@@ -414,9 +549,13 @@ fn token_cache_key(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_strong_identity_sync_error, should_sync_identity};
-    use crate::config::ReadConsistency;
+    use super::{
+        CachedRauthyIdentity, RauthyIdentity, cache_ttl_for_exp, map_strong_identity_sync_error,
+        should_sync_identity, verified_email,
+    };
+    use crate::config::{AuthConfig, RauthyAuthConfig, ReadConsistency};
     use anyhow::anyhow;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn wraps_internal_identity_sync_failures_with_quorum_message() {
@@ -439,5 +578,71 @@ mod tests {
         assert!(should_sync_identity(Some(&ReadConsistency::PreferStrong)));
         assert!(!should_sync_identity(Some(&ReadConsistency::Local)));
         assert!(!should_sync_identity(None));
+    }
+
+    #[test]
+    fn only_verified_email_is_eligible_for_identity_linking() {
+        assert_eq!(
+            verified_email(Some("user@example.com".to_owned()), Some(true)).as_deref(),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            verified_email(Some("user@example.com".to_owned()), Some(false)),
+            None
+        );
+    }
+
+    #[test]
+    fn token_expiry_caps_cache_ttl() {
+        assert_eq!(
+            cache_ttl_for_exp(Duration::from_secs(30), Some(110), 100).expect("ttl"),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            cache_ttl_for_exp(Duration::from_secs(30), Some(100), 100).expect("ttl"),
+            Duration::ZERO
+        );
+        assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(i64::MAX), i64::MIN).is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_write_sweeps_unqueried_expired_entries() {
+        let resolver = super::AuthResolver::new(&AuthConfig {
+            rauthy: RauthyAuthConfig {
+                base_url: "http://localhost".to_owned(),
+                introspect_path: "/introspect".to_owned(),
+                userinfo_path: "/userinfo".to_owned(),
+                client_id: "client".to_owned(),
+                client_secret: "secret".to_owned(),
+                admin_api_key: "admin".to_owned(),
+                cache_ttl_seconds: 30,
+            },
+        })
+        .rauthy;
+        let identity = RauthyIdentity {
+            external_user_id: "user".to_owned(),
+            email: None,
+            display_name: "User".to_owned(),
+            active: true,
+        };
+        resolver.cache.lock().expect("cache").insert(
+            "expired".to_owned(),
+            CachedRauthyIdentity {
+                identity: identity.clone(),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        resolver
+            .write_cache_until(
+                "fresh".to_owned(),
+                identity,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await;
+
+        let cache = resolver.cache.lock().expect("cache");
+        assert!(!cache.contains_key("expired"));
+        assert!(cache.contains_key("fresh"));
     }
 }

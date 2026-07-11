@@ -3,28 +3,36 @@
 pub mod auth;
 
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     body::Body,
     extract::State,
     http::{HeaderMap, Method, Request, StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use domain::{RoleBinding, RoleBindingState, RoleBindingSubjectType, User};
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
     config::{
-        AppConfig, AuthConfig, HiqliteConfig, LocalNodeRole, ReadConsistency, RuntimeMode,
-        SecurityConfig, ServerConfig, TrailbaseAuthConfig,
+        AppConfig, AuthConfig, HiqliteConfig, LocalNodeRole, RauthyAuthConfig, ReadConsistency,
+        RuntimeMode, SecurityConfig, ServerConfig,
     },
     database::Database,
     runtime::HiqliteRuntime,
     service::AppService,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tempfile::TempDir;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub const MASTER_KEY: &str = "dev-only-master-key";
@@ -33,14 +41,78 @@ pub const BOOTSTRAP_USER_NAME: &str = "Bootstrap User";
 pub const FIXED_TEST_TIME: &str = "2026-04-03T00:00:00Z";
 
 #[derive(Clone)]
-struct MockTrailbaseState;
+struct MockRauthyState {
+    clients: Arc<Mutex<HashMap<String, MockClient>>>,
+    reconcile_blocked: Arc<AtomicBool>,
+    reconcile_started: Arc<Notify>,
+    reconcile_release: Arc<Notify>,
+    update_counts: Arc<Mutex<HashMap<String, usize>>>,
+}
 
-pub fn trailbase_auth_config(base_url: String) -> AuthConfig {
+#[derive(Clone)]
+struct MockClient {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+    flows_enabled: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntrospectionForm {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MockClientRequest {
+    id: String,
+    name: Option<String>,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MockClientUpdateRequest {
+    name: Option<String>,
+    enabled: bool,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+    post_logout_redirect_uris: Option<Vec<String>>,
+    allowed_origins: Option<Vec<String>>,
+    flows_enabled: Vec<String>,
+    auth_code_lifetime: i32,
+    access_token_lifetime: i32,
+    challenges: Option<Vec<String>>,
+    client_uri: Option<String>,
+    claims: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct MockClientResponse {
+    id: String,
+    name: Option<String>,
+    enabled: bool,
+    confidential: bool,
+    redirect_uris: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MockClientSecretResponse {
+    id: String,
+    confidential: bool,
+    secret: String,
+}
+
+pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
     AuthConfig {
-        trailbase: TrailbaseAuthConfig {
+        rauthy: RauthyAuthConfig {
             base_url,
-            introspect_path: "/api/grant/introspect".to_owned(),
-            internal_secret: "test-trailbase-secret".to_owned(),
+            introspect_path: "/auth/v1/oidc/introspect".to_owned(),
+            userinfo_path: "/auth/v1/oidc/userinfo".to_owned(),
+            client_id: "grant".to_owned(),
+            client_secret: "test-rauthy-secret".to_owned(),
+            admin_api_key: "grant-rauthy-api-key".to_owned(),
             cache_ttl_seconds: 30,
         },
     }
@@ -90,7 +162,7 @@ pub async fn test_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempD
 pub async fn test_service_with_default_consistency(
     default_read_consistency: ReadConsistency,
 ) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
-    let trailbase_base_url = start_mock_trailbase().await;
+    let rauthy_base_url = start_mock_rauthy().await;
     let (runtime, dir) = test_runtime(default_read_consistency.clone()).await;
     let app_cfg = AppConfig {
         server: ServerConfig {
@@ -101,7 +173,7 @@ pub async fn test_service_with_default_consistency(
             bootstrap_user_id: BOOTSTRAP_USER_ID.to_owned(),
             bootstrap_user_name: BOOTSTRAP_USER_NAME.to_owned(),
         },
-        auth: trailbase_auth_config(trailbase_base_url),
+        auth: rauthy_auth_config(rauthy_base_url),
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
@@ -283,7 +355,7 @@ pub async fn seed_identity(
     display_name: &str,
     active: bool,
 ) -> User {
-    db.resolve_or_create_user_identity("trailbase", external_user_id, email, display_name, active)
+    db.resolve_or_create_user_identity("rauthy", external_user_id, email, display_name, active)
         .await
         .expect("seed identity")
 }
@@ -325,7 +397,7 @@ pub async fn seed_org_with_user(
     let user = seed_identity(
         db,
         external_user_id,
-        Some(&format!("{external_user_id}@trailbase.test")),
+        Some(&format!("{external_user_id}@rauthy.test")),
         display_name,
         true,
     )
@@ -362,17 +434,17 @@ pub fn user_org_role_binding(
     }
 }
 
-pub async fn start_mock_trailbase() -> String {
+pub async fn start_mock_rauthy() -> String {
     async fn login_ui() -> Html<&'static str> {
         Html(
             r#"<!doctype html>
 <html><body>
-<h1>TrailBase Login</h1>
-<form method="post" action="/api/auth/v1/login">
+<h1>Rauthy Login</h1>
+<form method="post" action="/auth/v1/oidc/authorize">
   <input name="email" />
   <input name="password" type="password" />
 </form>
-<link rel="stylesheet" href="/_/auth/app.css">
+<link rel="stylesheet" href="/auth/v1/assets/app.css">
 </body></html>"#,
         )
     }
@@ -384,22 +456,282 @@ pub async fn start_mock_trailbase() -> String {
         )
     }
 
-    async fn login_api() -> Json<serde_json::Value> {
-        Json(json!({
-            "authToken": "mock-auth-token",
-            "refreshToken": "mock-refresh-token"
-        }))
+    async fn redirect_response() -> impl IntoResponse {
+        (
+            StatusCode::FOUND,
+            [
+                (header::LOCATION, "/auth/v1/redirect-target"),
+                (header::SET_COOKIE, "rauthy_session=test; Path=/; HttpOnly"),
+            ],
+        )
+    }
+
+    async fn redirect_target() -> &'static str {
+        "redirect was followed upstream"
+    }
+
+    async fn echo_path(uri: axum::http::Uri) -> String {
+        uri.path().to_owned()
+    }
+
+    fn require_admin_api_key(headers: &HeaderMap) {
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(authorization, "API-Key grant-rauthy-api-key");
+    }
+
+    async fn create_client(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        Json(body): Json<MockClientRequest>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        assert!(!body.redirect_uris.is_empty());
+        let client = MockClient {
+            id: body.id.clone(),
+            name: body.name,
+            enabled: true,
+            confidential: body.confidential,
+            redirect_uris: body.redirect_uris,
+            flows_enabled: vec!["authorization_code".to_owned()],
+        };
+        let mut clients = state.clients.lock().expect("clients");
+        if clients.contains_key(&body.id) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "client already exists" })),
+            )
+                .into_response();
+        }
+        clients.insert(body.id.clone(), client.clone());
+        Json(MockClientResponse {
+            id: client.id,
+            name: client.name,
+            enabled: true,
+            confidential: client.confidential,
+            redirect_uris: client.redirect_uris,
+        })
+        .into_response()
+    }
+
+    async fn update_client(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        axum::extract::Path(client_id): axum::extract::Path<String>,
+        Json(raw_body): Json<Value>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        assert!(
+            raw_body.get("id").is_none(),
+            "PUT must not include client id"
+        );
+        if client_id == "application-unknown-rauthy-field" {
+            return (
+                StatusCode::IM_A_TEAPOT,
+                Json(json!({ "error": "unexpected put" })),
+            )
+                .into_response();
+        }
+        let body: MockClientUpdateRequest =
+            serde_json::from_value(raw_body).expect("valid client update");
+        let expected_flows = if body.confidential {
+            vec!["authorization_code", "client_credentials", "refresh_token"]
+        } else {
+            vec!["authorization_code", "refresh_token"]
+        };
+        assert_eq!(body.flows_enabled, expected_flows);
+        assert_eq!(
+            body.post_logout_redirect_uris,
+            Some(vec!["https://admin.example/logout".to_owned()])
+        );
+        assert_eq!(
+            body.allowed_origins,
+            Some(vec!["https://admin.example".to_owned()])
+        );
+        assert_eq!(body.auth_code_lifetime, 90);
+        assert_eq!(body.access_token_lifetime, 7_200);
+        assert_eq!(body.challenges, Some(vec!["S256".to_owned()]));
+        assert_eq!(
+            body.client_uri.as_deref(),
+            Some("https://admin.example/client")
+        );
+        assert_eq!(body.claims, Some(json!({ "admin": "customized" })));
+        if matches!(
+            client_id.as_str(),
+            "application-reconcile-stale"
+                | "application-reconcile-read-failure"
+                | "application-reconcile-second-failure"
+        ) && !state.reconcile_blocked.swap(true, Ordering::SeqCst)
+        {
+            state.reconcile_started.notify_one();
+            state.reconcile_release.notified().await;
+        }
+        let update_count = {
+            let mut counts = state.update_counts.lock().expect("update counts");
+            let count = counts.entry(client_id.clone()).or_default();
+            *count += 1;
+            *count
+        };
+        if client_id == "application-reconcile-second-failure" && update_count == 2 {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "second reconciliation failed" })),
+            )
+                .into_response();
+        }
+        if body.name.as_deref() == Some("reject-sync") {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "BadRequest",
+                    "message": "sync rejected",
+                    "client_secret": "must-not-leak"
+                })),
+            )
+                .into_response();
+        }
+        let mut clients = state.clients.lock().expect("clients");
+        let Some(client) = clients.get_mut(&client_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        };
+        client.name = body.name;
+        client.enabled = body.enabled;
+        client.confidential = body.confidential;
+        client.redirect_uris = body.redirect_uris;
+        client.flows_enabled = body.flows_enabled;
+        Json(MockClientResponse {
+            id: client.id.clone(),
+            name: client.name.clone(),
+            enabled: true,
+            confidential: client.confidential,
+            redirect_uris: client.redirect_uris.clone(),
+        })
+        .into_response()
+    }
+
+    async fn get_client(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        axum::extract::Path(client_id): axum::extract::Path<String>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        let mut clients = state.clients.lock().expect("clients");
+        if client_id == "application-create-race" && !clients.contains_key(&client_id) {
+            clients.insert(
+                client_id.clone(),
+                MockClient {
+                    id: client_id.clone(),
+                    name: Some("Concurrent Client".to_owned()),
+                    enabled: true,
+                    confidential: true,
+                    redirect_uris: vec!["https://concurrent.example/callback".to_owned()],
+                    flows_enabled: vec!["authorization_code".to_owned()],
+                },
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        }
+        let Some(client) = clients.get(&client_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        };
+        let mut body = json!({
+            "id": client.id,
+            "name": client.name,
+            "enabled": client.enabled,
+            "confidential": client.confidential,
+            "redirect_uris": client.redirect_uris,
+            "post_logout_redirect_uris": ["https://admin.example/logout"],
+            "allowed_origins": ["https://admin.example"],
+            "flows_enabled": client.flows_enabled,
+            "access_token_alg": "EdDSA",
+            "id_token_alg": "EdDSA",
+            "auth_code_lifetime": 90,
+            "access_token_lifetime": 7200,
+            "scopes": ["openid", "profile", "email"],
+            "default_scopes": ["openid", "profile", "email"],
+            "challenges": ["S256"],
+            "force_mfa": false,
+            "client_uri": "https://admin.example/client",
+            "contacts": null,
+            "backchannel_logout_uri": null,
+            "restrict_group_prefix": null,
+            "claims": { "admin": "customized" },
+            "claims_at_root": false,
+            "allowed_resources": null,
+            "default_aud": null,
+            "scim": null
+        });
+        if client_id == "application-unknown-rauthy-field" {
+            body["future_setting"] = json!(true);
+        }
+        Json(body).into_response()
+    }
+
+    async fn wait_for_reconcile(State(state): State<MockRauthyState>) -> StatusCode {
+        state.reconcile_started.notified().await;
+        StatusCode::NO_CONTENT
+    }
+
+    async fn release_reconcile(State(state): State<MockRauthyState>) -> StatusCode {
+        state.reconcile_release.notify_one();
+        StatusCode::NO_CONTENT
+    }
+
+    async fn rotate_client_secret(
+        State(state): State<MockRauthyState>,
+        headers: HeaderMap,
+        axum::extract::Path(client_id): axum::extract::Path<String>,
+    ) -> impl IntoResponse {
+        require_admin_api_key(&headers);
+        let clients = state.clients.lock().expect("clients");
+        let Some(client) = clients.get(&client_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "client not found" })),
+            )
+                .into_response();
+        };
+        Json(MockClientSecretResponse {
+            id: client.id.clone(),
+            confidential: client.confidential,
+            secret: format!("rotated-{}", client.id),
+        })
+        .into_response()
     }
 
     async fn introspect(
-        State(_state): State<MockTrailbaseState>,
+        State(_state): State<MockRauthyState>,
         headers: HeaderMap,
+        Form(form): Form<IntrospectionForm>,
     ) -> Json<serde_json::Value> {
-        let secret = headers
-            .get("x-grant-internal-secret")
+        let authorization = headers
+            .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        assert_eq!(secret, "test-trailbase-secret");
+        assert_eq!(authorization, "Basic Z3JhbnQ6dGVzdC1yYXV0aHktc2VjcmV0");
+        Json(json!({
+            "active": true,
+            "sub": form.token,
+            "scope": "openid email profile",
+            "client_id": "grant",
+            "exp": 4_102_444_800i64
+        }))
+    }
+
+    async fn userinfo(headers: HeaderMap) -> Json<serde_json::Value> {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -411,29 +743,55 @@ pub async fn start_mock_trailbase() -> String {
                     .and_then(|value| value.strip_prefix("bearer "))
             })
             .unwrap_or("anonymous");
+        let sub = if token == "userinfo-sub-mismatch" {
+            "different-subject"
+        } else {
+            token
+        };
         Json(json!({
-            "valid": true,
-            "trailbaseUserId": token,
-            "email": format!("{token}@trailbase.test"),
-            "displayName": token,
-            "verified": true,
-            "active": true,
-            "expiresAt": "2099-01-01T00:00:00Z"
+            "id": token,
+            "sub": sub,
+            "name": token,
+            "email": format!("{token}@rauthy.test"),
+            "email_verified": true,
+            "roles": [],
+            "mfa_enabled": false
         }))
     }
 
+    let state = MockRauthyState {
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        reconcile_blocked: Arc::new(AtomicBool::new(false)),
+        reconcile_started: Arc::new(Notify::new()),
+        reconcile_release: Arc::new(Notify::new()),
+        update_counts: Arc::new(Mutex::new(HashMap::new())),
+    };
     let app = Router::new()
-        .route("/_/auth/login", get(login_ui))
-        .route("/_/auth/{*path}", get(asset))
-        .route("/api/auth/v1/login", post(login_api))
-        .route("/api/grant/introspect", post(introspect))
-        .with_state(MockTrailbaseState);
+        .route("/auth/v1", get(login_ui))
+        .route("/auth/v1/redirect", get(redirect_response))
+        .route("/auth/v1/redirect-target", get(redirect_target))
+        .route("/auth/v1/echo/{*path}", get(echo_path))
+        .route("/auth/v1/assets/{*path}", get(asset))
+        .route("/_test/reconcile-started", get(wait_for_reconcile))
+        .route("/_test/reconcile-release", post(release_reconcile))
+        .route("/auth/v1/clients", post(create_client))
+        .route(
+            "/auth/v1/clients/{clientId}",
+            get(get_client).put(update_client),
+        )
+        .route(
+            "/auth/v1/clients/{clientId}/secret",
+            put(rotate_client_secret),
+        )
+        .route("/auth/v1/oidc/introspect", post(introspect))
+        .route("/auth/v1/oidc/userinfo", get(userinfo))
+        .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind trailbase");
+        .expect("bind rauthy");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve trailbase");
+        axum::serve(listener, app).await.expect("serve rauthy");
     });
     format!("http://{}", addr)
 }

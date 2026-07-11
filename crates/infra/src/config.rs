@@ -14,16 +14,19 @@ pub struct SecurityConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrailbaseAuthConfig {
+pub struct RauthyAuthConfig {
     pub base_url: String,
     pub introspect_path: String,
-    pub internal_secret: String,
+    pub userinfo_path: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub admin_api_key: String,
     pub cache_ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
-    pub trailbase: TrailbaseAuthConfig,
+    pub rauthy: RauthyAuthConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,11 +105,14 @@ fn hiqlite_config() -> Result<HiqliteConfig> {
 
 fn auth_config() -> Result<AuthConfig> {
     Ok(AuthConfig {
-        trailbase: TrailbaseAuthConfig {
-            base_url: env_or("GRANT_TRAILBASE_BASE_URL", "http://127.0.0.1:4000"),
-            introspect_path: env_or("GRANT_TRAILBASE_INTROSPECT_PATH", "/api/grant/introspect"),
-            internal_secret: required_env("GRANT_TRAILBASE_INTERNAL_SECRET")?,
-            cache_ttl_seconds: env::var("GRANT_TRAILBASE_CACHE_TTL_SECONDS")
+        rauthy: RauthyAuthConfig {
+            base_url: env_or("GRANT_RAUTHY_BASE_URL", "http://127.0.0.1:8080"),
+            introspect_path: env_or("GRANT_RAUTHY_INTROSPECT_PATH", "/auth/v1/oidc/introspect"),
+            userinfo_path: env_or("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo"),
+            client_id: required_env("GRANT_RAUTHY_CLIENT_ID")?,
+            client_secret: required_env("GRANT_RAUTHY_CLIENT_SECRET")?,
+            admin_api_key: required_env("GRANT_RAUTHY_ADMIN_API_KEY")?,
+            cache_ttl_seconds: env::var("GRANT_RAUTHY_CACHE_TTL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(30),

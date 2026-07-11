@@ -1,0 +1,32 @@
+[bootstrap]
+admin_email = "admin@localhost"
+bootstrap_dir = "/app/bootstrap"
+
+[cluster]
+node_id = 1
+nodes = ["1 localhost:8100 localhost:8200"]
+secret_raft = "dev-rauthy-raft-secret"
+secret_api = "dev-rauthy-api-secret"
+
+[email]
+rauthy_admin_email = "admin@localhost"
+smtp_from = "Rauthy <rauthy@localhost>"
+
+[encryption]
+keys = ["devkey01/MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="]
+key_active = "devkey01"
+
+[events]
+email = "admin@localhost"
+
+[mfa]
+admin_force_mfa = false
+
+[server]
+scheme = "http"
+pub_url = "localhost:8080"
+proxy_mode = false
+
+[webauthn]
+rp_id = "localhost"
+rp_origin = "http://localhost:8080"

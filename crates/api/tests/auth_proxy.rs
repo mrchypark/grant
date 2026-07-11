@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -25,6 +25,61 @@ fn free_local_addr() -> String {
     let addr = listener.local_addr().expect("local addr");
     drop(listener);
     addr.to_string()
+}
+
+#[tokio::test]
+async fn auth_proxy_forwards_redirects_and_cookies_to_the_browser() {
+    let app = build_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/v1/redirect")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/auth/v1/redirect-target")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok()),
+        Some("rauthy_session=test; Path=/; HttpOnly")
+    );
+}
+
+#[tokio::test]
+async fn auth_proxy_preserves_percent_encoded_upstream_paths() {
+    let app = build_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/v1/echo/encoded%2Fsegment")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(body.as_ref(), b"/auth/v1/echo/encoded%2Fsegment");
 }
 
 async fn test_runtime() -> (HiqliteRuntime, TempDir) {
@@ -58,7 +113,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 async fn build_app() -> axum::Router {
-    let trailbase_base_url = support::start_mock_trailbase().await;
+    let rauthy_base_url = support::start_mock_rauthy().await;
     let (runtime, _db_dir) = test_runtime().await;
     let cfg = AppConfig {
         server: ServerConfig {
@@ -69,7 +124,7 @@ async fn build_app() -> axum::Router {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
-        auth: support::trailbase_auth_config(trailbase_base_url),
+        auth: support::rauthy_auth_config(rauthy_base_url),
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,
@@ -92,13 +147,13 @@ async fn build_app() -> axum::Router {
 }
 
 #[tokio::test]
-async fn auth_login_proxy_returns_trailbase_ui() {
+async fn auth_login_proxy_returns_rauthy_ui() {
     let app = build_app().await;
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/auth/login")
+                .uri("/auth/v1")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -113,7 +168,7 @@ async fn auth_login_proxy_returns_trailbase_ui() {
         .expect("body")
         .to_bytes();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("TrailBase Login"));
-    assert!(html.contains("/api/auth/v1/login"));
-    assert!(html.contains("/_/auth/app.css"));
+    assert!(html.contains("Rauthy Login"));
+    assert!(html.contains("/auth/v1/oidc/authorize"));
+    assert!(html.contains("/auth/v1/assets/app.css"));
 }

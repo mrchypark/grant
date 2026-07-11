@@ -6,8 +6,8 @@ use super::codec::{
 };
 use anyhow::Result;
 use domain::{
-    Action, Agreement, Application, ApplicationGrant, Organization, Party, Role, RoleBinding,
-    ServiceProvider,
+    Action, Agreement, Application, ApplicationGrant, ApplicationRedirectUri, Organization, Party,
+    Role, RoleBinding, ServiceProvider,
 };
 use hiqlite::Row;
 
@@ -148,7 +148,16 @@ pub(super) struct ApplicationRow {
     pub(super) first_party: i64,
     pub(super) consent_policy: String,
     pub(super) active: i64,
+    pub(super) rauthy_client_id: Option<String>,
+    pub(super) secret_rotated_at: Option<String>,
     pub(super) created_by_user_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ApplicationRedirectUriRow {
+    pub(super) application_id: String,
+    pub(super) redirect_uri: String,
+    pub(super) created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -352,7 +361,19 @@ impl From<&mut Row<'_>> for ApplicationRow {
             first_party: row.get("first_party"),
             consent_policy: row.get("consent_policy"),
             active: row.get("active"),
+            rauthy_client_id: row.get("rauthy_client_id"),
+            secret_rotated_at: row.get("secret_rotated_at"),
             created_by_user_id: row.get("created_by_user_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for ApplicationRedirectUriRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            application_id: row.get("application_id"),
+            redirect_uri: row.get("redirect_uri"),
+            created_at: row.get("created_at"),
         }
     }
 }
@@ -491,8 +512,20 @@ impl TryFrom<ApplicationRow> for Application {
             first_party: value.first_party == 1,
             consent_policy: application_consent_policy_from_str(&value.consent_policy)?,
             active: value.active == 1,
+            rauthy_client_id: value.rauthy_client_id,
+            secret_rotated_at: value.secret_rotated_at,
             created_by_user_id: value.created_by_user_id,
         })
+    }
+}
+
+impl From<ApplicationRedirectUriRow> for ApplicationRedirectUri {
+    fn from(value: ApplicationRedirectUriRow) -> Self {
+        Self {
+            application_id: value.application_id,
+            redirect_uri: value.redirect_uri,
+            created_at: value.created_at,
+        }
     }
 }
 

@@ -17,15 +17,13 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 ## 코드 기준 구성 요소
 
 - `crates/domain`
-  - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationGrant`, `Agreement`.
+  - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationRedirectUri`, `ApplicationGrant`, `Agreement`.
 - `crates/infra`
-  - 설정 로딩, TrailBase identity 연동, hiqlite runtime, schema/seed, 권한 판정 service layer를 가진다.
+  - 설정 로딩, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, 권한 판정 service layer를 가진다.
 - `crates/api`
-  - `/api/v1/me`, `/api/v1/providers`, `/api/v1/orgs/*`, `/api/v1/authz/*`, backup/admin, TrailBase auth proxy 라우트를 제공한다.
+  - `/api/v1/me`, `/api/v1/providers`, `/api/v1/orgs/*`, `/api/v1/authz/*`, backup/admin, Rauthy `/auth/v1/*` proxy 라우트를 제공한다.
 - `crates/app`
   - 환경변수로 설정을 읽고 voter/learner 역할에 맞는 Axum router를 띄운다.
-- `crates/trailbase-auth-bridge`
-  - 별도 TrailBase auth service로 동작하며 grant가 사용할 introspection endpoint를 제공한다.
 
 ## Public API Shape
 
@@ -36,6 +34,8 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `GET|POST /api/v1/orgs/{orgId}/apps`
 - `GET|PUT /api/v1/orgs/{orgId}/apps/{appId}`
 - `GET|PUT /api/v1/orgs/{orgId}/apps/{appId}/actions`
+- `GET|POST|DELETE /api/v1/orgs/{orgId}/apps/{appId}/redirect-uris`
+- `POST /api/v1/orgs/{orgId}/apps/{appId}/client-secret/rotate`
 - `GET|POST /api/v1/orgs/{orgId}/app-grants`
 - `PUT /api/v1/orgs/{orgId}/app-grants/{grantId}/actions`
 - `POST /api/v1/orgs/{orgId}/app-grants/{grantId}/revoke`
@@ -53,9 +53,11 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 
 1. `crates/app/src/main.rs`가 설정을 읽고 `AppService`를 초기화한다.
 2. `crates/api/src/lib.rs`가 shared read/authz 라우트와 voter-only write/admin 라우트를 조립한다.
-3. 사용자 요청은 TrailBase bearer token을 grant user/org context로 해석한다.
+3. 사용자 요청은 Rauthy bearer token을 OAuth2 introspection과 OIDC userinfo로 확인한 뒤 grant user/org context로 해석한다.
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
 5. service-to-service admin/authz API는 현재 `x-grant-master-key` header로 보호한다.
+
+Developer console은 기존 organization/application 경계 안에 둔다. 외부 provider는 Grant API만 호출하고, Grant backend가 제한된 Rauthy Admin API key로 해당 application의 Rauthy client redirect URI와 client secret rotation을 동기화한다.
 
 ## Voter And Learner
 

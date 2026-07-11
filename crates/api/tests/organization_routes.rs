@@ -58,7 +58,7 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
 }
 
 async fn test_service() -> (Arc<AppService>, Database, TempDir) {
-    let trailbase_base_url = support::start_mock_trailbase().await;
+    let rauthy_base_url = support::start_mock_rauthy().await;
     let (runtime, dir) = test_runtime().await;
     let app_cfg = AppConfig {
         server: ServerConfig {
@@ -69,7 +69,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
-        auth: support::trailbase_auth_config(trailbase_base_url),
+        auth: support::rauthy_auth_config(rauthy_base_url),
         hiqlite: HiqliteConfig {
             runtime_mode: RuntimeMode::Embedded,
             local_node_role: LocalNodeRole::Voter,

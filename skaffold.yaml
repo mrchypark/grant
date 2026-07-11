@@ -11,10 +11,6 @@ build:
       context: .
       docker:
         dockerfile: Dockerfile
-    - image: trailbase-auth-bridge
-      context: .
-      docker:
-        dockerfile: Dockerfile.trailbase-auth-bridge
 
 manifests:
   kustomize:
