@@ -390,12 +390,20 @@ assert_gke_skaffold_registry_secret_contract() {
   config_path_file="${TMP_DIR}/gke-registry-config-path"
   fixture_root="${TMP_DIR}/gke-published-fixture"
   fixture_script="${fixture_root}/scripts/gke-skaffold-run.sh"
+  placeholder_root="${TMP_DIR}/gke-placeholder-fixture"
+  placeholder_script="${placeholder_root}/scripts/gke-skaffold-run.sh"
   fixture_image='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-  mkdir -p "${mock_bin}" "${fixture_root}/scripts" "${fixture_root}/deploy/k8s"
+  placeholder_image='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST'
+  mkdir -p "${mock_bin}" \
+    "${fixture_root}/scripts" "${fixture_root}/deploy/k8s" \
+    "${placeholder_root}/scripts" "${placeholder_root}/deploy/k8s"
   cp "${ROOT_DIR}/scripts/gke-skaffold-run.sh" "${fixture_script}"
   cp "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" "${fixture_root}/scripts/k8s-secret-helpers.sh"
   sed "s|ghcr.io/conalog/grant-rauthy-launcher:[^[:space:]]*|${fixture_image}|" \
     "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" >"${fixture_root}/deploy/k8s/rauthy-statefulset.yaml"
+  cp "${ROOT_DIR}/scripts/gke-skaffold-run.sh" "${placeholder_script}"
+  sed "s|ghcr.io/conalog/grant-rauthy-launcher:[^[:space:]]*|${placeholder_image}|" \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" >"${placeholder_root}/deploy/k8s/rauthy-statefulset.yaml"
 
   cat >"${mock_bin}/docker" <<'EOF'
 #!/bin/sh
@@ -496,7 +504,7 @@ EOF
   : >"${mock_log}"
   set +e
   PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
-    bash "${ROOT_DIR}/scripts/gke-skaffold-run.sh" >"${missing_log}" 2>&1
+    bash "${placeholder_script}" >"${missing_log}" 2>&1
   placeholder_status=$?
   set -e
   [ "${placeholder_status}" -ne 0 ] \
@@ -700,6 +708,18 @@ verify_static() {
     || fail "Rauthy launcher does not derive from the pinned official 0.36.0 image"
   grep -q 'ENTRYPOINT \["/usr/local/bin/rauthy-launcher"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
     || fail "Rauthy launcher image entrypoint contract is missing"
+  if ! grep -q 'provenance: mode=max' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'sbom: true' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'EXPECTED_SOURCE_SHA:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'run: sh scripts/verify-oci-attestations.sh' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'fetch_blob' "${ROOT_DIR}/scripts/verify-oci-attestations.sh" \
+    || ! grep -q 'https://in-toto.io/Statement/v0.1' "${ROOT_DIR}/scripts/verify-oci-attestations.sh"; then
+    fail "Rauthy launcher publish does not verify portable OCI provenance and SBOM attestations"
+  fi
+  if grep -Eq 'attest-build-provenance|attestations:[[:space:]]*write|id-token:[[:space:]]*write' \
+    "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml"; then
+    fail "Rauthy launcher publish still depends on unsupported GitHub repository attestations"
+  fi
   grep -q 'ca-certificates curl libcurl4 libssl3' "${ROOT_DIR}/Dockerfile" \
     || fail "Grant runtime image is missing the restore readiness HTTP probe"
   grep -q 'REQUIRED_BASE64_DOCKER_CONFIG_JSON' "${ROOT_DIR}/deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml" \
@@ -800,6 +820,7 @@ verify_static() {
   assert_ci_local_registry_auth_contract
   assert_gke_skaffold_registry_secret_contract
   assert_recovery_role_resolution_policy
+  "${ROOT_DIR}/scripts/verify-oci-attestations-tests.sh"
   "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
   "${ROOT_DIR}/scripts/verify-aws-principal-helpers.sh"
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"

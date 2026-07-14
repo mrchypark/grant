@@ -90,8 +90,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -130,12 +128,15 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Attest production image provenance
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+      - name: Verify portable OCI provenance and SBOM attestations
+        env:
+          IMAGE_REPOSITORY: ${{ env.IMAGE }}
+          IMAGE_REF: ${{ env.IMAGE }}:rauthy-0.36.0-${{ inputs.source_sha }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: sh scripts/verify-oci-attestations.sh
 
       - name: Record immutable digest
         env:
