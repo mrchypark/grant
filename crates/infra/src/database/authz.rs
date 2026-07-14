@@ -115,16 +115,17 @@ impl Database {
                         0_i64
                     }));
                     Ok(format!(
-                        "(${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                        base + 1,
-                        base + 2,
-                        base + 3,
-                        base + 4,
-                        base + 5,
-                        base + 6,
-                        base + 7,
-                        base + 8,
-                        base + 9
+                        "(${p1}, ${p2}, ${p3}, ${p4}, ${p5}, ${p6}, ${p7}, ${p8}, ${p9}, ${p10})",
+                        p1 = base,
+                        p2 = base + 1,
+                        p3 = base + 2,
+                        p4 = base + 3,
+                        p5 = base + 4,
+                        p6 = base + 5,
+                        p7 = base + 6,
+                        p8 = base + 7,
+                        p9 = base + 8,
+                        p10 = base + 9
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?
