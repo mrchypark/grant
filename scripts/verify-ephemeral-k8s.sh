@@ -503,7 +503,8 @@ EOF
 
   : >"${mock_log}"
   set +e
-  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" RAUTHY_IMAGE='' \
+    GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
     bash "${placeholder_script}" >"${missing_log}" 2>&1
   placeholder_status=$?
   set -e
@@ -516,7 +517,8 @@ EOF
 
   : >"${mock_log}"
   set +e
-  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GHCR_USERNAME=ci-user GHCR_TOKEN='' \
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" RAUTHY_IMAGE='' \
+    GHCR_USERNAME=ci-user GHCR_TOKEN='' \
     bash "${fixture_script}" >"${missing_log}" 2>&1
   missing_status=$?
   set -e
@@ -546,6 +548,7 @@ EOF
   : >"${mock_log}"
   rm -f "${config_path_file}"
   PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    RAUTHY_IMAGE='' \
     GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
     bash "${fixture_script}" >"${success_log}" 2>&1
 
@@ -572,6 +575,7 @@ EOF
   rm -f "${config_path_file}"
   set +e
   PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    RAUTHY_IMAGE='' \
     GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_SKAFFOLD_STATUS=47 \
     GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
     bash "${fixture_script}" >"${success_log}" 2>&1
@@ -662,6 +666,7 @@ EOF
 
     set +e
     PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+      RAUTHY_IMAGE='' \
       GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_LONG_RUNNING=1 \
       GKE_MOCK_CHILD_PID_FILE="${child_pid_file}" GKE_MOCK_CHILD_SIGNAL_FILE="${child_signal_file}" \
       GKE_MOCK_IGNORE_SIGNALS="${ignore_signals}" \
