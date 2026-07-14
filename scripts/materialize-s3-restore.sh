@@ -159,7 +159,14 @@ else
   printf '%s\n' '{"Version":"2012-10-17","Statement":[]}' >"${TMP_DIR}/bucket-policy.json"
 fi
 jq --arg sid "${POLICY_SID}" --arg writerSid "${WRITER_DENY_SID}" --arg writer "${WRITER_PRINCIPAL}" --arg resource "${TARGET_ARN}" '
-  if any(.Statement[]?; .Sid == $sid or .Sid == $writerSid) then error("recovery policy SID already exists")
+  .Statement = (
+    if .Statement == null then []
+    elif (.Statement | type) == "array" then .Statement
+    elif (.Statement | type) == "object" then [.Statement]
+    else error("bucket policy Statement must be an object, array, or null")
+    end
+  ) |
+  if any(.Statement[]; .Sid == $sid or .Sid == $writerSid) then error("recovery policy SID already exists")
   else .Statement += [{
     Sid:$sid,
     Effect:"Deny",
