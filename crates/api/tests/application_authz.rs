@@ -327,6 +327,28 @@ async fn application_authz_derives_client_and_subject_and_requires_consent_or_tr
 async fn application_and_admin_credentials_are_not_interchangeable() {
     let test = support::TestApi::new().await;
 
+    let missing_bearer = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/application-authz/check")
+        .header("content-type", "application/json")
+        .header("x-organization-id", "bootstrap-user")
+        .header("x-grant-app-auth-key", support::APP_AUTH_KEY)
+        .body(Body::from(
+            json!({
+                "action": "organization.profile.read",
+                "resource": {"provider": "grant", "type": "organization", "id": "bootstrap-user"}
+            })
+            .to_string(),
+        ))
+        .expect("missing bearer request");
+    let response = test
+        .app
+        .clone()
+        .oneshot(missing_bearer)
+        .await
+        .expect("missing bearer response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
     let app_auth_with_master = Request::builder()
         .method(Method::POST)
         .uri("/api/v1/application-authz/check")

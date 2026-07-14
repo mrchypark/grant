@@ -49,8 +49,8 @@ fn application_auth_headers(
 ) -> ApiResult<(String, String)> {
     require_app_auth_key(service, headers)?;
     let token = bearer_token(headers)?.ok_or_else(|| ApiError {
-        status: axum::http::StatusCode::BAD_REQUEST,
-        message: "missing authorization header".to_owned(),
+        status: axum::http::StatusCode::UNAUTHORIZED,
+        message: "unauthorized: missing authorization header".to_owned(),
     })?;
     let organization_id =
         optional_header_value(headers, "x-organization-id")?.ok_or_else(|| ApiError {
