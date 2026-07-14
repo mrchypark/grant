@@ -114,54 +114,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-
-          auth_config="${RUNNER_TEMP}/ghcr-auth-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.curlrc"
-          token_response="${RUNNER_TEMP}/ghcr-token-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          registry_config="${RUNNER_TEMP}/ghcr-registry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.curlrc"
-          cleanup() {
-            rm -f "${auth_config}" "${token_response}" "${registry_config}"
-            unset registry_token GHCR_TOKEN
-          }
-          trap cleanup EXIT HUP INT TERM
-          umask 077
-
-          {
-            printf 'silent\n'
-            printf 'show-error\n'
-            printf 'fail\n'
-            printf 'user = "%s:%s"\n' "${GHCR_USERNAME}" "${GHCR_TOKEN}"
-            printf 'url = "https://ghcr.io/token?service=ghcr.io&scope=repository:conalog/grant-rauthy-launcher:pull"\n'
-          } > "${auth_config}"
-          curl --config "${auth_config}" > "${token_response}"
-          registry_token="$(jq -er '.token // .access_token' "${token_response}")"
-
-          {
-            printf 'silent\n'
-            printf 'show-error\n'
-            printf 'request = "HEAD"\n'
-            printf 'output = "/dev/null"\n'
-            printf 'write-out = "%%{http_code}"\n'
-            printf 'header = "Authorization: Bearer %s"\n' "${registry_token}"
-            printf 'header = "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"\n'
-            printf 'url = "https://ghcr.io/v2/conalog/grant-rauthy-launcher/manifests/rauthy-0.36.0-%s"\n' "${SOURCE_SHA}"
-          } > "${registry_config}"
-
-          if ! status="$(curl --config "${registry_config}")"; then
-            echo "cannot verify whether the production commit tag exists" >&2
-            exit 1
-          fi
-          case "${status}" in
-            200)
-              echo "production commit tag already exists and will not be overwritten" >&2
-              exit 1
-              ;;
-            404)
-              ;;
-            *)
-              echo "unexpected GHCR manifest response: HTTP ${status}" >&2
-              exit 1
-              ;;
-          esac
+          sh scripts/ghcr-tag-preflight.sh
 
       - name: Build and publish source-addressed image
         id: build
