@@ -346,6 +346,75 @@ async fn ensure_schema_rejects_duplicate_rauthy_client_ids_before_unique_index()
 }
 
 #[tokio::test]
+async fn ensure_schema_rebuilds_rauthy_client_index_and_allows_legacy_blank_values() {
+    let (runtime, db, _dir) = support::ensured_database().await;
+    runtime
+        .batch(
+            r#"
+            DROP INDEX idx_applications_rauthy_client_id_unique;
+            CREATE UNIQUE INDEX idx_applications_rauthy_client_id_unique
+                ON applications (rauthy_client_id)
+                WHERE rauthy_client_id IS NOT NULL;
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("install legacy Rauthy client id index");
+
+    db.ensure_schema_only()
+        .await
+        .expect("rebuild Rauthy client id index predicate");
+
+    runtime
+        .batch(
+            r#"
+            INSERT INTO applications (
+                id, organization_id, slug, name, description, application_type, app_type,
+                first_party, consent_policy, active, provisioning_status, rauthy_client_id,
+                created_by_user_id, created_at, updated_at
+            ) VALUES
+                ('app-empty-client-a', 'org-a', 'empty-client-a', 'Empty Client A', NULL,
+                 'confidential', 'web', 0, 'explicit', 1, 'unprovisioned', '', 'user-a',
+                 '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z'),
+                ('app-empty-client-b', 'org-b', 'empty-client-b', 'Empty Client B', NULL,
+                 'confidential', 'web', 0, 'explicit', 1, 'unprovisioned', '', 'user-b',
+                 '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z'),
+                ('app-space-client-a', 'org-a', 'space-client-a', 'Space Client A', NULL,
+                 'confidential', 'web', 0, 'explicit', 1, 'unprovisioned', '   ', 'user-a',
+                 '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z'),
+                ('app-space-client-b', 'org-b', 'space-client-b', 'Space Client B', NULL,
+                 'confidential', 'web', 0, 'explicit', 1, 'unprovisioned', '   ', 'user-b',
+                 '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z');
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed duplicate legacy blank client ids");
+
+    db.ensure_schema_only()
+        .await
+        .expect("blank legacy client ids must not block schema migration");
+
+    let index_sql: Vec<NameRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT sql AS name
+             FROM sqlite_master
+             WHERE type = 'index'
+               AND name = 'idx_applications_rauthy_client_id_unique'",
+            vec![],
+        )
+        .await
+        .expect("read Rauthy client id index SQL");
+    assert_eq!(index_sql.len(), 1);
+    assert!(
+        index_sql[0].name.contains("TRIM(rauthy_client_id) <> ''"),
+        "unexpected index SQL: {}",
+        index_sql[0].name
+    );
+}
+
+#[tokio::test]
 async fn ensure_schema_rejects_cross_organization_group_memberships() {
     let (runtime, db, _dir) = support::ensured_database().await;
     runtime

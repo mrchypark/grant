@@ -330,9 +330,11 @@ impl Database {
                     ON user_identities (provider, external_user_id);
                 CREATE INDEX IF NOT EXISTS idx_auth_identity_cache_expires_at
                     ON auth_identity_cache (expires_at);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_rauthy_client_id_unique
+                DROP INDEX IF EXISTS idx_applications_rauthy_client_id_unique;
+                CREATE UNIQUE INDEX idx_applications_rauthy_client_id_unique
                     ON applications (rauthy_client_id)
-                    WHERE rauthy_client_id IS NOT NULL;
+                    WHERE rauthy_client_id IS NOT NULL
+                      AND TRIM(rauthy_client_id) <> '';
                 CREATE INDEX IF NOT EXISTS idx_group_memberships_group_member
                     ON group_memberships (group_id, organization_membership_id);
                 CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
