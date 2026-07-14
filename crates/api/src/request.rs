@@ -95,7 +95,7 @@ pub(crate) fn ensure_request_context_organization(
 }
 
 pub(crate) fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
-    let provided = header_value(headers, "x-grant-master-key")?;
+    let provided = credential_header(headers, "x-grant-master-key")?;
     if !secrets_match(&provided, service.master_key()) {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
@@ -106,7 +106,7 @@ pub(crate) fn require_master_key(service: &AppService, headers: &HeaderMap) -> A
 }
 
 pub(crate) fn require_app_auth_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
-    let provided = header_value(headers, "x-grant-app-auth-key")?;
+    let provided = credential_header(headers, "x-grant-app-auth-key")?;
     if !secrets_match(&provided, service.app_auth_key()) {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
@@ -120,6 +120,13 @@ fn secrets_match(provided: &str, expected: &str) -> bool {
     let provided_digest = Sha256::digest(provided.as_bytes());
     let expected_digest = Sha256::digest(expected.as_bytes());
     bool::from(provided_digest.ct_eq(&expected_digest))
+}
+
+fn credential_header(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
+    optional_header_value(headers, key)?.ok_or_else(|| ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        message: format!("unauthorized: missing {key} header"),
+    })
 }
 
 fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
@@ -176,8 +183,23 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> ApiResult<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_active_organization_path_matches, secrets_match};
-    use axum::http::StatusCode;
+    use super::{credential_header, ensure_active_organization_path_matches, secrets_match};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+
+    #[test]
+    fn credential_headers_distinguish_missing_from_malformed() {
+        for key in ["x-grant-master-key", "x-grant-app-auth-key"] {
+            let missing = credential_header(&HeaderMap::new(), key)
+                .expect_err("missing credential header must fail");
+            assert_eq!(missing.status, StatusCode::UNAUTHORIZED);
+
+            let mut headers = HeaderMap::new();
+            headers.insert(key, HeaderValue::from_static("   "));
+            let malformed =
+                credential_header(&headers, key).expect_err("empty credential header must fail");
+            assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+        }
+    }
 
     #[test]
     fn organization_path_match_helper_returns_forbidden_on_mismatch() {

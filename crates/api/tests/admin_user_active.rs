@@ -22,7 +22,23 @@ async fn master_user_active_is_the_local_kill_switch_and_can_reenable() {
         ))
         .await
         .expect("missing master key response");
-    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+    let empty = test
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("x-grant-master-key", "   ")
+                .body(Body::from(json!({ "active": false }).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("empty master key response");
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
 
     let wrong = test
         .app

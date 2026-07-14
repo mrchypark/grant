@@ -326,6 +326,57 @@ async fn application_authz_derives_client_and_subject_and_requires_consent_or_tr
 async fn application_and_admin_credentials_are_not_interchangeable() {
     let test = support::TestApi::new().await;
 
+    let missing_app_key = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/application-authz/check")
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            support::auth::bearer_header("app-token/unknown/bootstrap-user"),
+        )
+        .header("x-organization-id", "bootstrap-user")
+        .body(Body::from(
+            json!({
+                "action": "organization.profile.read",
+                "resource": {"provider": "grant", "type": "organization", "id": "bootstrap-user"}
+            })
+            .to_string(),
+        ))
+        .expect("missing application key request");
+    let response = test
+        .app
+        .clone()
+        .oneshot(missing_app_key)
+        .await
+        .expect("missing application key response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let empty_app_key = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/application-authz/check")
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            support::auth::bearer_header("app-token/unknown/bootstrap-user"),
+        )
+        .header("x-organization-id", "bootstrap-user")
+        .header("x-grant-app-auth-key", "   ")
+        .body(Body::from(
+            json!({
+                "action": "organization.profile.read",
+                "resource": {"provider": "grant", "type": "organization", "id": "bootstrap-user"}
+            })
+            .to_string(),
+        ))
+        .expect("empty application key request");
+    let response = test
+        .app
+        .clone()
+        .oneshot(empty_app_key)
+        .await
+        .expect("empty application key response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
     let missing_bearer = Request::builder()
         .method(Method::POST)
         .uri("/api/v1/application-authz/check")
