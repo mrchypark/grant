@@ -39,6 +39,19 @@ done
 
 [ -n "${RECORD}" ] && [ -r "${RECORD}" ] || { echo "readable --record is required" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "missing command: jq" >&2; exit 1; }
+command -v mktemp >/dev/null 2>&1 || { echo "missing command: mktemp" >&2; exit 1; }
+umask 077
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-restore-full.XXXXXX")
+cleanup_tmp() {
+  rm -rf "${TMP_DIR}" || {
+    echo "warning: failed to remove private recovery temporary state: ${TMP_DIR}" >&2
+    return 0
+  }
+}
+trap cleanup_tmp 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 # shellcheck source=recovery-state-machine.sh
 # shellcheck disable=SC1091
@@ -76,7 +89,7 @@ if [ "${ISOLATED_DRILL}" -eq 0 ]; then
   command -v openssl >/dev/null 2>&1 || { echo "missing command: openssl" >&2; exit 1; }
   approval_fingerprint=$(openssl pkey -pubin -in "${APPROVAL_PUBLIC_KEY}" -outform DER | openssl dgst -sha256 | awk '{print $NF}')
   [ "${approval_fingerprint}" = "${RECOVERY_APPROVAL_PUBLIC_KEY_SHA256}" ] || { echo "approval public key is not the pinned trust root" >&2; exit 1; }
-  canonical=$(mktemp "${TMPDIR:-/tmp}/recovery-approval.XXXXXX")
+  canonical=$(mktemp "${TMP_DIR}/recovery-approval.XXXXXX")
   jq -S -c . "${RECORD}" >"${canonical}"
   openssl dgst -sha256 -verify "${APPROVAL_PUBLIC_KEY}" -signature "${APPROVAL_SIGNATURE}" "${canonical}" >/dev/null \
     || { rm -f "${canonical}"; echo "approved record signature verification failed" >&2; exit 1; }
@@ -125,6 +138,7 @@ run() {
 }
 
 LEASE_HOLDER=
+LEASE_ACQUIRED=0
 PORT_FORWARD_PID=
 SEMANTIC_SERVICE="rauthy-recovery-${RECOVERY_ID}"
 SEMANTIC_ROUTE_ACTIVE=0
@@ -138,17 +152,20 @@ acquire_lease() {
     echo "recovery lease is already held by ${holder:-unknown}; inspect the checkpoint before manually deleting a stale lease" >&2
     exit 1
   }
+  LEASE_ACQUIRED=1
 }
 
 release_lease() {
   [ -n "${LEASE_HOLDER}" ] || return 0
   holder=$(kubectl -n "${NAMESPACE}" get lease "${LEASE_NAME}" -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
   if [ "${holder}" = "${LEASE_HOLDER}" ]; then kubectl -n "${NAMESPACE}" delete lease "${LEASE_NAME}" --ignore-not-found >/dev/null 2>&1 || true; fi
+  LEASE_ACQUIRED=0
 }
 
 cleanup_all() {
+  cleanup_tmp
   if [ -n "${PORT_FORWARD_PID}" ]; then kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true; wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true; fi
-  if [ "${DRY_RUN}" -eq 0 ] && [ "${CURRENT_PHASE:-materialized}" != unfenced ] && [ -n "${LEASE_HOLDER}" ]; then
+  if [ "${DRY_RUN}" -eq 0 ] && [ "${CURRENT_PHASE:-materialized}" != unfenced ] && [ "${LEASE_ACQUIRED}" -eq 1 ]; then
     patch=$(jq -nc --arg id "${RECOVERY_ID}" '{spec:{selector:{"grant-recovery-fence":$id}}}')
     kubectl -n "${NAMESPACE}" patch service grant --type merge -p "${patch}" >/dev/null 2>&1 || true
     kubectl -n "${NAMESPACE}" patch service rauthy --type merge -p "${patch}" >/dev/null 2>&1 || true
@@ -161,8 +178,8 @@ cleanup_all() {
   release_lease
 }
 
+trap cleanup_all 0
 acquire_lease
-trap cleanup_all 0 HUP INT TERM
 
 CURRENT_PHASE=materialized
 STATE_OWNER=none
@@ -320,7 +337,7 @@ verify_restore_object() {
     any(.Statement[]?; .Sid == $writerSid and .Effect == "Deny" and .Principal.AWS == $writer and .Resource == $resource and
       (actions | index("s3:GetObject")) != null and (actions | index("s3:GetObjectVersion")) != null)
   ' >/dev/null || { echo "${workload} exact-key immutable bucket policy is missing" >&2; exit 1; }
-  tmp=$(mktemp "${TMPDIR:-/tmp}/${workload}-restore.XXXXXX")
+  tmp=$(mktemp "${TMP_DIR}/${workload}-restore.XXXXXX")
   aws_s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${version}" "${tmp}" >/dev/null
   actual_sha=$(sha256_file "${tmp}")
   rm -f "${tmp}"
@@ -346,7 +363,7 @@ assert_runtime_binding() {
   else active=$(printf '%s' "${encoded}" | base64 -D); fi
   [ "${active}" = "$(jq -r ".${workload}.keyId" "${RECORD}")" ] || { echo "${workload} active encryption key differs from signed record" >&2; exit 1; }
   encoded_keyring=$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath='{.data.ENC_KEYS}')
-  keyring_file=$(mktemp "${TMPDIR:-/tmp}/${workload}-keyring.XXXXXX")
+  keyring_file=$(mktemp "${TMP_DIR}/${workload}-keyring.XXXXXX")
   if printf '%s' "${encoded_keyring}" | base64 --decode >"${keyring_file}" 2>/dev/null; then :
   else printf '%s' "${encoded_keyring}" | base64 -D >"${keyring_file}"; fi
   keyring_sha=$(sha256_file "${keyring_file}")
@@ -430,7 +447,7 @@ check_membership() {
   api_secret=$(decode_secret "${secret_name}")
   sanitized_secret=$(printf '%s' "${api_secret}" | tr -d '\r\n')
   [ "${sanitized_secret}" = "${api_secret}" ] || { echo "invalid API secret" >&2; exit 1; }
-  curl_config=$(mktemp "${TMPDIR:-/tmp}/${sts}-curl.XXXXXX")
+  curl_config=$(mktemp "${TMP_DIR}/${sts}-curl.XXXXXX")
   escaped_secret=$(printf '%s' "${api_secret}" | sed 's/[\\"]/\\&/g')
   printf 'header = "X-API-SECRET: %s"\nheader = "Accept: application/json"\n' "${escaped_secret}" >"${curl_config}"
   chmod 0600 "${curl_config}"
@@ -443,8 +460,8 @@ check_membership() {
       ordinal=0
       while [ "${ordinal}" -lt 3 ]; do
         port=$((local_port + ordinal))
-        log_file=$(mktemp "${TMPDIR:-/tmp}/${sts}-${ordinal}-port-forward.XXXXXX")
-        metrics_file=$(mktemp "${TMPDIR:-/tmp}/${sts}-${ordinal}-${raft_type}.XXXXXX")
+        log_file=$(mktemp "${TMP_DIR}/${sts}-${ordinal}-port-forward.XXXXXX")
+        metrics_file=$(mktemp "${TMP_DIR}/${sts}-${ordinal}-${raft_type}.XXXXXX")
         kubectl -n "${NAMESPACE}" port-forward "pod/${sts}-${ordinal}" "${port}:8200" >"${log_file}" 2>&1 &
         PORT_FORWARD_PID=$!
         ready=0
@@ -528,7 +545,7 @@ run_semantic_gate() {
     (.resource.provider | type == "string" and length > 0) and (.resource.type | type == "string" and length > 0) and
     (.resource.id | type == "string" and length > 0) and (.expectedAllowed | type == "boolean")
   ' "${SEMANTIC_CONFIG}" >/dev/null || { echo "invalid semantic config" >&2; exit 1; }
-  canonical_semantic=$(mktemp "${TMPDIR:-/tmp}/recovery-semantic.XXXXXX")
+  canonical_semantic=$(mktemp "${TMP_DIR}/recovery-semantic.XXXXXX")
   jq -S -c . "${SEMANTIC_CONFIG}" >"${canonical_semantic}"
   semantic_sha=$(openssl dgst -sha256 "${canonical_semantic}" | awk '{print $NF}')
   if [ "${ISOLATED_DRILL}" -eq 0 ]; then
@@ -544,7 +561,7 @@ run_semantic_gate() {
   wait_ready grant-voter 3
   check_membership grant-voter grant-headless "${GRANT_SECRET_NAME}" 28210
 
-  rauthy_log=$(mktemp "${TMPDIR:-/tmp}/rauthy-semantic-pf.XXXXXX")
+  rauthy_log=$(mktemp "${TMP_DIR}/rauthy-semantic-pf.XXXXXX")
   kubectl -n "${NAMESPACE}" port-forward pod/rauthy-0 28301:8080 >"${rauthy_log}" 2>&1 & PORT_FORWARD_PID=$!
   sleep 2
   if ! curl -fsS http://127.0.0.1:28301/auth/v1/health >/dev/null; then
@@ -553,10 +570,10 @@ run_semantic_gate() {
   fi
   kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true; wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true; PORT_FORWARD_PID=; rm -f "${rauthy_log}"
 
-  grant_log=$(mktemp "${TMPDIR:-/tmp}/grant-semantic-pf.XXXXXX")
+  grant_log=$(mktemp "${TMP_DIR}/grant-semantic-pf.XXXXXX")
   kubectl -n "${NAMESPACE}" port-forward pod/grant-voter-0 28300:8080 >"${grant_log}" 2>&1 & PORT_FORWARD_PID=$!
   sleep 2
-  semantic_curl=$(mktemp "${TMPDIR:-/tmp}/grant-semantic-curl.XXXXXX")
+  semantic_curl=$(mktemp "${TMP_DIR}/grant-semantic-curl.XXXXXX")
   org=$(jq -r '.organizationId' "${SEMANTIC_CONFIG}")
   token=$(printf '%s' "${RECOVERY_SEMANTIC_BEARER_TOKEN}" | sed 's/[\\"]/\\&/g')
   app_key=$(printf '%s' "${RECOVERY_SEMANTIC_APP_AUTH_KEY}" | sed 's/[\\"]/\\&/g')
@@ -589,7 +606,7 @@ release_completed_recovery() {
     echo "direct writers are not explicitly released for ${RECOVERY_ID}; set the protected namespace annotation after external writers are resumed" >&2
     exit 1
   }
-  cron_file=$(mktemp "${TMPDIR:-/tmp}/recovery-cronjobs.XXXXXX")
+  cron_file=$(mktemp "${TMP_DIR}/recovery-cronjobs.XXXXXX")
   jq -r '.trafficWriteFence.release.cronJobsToResume[]?' "${RECORD}" >"${cron_file}"
   while IFS= read -r cronjob; do
     [ -n "${cronjob}" ] || continue

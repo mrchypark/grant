@@ -115,6 +115,130 @@ assert_recovery_dry_run() {
     (.trafficWriteFence.snapshots.grant.snapshotId | length > 0) and
     (.trafficWriteFence.snapshots.rauthy.snapshotId | length > 0)
   ' "${pair}" >/dev/null || fail "recovery pair is missing reader, writer, keyring, or signed snapshot bindings"
+
+  restore_early_tmp="${TMP_DIR}/restore-cleanup-early"
+  mkdir -p "${restore_early_tmp}"
+  printf '%s\n' '{}' >"${TMP_DIR}/invalid-recovery-record.json"
+  if TMPDIR=${restore_early_tmp} "${ROOT_DIR}/scripts/restore-full-cluster.sh" \
+    --dry-run --isolated-drill --record "${TMP_DIR}/invalid-recovery-record.json" \
+    >"${TMP_DIR}/restore-cleanup-early.log" 2>&1; then
+    fail "invalid recovery record unexpectedly passed the cleanup fixture"
+  fi
+  if find "${restore_early_tmp}" -name 'grant-restore-full.*' -print | grep -q .; then
+    fail "restore early failure left private temporary state behind"
+  fi
+
+  restore_signal_tmp="${TMP_DIR}/restore-cleanup-signal"
+  restore_signal_bin="${TMP_DIR}/restore-cleanup-signal-bin"
+  restore_signal_marker="${TMP_DIR}/restore-cleanup-signal.marker"
+  restore_signal_order_marker="${TMP_DIR}/restore-cleanup-signal-order.marker"
+  restore_signal_order_failure="${TMP_DIR}/restore-cleanup-signal-order-failure.marker"
+  restore_signal_kubectl_log="${TMP_DIR}/restore-cleanup-signal-kubectl.log"
+  restore_signal_secret='restore-signal-secret-must-not-survive'
+  mkdir -p "${restore_signal_tmp}" "${restore_signal_bin}"
+  cat >"${restore_signal_bin}/kubectl" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"${RESTORE_KUBECTL_LOG}"
+case "$*" in
+  "get namespace ${RESTORE_SIGNAL_NAMESPACE} -o json")
+    printf '%s\n' '{"metadata":{"uid":"restore-signal-uid","labels":{"grant.cypark.dev/recovery-drill":"true"},"annotations":{"grant.cypark.dev/source-recovery-id":"ci-static"}}}'
+    ;;
+  "-n ${RESTORE_SIGNAL_NAMESPACE} get cronjob -o json")
+    printf '%s\n' '{"items":[]}'
+    ;;
+  "create -f -")
+    cat >/dev/null
+    [ "${RESTORE_LEASE_MODE}" != acquire-fail ] || exit 1
+    ;;
+  "-n ${RESTORE_SIGNAL_NAMESPACE} get configmap grant-recovery-state")
+    restore_dir=
+    for candidate in "${TMPDIR}"/grant-restore-full.*; do
+      if [ -d "${candidate}" ]; then restore_dir=${candidate}; break; fi
+    done
+    [ -n "${restore_dir}" ]
+    printf '%s\n' "${RESTORE_SIGNAL_SECRET}" >"${restore_dir}/signal-secret"
+    : >"${RESTORE_SIGNAL_MARKER}"
+    kill -TERM "${PPID}"
+    exit 143
+    ;;
+  "-n ${RESTORE_SIGNAL_NAMESPACE} patch service grant "*|"-n ${RESTORE_SIGNAL_NAMESPACE} patch service rauthy "*)
+    if find "${TMPDIR}" -name 'grant-restore-full.*' -print | grep -q .; then
+      : >"${RESTORE_SIGNAL_ORDER_FAILURE}"
+    else
+      : >"${RESTORE_SIGNAL_ORDER_MARKER}"
+    fi
+    ;;
+  "-n ${RESTORE_SIGNAL_NAMESPACE} get lease grant-recovery-lock "*)
+    printf '%s' 'another-recovery-operator'
+    ;;
+  "-n ${RESTORE_SIGNAL_NAMESPACE} delete lease grant-recovery-lock "*)
+    : >"${RESTORE_SIGNAL_LEASE_DELETED}"
+    ;;
+  *)
+    echo "unexpected kubectl invocation: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  cat >"${restore_signal_bin}/aws" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  cat >"${restore_signal_bin}/curl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "${restore_signal_bin}/kubectl" "${restore_signal_bin}/aws" "${restore_signal_bin}/curl"
+  set +e
+  PATH="${restore_signal_bin}:${PATH}" TMPDIR=${restore_signal_tmp} \
+    RESTORE_SIGNAL_NAMESPACE=grant-restore-signal RESTORE_SIGNAL_MARKER=${restore_signal_marker} \
+    RESTORE_SIGNAL_ORDER_MARKER=${restore_signal_order_marker} RESTORE_SIGNAL_ORDER_FAILURE=${restore_signal_order_failure} \
+    RESTORE_SIGNAL_LEASE_DELETED="${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" \
+    RESTORE_SIGNAL_SECRET=${restore_signal_secret} RESTORE_KUBECTL_LOG=${restore_signal_kubectl_log} RESTORE_LEASE_MODE=acquire-success \
+    "${ROOT_DIR}/scripts/restore-full-cluster.sh" --isolated-drill --record "${pair}" \
+    --namespace grant-restore-signal --confirm-recovery-id ci-static --expected-namespace-uid restore-signal-uid \
+    >"${TMP_DIR}/restore-cleanup-signal.log" 2>&1
+  restore_signal_status=$?
+  set -e
+  [ "${restore_signal_status}" -eq 143 ] \
+    || fail "restore TERM cleanup exited ${restore_signal_status}, expected 143"
+  [ -e "${restore_signal_marker}" ] || fail "restore TERM cleanup fixture did not inject its signal"
+  if find "${restore_signal_tmp}" -name 'grant-restore-full.*' -print | grep -q .; then
+    fail "restore TERM cleanup left private temporary state behind"
+  fi
+  if grep -Fq "${restore_signal_secret}" "${TMP_DIR}/restore-cleanup-signal.log"; then
+    fail "restore TERM cleanup exposed a temporary secret"
+  fi
+  [ -e "${restore_signal_order_marker}" ] \
+    || fail "restore TERM cleanup did not re-fence after acquiring the recovery lease"
+  [ ! -e "${restore_signal_order_failure}" ] \
+    || fail "restore TERM cleanup contacted the cluster before deleting private temporary state"
+  [ ! -e "${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" ] \
+    || fail "restore TERM cleanup deleted a lease now owned by another operator"
+  [ "$(grep -c 'patch service' "${restore_signal_kubectl_log}" || true)" -eq 2 ] \
+    || fail "restore TERM cleanup did not re-fence both services"
+
+  : >"${restore_signal_kubectl_log}"
+  set +e
+  PATH="${restore_signal_bin}:${PATH}" TMPDIR=${restore_signal_tmp} \
+    RESTORE_SIGNAL_NAMESPACE=grant-restore-signal RESTORE_SIGNAL_MARKER=${restore_signal_marker} \
+    RESTORE_SIGNAL_ORDER_MARKER=${restore_signal_order_marker} RESTORE_SIGNAL_ORDER_FAILURE=${restore_signal_order_failure} \
+    RESTORE_SIGNAL_LEASE_DELETED="${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" \
+    RESTORE_SIGNAL_SECRET=${restore_signal_secret} RESTORE_KUBECTL_LOG=${restore_signal_kubectl_log} RESTORE_LEASE_MODE=acquire-fail \
+    "${ROOT_DIR}/scripts/restore-full-cluster.sh" --isolated-drill --record "${pair}" \
+    --namespace grant-restore-signal --confirm-recovery-id ci-static --expected-namespace-uid restore-signal-uid \
+    >"${TMP_DIR}/restore-cleanup-lease-failure.log" 2>&1
+  restore_lease_failure_status=$?
+  set -e
+  [ "${restore_lease_failure_status}" -eq 1 ] \
+    || fail "restore lease contention exited ${restore_lease_failure_status}, expected 1"
+  if grep -q 'patch service' "${restore_signal_kubectl_log}"; then
+    fail "restore cleanup re-fenced services without acquiring the recovery lease"
+  fi
+  [ ! -e "${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" ] \
+    || fail "restore lease contention deleted another operator's lease"
+
   if "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --record "${pair}" >/dev/null 2>&1; then
     fail "unapproved recovery record was accepted for production restore"
   fi
@@ -526,8 +650,9 @@ EOF
     wait "${watchdog_pid}"
     watchdog_status=$?
     set -e
-    [ "${watchdog_status}" -eq 0 ] && grep -qx exited "${watchdog_result}" \
-      || fail "GKE Skaffold ${signal_name} watchdog failed: $(sed -n '1p' "${watchdog_result}" 2>/dev/null)"
+    if [ "${watchdog_status}" -ne 0 ] || ! grep -qx exited "${watchdog_result}"; then
+      fail "GKE Skaffold ${signal_name} watchdog failed: $(sed -n '1p' "${watchdog_result}" 2>/dev/null)"
+    fi
     [ "${signal_status}" -eq "${expected_status}" ] \
       || fail "GKE Skaffold ${contract_label} status was ${signal_status}, expected ${expected_status}"
     skaffold_pid=$(sed -n '1p' "${child_pid_file}")
