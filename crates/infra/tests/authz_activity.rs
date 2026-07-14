@@ -152,6 +152,62 @@ async fn authz_denies_inactive_user_provider_and_organization_but_reactivation_i
 }
 
 #[tokio::test]
+async fn bulk_authz_preserves_absolute_result_indexes_across_query_chunks() {
+    const QUERY_CHUNK_SIZE: usize = 90;
+    const ALLOWED_ACTION: &str = "organization.permission.manage";
+    const DENIED_ACTION: &str = "action-that-does-not-exist";
+
+    let (db, _runtime, _dir) = activity_database().await;
+
+    for check_count in [QUERY_CHUNK_SIZE + 1, QUERY_CHUNK_SIZE * 2] {
+        let expected = (0..check_count)
+            .map(|index| {
+                let chunk_number = index / QUERY_CHUNK_SIZE;
+                let chunk_index = index % QUERY_CHUNK_SIZE;
+                (chunk_number + chunk_index).is_multiple_of(2)
+            })
+            .collect::<Vec<_>>();
+        let checks = expected
+            .iter()
+            .map(|allowed| UserActionCheck {
+                user_id: USER_ID,
+                organization_id: ORGANIZATION_ID,
+                provider_id: "grant",
+                resource_type: "organization",
+                resource_id: ORGANIZATION_ID,
+                action_id: if *allowed {
+                    ALLOWED_ACTION
+                } else {
+                    DENIED_ACTION
+                },
+                application_id: None,
+                consistency: Some(ReadConsistency::Strong),
+            })
+            .collect::<Vec<_>>();
+
+        let decisions = db
+            .evaluate_user_actions(&checks)
+            .await
+            .expect("bulk authorization decisions");
+
+        assert_eq!(decisions.len(), check_count);
+        for (index, (decision, expected_allowed)) in
+            decisions.iter().zip(expected.iter()).enumerate()
+        {
+            assert_eq!(
+                decision.allowed, *expected_allowed,
+                "allowed decision mismatch at absolute index {index} for {check_count} checks"
+            );
+            assert_eq!(
+                decision.rbac_allowed, *expected_allowed,
+                "RBAC decision mismatch at absolute index {index} for {check_count} checks"
+            );
+            assert!(!decision.trusted_application);
+        }
+    }
+}
+
+#[tokio::test]
 async fn application_authz_bulk_sql_requires_ready_for_explicit_and_trusted_apps() {
     let (db, _runtime, _dir) = activity_database().await;
     let mut explicit = support::test_application("application-explicit", ORGANIZATION_ID);

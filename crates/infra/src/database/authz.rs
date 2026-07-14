@@ -75,6 +75,12 @@ impl Database {
         };
         let mut results = vec![denied; checks.len()];
         for (chunk_number, chunk) in checks.chunks(MAX_AUTHZ_CHECKS_PER_QUERY).enumerate() {
+            let chunk_start = chunk_number
+                .checked_mul(MAX_AUTHZ_CHECKS_PER_QUERY)
+                .ok_or_else(|| anyhow!("authorization chunk offset overflow"))?;
+            let chunk_end = chunk_start
+                .checked_add(chunk.len())
+                .ok_or_else(|| anyhow!("authorization chunk end overflow"))?;
             let Some(first) = chunk.first() else {
                 continue;
             };
@@ -85,10 +91,14 @@ impl Database {
             let values = chunk
                 .iter()
                 .enumerate()
-                .map(|(chunk_index, check)| {
-                    let idx = chunk_number * MAX_AUTHZ_CHECKS_PER_QUERY + chunk_index;
+                .map(|(chunk_index, check)| -> Result<String> {
+                    let absolute_index = chunk_start
+                        .checked_add(chunk_index)
+                        .ok_or_else(|| anyhow!("authorization result index overflow"))?;
+                    let query_index = i64::try_from(absolute_index)
+                        .context("authorization result index exceeds SQLite INTEGER")?;
                     let base = query_params.len() + 1;
-                    query_params.push(hiqlite::Param::from(idx as i64));
+                    query_params.push(hiqlite::Param::from(query_index));
                     query_params.push(hiqlite::Param::from(check.user_id.to_owned()));
                     query_params.push(hiqlite::Param::from(check.organization_id.to_owned()));
                     query_params.push(hiqlite::Param::from(check.provider_id.to_owned()));
@@ -104,7 +114,7 @@ impl Database {
                     } else {
                         0_i64
                     }));
-                    format!(
+                    Ok(format!(
                         "(${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                         base + 1,
                         base + 2,
@@ -115,9 +125,9 @@ impl Database {
                         base + 7,
                         base + 8,
                         base + 9
-                    )
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>>>()?
                 .join(", ");
             let rows: Vec<UserActionDecisionRow> = self
                 .query_rows_with(
@@ -302,13 +312,24 @@ impl Database {
                 )
                 .await?;
             for row in rows {
-                if let Some(result) = results.get_mut(row.idx as usize) {
-                    *result = UserActionDecision {
-                        allowed: row.allowed != 0,
-                        rbac_allowed: row.rbac_allowed != 0,
-                        trusted_application: row.trusted_application != 0,
-                    };
+                let result_index = usize::try_from(row.idx)
+                    .context("authorization query returned a negative result index")?;
+                if !(chunk_start..chunk_end).contains(&result_index) {
+                    return Err(anyhow!(
+                        "authorization query returned result index {result_index} outside chunk range {chunk_start}..{chunk_end}"
+                    ));
                 }
+                let result = results.get_mut(result_index).ok_or_else(|| {
+                    anyhow!(
+                        "authorization query returned result index {result_index} outside result length {}",
+                        checks.len()
+                    )
+                })?;
+                *result = UserActionDecision {
+                    allowed: row.allowed != 0,
+                    rbac_allowed: row.rbac_allowed != 0,
+                    trusted_application: row.trusted_application != 0,
+                };
             }
         }
         Ok(results)

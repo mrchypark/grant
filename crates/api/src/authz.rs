@@ -118,17 +118,14 @@ pub(crate) async fn application_authz_filter(
         )));
     }
     let mut ids = Vec::with_capacity(body.resources.len());
-    let checks = body
-        .resources
-        .into_iter()
-        .map(|resource| {
-            ids.push(resource.id.clone());
-            application_check_input(ApplicationAuthzCheckRequest {
-                action: body.action.clone(),
-                resource,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut checks = Vec::with_capacity(body.resources.len());
+    for resource in body.resources {
+        ids.push(resource.id.clone());
+        checks.push(application_check_input(ApplicationAuthzCheckRequest {
+            action: body.action.clone(),
+            resource,
+        }));
+    }
     let decisions = service
         .check_application_authorizations(Some(&token), &organization_id, &checks)
         .await
