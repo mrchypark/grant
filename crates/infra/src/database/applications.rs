@@ -99,38 +99,38 @@ impl Database {
         let now = now_string();
         let stmt = if slug_changed {
             "UPDATE applications
-             SET organization_id = $2,
-                 slug = $3,
-                 name = $4,
-                 description = $5,
-                 application_type = $6,
-                 app_type = $7,
-                 active = $8,
-                 created_by_user_id = $9,
-                 updated_at = $10
-             WHERE id = $1
+             SET organization_id = ?2,
+                 slug = ?3,
+                 name = ?4,
+                 description = ?5,
+                 application_type = ?6,
+                 app_type = ?7,
+                 active = ?8,
+                 created_by_user_id = ?9,
+                 updated_at = ?10
+             WHERE id = ?1
                AND NOT (first_party = 1 AND consent_policy = 'auto_approve')
-               AND security_mutation_token = $11
-               AND security_mutation_expires_at > $10
+               AND security_mutation_token = ?11
+               AND security_mutation_expires_at > ?10
                AND NOT EXISTS (
                    SELECT 1 FROM applications existing
-                   WHERE existing.slug = $12 AND existing.id != $13
+                   WHERE existing.slug = ?12 AND existing.id != ?13
                )"
         } else {
             "UPDATE applications
-             SET organization_id = $2,
-                 slug = $3,
-                 name = $4,
-                 description = $5,
-                 application_type = $6,
-                 app_type = $7,
-                 active = $8,
-                 created_by_user_id = $9,
-                 updated_at = $10
-             WHERE id = $1
+             SET organization_id = ?2,
+                 slug = ?3,
+                 name = ?4,
+                 description = ?5,
+                 application_type = ?6,
+                 app_type = ?7,
+                 active = ?8,
+                 created_by_user_id = ?9,
+                 updated_at = ?10
+             WHERE id = ?1
                AND NOT (first_party = 1 AND consent_policy = 'auto_approve')
-               AND security_mutation_token = $11
-               AND security_mutation_expires_at > $10"
+               AND security_mutation_token = ?11
+               AND security_mutation_expires_at > ?10"
         };
         let mut update_params = params!(
             application.id.clone(),
