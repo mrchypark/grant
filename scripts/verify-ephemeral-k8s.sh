@@ -57,6 +57,8 @@ assert_ha_contract() {
   [ "$(grep -c '^  minAvailable: 2$' "${manifest}" || true)" -eq 2 ] \
     || fail "${label} must render two quorum PDBs"
   grep -q 'name: lifecycle-gate' "${manifest}" || fail "${label} is missing lifecycle gates"
+  grep -q 'command -v od' "${ROOT_DIR}/deploy/k8s/lifecycle-gate.sh" \
+    || fail "lifecycle gate does not fail closed when its byte-inspection tool is unavailable"
   if grep -E 'image: (busybox|ghcr.io/sebadob/rauthy)' "${manifest}" | grep -v '@sha256:' >/dev/null; then
     fail "${label} contains an unpinned third-party image"
   fi
@@ -798,6 +800,7 @@ verify_static() {
   assert_ci_local_registry_auth_contract
   assert_gke_skaffold_registry_secret_contract
   assert_recovery_role_resolution_policy
+  "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
   "${ROOT_DIR}/scripts/verify-aws-principal-helpers.sh"
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
   assert_recovery_dry_run

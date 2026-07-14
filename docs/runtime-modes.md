@@ -88,6 +88,8 @@ production init lifecycle gate는 다음 mode를 사용한다.
 - `fresh`: local 개발 profile에서만 허용한다. production gate는 fresh bootstrap을 거부하고 승인된 전체 restore만 허용한다.
 - `restore`: ordinal 0만 시작할 수 있으며 32자 이하 lowercase DNS recovery ID가 lifecycle state와 restore authorization에서 같아야 한다. Grant shell supervisor는 원자적 `pending/completed` marker와 제한된 로컬 `/healthz`·`/readyz` 확인으로 replay를 차단한다. 같은-ID stale `pending`은 authorization이 유지된 동안 재시도하고 `completed`만 일반 시작으로 전환한다. Rauthy static launcher는 `/app/data`의 원자적 `pending/completed` 상태와 연속 hiqlite `/ready` 확인을 사용하지만, Rauthy `pending` container restart는 자동으로 재실행하지 않는다. Secret이 없어도 같은 recovery의 `completed` 상태는 일반 시작할 수 있지만, authorization과 completed 상태가 모두 없으면 fail closed한다.
 
+Lifecycle mode와 recovery ID 파일은 shell gate와 Rauthy launcher 모두 정확히 한 줄만 허용한다. 값 뒤에는 LF 또는 CRLF 하나를 선택적으로 붙일 수 있지만, 선행·후행·내부 space/tab, bare CR, 빈 값, 추가 줄은 허용하지 않는다.
+
 나머지 ordinal은 `fresh`나 `restore`에서도 ready peer를 기다린 뒤 learner로 가입하고 voter로 승격된다. schema migration과 seed는 voter 경로에서만 실행하며 learner는 voter 복구와 migration이 완료된 후 가입시킨다. 전체 복구의 partition rollout과 checkpoint는 [backup-restore.md](./backup-restore.md)를 따른다.
 
 ## 현재 의존성 메모

@@ -316,19 +316,32 @@ func readAuthorization(cfg config, lifecycle lifecycleState) (authorization, boo
 }
 
 func readValue(path string, limit int64) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect restore input %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("restore input %s is not a regular file", path)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("open restore input %s: %w", path, err)
 	}
 	defer file.Close()
-	value, err := io.ReadAll(io.LimitReader(file, limit+1))
+	value, err := io.ReadAll(io.LimitReader(file, limit+3))
 	if err != nil {
 		return "", fmt.Errorf("read restore input %s: %w", path, err)
 	}
-	if int64(len(value)) > limit {
+	trimmed := string(value)
+	switch {
+	case strings.HasSuffix(trimmed, "\r\n"):
+		trimmed = strings.TrimSuffix(trimmed, "\r\n")
+	case strings.HasSuffix(trimmed, "\n"):
+		trimmed = strings.TrimSuffix(trimmed, "\n")
+	}
+	if int64(len(trimmed)) > limit {
 		return "", fmt.Errorf("restore input %s exceeds %d bytes", path, limit)
 	}
-	trimmed := strings.TrimSuffix(strings.TrimSuffix(string(value), "\n"), "\r")
 	if trimmed == "" || strings.IndexByte(trimmed, 0) >= 0 || strings.ContainsAny(trimmed, "\r\n") {
 		return "", fmt.Errorf("restore input %s is empty or contains line breaks", path)
 	}

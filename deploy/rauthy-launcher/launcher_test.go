@@ -135,6 +135,121 @@ func TestNormalStartupWithoutAuthorization(t *testing.T) {
 	}
 }
 
+func TestLifecycleValueContract(t *testing.T) {
+	t.Run("accepts LF", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, "lifecycle", "mode"), "restore\n")
+		writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), testRecoveryID+"\n")
+		cfg := testConfig(t, tmp, "http://127.0.0.1:1/unused", filepath.Join(tmp, "capture.json"))
+		state, err := readLifecycle(cfg)
+		if err != nil || state.mode != "restore" || state.recoveryID != testRecoveryID {
+			t.Fatalf("LF lifecycle state = %+v, err = %v", state, err)
+		}
+	})
+
+	t.Run("accepts CRLF", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, "lifecycle", "mode"), "restore\r\n")
+		writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), testRecoveryID+"\r\n")
+		cfg := testConfig(t, tmp, "http://127.0.0.1:1/unused", filepath.Join(tmp, "capture.json"))
+		state, err := readLifecycle(cfg)
+		if err != nil || state.mode != "restore" || state.recoveryID != testRecoveryID {
+			t.Fatalf("CRLF lifecycle state = %+v, err = %v", state, err)
+		}
+	})
+
+	t.Run("accepts maximum recovery ID with CRLF", func(t *testing.T) {
+		tmp := t.TempDir()
+		maximumID := strings.Repeat("a", 32)
+		writeFile(t, filepath.Join(tmp, "lifecycle", "mode"), "restore\r\n")
+		writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), maximumID+"\r\n")
+		cfg := testConfig(t, tmp, "http://127.0.0.1:1/unused", filepath.Join(tmp, "capture.json"))
+		state, err := readLifecycle(cfg)
+		if err != nil || state.recoveryID != maximumID {
+			t.Fatalf("maximum CRLF lifecycle state = %+v, err = %v", state, err)
+		}
+	})
+
+	invalidValues := []struct {
+		name  string
+		value string
+	}{
+		{name: "leading space", value: " restore\n"},
+		{name: "trailing space", value: "restore \n"},
+		{name: "internal space", value: "rest ore\n"},
+		{name: "tab", value: "restore\t\n"},
+		{name: "extra line", value: "restore\nsteady\n"},
+		{name: "NUL", value: "restore\x00\n"},
+		{name: "empty", value: ""},
+		{name: "bare CR", value: "restore\r"},
+	}
+	for _, tt := range invalidValues {
+		t.Run("mode rejects "+tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			writeFile(t, filepath.Join(tmp, "lifecycle", "mode"), tt.value)
+			writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), testRecoveryID+"\n")
+			cfg := testConfig(t, tmp, "http://127.0.0.1:1/unused", filepath.Join(tmp, "capture.json"))
+			if _, err := readLifecycle(cfg); err == nil {
+				t.Fatal("invalid lifecycle mode was accepted")
+			}
+		})
+	}
+
+	invalidIDs := []struct {
+		name  string
+		value string
+	}{
+		{name: "leading space", value: " " + testRecoveryID + "\n"},
+		{name: "trailing space", value: testRecoveryID + " \n"},
+		{name: "internal space", value: "recovery test-1\n"},
+		{name: "tab", value: "recovery\ttest-1\n"},
+		{name: "extra line", value: testRecoveryID + "\nother\n"},
+		{name: "NUL", value: "recovery\x00test-1\n"},
+		{name: "empty", value: ""},
+		{name: "bare CR", value: testRecoveryID + "\r"},
+		{name: "33 bytes", value: strings.Repeat("a", 33) + "\n"},
+	}
+	for _, tt := range invalidIDs {
+		t.Run("recovery ID rejects "+tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			writeFile(t, filepath.Join(tmp, "lifecycle", "mode"), "restore\n")
+			writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), tt.value)
+			cfg := testConfig(t, tmp, "http://127.0.0.1:1/unused", filepath.Join(tmp, "capture.json"))
+			if _, err := readLifecycle(cfg); err == nil {
+				t.Fatal("invalid lifecycle recovery ID was accepted")
+			}
+		})
+	}
+}
+
+func TestReadValueRejectsNonRegularFilesWithoutBlocking(t *testing.T) {
+	t.Run("directory", func(t *testing.T) {
+		if _, err := readValue(t.TempDir(), 32); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("directory error = %v", err)
+		}
+	})
+
+	t.Run("FIFO", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "lifecycle-fifo")
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := readValue(path, 32)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("FIFO error = %v", err)
+			}
+		case <-time.After(250 * time.Millisecond):
+			t.Fatal("readValue blocked while opening a FIFO")
+		}
+	})
+}
+
 func TestRejectsIncompleteOrMismatchedAuthorization(t *testing.T) {
 	tests := []struct {
 		name string
@@ -154,6 +269,14 @@ func TestRejectsIncompleteOrMismatchedAuthorization(t *testing.T) {
 			edit: func(t *testing.T, tmp string) {
 				t.Helper()
 				writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), "other-recovery")
+			},
+		},
+		{
+			name: "recovery ids have divergent suffixes",
+			edit: func(t *testing.T, tmp string) {
+				t.Helper()
+				writeFile(t, filepath.Join(tmp, "restore", "recovery-id"), "recovery-test-restore")
+				writeFile(t, filepath.Join(tmp, "lifecycle", "recovery-id"), "recovery-test-lifecycle")
 			},
 		},
 		{
