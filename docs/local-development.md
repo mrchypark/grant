@@ -88,6 +88,9 @@ bash scripts/ci-local.sh
 ```
 
 script는 token을 argv에 넣지 않고 임시 Docker config와 namespace `rauthy-launcher-pull` Secret을 만든다. credential이 없으면 public image로 fallback하지 않고 실패한다.
+
+GKE의 `scripts/gke-skaffold-run.sh`도 같은 입력 계약을 사용한다. script는 manifest에 고정된 launcher image를 임의의 `RAUTHY_IMAGE`로 우회하지 못하게 하고, publish 전 digest marker나 immutable digest가 아닌 image를 Docker 및 cluster 접근 전에 거부한다. credential 검증과 GHCR login이 성공하면 raw `GHCR_USERNAME`과 `GHCR_TOKEN`을 즉시 환경에서 제거한다. 임시 Docker config로 namespace의 `rauthy-launcher-pull`을 적용한 직후 config와 그 환경 경로를 삭제하고 Grant Secret과 Skaffold에는 전달하지 않는다. Skaffold는 추적 가능한 child PID로 실행하며 HUP, INT, TERM을 받으면 같은 신호를 child에 전달하고 최대 2초 기다린다. child가 신호를 무시하면 KILL 후 회수하며 wrapper는 각각 129, 130, 143으로 종료한다. 정상 종료도 Skaffold 상태를 보존한다. 따라서 새 namespace를 배포할 때도 위 두 변수를 먼저 설정해야 하며, Secret을 별도로 수동 생성할 필요는 없다.
+
 - `scripts/create-recovery-pair.sh`, `scripts/restore-full-cluster.sh`
   - exact S3 version recovery record 생성과 전체 cluster restore
   - 로컬에서는 `--dry-run`만 사용하고 실제 복구는 보호된 운영 절차를 따른다.

@@ -21,8 +21,10 @@ prepare_rauthy_registry_auth() {
     ghcr.io/conalog/grant-rauthy-launcher:*) ;;
     *) return 0 ;;
   esac
-  : "${GHCR_USERNAME:?GHCR_USERNAME is required for the private Rauthy launcher image}"
-  : "${GHCR_TOKEN:?GHCR_TOKEN with read:packages is required for the private Rauthy launcher image}"
+  [ -n "${GHCR_USERNAME:-}" ] \
+    || { echo "GHCR_USERNAME is required for the private Rauthy launcher image" >&2; return 1; }
+  [ -n "${GHCR_TOKEN:-}" ] \
+    || { echo "GHCR_TOKEN with read:packages is required for the private Rauthy launcher image" >&2; return 1; }
   RAUTHY_DOCKER_CONTEXT=$(docker context show) \
     || { echo "cannot read the active Docker context" >&2; return 1; }
   [ -n "${RAUTHY_DOCKER_CONTEXT}" ] \

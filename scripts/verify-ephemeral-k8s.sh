@@ -171,6 +171,305 @@ assert_ci_local_placeholder_guard() {
   fi
 }
 
+assert_gke_skaffold_registry_secret_contract() {
+  mock_bin="${TMP_DIR}/gke-mock-bin"
+  mock_log="${TMP_DIR}/gke-mock-commands.log"
+  missing_log="${TMP_DIR}/gke-missing-registry-credential.log"
+  success_log="${TMP_DIR}/gke-registry-secret.log"
+  config_path_file="${TMP_DIR}/gke-registry-config-path"
+  fixture_root="${TMP_DIR}/gke-published-fixture"
+  fixture_script="${fixture_root}/scripts/gke-skaffold-run.sh"
+  fixture_image='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  mkdir -p "${mock_bin}" "${fixture_root}/scripts" "${fixture_root}/deploy/k8s"
+  cp "${ROOT_DIR}/scripts/gke-skaffold-run.sh" "${fixture_script}"
+  cp "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" "${fixture_root}/scripts/k8s-secret-helpers.sh"
+  sed "s|ghcr.io/conalog/grant-rauthy-launcher:[^[:space:]]*|${fixture_image}|" \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" >"${fixture_root}/deploy/k8s/rauthy-statefulset.yaml"
+
+  cat >"${mock_bin}/docker" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'docker %s\n' "$*" >>"${GKE_MOCK_LOG}"
+
+if [ "${1:-}" = context ] && [ "${2:-}" = show ]; then
+  echo mock-docker-context
+  exit 0
+fi
+
+config_dir=
+previous=
+is_login=0
+for argument do
+  if [ "${previous}" = --config ]; then config_dir=${argument}; fi
+  if [ "${argument}" = login ]; then is_login=1; fi
+  previous=${argument}
+done
+if [ "${is_login}" = 1 ]; then
+  IFS= read -r supplied_token || true
+  [ "${supplied_token}" = "${GKE_EXPECTED_TOKEN}" ] || exit 91
+  [ -n "${config_dir}" ] || exit 92
+  mkdir -p "${config_dir}"
+  printf '%s\n' '{"auths":{"ghcr.io":{"auth":"mock-only"}}}' >"${config_dir}/config.json"
+  if [ -n "${GKE_MOCK_CONFIG_PATH_FILE:-}" ]; then
+    printf '%s\n' "${config_dir}" >"${GKE_MOCK_CONFIG_PATH_FILE}"
+  fi
+fi
+EOF
+
+  cat >"${mock_bin}/kubectl" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${GHCR_TOKEN+x}" = x ] || [ "${GHCR_USERNAME+x}" = x ]; then
+  echo 'raw GHCR credentials reached kubectl' >&2
+  exit 94
+fi
+printf 'kubectl %s\n' "$*" >>"${GKE_MOCK_LOG}"
+
+case " $* " in
+  *' apply -f - '*) cat >/dev/null ;;
+  *' create namespace '*) printf '%s\n' 'apiVersion: v1' 'kind: Namespace' ;;
+  *' create secret generic rauthy-launcher-pull '*)
+    config_path=
+    previous=
+    for argument do
+      case "${argument}" in
+        --from-file=.dockerconfigjson=*) config_path=${argument#--from-file=.dockerconfigjson=} ;;
+      esac
+      if [ "${previous}" = --from-file ]; then
+        case "${argument}" in .dockerconfigjson=*) config_path=${argument#*=} ;; esac
+      fi
+      previous=${argument}
+    done
+    [ -s "${config_path}" ] || exit 93
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret'
+    ;;
+  *' create secret generic grant-secrets '*)
+    if [ "${RAUTHY_REGISTRY_CONFIG_DIR+x}" = x ]; then
+      echo 'temporary registry config reached grant Secret creation' >&2
+      exit 96
+    fi
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret'
+    ;;
+esac
+EOF
+
+  cat >"${mock_bin}/skaffold" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${GHCR_TOKEN+x}" = x ] || [ "${GHCR_USERNAME+x}" = x ]; then
+  echo 'raw GHCR credentials reached skaffold' >&2
+  exit 95
+fi
+if [ "${RAUTHY_REGISTRY_CONFIG_DIR+x}" = x ]; then
+  echo 'temporary registry config path reached skaffold' >&2
+  exit 96
+fi
+printf 'skaffold %s\n' "$*" >>"${GKE_MOCK_LOG}"
+if [ "${GKE_MOCK_LONG_RUNNING:-0}" = 1 ]; then
+  : "${GKE_MOCK_CHILD_PID_FILE:?}"
+  : "${GKE_MOCK_CHILD_SIGNAL_FILE:?}"
+  printf '%s\n' "$$" >"${GKE_MOCK_CHILD_PID_FILE}"
+  if [ "${GKE_MOCK_IGNORE_SIGNALS:-0}" = 1 ]; then
+    trap '' HUP INT TERM
+  else
+    trap 'printf "%s\n" HUP >"${GKE_MOCK_CHILD_SIGNAL_FILE}"; exit 129' HUP
+    trap 'printf "%s\n" INT >"${GKE_MOCK_CHILD_SIGNAL_FILE}"; exit 130' INT
+    trap 'printf "%s\n" TERM >"${GKE_MOCK_CHILD_SIGNAL_FILE}"; exit 143' TERM
+  fi
+  while :; do sleep 1; done
+fi
+exit "${GKE_MOCK_SKAFFOLD_STATUS:-0}"
+EOF
+  chmod +x "${mock_bin}/docker" "${mock_bin}/kubectl" "${mock_bin}/skaffold"
+
+  : >"${mock_log}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
+    bash "${ROOT_DIR}/scripts/gke-skaffold-run.sh" >"${missing_log}" 2>&1
+  placeholder_status=$?
+  set -e
+  [ "${placeholder_status}" -ne 0 ] \
+    || fail "GKE Skaffold accepted the unpublished Rauthy launcher marker"
+  grep -q 'digest is unpublished; refusing GKE deployment before Docker or cluster access' "${missing_log}" \
+    || fail "GKE Skaffold placeholder failure is not explicit"
+  [ ! -s "${mock_log}" ] \
+    || fail "GKE Skaffold touched Docker or the cluster before rejecting the launcher placeholder"
+
+  : >"${mock_log}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GHCR_USERNAME=ci-user GHCR_TOKEN='' \
+    bash "${fixture_script}" >"${missing_log}" 2>&1
+  missing_status=$?
+  set -e
+  if [ "${missing_status}" -eq 0 ]; then
+    fail "GKE Skaffold provisioning accepted missing private launcher credentials"
+  fi
+  grep -q 'GHCR_TOKEN with read:packages is required' "${missing_log}" \
+    || fail "GKE Skaffold missing-credential failure is not explicit"
+  [ ! -s "${mock_log}" ] \
+    || fail "GKE Skaffold touched Docker or the cluster before rejecting missing credentials"
+
+  : >"${mock_log}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    RAUTHY_IMAGE=docker.io/library/busybox:latest GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
+    bash "${fixture_script}" >"${missing_log}" 2>&1
+  override_status=$?
+  set -e
+  [ "${override_status}" -ne 0 ] \
+    || fail "GKE Skaffold allowed the private manifest image to be bypassed"
+  grep -q 'RAUTHY_IMAGE cannot override it' "${missing_log}" \
+    || fail "GKE Skaffold image override failure is not explicit"
+  [ ! -s "${mock_log}" ] \
+    || fail "GKE Skaffold touched Docker or the cluster before rejecting an image override"
+
+  registry_token='gke-private-registry-token-sentinel'
+  : >"${mock_log}"
+  rm -f "${config_path_file}"
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
+    bash "${fixture_script}" >"${success_log}" 2>&1
+
+  grep -q 'docker .* login .* --password-stdin' "${mock_log}" \
+    || fail "GKE Skaffold did not authenticate to GHCR through password stdin"
+  pull_secret_line=$(grep -n 'kubectl .* create secret generic rauthy-launcher-pull .*--type=kubernetes.io/dockerconfigjson' "${mock_log}" \
+    | head -n 1 | cut -d: -f1)
+  skaffold_line=$(grep -n '^skaffold .*run' "${mock_log}" | head -n 1 | cut -d: -f1)
+  if ! { [ -n "${pull_secret_line}" ] && [ -n "${skaffold_line}" ] \
+    && [ "${pull_secret_line}" -lt "${skaffold_line}" ]; }; then
+    sed -n '1,40p' "${mock_log}" >&2
+    fail "GKE Skaffold did not create the private launcher pull Secret before deployment"
+  fi
+  if grep -Fq "${registry_token}" "${mock_log}" "${success_log}"; then
+    fail "GKE Skaffold exposed the private registry token in argv or output"
+  fi
+  [ -s "${config_path_file}" ] \
+    || fail "GKE Skaffold success mock did not record the temporary registry config"
+  registry_config_dir=$(sed -n '1p' "${config_path_file}")
+  [ ! -e "${registry_config_dir}" ] \
+    || fail "GKE Skaffold did not clean the temporary registry config after success"
+
+  : >"${mock_log}"
+  rm -f "${config_path_file}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_SKAFFOLD_STATUS=47 \
+    GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
+    bash "${fixture_script}" >"${success_log}" 2>&1
+  failure_status=$?
+  set -e
+  [ "${failure_status}" -eq 47 ] \
+    || fail "GKE Skaffold normal failure status was not preserved: ${failure_status}"
+  registry_config_dir=$(sed -n '1p' "${config_path_file}")
+  [ -n "${registry_config_dir}" ] && [ ! -e "${registry_config_dir}" ] \
+    || fail "GKE Skaffold did not clean the temporary registry config after normal failure"
+
+  for signal_contract in HUP:129:0 INT:130:0 TERM:143:0 TERM:143:1; do
+    signal_name=${signal_contract%%:*}
+    signal_details=${signal_contract#*:}
+    expected_status=${signal_details%%:*}
+    ignore_signals=${signal_details#*:}
+    contract_label=${signal_name}
+    if [ "${ignore_signals}" = 1 ]; then contract_label=${signal_name}-ignored; fi
+    parent_pid_file="${TMP_DIR}/gke-runner-${contract_label}.pid"
+    child_pid_file="${TMP_DIR}/gke-skaffold-${contract_label}.pid"
+    child_signal_file="${TMP_DIR}/gke-skaffold-${contract_label}.signal"
+    watchdog_result="${TMP_DIR}/gke-watchdog-${contract_label}.result"
+    : >"${mock_log}"
+    rm -f "${config_path_file}" "${parent_pid_file}" "${child_pid_file}" \
+      "${child_signal_file}" "${watchdog_result}"
+
+    (
+      set +e
+      terminate_watchdog_processes() {
+        runner_to_stop=${1:-}
+        child_to_stop=${2:-}
+        [ -z "${runner_to_stop}" ] || kill -TERM "${runner_to_stop}" 2>/dev/null
+        [ -z "${child_to_stop}" ] || kill -TERM "${child_to_stop}" 2>/dev/null
+        cleanup_attempts=0
+        while [ "${cleanup_attempts}" -lt 10 ]; do
+          runner_alive=0
+          child_alive=0
+          [ -z "${runner_to_stop}" ] || kill -0 "${runner_to_stop}" 2>/dev/null || runner_alive=$?
+          [ -z "${child_to_stop}" ] || kill -0 "${child_to_stop}" 2>/dev/null || child_alive=$?
+          if { [ -z "${runner_to_stop}" ] || [ "${runner_alive}" -ne 0 ]; } \
+            && { [ -z "${child_to_stop}" ] || [ "${child_alive}" -ne 0 ]; }; then
+            return 0
+          fi
+          cleanup_attempts=$((cleanup_attempts + 1))
+          sleep 0.1
+        done
+        [ -z "${runner_to_stop}" ] || kill -KILL "${runner_to_stop}" 2>/dev/null
+        [ -z "${child_to_stop}" ] || kill -KILL "${child_to_stop}" 2>/dev/null
+      }
+
+      watchdog_attempts=0
+      while { [ ! -s "${parent_pid_file}" ] || [ ! -s "${child_pid_file}" ]; }; do
+        watchdog_attempts=$((watchdog_attempts + 1))
+        if [ "${watchdog_attempts}" -ge 100 ]; then
+          runner_pid=$(sed -n '1p' "${parent_pid_file}" 2>/dev/null)
+          skaffold_pid=$(sed -n '1p' "${child_pid_file}" 2>/dev/null)
+          terminate_watchdog_processes "${runner_pid}" "${skaffold_pid}"
+          printf '%s\n' start-timeout >"${watchdog_result}"
+          exit 1
+        fi
+        sleep 0.1
+      done
+      runner_pid=$(sed -n '1p' "${parent_pid_file}")
+      skaffold_pid=$(sed -n '1p' "${child_pid_file}")
+      registry_config_dir=$(sed -n '1p' "${config_path_file}")
+      if [ -z "${registry_config_dir}" ] || [ -e "${registry_config_dir}" ]; then
+        terminate_watchdog_processes "${runner_pid}" "${skaffold_pid}"
+        printf '%s\n' registry-config-retained >"${watchdog_result}"
+        exit 1
+      fi
+
+      # Only the tracked GKE runner receives the test signal. Its handler must
+      # forward the same signal to the long-running Skaffold child.
+      kill -s "${signal_name}" "${runner_pid}"
+      watchdog_attempts=0
+      while kill -0 "${runner_pid}" 2>/dev/null; do
+        watchdog_attempts=$((watchdog_attempts + 1))
+        if [ "${watchdog_attempts}" -ge 100 ]; then
+          terminate_watchdog_processes "${runner_pid}" "${skaffold_pid}"
+          printf '%s\n' exit-timeout >"${watchdog_result}"
+          exit 1
+        fi
+        sleep 0.1
+      done
+      printf '%s\n' exited >"${watchdog_result}"
+    ) &
+    watchdog_pid=$!
+
+    set +e
+    PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+      GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_LONG_RUNNING=1 \
+      GKE_MOCK_CHILD_PID_FILE="${child_pid_file}" GKE_MOCK_CHILD_SIGNAL_FILE="${child_signal_file}" \
+      GKE_MOCK_IGNORE_SIGNALS="${ignore_signals}" \
+      GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
+      bash -c 'set -m; bash "$2" & runner_pid=$!; printf "%s\n" "${runner_pid}" >"$1"; set +m; wait "${runner_pid}"; exit "$?"' \
+        gke-signal-runner "${parent_pid_file}" "${fixture_script}" >"${success_log}" 2>&1
+    signal_status=$?
+    wait "${watchdog_pid}"
+    watchdog_status=$?
+    set -e
+    [ "${watchdog_status}" -eq 0 ] && grep -qx exited "${watchdog_result}" \
+      || fail "GKE Skaffold ${signal_name} watchdog failed: $(sed -n '1p' "${watchdog_result}" 2>/dev/null)"
+    [ "${signal_status}" -eq "${expected_status}" ] \
+      || fail "GKE Skaffold ${contract_label} status was ${signal_status}, expected ${expected_status}"
+    skaffold_pid=$(sed -n '1p' "${child_pid_file}")
+    if [ "${ignore_signals}" = 0 ]; then
+      grep -qx "${signal_name}" "${child_signal_file}" \
+        || fail "GKE Skaffold did not forward ${signal_name} to its tracked child"
+    elif [ -s "${child_signal_file}" ]; then
+      fail "GKE Skaffold non-cooperating child unexpectedly handled ${signal_name}"
+    fi
+    if kill -0 "${skaffold_pid}" 2>/dev/null; then
+      fail "GKE Skaffold ${contract_label} handler left child ${skaffold_pid} running"
+    fi
+  done
+}
+
 verify_static() {
   need bash
   need kubectl
@@ -266,6 +565,7 @@ verify_static() {
   grep -Eq 'name: rauthy-bootstrap-renderer-[a-z0-9]+' "${TMP_DIR}/ephemeral.yaml" \
     || fail "ephemeral render is missing the generated bootstrap renderer ConfigMap"
   assert_ci_local_placeholder_guard
+  assert_gke_skaffold_registry_secret_contract
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
   assert_recovery_dry_run
   "${ROOT_DIR}/scripts/verify-recovery-state-machine.sh"
