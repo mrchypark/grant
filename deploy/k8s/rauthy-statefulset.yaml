@@ -17,6 +17,8 @@ spec:
       labels:
         app: rauthy
     spec:
+      imagePullSecrets:
+        - name: rauthy-launcher-pull
       securityContext:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
@@ -107,9 +109,10 @@ spec:
               mountPath: /bootstrap
       containers:
         - name: rauthy
-          image: ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d
+          image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "/gate/restore-once.sh"]
+          command: ["/usr/local/bin/rauthy-launcher"]
+          args: ["/app/rauthy"]
           securityContext:
             runAsUser: 10001
             runAsGroup: 10001
@@ -127,10 +130,8 @@ spec:
             - name: hiq-api
               containerPort: 8200
           env:
-            - name: RESTORE_ONCE_EXEC
-              value: /app/rauthy
-            - name: RESTORE_ONCE_MARKER
-              value: /app/data/.restore-consumed
+            - name: RAUTHY_LAUNCHER_HEALTH_URL
+              value: http://127.0.0.1:8200/ready
           volumeMounts:
             - name: rauthy-data
               mountPath: /app/data
@@ -143,9 +144,6 @@ spec:
               readOnly: true
             - name: lifecycle-state
               mountPath: /lifecycle
-              readOnly: true
-            - name: lifecycle-gate
-              mountPath: /gate
               readOnly: true
             - name: restore-authorization
               mountPath: /restore

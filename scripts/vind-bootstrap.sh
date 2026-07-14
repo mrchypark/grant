@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 NAMESPACE="${NAMESPACE:-grant}"
 IMAGE_NAME="${IMAGE_NAME:-grant:local}"
-RAUTHY_IMAGE="${RAUTHY_IMAGE:-ghcr.io/sebadob/rauthy:0.36.0}"
+DEFAULT_RAUTHY_IMAGE="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")"
+RAUTHY_IMAGE="${RAUTHY_IMAGE:-${DEFAULT_RAUTHY_IMAGE}}"
 KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-$ROOT_DIR/deploy/overlays/ephemeral}"
 KUBECONTEXT="${KUBECONTEXT:-}"
 VIND_EXEC_ACTIVE="${VIND_EXEC_ACTIVE:-0}"
@@ -101,6 +102,13 @@ ENC_KEY_ACTIVE="${ENC_KEY_ACTIVE:-devkey01}"
 # shellcheck source=scripts/k8s-secret-helpers.sh
 . "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"
 
+cleanup_registry_auth() {
+  if [[ -n "${RAUTHY_REGISTRY_CONFIG_DIR:-}" ]]; then
+    rm -rf "${RAUTHY_REGISTRY_CONFIG_DIR}"
+  fi
+}
+trap cleanup_registry_auth EXIT
+
 if [[ -n "${KUBECONTEXT}" ]]; then
   kubectl config use-context "${KUBECONTEXT}" >/dev/null
   export KUBE_CONTEXT="${KUBECONTEXT}"
@@ -114,7 +122,9 @@ docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1 || {
   exit 1
 }
 
-docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 || docker pull "${RAUTHY_IMAGE}"
+prepare_rauthy_registry_auth
+docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 \
+  || docker --context "${RAUTHY_DOCKER_CONTEXT}" --config "${RAUTHY_REGISTRY_CONFIG_DIR}" pull "${RAUTHY_IMAGE}"
 
 ensure_runtime_image "${IMAGE_NAME}"
 ensure_runtime_image "${RAUTHY_IMAGE}"
@@ -154,6 +164,7 @@ wait_for_resource() {
 }
 
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+apply_rauthy_registry_pull_secret
 apply_grant_secret
 kubectl apply -k "${KUSTOMIZE_DIR}"
 

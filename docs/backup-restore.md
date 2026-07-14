@@ -21,6 +21,8 @@ hiqlite는 bucket root에 `backup_node_<leader-id>_<unix-seconds>.sqlite` 이름
 - `rauthy-production-config`, `rauthy-production-backup`, `rauthy-production-secrets`
 - operator 소유 `grant-recovery-state`
 - 별도 관리되는 production Ingress/TLS와 실제 digest로 치환한 Grant release image. 저장소의 `REQUIRED_PRODUCTION_DIGEST`는 admission-invalid marker이므로 그대로 배포할 수 없다.
+- 공식 Rauthy 0.36.0 digest에서 빌드한 `grant-rauthy-launcher` multi-architecture image의 실제 manifest digest. 저장소의 launcher digest token은 publish 전 fail-closed marker이며 그대로 배포할 수 없다.
+- private GHCR package를 읽는 namespace Secret `rauthy-launcher-pull`. `deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml`은 형식만 보여주며 실제 `.dockerconfigjson`은 외부 secret manager에서 공급한다.
 
 형식만 보여주는 파일은 `deploy/overlays/production/*.example.yaml`에 있다. 저장소에 실제 credential을 넣지 않는다.
 
@@ -62,7 +64,17 @@ Fence signer는 direct/headless writer, 관리 작업과 외부 queue consumer�
 - isolated drill ID와 성공 상태
 - Object Lock retention 종료 시각
 
-materialized key는 `restore/<workload>/<recovery-id>/<sha256>.enc`이다. bucket versioning과 S3 Object Lock `COMPLIANCE`가 필수이며 retention은 최소 24시간 뒤여야 한다. HQL은 `versionId`를 직접 읽지 못하므로 materializer는 첫 version을 만든 직후 그 exact key에 대한 `PutObject`, `DeleteObject`, `DeleteObjectVersion` explicit Deny bucket-policy 문을 설치한다. 별도 explicit Deny는 평상시 backup writer의 `GetObject`/`GetObjectVersion`도 이 restore key에서 차단한다. 정책 설치 후 current version, exact retention, ciphertext SHA를 다시 확인한다. restore 시 one-shot Secret이 전용 reader의 `HQL_S3_KEY`/`HQL_S3_SECRET`을 Pod에 공급하고 wrapper가 평상시 writer credential을 해당 1회 실행에서만 덮어쓴다. operator가 검증한 reader ARN과 실제 Pod reader가 같은 record 값에 묶인다.
+materialized key는 `restore/<workload>/<recovery-id>/<sha256>.enc`이다. bucket versioning과 S3 Object Lock `COMPLIANCE`가 필수이며 retention은 최소 24시간 뒤여야 한다. HQL은 `versionId`를 직접 읽지 못하므로 materializer는 첫 version을 만든 직후 그 exact key에 대한 `PutObject`, `DeleteObject`, `DeleteObjectVersion` explicit Deny bucket-policy 문을 설치한다. 별도 explicit Deny는 평상시 backup writer의 `GetObject`/`GetObjectVersion`도 이 restore key에서 차단한다. 정책 설치 후 current version, exact retention, ciphertext SHA를 다시 확인한다. restore 시 one-shot Secret이 전용 reader의 `HQL_S3_KEY`/`HQL_S3_SECRET`을 Pod에 공급한다. Grant shell wrapper와 Rauthy static launcher는 평상시 writer credential을 해당 1회 실행에서만 덮어쓴다. operator가 검증한 reader ARN과 실제 Pod reader가 같은 record 값에 묶인다.
+
+## Rauthy launcher image
+
+공식 Rauthy 0.36.0 image는 distroless이고 `/bin/sh`가 없으므로 main container에서 shell restore wrapper를 실행하지 않는다. `deploy/rauthy-launcher`의 stdlib-only Go binary를 `CGO_ENABLED=0`으로 빌드해 digest-pinned 공식 image에 복사한다. launcher는 Secret 값을 인자나 로그에 출력하지 않으며 `/app/rauthy` child에만 환경변수로 전달한다. 종료 신호는 child에 전달하고 child exit code를 보존한다. Secret이 없으면 일반 Rauthy 시작 경로로 동작한다.
+
+복구를 처음 소비하기 전에 launcher는 `/app/data/.rauthy-restore-state.json`을 `pending`으로 원자 기록한다. recovery ID는 32자 이하 lowercase DNS label이어야 하며 `s3:restore/rauthy/<recovery-id>/<sha256>.enc` 형식, lifecycle `restore` mode를 모두 검증한다. child가 hiqlite `/ready`에 연속 3회 성공하고 그 사이 종료하지 않은 뒤에만 상태를 `completed`로 원자 교체한다. `pending` 상태에서 container가 재시작되면 자동 replay하지 않고 실패한다. Secret이 삭제됐어도 `completed` recovery ID와 lifecycle ID가 같으면 일반 시작할 수 있다. `restore`인데 authorization과 같은 completed 상태가 모두 없으면 실패한다. 운영자는 불완전한 복구를 같은 Pod에서 재개하지 않고 전체 recovery checkpoint와 immutable object를 재검증한 뒤 ordinal 0을 명시적으로 re-arm한다.
+
+PR의 `rauthy-launcher-image` workflow는 read-only 권한으로 unit/race/vet, 실제 `/app/rauthy --help` 실행 계약과 amd64/arm64 no-push build를 검사한다. PR에서는 launcher digest marker를 source/contract 검증에 한해 허용하며 production 정적 검증의 기본 동작은 계속 fail closed다. PR 또는 feature ref에는 `packages:write`를 부여하지 않는다. merge 후 production publish만 `main`의 `rauthy-launcher-image`를 정확한 main HEAD SHA와 confirmation `publish-rauthy-launcher-production`으로 실행하며 보호 환경 `rauthy-launcher-production-publish` 승인이 필요하다. 결과 summary의 `sha256:` digest를 받은 운영자는 새 `feature/pin-rauthy-launcher-<main-short-sha>` branch에서 `deploy/k8s/rauthy-statefulset.yaml`의 단일 marker를 치환하고 정적 검증을 통과시키는 후속 PR을 만든다. workflow는 repository contents를 쓰거나 branch/PR을 자동 생성하지 않는다. package visibility를 public으로 바꾸거나 mutable tag만 record/StatefulSet에 사용하면 안 된다.
+
+GitHub Environment `rauthy-launcher-production-publish`에는 required reviewer와 `main` branch 제한을 설정한다. GHCR package는 이 repository에 연결하고 Actions access를 이 repository로 제한한다. cluster pull credential은 read-only `read:packages` token만 사용한다. 로컬/CI script는 `GHCR_USERNAME`과 `GHCR_TOKEN`이 없으면 derivative image 사용을 거부하고, `--password-stdin`으로 만든 임시 Docker config를 명령별 `docker --config`에만 사용해 기존 Docker context를 보존하며 `rauthy-launcher-pull` Secret을 생성한다. credential 값은 argv나 로그에 넣지 않는다.
 
 이 exact-key Deny는 Object Lock 만료 뒤에도 자동으로 사라지지 않는다. 보존 정책에 따라 restore record와 승인을 폐기한 뒤 bucket-policy의 해당 `immutablePolicySid`를 별도 변경관리로 제거해야 하며, materializer나 restore workflow가 자동으로 제거하지 않는다.
 
@@ -123,7 +135,7 @@ scripts/restore-full-cluster.sh \
 
 1. 두 public Service를 fence하고, immutable current version·Object Lock·SHA·image digest를 다시 검증한다.
 2. 아직 복구 데이터가 생성되기 전에만 두 StatefulSet을 0으로 만든다.
-3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. wrapper는 `emptyDir` marker를 원자적으로 만들고 같은 Pod의 container restart에서는 restore env를 다시 노출하지 않는다.
+3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. static launcher는 `emptyDir`에 `pending`을 먼저 기록하고 Rauthy/hiqlite ready가 확인된 뒤에만 `completed`로 바꾼다. 불완전한 container restart는 자동 replay하지 않는다.
 4. ordinal 0 Ready와 S3 정책/version 재검증 직후 Secret을 삭제한다. 새 Pod는 authorization이 없어 init에서 막히며, 재시도는 operator의 명시적 re-arm이 필요하다.
 5. `partition: 1`에서 no-restore template을 만든 뒤 replicas 3으로 확장한다. 각 Pod readiness와 native membership의 config가 joint consensus가 아닌 정확히 하나의 voter set `1,2,3`인지 확인한다.
 6. lifecycle mode를 `steady`로 바꾸고 `partition: 0`으로 ordinal 0만 quorum-preserving restart한다. restore env와 Secret이 모두 사라졌는지 확인한다.
@@ -146,7 +158,7 @@ live drill은 `RESTORE_STOP_AFTER_PHASE=<phase>`로 checkpoint 직후 operator �
 
 ## Lifecycle gate와 검증
 
-`deploy/k8s/lifecycle-gate.sh`는 aggregate Service나 Ingress가 아니라 각 StatefulSet ordinal DNS의 cluster-readiness endpoint를 확인한다. production은 local-only `fresh`를 거부하며 restore ID가 state와 Secret에서 일치해야 한다. production workload ServiceAccount는 API token을 mount하지 않고 recovery state를 수정할 RBAC도 받지 않는다.
+`deploy/k8s/lifecycle-gate.sh`는 aggregate Service나 Ingress가 아니라 각 StatefulSet ordinal DNS의 cluster-readiness endpoint를 확인한다. production은 local-only `fresh`를 거부하며 restore ID가 state와 Secret에서 일치해야 한다. Rauthy main container는 shell이 아니라 derivative image의 `/usr/local/bin/rauthy-launcher`를 실행한다. production workload ServiceAccount는 API token을 mount하지 않고 recovery state를 수정할 RBAC도 받지 않는다.
 
 정적 검증:
 

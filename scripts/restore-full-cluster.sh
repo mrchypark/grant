@@ -58,6 +58,7 @@ jq -e '
 RECOVERY_ID=$(jq -er '.recoveryId' "${RECORD}")
 GENERATION=$(jq -er '.generation' "${RECORD}")
 case "${RECOVERY_ID}" in ''|*[!a-z0-9-]*|-*|*-) echo "record recoveryId must be a lowercase DNS label" >&2; exit 2 ;; esac
+[ "${#RECOVERY_ID}" -le 32 ] || { echo "record recoveryId must be at most 32 characters" >&2; exit 2; }
 DRILL_PASSED=$(jq -r '.isolatedDrill.passed' "${RECORD}")
 if [ "${ISOLATED_DRILL}" -eq 0 ] && [ "${DRILL_PASSED}" != "true" ]; then
   echo "production restore requires a record with a passed isolated restore drill" >&2

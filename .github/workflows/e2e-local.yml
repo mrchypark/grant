@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -41,8 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: rust-verification
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Reclaim runner disk
         run: |
@@ -152,13 +155,25 @@ jobs:
           actionlint -shellcheck= .github/workflows/*.yml
 
       - name: Verify docs and recovery manifests
+        env:
+          ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER: "1"
         run: |
           scripts/verify-docs.sh
           scripts/verify-recovery-state-machine.sh
           scripts/verify-restore-once.sh
           scripts/verify-ephemeral-k8s.sh static
 
+      - name: Check whether the launcher digest is published
+        id: launcher
+        run: |
+          if grep -q 'RAUTHY_LAUNCHER_IMAGE_DIGEST' deploy/k8s/rauthy-statefulset.yaml; then
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Run local bootstrap regression
+        if: steps.launcher.outputs.published == 'true'
         env:
           CLUSTER_NAME: grant-vind-ci
           CI_CLUSTER_BACKEND: vind
@@ -166,6 +181,8 @@ jobs:
           NAMESPACE: grant
           GRANT_MASTER_KEY: local-dev-master-key
           GRANT_APP_AUTH_KEY: local-dev-app-auth-key
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESET_CLUSTER: "1"
           KEEP_CLUSTER: "0"
         run: bash scripts/ci-local.sh

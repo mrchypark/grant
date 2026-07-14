@@ -31,7 +31,8 @@ restore_authorized() {
   [ -r "${RECOVERY_ID_FILE}" ] && [ -r "${RESTORE_ID_FILE}" ] || return 1
   lifecycle_id=$(sed -n '1{s/[[:space:]]//g;p;}' "${RECOVERY_ID_FILE}")
   restore_id=$(sed -n '1{s/[[:space:]]//g;p;}' "${RESTORE_ID_FILE}")
-  [ -n "${lifecycle_id}" ] && [ "${lifecycle_id}" = "${restore_id}" ]
+  case "${lifecycle_id}" in ''|*[!a-z0-9-]*|-*|*-) return 1 ;; esac
+  [ "${#lifecycle_id}" -le 32 ] && [ "${lifecycle_id}" = "${restore_id}" ]
 }
 
 peer_ready() {

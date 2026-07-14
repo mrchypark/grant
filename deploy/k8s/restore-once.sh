@@ -18,6 +18,8 @@ if [ -r "${RESTORE_VALUE_FILE}" ] || [ -r "${RESTORE_ID_FILE}" ]; then
   }
   restore_id=$(sed -n '1{s/[[:space:]]//g;p;}' "${RESTORE_ID_FILE}")
   recovery_id=$(sed -n '1{s/[[:space:]]//g;p;}' "${RECOVERY_ID_FILE}")
+  case "${restore_id}" in ''|*[!a-z0-9-]*|-*|*-) echo "restore recovery ID must be a lowercase DNS label" >&2; exit 1 ;; esac
+  [ "${#restore_id}" -le 32 ] || { echo "restore recovery ID must be at most 32 characters" >&2; exit 1; }
   [ -n "${restore_id}" ] && [ "${restore_id}" = "${recovery_id}" ] || {
     echo "restore authorization does not match the lifecycle recovery ID" >&2
     exit 1

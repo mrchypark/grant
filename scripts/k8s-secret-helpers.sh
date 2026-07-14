@@ -16,6 +16,44 @@ apply_secret_from_files() {
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
+prepare_rauthy_registry_auth() {
+  case "${RAUTHY_IMAGE:-}" in
+    ghcr.io/conalog/grant-rauthy-launcher:*) ;;
+    *) return 0 ;;
+  esac
+  : "${GHCR_USERNAME:?GHCR_USERNAME is required for the private Rauthy launcher image}"
+  : "${GHCR_TOKEN:?GHCR_TOKEN with read:packages is required for the private Rauthy launcher image}"
+  RAUTHY_DOCKER_CONTEXT=$(docker context show) \
+    || { echo "cannot read the active Docker context" >&2; return 1; }
+  [ -n "${RAUTHY_DOCKER_CONTEXT}" ] \
+    || { echo "active Docker context is empty" >&2; return 1; }
+  docker --context "${RAUTHY_DOCKER_CONTEXT}" info >/dev/null \
+    || { echo "active Docker context is unavailable: ${RAUTHY_DOCKER_CONTEXT}" >&2; return 1; }
+  export RAUTHY_DOCKER_CONTEXT
+  old_umask=$(umask)
+  umask 077
+  RAUTHY_REGISTRY_CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rauthy-registry.XXXXXX")
+  umask "${old_umask}"
+  export RAUTHY_REGISTRY_CONFIG_DIR
+  printf '%s' "${GHCR_TOKEN}" \
+    | docker --context "${RAUTHY_DOCKER_CONTEXT}" --config "${RAUTHY_REGISTRY_CONFIG_DIR}" \
+      login ghcr.io --username "${GHCR_USERNAME}" --password-stdin >/dev/null
+  [ -s "${RAUTHY_REGISTRY_CONFIG_DIR}/config.json" ] \
+    || { echo "GHCR login did not create a Docker credential file" >&2; return 1; }
+}
+
+apply_rauthy_registry_pull_secret() {
+  case "${RAUTHY_IMAGE:-}" in
+    ghcr.io/conalog/grant-rauthy-launcher:*) ;;
+    *) return 0 ;;
+  esac
+  [ -n "${RAUTHY_REGISTRY_CONFIG_DIR:-}" ] && [ -s "${RAUTHY_REGISTRY_CONFIG_DIR}/config.json" ] \
+    || { echo "private Rauthy launcher pull credentials are unavailable" >&2; return 1; }
+  apply_secret_from_files rauthy-launcher-pull \
+    --type=kubernetes.io/dockerconfigjson \
+    --from-file=".dockerconfigjson=${RAUTHY_REGISTRY_CONFIG_DIR}/config.json"
+}
+
 apply_grant_secret() (
   old_umask=$(umask)
   umask 077

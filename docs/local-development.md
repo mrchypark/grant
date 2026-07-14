@@ -63,8 +63,21 @@ Grant는 admin용 `GRANT_MASTER_KEY`와 application-authz용 `GRANT_APP_AUTH_KEY
   - Rauthy, grant service rollout 대기
 - `scripts/verify-ephemeral-k8s.sh`
   - base/ephemeral/ied/production의 no-PVC 3-node HA render 검증
-  - production hard spread, digest, 외부 backup/lifecycle 참조와 restore dry-run 검증
+  - production hard spread, Grant/Rauthy derivative digest, 외부 backup/lifecycle 참조와 restore dry-run 검증
   - live cluster의 `emptyDir`, health, proxy, bootstrap client, introspection 검증
+- `deploy/rauthy-launcher`, `.github/workflows/rauthy-launcher-image.yml`
+  - distroless Rauthy용 static restore/startup supervisor와 amd64/arm64 image 계약 검증
+  - GHCR publish는 수동 confirmation 뒤에만 수행하며 출력 manifest digest를 StatefulSet에 pin해야 한다.
+
+private launcher image를 사용하는 local bootstrap에는 package read 권한만 가진 credential이 필요하다.
+
+```bash
+export GHCR_USERNAME='<github-user-or-app>'
+export GHCR_TOKEN='<read-packages-only-token>'
+bash scripts/ci-local.sh
+```
+
+script는 token을 argv에 넣지 않고 임시 Docker config와 namespace `rauthy-launcher-pull` Secret을 만든다. credential이 없으면 public image로 fallback하지 않고 실패한다.
 - `scripts/create-recovery-pair.sh`, `scripts/restore-full-cluster.sh`
   - exact S3 version recovery record 생성과 전체 cluster restore
   - 로컬에서는 `--dry-run`만 사용하고 실제 복구는 보호된 운영 절차를 따른다.

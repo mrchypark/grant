@@ -27,8 +27,10 @@ MIN_RETENTION_SECONDS=${MIN_RETENTION_SECONDS:-86400}
 
 case "${WORKLOAD}" in grant|rauthy) ;; *) echo "invalid workload: ${WORKLOAD}" >&2; exit 2 ;; esac
 case "${RECOVERY_ID}" in ''|*[!a-z0-9-]*|-*|*-) echo "recovery id must be lowercase DNS-label characters" >&2; exit 2 ;; esac
+[ "${#RECOVERY_ID}" -le 32 ] || { echo "recovery id must be at most 32 characters" >&2; exit 2; }
 case "${SOURCE_SHA}" in *[!0-9a-fA-F]*|'') echo "SHA256 must be hexadecimal" >&2; exit 2 ;; esac
 [ "${#SOURCE_SHA}" -eq 64 ] || { echo "SHA256 must contain 64 hex characters" >&2; exit 2; }
+SOURCE_SHA=$(printf '%s' "${SOURCE_SHA}" | tr 'A-F' 'a-f')
 case "${BUCKET}${SOURCE_KEY}${SOURCE_VERSION}${RETAIN_UNTIL}" in *'
 '*) echo "metadata must not contain newlines" >&2; exit 2 ;; esac
 

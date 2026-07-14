@@ -3,6 +3,7 @@ set -eu
 
 ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 MODE=${1:-static}
+ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER=${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER:-0}
 NAMESPACE=${NAMESPACE:-grant}
 GRANT_SMOKE_PORT=${GRANT_SMOKE_PORT:-18080}
 GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
@@ -59,10 +60,35 @@ assert_ha_contract() {
   if grep -E 'image: (busybox|ghcr.io/sebadob/rauthy)' "${manifest}" | grep -v '@sha256:' >/dev/null; then
     fail "${label} contains an unpinned third-party image"
   fi
+  if grep -q 'image: ghcr.io/sebadob/rauthy' "${manifest}"; then
+    fail "${label} runs the official distroless Rauthy image without the static launcher"
+  fi
+  grep -q 'image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:' "${manifest}" \
+    || fail "${label} does not use the derivative Rauthy launcher image"
+  expected_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
+  [ "$(grep -c 'image: ghcr.io/conalog/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
+    || fail "${label} must render exactly one Rauthy launcher image"
+  actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
+  [ "${actual_rauthy_image}" = "${expected_rauthy_image}" ] \
+    || fail "${label} overrides or corrupts the Rauthy launcher image pin"
+  grep -q '/usr/local/bin/rauthy-launcher' "${manifest}" \
+    || fail "${label} does not execute the static Rauthy launcher"
+  grep -q 'name: rauthy-launcher-pull' "${manifest}" \
+    || fail "${label} does not reference the private GHCR pull Secret"
 }
 
 assert_recovery_dry_run() {
   pair="${TMP_DIR}/pair.json"
+  normalized="${TMP_DIR}/normalized-materialization.tsv"
+  "${ROOT_DIR}/scripts/materialize-s3-restore.sh" --dry-run rauthy test-bucket source version \
+    BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB ci-static 2030-01-01T00:00:00Z \
+    arn:aws:iam::222222222222:role/writer "${normalized}"
+  grep -q 'restore/rauthy/ci-static/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.enc' "${normalized}" \
+    || fail "materialized restore SHA is not normalized to lowercase"
+  rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
+  [ -n "${rauthy_image}" ] || fail "cannot read the Rauthy launcher image pin"
   RECOVERY_ID=ci-static RECOVERY_GENERATION=ci-generation RESTORE_RETAIN_UNTIL=2030-01-01T00:00:00Z \
   ISOLATED_DRILL_ID=pending \
   GRANT_BUCKET=grant-ci-backups GRANT_SOURCE_KEY=backup_node_1_1.sqlite GRANT_SOURCE_VERSION_ID=grant-v1 \
@@ -75,7 +101,7 @@ assert_recovery_dry_run() {
   GRANT_RESTORE_READER_PRINCIPAL_ARN=arn:aws:iam::111111111111:role/grant-reader \
   RAUTHY_BUCKET=rauthy-ci-backups RAUTHY_SOURCE_KEY=backup_node_1_1.sqlite RAUTHY_SOURCE_VERSION_ID=rauthy-v1 \
   RAUTHY_SOURCE_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  RAUTHY_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d \
+  RAUTHY_IMAGE=${rauthy_image} \
   RAUTHY_SCHEMA_ID=rauthy-0.36.0 RAUTHY_KEY_ID=rauthy-key-ci \
   RAUTHY_BACKUP_GENERATION=rauthy-ci-g1 \
   RAUTHY_KEYRING_SHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
@@ -124,6 +150,38 @@ verify_static() {
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied" >"${TMP_DIR}/ied.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/production" >"${TMP_DIR}/production.yaml"
 
+  grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d' \
+    "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
+    || fail "Rauthy launcher does not derive from the pinned official 0.36.0 image"
+  grep -q 'ENTRYPOINT \["/usr/local/bin/rauthy-launcher"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
+    || fail "Rauthy launcher image entrypoint contract is missing"
+  grep -q 'REQUIRED_BASE64_DOCKER_CONFIG_JSON' "${ROOT_DIR}/deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml" \
+    || fail "production private registry pull Secret example is missing"
+  grep -q -- '--password-stdin' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
+    || fail "private registry login must use password stdin"
+  grep -Fq "RAUTHY_DOCKER_CONTEXT=\$(docker context show)" "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
+    || fail "private registry auth does not preserve the active Docker context"
+  grep -Fq -- "docker --context \"\${RAUTHY_DOCKER_CONTEXT}\" --config \"\${RAUTHY_REGISTRY_CONFIG_DIR}\"" \
+    "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
+    || fail "private registry login does not bind the captured Docker context"
+  if grep -q 'export DOCKER_CONFIG' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"; then
+    fail "private registry auth globally overrides DOCKER_CONFIG"
+  fi
+  if grep -Eq -- '--password([ =]|$)|--from-literal=.*GHCR' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"; then
+    fail "private registry credential is exposed through child argv"
+  fi
+  if grep -q 'command: \["/bin/sh", "/gate/restore-once.sh"\]' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml"; then
+    fail "Rauthy cannot use the shell restore wrapper from its distroless image"
+  fi
+  rauthy_pin=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
+  if [ "${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER}" = 1 ] && printf '%s\n' "${rauthy_pin}" | grep -q 'RAUTHY_LAUNCHER_IMAGE_DIGEST$'; then
+    : # PR source/contract validation may precede the main-only publication.
+  else
+    printf '%s\n' "${rauthy_pin}" | grep -Eq '@sha256:[a-f0-9]{64}$' \
+      || fail "Rauthy launcher image has not been published and pinned by digest"
+  fi
+
   assert_no_pvc_references "${TMP_DIR}/base.yaml" base
   assert_no_pvc_references "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_no_pvc_references "${TMP_DIR}/ied.yaml" ied
@@ -145,6 +203,10 @@ verify_static() {
     || fail "production Rauthy backup references are missing"
   grep -q 'image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST' "${TMP_DIR}/production.yaml" \
     || fail "production template must retain an admission-invalid required image marker"
+  if [ "${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER}" != 1 ]; then
+    grep -Eq 'image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:[a-f0-9]{64}$' "${TMP_DIR}/production.yaml" \
+      || fail "production Rauthy launcher image is not digest-pinned"
+  fi
   if grep -Eq 'sha256:0{64}|grant\.example\.com|identity\.example\.com|kind: Ingress' "${TMP_DIR}/production.yaml"; then
     fail "production render contains an unresolved digest, example host, or bundled public ingress"
   fi
