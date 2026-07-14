@@ -63,7 +63,7 @@ cleanup_registry_config() {
   fi
 }
 
-# shellcheck disable=SC2329 # invoked by EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked by EXIT trap
 exit_with_cleanup() {
   local exit_code="$1"
   trap - EXIT HUP INT TERM
@@ -71,7 +71,7 @@ exit_with_cleanup() {
   exit "${exit_code}"
 }
 
-# shellcheck disable=SC2329 # invoked by signal traps
+# shellcheck disable=SC2317,SC2329 # invoked by signal traps
 forward_signal_and_exit() {
   local signal_name="$1"
   local exit_code="$2"
