@@ -25,17 +25,21 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn free_local_addr() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    addr.to_string()
+static HIQLITE_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn free_local_addrs() -> (String, String) {
+    let api_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral API port");
+    let raft_listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral Raft port");
+    let api_addr = api_listener.local_addr().expect("API local addr");
+    let raft_addr = raft_listener.local_addr().expect("Raft local addr");
+    (api_addr.to_string(), raft_addr.to_string())
 }
 
 async fn test_runtime() -> (HiqliteRuntime, TempDir) {
+    let _start_guard = HIQLITE_START_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let api_addr = free_local_addr();
-    let raft_addr = free_local_addr();
+    let (api_addr, raft_addr) = free_local_addrs();
     let cfg = NodeConfig {
         node_id: 1,
         nodes: vec![Node {
@@ -55,7 +59,11 @@ async fn test_runtime() -> (HiqliteRuntime, TempDir) {
         ..Default::default()
     };
 
-    let application = hiqlite::start_node(cfg).await.expect("start hiqlite");
+    let application =
+        tokio::time::timeout(std::time::Duration::from_secs(30), hiqlite::start_node(cfg))
+            .await
+            .expect("start hiqlite within 30 seconds")
+            .expect("start hiqlite");
     (
         HiqliteRuntime::embedded(application, ReadConsistency::Local),
         dir,
@@ -67,7 +75,7 @@ async fn test_service_with_rauthy_url() -> (Arc<AppService>, Database, TempDir, 
     let (runtime, dir) = test_runtime().await;
     let app_cfg = AppConfig {
         server: ServerConfig {
-            bind_addr: free_local_addr(),
+            bind_addr: support::free_local_addr(),
         },
         security: SecurityConfig {
             master_key: "dev-only-master-key".to_owned(),
