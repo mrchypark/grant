@@ -82,22 +82,23 @@ handle_signal() {
   forward_signal "${signal}" "${fallback_status}"
 }
 
-write_marker() {
+write_marker() (
   marker_state=$1
   marker_id=$2
   marker_restore=$3
   marker_parent=${MARKER%/*}
-  [ "${marker_parent}" != "${MARKER}" ] && mkdir -p "${marker_parent}"
-  MARKER_TMP="${MARKER}.tmp.$$"
+  marker_tmp="${MARKER}.tmp.$$"
+  trap 'rm -f "${marker_tmp}" 2>/dev/null || true' 0 HUP INT TERM
   umask 077
+  [ "${marker_parent}" != "${MARKER}" ] && mkdir -p "${marker_parent}"
   {
     printf '%s\n' "${marker_state}"
     printf '%s\n' "${marker_id}"
     printf '%s\n' "${marker_restore}"
-  } >"${MARKER_TMP}"
-  mv -f "${MARKER_TMP}" "${MARKER}"
-  MARKER_TMP=
-}
+  } >"${marker_tmp}"
+  mv -f "${marker_tmp}" "${MARKER}"
+  marker_tmp=
+)
 
 probe_url() {
   "${PROBE_EXEC}" -fsS --max-time "${PROBE_TIMEOUT}" "$1" >/dev/null 2>&1

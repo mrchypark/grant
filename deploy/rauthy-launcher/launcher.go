@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	stateVersion  = 1
-	phasePending  = "pending"
-	phaseComplete = "completed"
+	stateVersion           = 1
+	phasePending           = "pending"
+	phaseComplete          = "completed"
+	maxStaleStateTempScan  = 256
+	maxStaleStateTempClean = 32
 )
 
 var recoveryIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
@@ -349,6 +351,9 @@ func readValue(path string, limit int64) (string, error) {
 }
 
 func readState(path string) (restoreState, bool, error) {
+	if err := cleanupStaleStateTemps(path); err != nil {
+		return restoreState{}, false, err
+	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return restoreState{}, false, nil
@@ -381,18 +386,15 @@ func writeState(path string, state restoreState) error {
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
+	if err := cleanupStaleStateTemps(path); err != nil {
+		return err
+	}
 	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)
 	}
 	data = append(data, '\n')
-	tmp, err := os.OpenFile(filepath.Join(parent, ".rauthy-restore-state.tmp"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		if removeErr := os.Remove(filepath.Join(parent, ".rauthy-restore-state.tmp")); removeErr != nil {
-			return fmt.Errorf("remove stale temporary state: %w", removeErr)
-		}
-		tmp, err = os.OpenFile(filepath.Join(parent, ".rauthy-restore-state.tmp"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	}
+	tmp, err := os.CreateTemp(parent, stateTempPrefix(path)+"*")
 	if err != nil {
 		return fmt.Errorf("create temporary state: %w", err)
 	}
@@ -403,6 +405,10 @@ func writeState(path string, state restoreState) error {
 			_ = os.Remove(tmpPath)
 		}
 	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secure temporary state: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temporary state: %w", err)
@@ -426,6 +432,61 @@ func writeState(path string, state restoreState) error {
 		return fmt.Errorf("sync state directory: %w", err)
 	}
 	ok = true
+	return nil
+}
+
+func stateTempPrefix(path string) string {
+	return filepath.Base(path) + ".tmp-"
+}
+
+func isStateTempName(path, name string) bool {
+	suffix, found := strings.CutPrefix(name, stateTempPrefix(path))
+	if !found || len(suffix) == 0 || len(suffix) > 10 {
+		return false
+	}
+	for _, character := range suffix {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func cleanupStaleStateTemps(path string) error {
+	parent := filepath.Dir(path)
+	directory, err := os.Open(parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open state directory for temporary cleanup: %w", err)
+	}
+	defer directory.Close()
+	entries, readErr := directory.ReadDir(maxStaleStateTempScan)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return fmt.Errorf("scan temporary recovery states: %w", readErr)
+	}
+	removed := 0
+	for _, entry := range entries {
+		if removed >= maxStaleStateTempClean || !isStateTempName(path, entry.Name()) {
+			continue
+		}
+		temporaryPath := filepath.Join(parent, entry.Name())
+		info, err := os.Lstat(temporaryPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect stale temporary state: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+			continue
+		}
+		if err := os.Remove(temporaryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale temporary state: %w", err)
+		}
+		removed++
+	}
 	return nil
 }
 

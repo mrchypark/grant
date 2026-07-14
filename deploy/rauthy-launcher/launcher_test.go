@@ -250,6 +250,120 @@ func TestReadValueRejectsNonRegularFilesWithoutBlocking(t *testing.T) {
 	})
 }
 
+func TestStateTemporaryFilesAreUniqueAndAtomic(t *testing.T) {
+	tmp := t.TempDir()
+	statePath := filepath.Join(tmp, "state.json")
+	first, err := os.CreateTemp(tmp, stateTempPrefix(statePath)+"*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstName := first.Name()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.CreateTemp(tmp, stateTempPrefix(statePath)+"*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondName := second.Name()
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if firstName == secondName || !isStateTempName(statePath, filepath.Base(firstName)) || !isStateTempName(statePath, filepath.Base(secondName)) {
+		t.Fatalf("temporary state names are not unique launcher names: %q, %q", firstName, secondName)
+	}
+
+	state := newState(phasePending, authorization{recoveryID: testRecoveryID, spec: testRestoreSpec})
+	if err := writeState(statePath, state); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	written, present, err := readState(statePath)
+	if err != nil || !present || written != state {
+		t.Fatalf("atomic state = %+v, present=%v, err=%v", written, present, err)
+	}
+	info, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("state mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestStaleStateTemporaryCleanupIsBoundedAndSafe(t *testing.T) {
+	tmp := t.TempDir()
+	statePath := filepath.Join(tmp, "state.json")
+	staleNames := make([]string, 0, maxStaleStateTempClean+8)
+	for range maxStaleStateTempClean + 8 {
+		file, err := os.CreateTemp(tmp, stateTempPrefix(statePath)+"*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		staleNames = append(staleNames, file.Name())
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := filepath.Join(tmp, stateTempPrefix(statePath)+"not-launcher-random")
+	writeFile(t, unrelated, "unrelated")
+	unrelatedNumeric := filepath.Join(tmp, stateTempPrefix(statePath)+"1111111111")
+	writeFile(t, unrelatedNumeric, "unrelated numeric file")
+	if err := os.Chmod(unrelatedNumeric, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(tmp, "symlink-target")
+	writeFile(t, target, "target")
+	symlink := filepath.Join(tmp, stateTempPrefix(statePath)+"1234567890")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(tmp, stateTempPrefix(statePath)+"9876543210")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, present, err := readState(statePath); err != nil || present {
+		t.Fatalf("read missing state after stale cleanup: present=%v err=%v", present, err)
+	}
+	remaining := 0
+	for _, name := range staleNames {
+		if _, err := os.Stat(name); err == nil {
+			remaining++
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	if remaining != 8 {
+		t.Fatalf("bounded cleanup left %d stale files, want 8", remaining)
+	}
+	for _, path := range []string{unrelated, unrelatedNumeric, target, symlink, fifo} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("safe cleanup removed %s: %v", path, err)
+		}
+	}
+}
+
+func TestWriteStateFailureRemovesItsTemporaryFile(t *testing.T) {
+	tmp := t.TempDir()
+	statePath := filepath.Join(tmp, "state.json")
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := newState(phasePending, authorization{recoveryID: testRecoveryID, spec: testRestoreSpec})
+	if err := writeState(statePath, state); err == nil {
+		t.Fatal("writing state over a directory unexpectedly succeeded")
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if isStateTempName(statePath, entry.Name()) {
+			t.Fatalf("failed write left temporary state %s", entry.Name())
+		}
+	}
+}
+
 func TestRejectsIncompleteOrMismatchedAuthorization(t *testing.T) {
 	tests := []struct {
 		name string

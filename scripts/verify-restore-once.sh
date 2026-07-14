@@ -25,6 +25,7 @@ cat >"${TMP_DIR}/child.sh" <<'EOF'
 #!/bin/sh
 set -eu
 printf '%s|%s|%s\n' "${HQL_BACKUP_RESTORE-unset}" "${HQL_S3_KEY-unset}" "${HQL_S3_SECRET-unset}" >"${CAPTURE}"
+: >"${CHILD_UMASK_FILE}"
 case "${CHILD_MODE}" in
   fail) exit 37 ;;
   signal) kill -TERM "$$"; sleep 10 ;;
@@ -100,6 +101,7 @@ run_wrapper() {
   spawn_hook=${5:-}
   set -- env HQL_BACKUP_RESTORE="${STALE_RESTORE}" HQL_S3_KEY="${WRITER_KEY}" HQL_S3_SECRET="${WRITER_SECRET}" \
     CAPTURE="${capture}" CHILD_MODE="${child_mode}" CHILD_SIGNAL_MARKER="${TMP_DIR}/child-signal" \
+    CHILD_UMASK_FILE="${TMP_DIR}/child-umask-file" \
     CHILD_READY_MARKER="${TMP_DIR}/child-ready" CHILD_PID_FILE="${TMP_DIR}/child.pid" \
     MARKER_PATH="${MARKER}" PROBE_MODE="${probe_mode}" PROBE_LOG="${TMP_DIR}/probe.log" \
     PROBE_SEQUENCE_COUNT="${TMP_DIR}/probe-sequence-count" \
@@ -133,11 +135,27 @@ printf '%s\n' restore >"${TMP_DIR}/lifecycle/mode"
 printf '%s\n' recovery-test >"${TMP_DIR}/lifecycle/recovery-id"
 
 set +e
+rm -f "${TMP_DIR}/child-umask-file"
+saved_umask=$(umask)
+umask 022
 run_wrapper "${TMP_DIR}/startup-failure.capture" fail fail >"${TMP_DIR}/startup-failure.log" 2>&1
 startup_status=$?
+umask "${saved_umask}"
 set -e
 [ "${startup_status}" -eq 37 ] || { echo "restore startup failure status was ${startup_status}, expected 37" >&2; exit 1; }
 [ "$(sed -n '1p' "${MARKER}")" = pending ] || { echo "startup failure completed the restore marker" >&2; exit 1; }
+file_mode() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then stat -c '%a' "$1"
+  else stat -f '%Lp' "$1"; fi
+}
+[ "$(file_mode "${TMP_DIR}/child-umask-file")" = 644 ] \
+  || { echo "restore marker umask leaked into the child process" >&2; exit 1; }
+[ "$(file_mode "${MARKER}")" = 600 ] \
+  || { echo "restore marker permissions are not 0600" >&2; exit 1; }
+if find "${TMP_DIR}/data" -name '*.tmp.*' -print | grep -q .; then
+  echo "failed restore left a marker temporary file behind" >&2
+  exit 1
+fi
 
 set +e
 run_wrapper "${TMP_DIR}/child-signal.capture" signal fail >"${TMP_DIR}/child-signal.log" 2>&1
