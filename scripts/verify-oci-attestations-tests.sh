@@ -184,8 +184,14 @@ start_redirect_fixture() {
   redirect_ready=${TMP_DIR}/redirect.ready
   redirect_log=${TMP_DIR}/redirect.requests.log
   redirect_body=${TMP_DIR}/redirect.body
+  redirect_cache=${TMP_DIR}/go-cache
   printf '%s\n' 'digest-bound-blob-body' >"${redirect_body}"
-  CODEX_GO_SCRIPT_CACHE=${TMP_DIR}/go-cache \
+  # Finish toolchain selection, compilation, and the atomic cache move before
+  # starting the server. This keeps cold-cache build time out of readiness and
+  # prevents cleanup from racing the launcher cache write.
+  CODEX_GO_SCRIPT_CACHE=${redirect_cache} \
+    "${ROOT_DIR}/scripts/oci-redirect-fixture" --help >/dev/null 2>&1
+  CODEX_GO_SCRIPT_CACHE=${redirect_cache} \
     "${ROOT_DIR}/scripts/oci-redirect-fixture" \
       --ready "${redirect_ready}" --log "${redirect_log}" --body "${redirect_body}" &
   REDIRECT_FIXTURE_PID=$!
