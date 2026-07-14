@@ -3,12 +3,15 @@ mod support;
 use chrono::{Duration, Utc};
 use domain::{
     Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationProvisioningStatus,
-    ApplicationType,
+    ApplicationRedirectUri, ApplicationType,
 };
 use hiqlite::Row;
 use infra::{
     config::ReadConsistency,
-    database::{ApplicationConsentWriteError, ApplicationTrustMutationError, Database},
+    database::{
+        ApplicationConsentWriteError, ApplicationSecurityMutationError,
+        ApplicationTrustMutationError, Database,
+    },
     runtime::HiqliteRuntime,
 };
 
@@ -222,12 +225,26 @@ async fn update_application_rejects_wrong_and_expired_leases_without_corruption(
     let (db, runtime, _dir, original) = application_database("application-lease", "lease").await;
     let valid_token = "valid-lease";
     let valid_expiry = acquire_lease(&db, &original.id, valid_token).await;
+    let mut occupied = support::test_application("application-lease-occupied", ORGANIZATION_ID);
+    occupied.slug = "lease-occupied".to_owned();
+    occupied.created_by_user_id = USER_ID.to_owned();
+    db.insert_application(&occupied)
+        .await
+        .expect("insert occupied application");
     let mut attempted = original.clone();
     attempted.name = "Must Not Be Written".to_owned();
+    attempted.slug = occupied.slug;
 
-    db.update_application_with_security_lease(&attempted, false, "wrong-lease")
+    let wrong_lease_error = db
+        .update_application_with_security_lease(&attempted, true, "wrong-lease")
         .await
-        .expect("wrong lease token produces no mutation");
+        .expect_err("wrong lease token must fail");
+    assert_eq!(
+        wrong_lease_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
     assert_eq!(
         db.get_application_with_consistency(&original.id, Some(ReadConsistency::Strong))
             .await
@@ -258,9 +275,16 @@ async fn update_application_rejects_wrong_and_expired_leases_without_corruption(
         .await
         .expect("store expired lease")
     );
-    db.update_application_with_security_lease(&attempted, false, "expired-lease")
+    let expired_lease_error = db
+        .update_application_with_security_lease(&attempted, true, "expired-lease")
         .await
-        .expect("expired lease produces no mutation");
+        .expect_err("expired lease must fail");
+    assert_eq!(
+        expired_lease_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
     assert_eq!(
         db.get_application_with_consistency(&original.id, Some(ReadConsistency::Strong))
             .await
@@ -273,6 +297,150 @@ async fn update_application_rejects_wrong_and_expired_leases_without_corruption(
             security_mutation_token: Some("expired-lease".to_owned()),
             security_mutation_expires_at: Some(expired_at),
         }
+    );
+}
+
+#[tokio::test]
+async fn security_lease_mutations_report_invalid_trusted_and_missing_targets() {
+    let (db, runtime, _dir, original) =
+        application_database("application-security-mutations", "security-mutations").await;
+    let lease_token = "security-mutation-lease";
+    let lease_expiry = acquire_lease(&db, &original.id, lease_token).await;
+    let redirect_uri = ApplicationRedirectUri {
+        application_id: original.id.clone(),
+        redirect_uri: "https://security-mutations.example/callback".to_owned(),
+        created_at: support::FIXED_TEST_TIME.to_owned(),
+    };
+
+    let insert_error = db
+        .insert_application_redirect_uri_with_security_lease(&redirect_uri, "wrong-lease")
+        .await
+        .expect_err("wrong lease must reject redirect URI insertion");
+    assert_eq!(
+        insert_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
+    assert!(
+        db.list_application_redirect_uris_with_consistency(
+            &original.id,
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("list redirect URIs after rejected insert")
+        .is_empty()
+    );
+
+    db.insert_application_redirect_uri_with_security_lease(&redirect_uri, lease_token)
+        .await
+        .expect("insert redirect URI with valid lease");
+    db.insert_application_redirect_uri_with_security_lease(&redirect_uri, lease_token)
+        .await
+        .expect("duplicate redirect URI with valid lease is idempotent");
+    assert_eq!(
+        db.list_application_redirect_uris_with_consistency(
+            &original.id,
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("list redirect URIs after idempotent duplicate insert"),
+        vec![redirect_uri.clone()]
+    );
+    let duplicate_wrong_lease_error = db
+        .insert_application_redirect_uri_with_security_lease(&redirect_uri, "wrong-lease")
+        .await
+        .expect_err("duplicate redirect URI must not hide a wrong lease");
+    assert_eq!(
+        duplicate_wrong_lease_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
+    let delete_error = db
+        .delete_application_redirect_uri_with_security_lease(
+            &original.id,
+            &redirect_uri.redirect_uri,
+            "wrong-lease",
+        )
+        .await
+        .expect_err("wrong lease must reject redirect URI deletion");
+    assert_eq!(
+        delete_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
+    assert_eq!(
+        db.list_application_redirect_uris_with_consistency(
+            &original.id,
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("list redirect URIs after rejected delete"),
+        vec![redirect_uri.clone()]
+    );
+
+    let replace_error = db
+        .replace_application_actions_with_security_lease(&original.id, &[], "wrong-lease")
+        .await
+        .expect_err("wrong lease must reject application action replacement");
+    assert_eq!(
+        replace_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
+
+    let release_error = db
+        .release_application_security_mutation(&original.id, "wrong-lease")
+        .await
+        .expect_err("wrong token must reject security lease release");
+    assert_eq!(
+        release_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+            application_id: original.id.clone(),
+        })
+    );
+    assert_eq!(
+        security_lease(&runtime, &original.id).await,
+        SecurityLeaseRow {
+            security_mutation_token: Some(lease_token.to_owned()),
+            security_mutation_expires_at: Some(lease_expiry),
+        }
+    );
+
+    db.release_application_security_mutation(&original.id, lease_token)
+        .await
+        .expect("release valid lease");
+    db.set_application_trust(ORGANIZATION_ID, &original.id, true)
+        .await
+        .expect("trust application");
+    let trusted_error = db
+        .insert_application_redirect_uri_with_security_lease(&redirect_uri, "unused-lease")
+        .await
+        .expect_err("trusted application must reject redirect URI insertion");
+    assert_eq!(
+        trusted_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::TrustedApplication {
+            application_id: original.id.clone(),
+        })
+    );
+
+    let missing_redirect_uri = ApplicationRedirectUri {
+        application_id: "application-missing-security-mutation".to_owned(),
+        redirect_uri: "https://missing.example/callback".to_owned(),
+        created_at: support::FIXED_TEST_TIME.to_owned(),
+    };
+    let missing_error = db
+        .insert_application_redirect_uri_with_security_lease(&missing_redirect_uri, "unused-lease")
+        .await
+        .expect_err("missing application must reject redirect URI insertion");
+    assert_eq!(
+        missing_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::ApplicationNotFound {
+            application_id: missing_redirect_uri.application_id,
+        })
     );
 }
 
@@ -338,7 +506,12 @@ async fn update_application_preserves_trusted_application_invariant() {
         .update_application_with_security_lease(&attempted, false, "unused-lease")
         .await
         .expect_err("trusted application update must fail");
-    assert!(error.to_string().contains("trusted applications"));
+    assert_eq!(
+        error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::TrustedApplication {
+            application_id: original.id.clone(),
+        })
+    );
     assert_eq!(
         db.get_application_with_consistency(&original.id, Some(ReadConsistency::Strong))
             .await
@@ -387,5 +560,35 @@ async fn update_application_rejects_duplicate_slug_without_corruption() {
             security_mutation_token: Some(lease_token.to_owned()),
             security_mutation_expires_at: Some(lease_expiry),
         }
+    );
+
+    db.release_application_security_mutation(&original.id, lease_token)
+        .await
+        .expect("release valid lease");
+    db.set_application_trust(ORGANIZATION_ID, &original.id, true)
+        .await
+        .expect("trust application");
+    let trusted_error = db
+        .update_application_with_security_lease(&attempted, true, "unused-lease")
+        .await
+        .expect_err("duplicate slug must not hide a trusted target");
+    assert_eq!(
+        trusted_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::TrustedApplication {
+            application_id: original.id.clone(),
+        })
+    );
+
+    let mut missing = attempted;
+    missing.id = "application-missing-duplicate-update".to_owned();
+    let missing_error = db
+        .update_application_with_security_lease(&missing, true, "unused-lease")
+        .await
+        .expect_err("duplicate slug must not hide a missing target");
+    assert_eq!(
+        missing_error.downcast_ref::<ApplicationSecurityMutationError>(),
+        Some(&ApplicationSecurityMutationError::ApplicationNotFound {
+            application_id: missing.id,
+        })
     );
 }

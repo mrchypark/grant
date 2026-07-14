@@ -87,6 +87,32 @@ impl fmt::Display for ApplicationTrustMutationError {
 
 impl StdError for ApplicationTrustMutationError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationSecurityMutationError {
+    ApplicationNotFound { application_id: String },
+    TrustedApplication { application_id: String },
+    LeaseExpiredOrInvalid { application_id: String },
+}
+
+impl fmt::Display for ApplicationSecurityMutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApplicationNotFound { application_id } => {
+                write!(f, "application not found: {application_id}")
+            }
+            Self::TrustedApplication { .. } => f.write_str(
+                "forbidden: trusted applications may only be changed by the master administrator",
+            ),
+            Self::LeaseExpiredOrInvalid { application_id } => write!(
+                f,
+                "application security lease expired or invalid: {application_id}"
+            ),
+        }
+    }
+}
+
+impl StdError for ApplicationSecurityMutationError {}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BindIdentityInput<'a> {
     pub user_id: &'a str,

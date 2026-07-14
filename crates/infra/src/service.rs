@@ -4,8 +4,8 @@ use crate::{
     },
     config::{AppConfig, ReadConsistency},
     database::{
-        ApplicationConsentWriteError, ApplicationTrustMutationError, BackupEntry,
-        BindIdentityInput, Database, UserActionCheck,
+        ApplicationConsentWriteError, ApplicationSecurityMutationError,
+        ApplicationTrustMutationError, BackupEntry, BindIdentityInput, Database, UserActionCheck,
     },
 };
 use anyhow::Result;
@@ -837,7 +837,7 @@ impl AppService {
             .db
             .release_application_security_mutation(application_id, &lease_token)
             .await;
-        result
+        result.map_err(map_application_security_mutation_error)
     }
 
     pub async fn list_application_grants_authorized(
@@ -2038,6 +2038,21 @@ fn map_application_trust_mutation_error(err: anyhow::Error) -> anyhow::Error {
     err
 }
 
+fn map_application_security_mutation_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast_ref::<ApplicationSecurityMutationError>() {
+        Some(error @ ApplicationSecurityMutationError::TrustedApplication { .. }) => {
+            service_error(ServiceErrorKind::Forbidden, error.to_string())
+        }
+        Some(error @ ApplicationSecurityMutationError::ApplicationNotFound { .. }) => {
+            service_error(ServiceErrorKind::NotFound, error.to_string())
+        }
+        Some(error @ ApplicationSecurityMutationError::LeaseExpiredOrInvalid { .. }) => {
+            service_error(ServiceErrorKind::Conflict, error.to_string())
+        }
+        None => err,
+    }
+}
+
 async fn rauthy_admin_response_error(
     operation: &str,
     mut response: reqwest::Response,
@@ -2206,9 +2221,13 @@ mod tests {
     use super::{
         SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
         SchemaReadinessState, ServiceError, ServiceErrorKind, map_application_consent_write_error,
-        map_application_trust_mutation_error, sanitize_rauthy_error_field,
+        map_application_security_mutation_error, map_application_trust_mutation_error,
+        sanitize_rauthy_error_field,
     };
-    use crate::database::{ApplicationConsentWriteError, ApplicationTrustMutationError};
+    use crate::database::{
+        ApplicationConsentWriteError, ApplicationSecurityMutationError,
+        ApplicationTrustMutationError,
+    };
     use std::{
         sync::{
             Arc,
@@ -2248,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_only_typed_database_conflicts_to_service_conflicts() {
+    fn maps_only_typed_database_mutation_errors_to_service_errors() {
         let consent_error = anyhow::Error::new(ApplicationConsentWriteError::PreconditionsChanged)
             .context("replace active application consent transaction");
         let consent_error = map_application_consent_write_error(consent_error);
@@ -2267,6 +2286,38 @@ mod tests {
             .downcast_ref::<ServiceError>()
             .expect("typed trust conflict maps to a service error");
         assert_eq!(trust_service_error.kind(), ServiceErrorKind::Conflict);
+
+        for (error, expected_kind) in [
+            (
+                ApplicationSecurityMutationError::TrustedApplication {
+                    application_id: "application-trusted".to_owned(),
+                },
+                ServiceErrorKind::Forbidden,
+            ),
+            (
+                ApplicationSecurityMutationError::ApplicationNotFound {
+                    application_id: "application-missing".to_owned(),
+                },
+                ServiceErrorKind::NotFound,
+            ),
+            (
+                ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+                    application_id: "application-conflict".to_owned(),
+                },
+                ServiceErrorKind::Conflict,
+            ),
+        ] {
+            let mapped = map_application_security_mutation_error(
+                anyhow::Error::new(error).context("application security mutation"),
+            );
+            assert_eq!(
+                mapped
+                    .downcast_ref::<ServiceError>()
+                    .expect("typed application security mutation maps to a service error")
+                    .kind(),
+                expected_kind
+            );
+        }
     }
 
     #[test]
@@ -2294,6 +2345,18 @@ mod tests {
             trust_error
                 .chain()
                 .any(|cause| cause.to_string() == trust_message)
+        );
+
+        let security_message = "application security lease expired or invalid: application-1";
+        let security_error = map_application_security_mutation_error(
+            anyhow::anyhow!(security_message).context("unexpected database failure"),
+        );
+        assert!(security_error.downcast_ref::<ServiceError>().is_none());
+        assert_eq!(security_error.to_string(), "unexpected database failure");
+        assert!(
+            security_error
+                .chain()
+                .any(|cause| cause.to_string() == security_message)
         );
     }
 

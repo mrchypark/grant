@@ -2,7 +2,83 @@ use super::core::now_string;
 use super::*;
 use domain::ApplicationConsentPolicy;
 
+struct ApplicationSecurityMutationStateRow {
+    first_party: i64,
+    consent_policy: String,
+    lease_matches: i64,
+}
+
+impl From<&mut Row<'_>> for ApplicationSecurityMutationStateRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            first_party: row.get("first_party"),
+            consent_policy: row.get("consent_policy"),
+            lease_matches: row.get("lease_matches"),
+        }
+    }
+}
+
 impl Database {
+    async fn validate_application_security_mutation_lease(
+        &self,
+        application_id: &str,
+        lease_token: &str,
+        valid_at: Option<&str>,
+    ) -> Result<()> {
+        let (query, query_params) = if let Some(valid_at) = valid_at {
+            (
+                "SELECT first_party, consent_policy,
+                        CASE WHEN security_mutation_token = ?2
+                                   AND security_mutation_expires_at > ?3
+                             THEN 1 ELSE 0 END AS lease_matches
+                 FROM applications WHERE id = ?1 LIMIT 1",
+                params!(
+                    application_id.to_owned(),
+                    lease_token.to_owned(),
+                    valid_at.to_owned()
+                ),
+            )
+        } else {
+            (
+                "SELECT first_party, consent_policy,
+                        CASE WHEN security_mutation_token = ?2
+                             THEN 1 ELSE 0 END AS lease_matches
+                 FROM applications WHERE id = ?1 LIMIT 1",
+                params!(application_id.to_owned(), lease_token.to_owned()),
+            )
+        };
+        let state = self
+            .query_rows_with::<ApplicationSecurityMutationStateRow, _>(
+                ReadConsistency::Strong,
+                query,
+                query_params,
+                "application security mutation state",
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApplicationSecurityMutationError::ApplicationNotFound {
+                application_id: application_id.to_owned(),
+            })?;
+        if state.first_party == 1
+            && state.consent_policy
+                == application_consent_policy_str(&ApplicationConsentPolicy::AutoApprove)
+        {
+            return Err(ApplicationSecurityMutationError::TrustedApplication {
+                application_id: application_id.to_owned(),
+            }
+            .into());
+        }
+
+        if state.lease_matches != 1 {
+            return Err(ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+                application_id: application_id.to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     async fn validate_application_references(&self, application: &Application) -> Result<()> {
         if !self
             .exists_row_with(
@@ -78,6 +154,13 @@ impl Database {
         slug_changed: bool,
         lease_token: &str,
     ) -> Result<()> {
+        let preflight_now = now_string();
+        self.validate_application_security_mutation_lease(
+            &application.id,
+            lease_token,
+            Some(&preflight_now),
+        )
+        .await?;
         self.validate_application_references(application).await?;
         let conflict_count = self
             .query_count(
@@ -96,7 +179,7 @@ impl Database {
                 application.slug
             ));
         }
-        let now = now_string();
+        let mutation_now = now_string();
         let stmt = if slug_changed {
             "UPDATE applications
              SET organization_id = ?2,
@@ -142,7 +225,7 @@ impl Database {
             application_app_type_str(&application.app_type),
             if application.active { 1_i64 } else { 0_i64 },
             application.created_by_user_id.clone(),
-            now
+            mutation_now.clone()
         );
         update_params.push(hiqlite::Param::from(lease_token.to_owned()));
         if slug_changed {
@@ -155,28 +238,22 @@ impl Database {
             .await
             .context("update application")?;
         if updated == 0 {
-            let current = self
-                .find_application_by_id_with_consistency(
-                    &application.id,
-                    Some(ReadConsistency::Strong),
-                )
-                .await?;
-            if current.is_none() {
-                return Err(anyhow!("application not found: {}", application.id));
-            }
-            if current.is_some_and(|app| {
-                app.first_party && app.consent_policy == ApplicationConsentPolicy::AutoApprove
-            }) {
-                return Err(anyhow!(
-                    "forbidden: trusted applications may only be changed by the master administrator"
-                ));
-            }
+            self.validate_application_security_mutation_lease(
+                &application.id,
+                lease_token,
+                Some(&mutation_now),
+            )
+            .await?;
             if slug_changed {
                 return Err(anyhow!(
                     "application slug already exists: {}",
                     application.slug
                 ));
             }
+            return Err(anyhow!(
+                "application update made no change: {}",
+                application.id
+            ));
         }
         Ok(())
     }
@@ -328,7 +405,8 @@ impl Database {
         application_id: &str,
         lease_token: &str,
     ) -> Result<()> {
-        self.runtime
+        let released = self
+            .runtime
             .execute(
                 "UPDATE applications
                  SET security_mutation_token = NULL,
@@ -338,6 +416,13 @@ impl Database {
             )
             .await
             .context("release application security mutation lease")?;
+        if released == 0 {
+            self.validate_application_security_mutation_lease(application_id, lease_token, None)
+                .await?;
+            return Err(anyhow!(
+                "application security mutation lease release made no change: {application_id}"
+            ));
+        }
         Ok(())
     }
 
@@ -602,6 +687,7 @@ impl Database {
         redirect_uri: &ApplicationRedirectUri,
         lease_token: &str,
     ) -> Result<()> {
+        let mutation_now = now_string();
         let inserted = self
             .runtime
             .execute(
@@ -611,19 +697,26 @@ impl Database {
                  WHERE app.id = $1
                    AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
                    AND app.security_mutation_token = $4
-                   AND app.security_mutation_expires_at > $5",
+                   AND app.security_mutation_expires_at > $5
+                 ON CONFLICT(application_id, redirect_uri) DO NOTHING",
                 params!(
                     redirect_uri.application_id.clone(),
                     redirect_uri.redirect_uri.clone(),
                     redirect_uri.created_at.clone(),
                     lease_token.to_owned(),
-                    now_string()
+                    mutation_now.clone()
                 ),
             )
             .await
             .context("insert application redirect uri")?;
-        if inserted == 0
-            && !self
+        if inserted == 0 {
+            self.validate_application_security_mutation_lease(
+                &redirect_uri.application_id,
+                lease_token,
+                Some(&mutation_now),
+            )
+            .await?;
+            if self
                 .exists_row_with(
                     ReadConsistency::Strong,
                     "SELECT COUNT(*) AS count FROM application_redirect_uris
@@ -635,9 +728,12 @@ impl Database {
                     "inserted application redirect uri",
                 )
                 .await?
-        {
+            {
+                return Ok(());
+            }
             return Err(anyhow!(
-                "forbidden: trusted applications may only be changed by the master administrator"
+                "application redirect URI insert made no change: {}",
+                redirect_uri.application_id
             ));
         }
         Ok(())
@@ -684,7 +780,9 @@ impl Database {
         redirect_uri: &str,
         lease_token: &str,
     ) -> Result<()> {
-        self.runtime
+        let mutation_now = now_string();
+        let deleted = self
+            .runtime
             .execute(
                 "DELETE FROM application_redirect_uris
                  WHERE application_id = $1
@@ -700,11 +798,19 @@ impl Database {
                     application_id.to_owned(),
                     redirect_uri.to_owned(),
                     lease_token.to_owned(),
-                    now_string()
+                    mutation_now.clone()
                 ),
             )
             .await
             .context("delete application redirect uri")?;
+        if deleted == 0 {
+            self.validate_application_security_mutation_lease(
+                application_id,
+                lease_token,
+                Some(&mutation_now),
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -845,7 +951,7 @@ impl Database {
                 assertion_id.clone(),
                 application_id.to_owned(),
                 lease_token.to_owned(),
-                mutation_now
+                mutation_now.clone()
             ),
         ));
         queries.push((
@@ -896,10 +1002,21 @@ impl Database {
             params!(assertion_id),
         ));
 
-        self.runtime
-            .transaction(queries)
-            .await
-            .context("replace application actions transaction")?;
+        if let Err(err) = self.runtime.transaction(queries).await {
+            if err.chain().any(|cause| {
+                cause
+                    .to_string()
+                    .contains("application_consent_assertion_valid")
+            }) {
+                self.validate_application_security_mutation_lease(
+                    application_id,
+                    lease_token,
+                    Some(&mutation_now),
+                )
+                .await?;
+            }
+            return Err(err).context("replace application actions transaction");
+        }
         self.list_application_actions_with_consistency(
             application_id,
             Some(ReadConsistency::Strong),

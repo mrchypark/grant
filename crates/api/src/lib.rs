@@ -290,6 +290,21 @@ mod tests {
     }
 
     #[test]
+    fn application_security_service_errors_map_to_http_statuses() {
+        for (kind, expected_status) in [
+            (ServiceErrorKind::Forbidden, StatusCode::FORBIDDEN),
+            (ServiceErrorKind::NotFound, StatusCode::NOT_FOUND),
+            (ServiceErrorKind::Conflict, StatusCode::CONFLICT),
+        ] {
+            let err = ApiError::from_domain(anyhow::Error::new(ServiceError::new(
+                kind,
+                "application security mutation failed",
+            )));
+            assert_eq!(err.status, expected_status);
+        }
+    }
+
+    #[test]
     fn generic_invalid_domain_errors_stay_internal() {
         let err = ApiError::from_domain(anyhow!("invalid internal state"));
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
