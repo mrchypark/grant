@@ -503,7 +503,9 @@ EOF
 
   : >"${mock_log}"
   set +e
-  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" RAUTHY_IMAGE='' \
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' RAUTHY_IMAGE='' \
     GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
     bash "${placeholder_script}" >"${missing_log}" 2>&1
   placeholder_status=$?
@@ -517,7 +519,9 @@ EOF
 
   : >"${mock_log}"
   set +e
-  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" RAUTHY_IMAGE='' \
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' RAUTHY_IMAGE='' \
     GHCR_USERNAME=ci-user GHCR_TOKEN='' \
     bash "${fixture_script}" >"${missing_log}" 2>&1
   missing_status=$?
@@ -525,14 +529,18 @@ EOF
   if [ "${missing_status}" -eq 0 ]; then
     fail "GKE Skaffold provisioning accepted missing private launcher credentials"
   fi
-  grep -q 'GHCR_TOKEN with read:packages is required' "${missing_log}" \
-    || fail "GKE Skaffold missing-credential failure is not explicit"
+  if ! grep -q 'GHCR_TOKEN with read:packages is required' "${missing_log}"; then
+    sed -n '1,20p' "${missing_log}" >&2
+    fail "GKE Skaffold missing-credential failure is not explicit"
+  fi
   [ ! -s "${mock_log}" ] \
     || fail "GKE Skaffold touched Docker or the cluster before rejecting missing credentials"
 
   : >"${mock_log}"
   set +e
   PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
     RAUTHY_IMAGE=docker.io/library/busybox:latest GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
     bash "${fixture_script}" >"${missing_log}" 2>&1
   override_status=$?
@@ -548,6 +556,8 @@ EOF
   : >"${mock_log}"
   rm -f "${config_path_file}"
   PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
     RAUTHY_IMAGE='' \
     GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
     bash "${fixture_script}" >"${success_log}" 2>&1
@@ -575,6 +585,8 @@ EOF
   rm -f "${config_path_file}"
   set +e
   PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
     RAUTHY_IMAGE='' \
     GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_SKAFFOLD_STATUS=47 \
     GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
@@ -666,6 +678,8 @@ EOF
 
     set +e
     PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+      NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+      SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
       RAUTHY_IMAGE='' \
       GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_LONG_RUNNING=1 \
       GKE_MOCK_CHILD_PID_FILE="${child_pid_file}" GKE_MOCK_CHILD_SIGNAL_FILE="${child_signal_file}" \
