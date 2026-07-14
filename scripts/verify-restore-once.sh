@@ -11,6 +11,9 @@ RESTORE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 VALID_RESTORE="s3:restore/grant/recovery-test/${RESTORE_SHA}.enc"
 MARKER="${TMP_DIR}/data/restore-state"
 READER_SECRET=restore-reader-secret-must-not-reach-state-or-log
+WRITER_KEY=normal-writer-key
+WRITER_SECRET=normal-writer-secret
+STALE_RESTORE=s3:backup_node_1_1.sqlite
 printf '%s\n' recovery-test >"${TMP_DIR}/restore/recovery-id"
 printf '%s\n' restore >"${TMP_DIR}/lifecycle/mode"
 printf '%s\n' recovery-test >"${TMP_DIR}/lifecycle/recovery-id"
@@ -83,6 +86,8 @@ while [ "${attempts}" -lt 5 ] && [ ! -e "${CHILD_READY_MARKER}" ]; do
   sleep 1
 done
 [ -e "${CHILD_READY_MARKER}" ]
+[ "${HQL_BACKUP_RESTORE-unset}" = unset ] && [ "${HQL_S3_KEY-unset}" = unset ] && [ "${HQL_S3_SECRET-unset}" = unset ] \
+  || { : >"${PROBE_SECRET_LEAK}"; exit 1; }
 kill -TERM "${PPID}"
 EOF
 chmod 0700 "${TMP_DIR}/child.sh" "${TMP_DIR}/probe.sh" "${TMP_DIR}/spawn-signal.sh"
@@ -93,7 +98,8 @@ run_wrapper() {
   probe_mode=$3
   timeout=${4:-4}
   spawn_hook=${5:-}
-  set -- env CAPTURE="${capture}" CHILD_MODE="${child_mode}" CHILD_SIGNAL_MARKER="${TMP_DIR}/child-signal" \
+  set -- env HQL_BACKUP_RESTORE="${STALE_RESTORE}" HQL_S3_KEY="${WRITER_KEY}" HQL_S3_SECRET="${WRITER_SECRET}" \
+    CAPTURE="${capture}" CHILD_MODE="${child_mode}" CHILD_SIGNAL_MARKER="${TMP_DIR}/child-signal" \
     CHILD_READY_MARKER="${TMP_DIR}/child-ready" CHILD_PID_FILE="${TMP_DIR}/child.pid" \
     MARKER_PATH="${MARKER}" PROBE_MODE="${probe_mode}" PROBE_LOG="${TMP_DIR}/probe.log" \
     PROBE_SEQUENCE_COUNT="${TMP_DIR}/probe-sequence-count" \
@@ -110,6 +116,21 @@ run_wrapper() {
   if [ "${RUN_WRAPPER_EXEC:-0}" = 1 ]; then exec "$@"; fi
   "$@"
 }
+
+normal_credentials="unset|${WRITER_KEY}|${WRITER_SECRET}"
+mv "${TMP_DIR}/restore" "${TMP_DIR}/restore.saved"
+printf '%s\n' steady >"${TMP_DIR}/lifecycle/mode"
+run_wrapper "${TMP_DIR}/steady.capture" capture fail >"${TMP_DIR}/steady.log" 2>&1
+[ "$(cat "${TMP_DIR}/steady.capture")" = "${normal_credentials}" ] \
+  || { echo "steady startup did not preserve normal backup writer credentials" >&2; exit 1; }
+printf '%s\n' fresh >"${TMP_DIR}/lifecycle/mode"
+printf '%s\n' none >"${TMP_DIR}/lifecycle/recovery-id"
+run_wrapper "${TMP_DIR}/fresh.capture" capture fail >"${TMP_DIR}/fresh.log" 2>&1
+[ "$(cat "${TMP_DIR}/fresh.capture")" = "${normal_credentials}" ] \
+  || { echo "fresh startup did not preserve normal backup writer credentials" >&2; exit 1; }
+mv "${TMP_DIR}/restore.saved" "${TMP_DIR}/restore"
+printf '%s\n' restore >"${TMP_DIR}/lifecycle/mode"
+printf '%s\n' recovery-test >"${TMP_DIR}/lifecycle/recovery-id"
 
 set +e
 run_wrapper "${TMP_DIR}/startup-failure.capture" fail fail >"${TMP_DIR}/startup-failure.log" 2>&1
@@ -194,8 +215,8 @@ ready_probes=$(grep -cx 'http://127.0.0.1:8080/readyz' "${TMP_DIR}/probe.log" ||
   || { echo "successful restore did not reset consecutive readiness after a failure" >&2; exit 1; }
 
 run_wrapper "${TMP_DIR}/replay.capture" capture fail >"${TMP_DIR}/replay.log" 2>&1
-[ "$(cat "${TMP_DIR}/replay.capture")" = 'unset|unset|unset' ] \
-  || { echo "completed restore authorization replay was not suppressed" >&2; exit 1; }
+[ "$(cat "${TMP_DIR}/replay.capture")" = "${normal_credentials}" ] \
+  || { echo "completed restore replay did not suppress restore or restore writer credentials" >&2; exit 1; }
 [ ! -e "${TMP_DIR}/probe-secret-leak" ] || { echo "restore supervisor leaked reader credentials to its probe" >&2; exit 1; }
 if grep -Fq "${READER_SECRET}" "${MARKER}" "${TMP_DIR}"/*.log; then
   echo "restore state or logs exposed the reader secret" >&2
@@ -208,8 +229,8 @@ fi
 
 mv "${TMP_DIR}/restore" "${TMP_DIR}/restore.saved"
 run_wrapper "${TMP_DIR}/completed-without-secret.capture" capture fail >"${TMP_DIR}/completed-without-secret.log" 2>&1
-[ "$(cat "${TMP_DIR}/completed-without-secret.capture")" = 'unset|unset|unset' ] \
-  || { echo "matching completed state could not start without the consumed Secret" >&2; exit 1; }
+[ "$(cat "${TMP_DIR}/completed-without-secret.capture")" = "${normal_credentials}" ] \
+  || { echo "matching completed state did not restore normal writer credentials without the consumed Secret" >&2; exit 1; }
 mv "${TMP_DIR}/restore.saved" "${TMP_DIR}/restore"
 
 printf '%s\n%s\n%s\n' pending recovery-test "${VALID_RESTORE}" >"${MARKER}"

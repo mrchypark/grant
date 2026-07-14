@@ -128,7 +128,7 @@ trap 'handle_signal HUP 129' HUP
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
 
-unset HQL_BACKUP_RESTORE HQL_S3_KEY HQL_S3_SECRET
+unset HQL_BACKUP_RESTORE
 [ -r "${LIFECYCLE_MODE_FILE}" ] && [ -r "${RECOVERY_ID_FILE}" ] \
   || { echo "incomplete lifecycle state mount" >&2; exit 1; }
 lifecycle_mode=$(sed -n '1{s/[[:space:]]//g;p;}' "${LIFECYCLE_MODE_FILE}")
@@ -197,13 +197,14 @@ if [ "${authorization_files}" -eq 4 ]; then
   export HQL_BACKUP_RESTORE HQL_S3_KEY HQL_S3_SECRET
   SPAWNING_CHILD=1
   "${EXECUTABLE}" "$@" &
+  unset HQL_BACKUP_RESTORE HQL_S3_KEY HQL_S3_SECRET
   if [ -n "${SPAWN_HOOK}" ]; then "${SPAWN_HOOK}"; fi
   CHILD_PID=$!
   SPAWNING_CHILD=0
   if [ -n "${PENDING_SIGNAL}" ]; then
     forward_signal "${PENDING_SIGNAL}" "${PENDING_SIGNAL_STATUS}"
   fi
-  unset HQL_BACKUP_RESTORE HQL_S3_KEY HQL_S3_SECRET restore_value
+  unset restore_value
 
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
   consecutive=0
