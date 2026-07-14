@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
 DRY_RUN=0
 if [ "${1:-}" = "--dry-run" ]; then
   DRY_RUN=1
@@ -48,6 +49,7 @@ fi
 command -v aws >/dev/null 2>&1 || { echo "missing command: aws" >&2; exit 1; }
 command -v mktemp >/dev/null 2>&1 || { echo "missing command: mktemp" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "missing command: jq" >&2; exit 1; }
+[ -x "${SCRIPT_DIR}/check-s3-object-history.sh" ] || { echo "missing executable: check-s3-object-history.sh" >&2; exit 1; }
 
 aws_s3api() {
   if [ -n "${S3_ENDPOINT_URL}" ]; then
@@ -96,8 +98,16 @@ LOCK_ENABLED=$(aws_s3api get-object-lock-configuration \
   --query 'ObjectLockConfiguration.ObjectLockEnabled' \
   --output text)
 [ "${LOCK_ENABLED}" = "Enabled" ] || { echo "bucket Object Lock is not enabled: ${BUCKET}" >&2; exit 1; }
+VERSIONING_STATUS=$(aws_s3api get-bucket-versioning \
+  --bucket "${BUCKET}" \
+  --query Status \
+  --output text)
+[ "${VERSIONING_STATUS}" = "Enabled" ] || { echo "bucket versioning is not enabled: ${BUCKET}" >&2; exit 1; }
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
 [ -n "${CALLER_ARN}" ] && [ "${CALLER_ARN}" != None ] || { echo "cannot identify AWS materialization principal" >&2; exit 1; }
+
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL}" \
+  "${SCRIPT_DIR}/check-s3-object-history.sh" "${BUCKET}" "${TARGET_KEY}"
 
 elapsed=0
 until aws_s3api head-object --bucket "${BUCKET}" --key "${SOURCE_KEY}" --version-id "${SOURCE_VERSION}" >/dev/null 2>&1; do
@@ -121,14 +131,10 @@ ACTUAL_SOURCE_SHA=$(sha256_file "${TMP_DIR}/source.enc")
   exit 1
 }
 
-if aws_s3api head-object --bucket "${BUCKET}" --key "${TARGET_KEY}" >/dev/null 2>&1; then
-  echo "refusing to overwrite existing restore key: s3://${BUCKET}/${TARGET_KEY}" >&2
-  exit 1
-fi
-
 TARGET_VERSION=$(aws_s3api put-object \
   --bucket "${BUCKET}" \
   --key "${TARGET_KEY}" \
+  --if-none-match '*' \
   --body "${TMP_DIR}/source.enc" \
   --object-lock-mode COMPLIANCE \
   --object-lock-retain-until-date "${RETAIN_UNTIL}" \
@@ -138,6 +144,8 @@ TARGET_VERSION=$(aws_s3api put-object \
   echo "destination object has no version id; bucket versioning is required" >&2
   exit 1
 }
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL}" \
+  "${SCRIPT_DIR}/check-s3-object-history.sh" "${BUCKET}" "${TARGET_KEY}" "${TARGET_VERSION}"
 
 if EXISTING_POLICY=$(aws_s3api get-bucket-policy --bucket "${BUCKET}" --query Policy --output text 2>/dev/null); then
   printf '%s\n' "${EXISTING_POLICY}" >"${TMP_DIR}/bucket-policy.json"
@@ -173,6 +181,9 @@ printf '%s\n' "${INSTALLED_POLICY}" | jq -e --arg sid "${POLICY_SID}" --arg writ
   any(.Statement[]?; .Sid == $writerSid and .Effect == "Deny" and .Principal.AWS == $writer and .Resource == $resource and
     (actions | index("s3:GetObject")) != null and (actions | index("s3:GetObjectVersion")) != null)
 ' >/dev/null || { echo "immutable exact-key bucket policy was not installed" >&2; exit 1; }
+
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL}" \
+  "${SCRIPT_DIR}/check-s3-object-history.sh" "${BUCKET}" "${TARGET_KEY}" "${TARGET_VERSION}"
 
 HEAD_VALUES=$(aws_s3api head-object \
   --bucket "${BUCKET}" \

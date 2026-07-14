@@ -21,6 +21,12 @@ VIND_COLIMA_AUTOFIX="${VIND_COLIMA_AUTOFIX:-1}"
 CI_DOCKER_BUILDER_PRUNE="${CI_DOCKER_BUILDER_PRUNE:-0}"
 CI_SKIP_CLUSTER_DELETE_ON_FAILURE="${CI_SKIP_CLUSTER_DELETE_ON_FAILURE:-0}"
 
+if [[ "${RAUTHY_IMAGE}" == *RAUTHY_LAUNCHER_IMAGE_DIGEST* ]]; then
+  echo "Rauthy launcher digest is unpublished; refusing local bootstrap before image pull." >&2
+  echo "Override RAUTHY_IMAGE with a published immutable image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:<64-hex-digest>" >&2
+  exit 1
+fi
+
 if [[ "${NAMESPACE}" != "grant" ]]; then
   echo "local validation uses a Kustomization fixed to namespace grant; got NAMESPACE=${NAMESPACE}" >&2
   exit 1

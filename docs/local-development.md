@@ -41,6 +41,16 @@ sh ./scripts/verify-ephemeral-k8s.sh static
 bash ./scripts/ci-local.sh
 ```
 
+저장소의 Rauthy launcher digest가 아직 publish 전 marker라면 이 명령은 Docker build나 image pull 전에
+실패한다. merge 후 발행된 immutable digest가 있지만 manifest pin 후속 PR 전이라면 명시적으로 override한다.
+
+```bash
+RAUTHY_IMAGE='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:<64-hex-digest>' \
+  bash ./scripts/ci-local.sh
+```
+
+GitHub PR workflow는 marker 상태에서 source/contract 정적 검증은 수행하되 runtime bootstrap은 계속 skip한다.
+
 Docker Compose와 Kubernetes bootstrap은 `GRANT_RAUTHY_CLIENT_SECRET` 및
 `GRANT_RAUTHY_CLIENT_READ_API_KEY`에서 읽기 전용 Rauthy bootstrap 파일을 생성한다. Grant와 Rauthy가 항상 같은
 credential을 사용하므로 두 값은 각각 64자 이상의 영숫자 secret을 사용해야 한다.

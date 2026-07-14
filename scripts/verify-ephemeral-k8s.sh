@@ -138,7 +138,23 @@ assert_recovery_dry_run() {
   fi
 }
 
+assert_ci_local_placeholder_guard() {
+  placeholder_log="${TMP_DIR}/ci-local-placeholder.log"
+  if RAUTHY_IMAGE='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST' \
+    bash "${ROOT_DIR}/scripts/ci-local.sh" >"${placeholder_log}" 2>&1; then
+    fail "ci-local accepted the unpublished Rauthy launcher placeholder"
+  fi
+  grep -q 'refusing local bootstrap before image pull' "${placeholder_log}" \
+    || fail "ci-local placeholder failure is not explicit or early"
+  grep -q 'Override RAUTHY_IMAGE with a published immutable image' "${placeholder_log}" \
+    || fail "ci-local placeholder failure does not explain the override"
+  if grep -q '\[phase\]' "${placeholder_log}"; then
+    fail "ci-local started a build or pull phase before rejecting the placeholder"
+  fi
+}
+
 verify_static() {
+  need bash
   need kubectl
   need grep
   need jq
@@ -231,6 +247,8 @@ verify_static() {
     || fail "Grant and Rauthy examples must use distinct backup buckets"
   grep -Eq 'name: rauthy-bootstrap-renderer-[a-z0-9]+' "${TMP_DIR}/ephemeral.yaml" \
     || fail "ephemeral render is missing the generated bootstrap renderer ConfigMap"
+  assert_ci_local_placeholder_guard
+  "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
   assert_recovery_dry_run
   "${ROOT_DIR}/scripts/verify-recovery-state-machine.sh"
   "${ROOT_DIR}/scripts/verify-restore-once.sh"
