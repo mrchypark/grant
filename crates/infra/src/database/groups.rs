@@ -107,14 +107,21 @@ impl Database {
             WHERE rb.subject_type = 'group'
               AND rb.subject_id = $1
         )";
-        self.runtime
+        let applied = self
+            .runtime
             .transaction([
                 (
                     Cow::Owned(format!(
                         "DELETE FROM group_memberships
-                         WHERE group_id = $1 AND {no_binding}"
+                         WHERE group_id = $1
+                           AND EXISTS (
+                               SELECT 1 FROM groups g
+                               WHERE g.id = group_memberships.group_id
+                                 AND g.organization_id = $2
+                           )
+                           AND {no_binding}"
                     )),
-                    params!(group_id.to_owned()),
+                    params!(group_id.to_owned(), organization_id.to_owned()),
                 ),
                 (
                     Cow::Owned(format!(
@@ -126,10 +133,12 @@ impl Database {
             ])
             .await
             .context("delete unbound group transaction")?;
-        Ok(self
-            .find_group_with_consistency(group_id, organization_id, Some(ReadConsistency::Strong))
-            .await?
-            .is_none())
+        let [_, deleted_groups] = applied.as_slice() else {
+            return Err(anyhow!(
+                "delete unbound group transaction returned invalid results"
+            ));
+        };
+        Ok(*deleted_groups == 1)
     }
 
     pub async fn list_group_members_with_consistency(
