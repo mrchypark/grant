@@ -88,48 +88,45 @@ impl Database {
                 self.default_read_consistency_with_override(first.consistency.clone());
             let validation_time = Utc::now().to_rfc3339();
             let mut query_params = Vec::with_capacity(chunk.len() * 10);
-            let values = chunk
-                .iter()
-                .enumerate()
-                .map(|(chunk_index, check)| -> Result<String> {
-                    let absolute_index = chunk_start
-                        .checked_add(chunk_index)
-                        .ok_or_else(|| anyhow!("authorization result index overflow"))?;
-                    let query_index = i64::try_from(absolute_index)
-                        .context("authorization result index exceeds SQLite INTEGER")?;
-                    let base = query_params.len() + 1;
-                    query_params.push(hiqlite::Param::from(query_index));
-                    query_params.push(hiqlite::Param::from(check.user_id.to_owned()));
-                    query_params.push(hiqlite::Param::from(check.organization_id.to_owned()));
-                    query_params.push(hiqlite::Param::from(check.provider_id.to_owned()));
-                    query_params.push(hiqlite::Param::from(check.resource_type.to_owned()));
-                    query_params.push(hiqlite::Param::from(check.resource_id.to_owned()));
-                    query_params.push(hiqlite::Param::from(check.action_id.to_owned()));
-                    query_params.push(hiqlite::Param::from(
-                        check.application_id.map(ToOwned::to_owned),
-                    ));
-                    query_params.push(hiqlite::Param::from(validation_time.clone()));
-                    query_params.push(hiqlite::Param::from(if allow_inactive_self_reactivation {
-                        1_i64
-                    } else {
-                        0_i64
-                    }));
-                    Ok(format!(
-                        "(${p1}, ${p2}, ${p3}, ${p4}, ${p5}, ${p6}, ${p7}, ${p8}, ${p9}, ${p10})",
-                        p1 = base,
-                        p2 = base + 1,
-                        p3 = base + 2,
-                        p4 = base + 3,
-                        p5 = base + 4,
-                        p6 = base + 5,
-                        p7 = base + 6,
-                        p8 = base + 7,
-                        p9 = base + 8,
-                        p10 = base + 9
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .join(", ");
+            let mut values = Vec::with_capacity(chunk.len());
+            for (chunk_index, check) in chunk.iter().enumerate() {
+                let absolute_index = chunk_start
+                    .checked_add(chunk_index)
+                    .ok_or_else(|| anyhow!("authorization result index overflow"))?;
+                let query_index = i64::try_from(absolute_index)
+                    .context("authorization result index exceeds SQLite INTEGER")?;
+                let base = query_params.len() + 1;
+                query_params.push(hiqlite::Param::from(query_index));
+                query_params.push(hiqlite::Param::from(check.user_id.to_owned()));
+                query_params.push(hiqlite::Param::from(check.organization_id.to_owned()));
+                query_params.push(hiqlite::Param::from(check.provider_id.to_owned()));
+                query_params.push(hiqlite::Param::from(check.resource_type.to_owned()));
+                query_params.push(hiqlite::Param::from(check.resource_id.to_owned()));
+                query_params.push(hiqlite::Param::from(check.action_id.to_owned()));
+                query_params.push(hiqlite::Param::from(
+                    check.application_id.map(ToOwned::to_owned),
+                ));
+                query_params.push(hiqlite::Param::from(validation_time.clone()));
+                query_params.push(hiqlite::Param::from(if allow_inactive_self_reactivation {
+                    1_i64
+                } else {
+                    0_i64
+                }));
+                values.push(format!(
+                    "(${p1}, ${p2}, ${p3}, ${p4}, ${p5}, ${p6}, ${p7}, ${p8}, ${p9}, ${p10})",
+                    p1 = base,
+                    p2 = base + 1,
+                    p3 = base + 2,
+                    p4 = base + 3,
+                    p5 = base + 4,
+                    p6 = base + 5,
+                    p7 = base + 6,
+                    p8 = base + 7,
+                    p9 = base + 8,
+                    p10 = base + 9
+                ));
+            }
+            let values = values.join(", ");
             let rows: Vec<UserActionDecisionRow> = self
                 .query_rows_with(
                     consistency,
