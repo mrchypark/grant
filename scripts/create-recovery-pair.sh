@@ -76,8 +76,9 @@ else
   [ "${actual_fence_fingerprint}" = "${RECOVERY_FENCE_PUBLIC_KEY_SHA256}" ] || { echo "fence signer public key is not the pinned trust root" >&2; exit 1; }
   openssl dgst -sha256 -verify "${FENCE_PUBLIC_KEY}" -signature "${FENCE_SIGNATURE}" "${TMP_DIR}/fence.canonical.json" >/dev/null \
     || { echo "fence evidence signature verification failed" >&2; exit 1; }
-  NAMESPACE_UID=$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.uid}')
-  label=$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.labels.grant\.cypark\.dev/recovery-write-fence}')
+  namespace_object=$(kubectl get namespace "${NAMESPACE}" -o json)
+  NAMESPACE_UID=$(printf '%s\n' "${namespace_object}" | jq -r '.metadata.uid // empty')
+  label=$(printf '%s\n' "${namespace_object}" | jq -r '.metadata.labels["grant.cypark.dev/recovery-write-fence"] // empty')
   [ "${label}" = "${RECOVERY_ID}" ] || { echo "namespace is not labeled for this recovery write fence" >&2; exit 1; }
   jq -e --arg id "${RECOVERY_ID}" --arg ns "${NAMESPACE}" --arg uid "${NAMESPACE_UID}" \
     --arg gk "${GRANT_SOURCE_KEY}" --arg gv "${GRANT_SOURCE_VERSION_ID}" --arg rk "${RAUTHY_SOURCE_KEY}" --arg rv "${RAUTHY_SOURCE_VERSION_ID}" '

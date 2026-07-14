@@ -16,11 +16,15 @@ apply_secret_from_files() {
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
-prepare_rauthy_registry_auth() {
-  case "${RAUTHY_IMAGE:-}" in
-    ghcr.io/conalog/grant-rauthy-launcher:*) ;;
-    *) return 0 ;;
+is_private_rauthy_launcher_image() {
+  case "${1:-}" in
+    ghcr.io/conalog/grant-rauthy-launcher|ghcr.io/conalog/grant-rauthy-launcher:*|ghcr.io/conalog/grant-rauthy-launcher@*) return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+prepare_rauthy_registry_auth() {
+  is_private_rauthy_launcher_image "${RAUTHY_IMAGE:-}" || return 0
   [ -n "${GHCR_USERNAME:-}" ] \
     || { echo "GHCR_USERNAME is required for the private Rauthy launcher image" >&2; return 1; }
   [ -n "${GHCR_TOKEN:-}" ] \
@@ -45,10 +49,7 @@ prepare_rauthy_registry_auth() {
 }
 
 apply_rauthy_registry_pull_secret() {
-  case "${RAUTHY_IMAGE:-}" in
-    ghcr.io/conalog/grant-rauthy-launcher:*) ;;
-    *) return 0 ;;
-  esac
+  is_private_rauthy_launcher_image "${RAUTHY_IMAGE:-}" || return 0
   [ -n "${RAUTHY_REGISTRY_CONFIG_DIR:-}" ] && [ -s "${RAUTHY_REGISTRY_CONFIG_DIR}/config.json" ] \
     || { echo "private Rauthy launcher pull credentials are unavailable" >&2; return 1; }
   apply_secret_from_files rauthy-launcher-pull \

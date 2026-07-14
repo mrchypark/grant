@@ -96,16 +96,17 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   for command in kubectl curl aws mktemp openssl; do
     command -v "${command}" >/dev/null 2>&1 || { echo "missing command: ${command}" >&2; exit 1; }
   done
-  actual_namespace_uid=$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.uid}')
+  namespace_object=$(kubectl get namespace "${NAMESPACE}" -o json)
+  actual_namespace_uid=$(printf '%s\n' "${namespace_object}" | jq -r '.metadata.uid // empty')
   [ -n "${EXPECTED_NAMESPACE_UID}" ] && [ "${actual_namespace_uid}" = "${EXPECTED_NAMESPACE_UID}" ] || { echo "namespace UID allowlist mismatch" >&2; exit 2; }
   if [ "${ISOLATED_DRILL}" -eq 1 ]; then
     [ "${NAMESPACE}" != "$(jq -r '.namespace' "${RECORD}")" ] || { echo "isolated drill namespace must differ from production" >&2; exit 2; }
-    [ "$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.labels.grant\.cypark\.dev/recovery-drill}')" = true ] || { echo "namespace is not labeled as a recovery drill" >&2; exit 2; }
-    [ "$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.annotations.grant\.cypark\.dev/source-recovery-id}')" = "${RECOVERY_ID}" ] || { echo "drill namespace is not bound to this recovery ID" >&2; exit 2; }
+    [ "$(printf '%s\n' "${namespace_object}" | jq -r '.metadata.labels["grant.cypark.dev/recovery-drill"] // empty')" = true ] || { echo "namespace is not labeled as a recovery drill" >&2; exit 2; }
+    [ "$(printf '%s\n' "${namespace_object}" | jq -r '.metadata.annotations["grant.cypark.dev/source-recovery-id"] // empty')" = "${RECOVERY_ID}" ] || { echo "drill namespace is not bound to this recovery ID" >&2; exit 2; }
   else
     [ "${NAMESPACE}" = "$(jq -r '.namespace' "${RECORD}")" ] && [ "${actual_namespace_uid}" = "$(jq -r '.namespaceUid' "${RECORD}")" ] \
       || { echo "production namespace name/UID differs from the signed record" >&2; exit 2; }
-    [ "$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.labels.grant\.cypark\.dev/recovery-write-fence}')" = "${RECOVERY_ID}" ] \
+    [ "$(printf '%s\n' "${namespace_object}" | jq -r '.metadata.labels["grant.cypark.dev/recovery-write-fence"] // empty')" = "${RECOVERY_ID}" ] \
       || { echo "production namespace write-fence label is missing or belongs to another recovery" >&2; exit 2; }
   fi
   kubectl -n "${NAMESPACE}" get cronjob -o json | jq -e 'all(.items[]; .spec.suspend == true)' >/dev/null \
@@ -582,7 +583,8 @@ release_completed_recovery() {
     log "dry-run: would require direct-writer release evidence, resume signed CronJobs, remove the namespace fence label, and CAS checkpoint ownership to none"
     return
   fi
-  release_annotation=$(kubectl get namespace "${NAMESPACE}" -o jsonpath='{.metadata.annotations.grant\.cypark\.dev/recovery-direct-writers-released}')
+  release_annotation=$(kubectl get namespace "${NAMESPACE}" -o json \
+    | jq -r '.metadata.annotations["grant.cypark.dev/recovery-direct-writers-released"] // empty')
   [ "${release_annotation}" = "${RECOVERY_ID}" ] || {
     echo "direct writers are not explicitly released for ${RECOVERY_ID}; set the protected namespace annotation after external writers are resumed" >&2
     exit 1

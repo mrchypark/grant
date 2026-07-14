@@ -96,9 +96,13 @@ run_phase verify-kubernetes-storage-profiles \
 log_storage_state
 run_phase build-grant-image \
   docker buildx build --load --network "${BUILD_NETWORK}" -t "${IMAGE_NAME}" .
-run_phase authenticate-private-rauthy-image prepare_rauthy_registry_auth
-run_phase pull-rauthy-image \
-  docker --context "${RAUTHY_DOCKER_CONTEXT}" --config "${RAUTHY_REGISTRY_CONFIG_DIR}" pull "${RAUTHY_IMAGE}"
+if is_private_rauthy_launcher_image "${RAUTHY_IMAGE}"; then
+  run_phase authenticate-private-rauthy-image prepare_rauthy_registry_auth
+  run_phase pull-rauthy-image \
+    docker --context "${RAUTHY_DOCKER_CONTEXT}" --config "${RAUTHY_REGISTRY_CONFIG_DIR}" pull "${RAUTHY_IMAGE}"
+else
+  run_phase pull-rauthy-image docker pull "${RAUTHY_IMAGE}"
+fi
 if [[ "${CI_DOCKER_BUILDER_PRUNE}" == "1" ]]; then
   echo "[storage] pruning buildkit cache before cluster bootstrap"
   docker builder prune -af >/dev/null || true

@@ -171,6 +171,79 @@ assert_ci_local_placeholder_guard() {
   fi
 }
 
+assert_ci_local_registry_auth_contract() {
+  mock_bin="${TMP_DIR}/ci-local-mock-bin"
+  mock_log="${TMP_DIR}/ci-local-mock-commands.log"
+  run_log="${TMP_DIR}/ci-local-registry-path.log"
+  mkdir -p "${mock_bin}"
+
+  cat >"${mock_bin}/docker" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'docker %s\n' "$*" >>"${CI_LOCAL_MOCK_LOG}"
+EOF
+
+  cat >"${mock_bin}/sh" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'sh %s\n' "$*" >>"${CI_LOCAL_MOCK_LOG}"
+EOF
+
+  cat >"${mock_bin}/bash" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'bash %s\n' "$*" >>"${CI_LOCAL_MOCK_LOG}"
+EOF
+
+  cat >"${mock_bin}/noop" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "${mock_bin}/docker" "${mock_bin}/sh" "${mock_bin}/bash" "${mock_bin}/noop"
+  for command_name in kubectl curl jq vcluster; do
+    cp "${mock_bin}/noop" "${mock_bin}/${command_name}"
+  done
+
+  for public_image in \
+    docker.io/library/busybox:1.37 \
+    registry.example.test/custom/rauthy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    ghcr.io/conalog/grant-rauthy-launcher-evil:tag; do
+    : >"${mock_log}"
+    PATH="${mock_bin}:${PATH}" CI_LOCAL_MOCK_LOG="${mock_log}" \
+      RAUTHY_IMAGE="${public_image}" GHCR_USERNAME='' GHCR_TOKEN='' KEEP_CLUSTER=1 \
+      /bin/bash "${ROOT_DIR}/scripts/ci-local.sh" >"${run_log}" 2>&1
+    grep -Fqx "docker pull ${public_image}" "${mock_log}" \
+      || fail "ci-local did not use ambient Docker auth for public/custom Rauthy image ${public_image}"
+    if grep -Eq 'docker .* login |docker --context .* --config .* pull' "${mock_log}"; then
+      fail "ci-local used private launcher auth state for public/custom Rauthy image ${public_image}"
+    fi
+    grep -q '^bash .*vind-bootstrap.sh' "${mock_log}" \
+      || fail "ci-local public/custom image path did not reach cluster bootstrap"
+  done
+
+  for private_image in \
+    ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0 \
+    ghcr.io/conalog/grant-rauthy-launcher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    ghcr.io/conalog/grant-rauthy-launcher; do
+    : >"${mock_log}"
+    set +e
+    PATH="${mock_bin}:${PATH}" CI_LOCAL_MOCK_LOG="${mock_log}" \
+      RAUTHY_IMAGE="${private_image}" GHCR_USERNAME='' GHCR_TOKEN='' KEEP_CLUSTER=1 \
+      /bin/bash "${ROOT_DIR}/scripts/ci-local.sh" >"${run_log}" 2>&1
+    private_status=$?
+    set -e
+    [ "${private_status}" -ne 0 ] \
+      || fail "ci-local accepted private Rauthy launcher ${private_image} without GHCR credentials"
+    grep -q 'GHCR_USERNAME is required for the private Rauthy launcher image' "${run_log}" \
+      || fail "ci-local private launcher credential failure is not explicit for ${private_image}"
+    if grep -Fq "docker pull ${private_image}" "${mock_log}" \
+      || grep -q '^bash .*vind-bootstrap.sh' "${mock_log}"; then
+      fail "ci-local continued after private launcher authentication failed for ${private_image}"
+    fi
+  done
+}
+
 assert_gke_skaffold_registry_secret_contract() {
   mock_bin="${TMP_DIR}/gke-mock-bin"
   mock_log="${TMP_DIR}/gke-mock-commands.log"
@@ -503,6 +576,10 @@ verify_static() {
   if grep -Eq -- '--password([ =]|$)|--from-literal=.*GHCR' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"; then
     fail "private registry credential is exposed through child argv"
   fi
+  if grep -Fq 'grant\.cypark\.dev/' "${ROOT_DIR}/scripts/restore-full-cluster.sh" \
+    || grep -Fq 'grant\.cypark\.dev/' "${ROOT_DIR}/scripts/create-recovery-pair.sh"; then
+    fail "recovery scripts use escaped-dot JSONPath for slash-containing metadata keys"
+  fi
   if grep -q 'command: \["/bin/sh", "/gate/restore-once.sh"\]' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml"; then
     fail "Rauthy cannot use the shell restore wrapper from its distroless image"
   fi
@@ -565,6 +642,7 @@ verify_static() {
   grep -Eq 'name: rauthy-bootstrap-renderer-[a-z0-9]+' "${TMP_DIR}/ephemeral.yaml" \
     || fail "ephemeral render is missing the generated bootstrap renderer ConfigMap"
   assert_ci_local_placeholder_guard
+  assert_ci_local_registry_auth_contract
   assert_gke_skaffold_registry_secret_contract
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
   assert_recovery_dry_run
