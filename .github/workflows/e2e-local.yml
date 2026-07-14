@@ -145,6 +145,8 @@ jobs:
             scripts/verify-ephemeral-k8s.sh
             scripts/verify-s3-object-history.sh
             scripts/verify-docs.sh
+            scripts/ghcr-tag-preflight.sh
+            scripts/verify-ghcr-tag-preflight.sh
             scripts/materialize-s3-restore.sh
             scripts/create-recovery-pair.sh
             scripts/restore-full-cluster.sh
@@ -164,6 +166,7 @@ jobs:
           ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER: "1"
         run: |
           scripts/verify-docs.sh
+          sh scripts/verify-ghcr-tag-preflight.sh
           scripts/verify-recovery-state-machine.sh
           scripts/verify-restore-once.sh
           scripts/verify-ephemeral-k8s.sh static
