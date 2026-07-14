@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use domain::{
-    Action, Agreement, Application, ApplicationGrant, ApplicationRedirectUri, HealthStatus,
+    Action, Agreement, Application, ApplicationGrant, Group, GroupMember, HealthStatus,
     Organization, Role, RoleBinding, ServiceProvider,
 };
 use infra::{config::ReadConsistency, service::AppService};
@@ -12,17 +12,17 @@ use std::sync::Arc;
 
 use crate::{
     dto::{
-        ApplicationRedirectUriRequest, BootstrapOwnerResponse, CreateApplicationGrantRequest,
-        CreateApplicationRequest, CreateRoleBindingRequest, CreateRoleRequest, CurrentUserResponse,
+        ApplicationConsentResponse, BootstrapOwnerResponse, CreateApplicationRequest,
+        CreateGroupRequest, CreateRoleBindingRequest, CreateRoleRequest, CurrentUserResponse,
         ReadConsistencyQuery, ReplaceActionsRequest, ReplaceApplicationActionsRequest,
-        ReplaceProviderActionsRequest, RotateClientSecretResponse, UpdateApplicationRequest,
+        ReplaceApplicationConsentRequest, ReplaceProviderActionsRequest,
+        SetApplicationTrustRequest, SetUserActiveRequest, UpdateGroupRequest,
         UpsertAgreementRequest,
     },
     error::{ApiError, ApiResult},
     mappers::{
-        agreement_input, create_application_grant_input, create_application_input,
-        create_role_binding_input, create_role_input, provider_action_input,
-        update_application_input,
+        agreement_input, create_application_input, create_group_input, create_role_binding_input,
+        create_role_input, provider_action_input, update_group_input,
     },
     request::{
         bearer_token, ensure_active_organization_path_matches, ensure_request_context_organization,
@@ -33,6 +33,18 @@ use crate::{
 
 pub(crate) async fn healthz(State(service): State<Arc<AppService>>) -> Json<HealthStatus> {
     Json(service.health_status().await)
+}
+
+pub(crate) async fn readyz(
+    State(service): State<Arc<AppService>>,
+) -> (StatusCode, Json<HealthStatus>) {
+    let status = service.health_status().await;
+    let http_status = if service.is_ready().await {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (http_status, Json(status))
 }
 
 pub(crate) async fn get_current_user(
@@ -160,108 +172,6 @@ pub(crate) async fn get_application(
     Ok(Json(application))
 }
 
-pub(crate) async fn update_application(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, application_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(body): Json<UpdateApplicationRequest>,
-) -> ApiResult<Json<Application>> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    let application = service
-        .update_application(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &application_id,
-            update_application_input(body),
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(application))
-}
-
-pub(crate) async fn list_application_redirect_uris(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, application_id)): Path<(String, String)>,
-    Query(query): Query<ReadConsistencyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<ApplicationRedirectUri>>> {
-    let read_consistency = read_consistency_override(&query)?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    let redirect_uris = service
-        .list_application_redirect_uris_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &application_id,
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(redirect_uris))
-}
-
-pub(crate) async fn create_application_redirect_uri(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, application_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(body): Json<ApplicationRedirectUriRequest>,
-) -> ApiResult<(StatusCode, Json<ApplicationRedirectUri>)> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    let redirect_uri = service
-        .create_application_redirect_uri_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &application_id,
-            &body.redirect_uri,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(redirect_uri)))
-}
-
-pub(crate) async fn delete_application_redirect_uri(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, application_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(body): Json<ApplicationRedirectUriRequest>,
-) -> ApiResult<StatusCode> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    service
-        .delete_application_redirect_uri_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &application_id,
-            &body.redirect_uri,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub(crate) async fn rotate_application_client_secret(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, application_id)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> ApiResult<Json<RotateClientSecretResponse>> {
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    let rotated = service
-        .rotate_application_client_secret_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &application_id,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(RotateClientSecretResponse {
-        client_secret: rotated.client_secret,
-        secret_rotated_at: rotated.secret_rotated_at,
-    }))
-}
-
 pub(crate) async fn list_application_actions(
     State(service): State<Arc<AppService>>,
     Path((organization_id, application_id)): Path<(String, String)>,
@@ -319,57 +229,224 @@ pub(crate) async fn list_application_grants(
     Ok(Json(grants))
 }
 
-pub(crate) async fn create_application_grant(
+pub(crate) async fn get_application_consent(
     State(service): State<Arc<AppService>>,
-    Path(organization_id): Path<String>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(body): Json<CreateApplicationGrantRequest>,
-) -> ApiResult<(StatusCode, Json<ApplicationGrant>)> {
+) -> ApiResult<Json<ApplicationConsentResponse>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let grant = service
-        .create_application_grant_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            create_application_grant_input(body),
-        )
+    let Some((grant, actions)) = service
+        .get_application_consent(&ctx.user_id, &ctx.organization_id, &application_id)
         .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(grant)))
+        .map_err(ApiError::from_domain)?
+    else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "application consent not found".to_owned(),
+        });
+    };
+    Ok(Json(ApplicationConsentResponse { grant, actions }))
 }
 
-pub(crate) async fn replace_application_grant_actions(
+pub(crate) async fn replace_application_consent(
     State(service): State<Arc<AppService>>,
-    Path((organization_id, grant_id)): Path<(String, String)>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(body): Json<ReplaceActionsRequest>,
-) -> ApiResult<Json<Vec<Action>>> {
+    Json(body): Json<ReplaceApplicationConsentRequest>,
+) -> ApiResult<Json<ApplicationConsentResponse>> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let actions = service
-        .replace_application_grant_actions_authorized(
+    let (grant, actions) = service
+        .replace_application_consent(
             &ctx.user_id,
             &ctx.organization_id,
-            &grant_id,
+            &application_id,
             &body.action_ids,
         )
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(actions))
+    Ok(Json(ApplicationConsentResponse { grant, actions }))
 }
 
-pub(crate) async fn revoke_application_grant(
+pub(crate) async fn revoke_application_consent(
     State(service): State<Arc<AppService>>,
-    Path((organization_id, grant_id)): Path<(String, String)>,
+    Path((organization_id, application_id)): Path<(String, String)>,
     headers: HeaderMap,
-) -> ApiResult<Json<ApplicationGrant>> {
+) -> ApiResult<StatusCode> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
-    let grant = service
-        .revoke_application_grant_authorized(&ctx.user_id, &ctx.organization_id, &grant_id)
+    service
+        .revoke_application_consent(&ctx.user_id, &ctx.organization_id, &application_id)
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(grant))
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn set_application_trust(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, application_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<SetApplicationTrustRequest>,
+) -> ApiResult<Json<Application>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let application = service
+        .set_application_trust_admin(&organization_id, &application_id, body.trusted)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(application))
+}
+
+pub(crate) async fn verify_application_provisioning(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, application_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Application>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let application = service
+        .verify_application_provisioning_admin(&organization_id, &application_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(application))
+}
+
+pub(crate) async fn set_user_active(
+    State(service): State<Arc<AppService>>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<SetUserActiveRequest>,
+) -> ApiResult<Json<domain::User>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let user = service
+        .set_user_active_admin(&user_id, body.active)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(user))
+}
+
+pub(crate) async fn list_groups(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<Group>>> {
+    let consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let groups = service
+        .list_groups_authorized(&ctx.user_id, &ctx.organization_id, consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(groups))
+}
+
+pub(crate) async fn create_group(
+    State(service): State<Arc<AppService>>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CreateGroupRequest>,
+) -> ApiResult<(StatusCode, Json<Group>)> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let group = service
+        .create_group_authorized(&ctx.user_id, &ctx.organization_id, create_group_input(body))
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(group)))
+}
+
+pub(crate) async fn get_group(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, group_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Group>> {
+    let consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let group = service
+        .get_group_authorized(&ctx.user_id, &ctx.organization_id, &group_id, consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(group))
+}
+
+pub(crate) async fn update_group(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, group_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateGroupRequest>,
+) -> ApiResult<Json<Group>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let group = service
+        .update_group_authorized(
+            &ctx.user_id,
+            &ctx.organization_id,
+            &group_id,
+            update_group_input(group_id.clone(), body),
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(group))
+}
+
+pub(crate) async fn delete_group(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, group_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    service
+        .delete_group_authorized(&ctx.user_id, &ctx.organization_id, &group_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn list_group_members(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, group_id)): Path<(String, String)>,
+    Query(query): Query<ReadConsistencyQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<GroupMember>>> {
+    let consistency = read_consistency_override(&query)?;
+    let ctx = request_context(service.as_ref(), &headers, consistency.clone()).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let members = service
+        .list_group_members_authorized(&ctx.user_id, &ctx.organization_id, &group_id, consistency)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(members))
+}
+
+pub(crate) async fn add_group_member(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, group_id, user_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<GroupMember>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let member = service
+        .add_group_member_authorized(&ctx.user_id, &ctx.organization_id, &group_id, &user_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(member))
+}
+
+pub(crate) async fn remove_group_member(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, group_id, user_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    service
+        .remove_group_member_authorized(&ctx.user_id, &ctx.organization_id, &group_id, &user_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn list_agreements(

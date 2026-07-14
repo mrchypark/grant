@@ -108,6 +108,14 @@ pub struct Group {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct GroupMember {
+    pub group_id: String,
+    pub organization_membership_id: String,
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Agreement {
     pub id: String,
     pub agreement_type: AgreementType,
@@ -248,11 +256,17 @@ pub struct Application {
     pub first_party: bool,
     pub consent_policy: ApplicationConsentPolicy,
     pub active: bool,
+    pub provisioning_status: ApplicationProvisioningStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rauthy_client_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret_rotated_at: Option<String>,
     pub created_by_user_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationProvisioningStatus {
+    Unprovisioned,
+    Ready,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

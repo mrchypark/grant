@@ -32,13 +32,10 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `POST /api/v1/admin/providers`
 - `PUT /api/v1/admin/providers/{providerId}/actions`
 - `GET|POST /api/v1/orgs/{orgId}/apps`
-- `GET|PUT /api/v1/orgs/{orgId}/apps/{appId}`
+- `GET /api/v1/orgs/{orgId}/apps/{appId}`
 - `GET|PUT /api/v1/orgs/{orgId}/apps/{appId}/actions`
-- `GET|POST|DELETE /api/v1/orgs/{orgId}/apps/{appId}/redirect-uris`
-- `POST /api/v1/orgs/{orgId}/apps/{appId}/client-secret/rotate`
-- `GET|POST /api/v1/orgs/{orgId}/app-grants`
-- `PUT /api/v1/orgs/{orgId}/app-grants/{grantId}/actions`
-- `POST /api/v1/orgs/{orgId}/app-grants/{grantId}/revoke`
+- `GET|PUT|DELETE /api/v1/orgs/{orgId}/apps/{appId}/consent`
+- `POST /api/v1/admin/orgs/{orgId}/apps/{appId}/provisioning/verify`
 - `GET|POST /api/v1/orgs/{orgId}/agreements`
 - `GET|PUT /api/v1/orgs/{orgId}/agreements/{agreementId}`
 - `GET|POST /api/v1/orgs/{orgId}/roles`
@@ -55,15 +52,18 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 2. `crates/api/src/lib.rs`가 shared read/authz 라우트와 voter-only write/admin 라우트를 조립한다.
 3. 사용자 요청은 Rauthy bearer token을 OAuth2 introspection과 OIDC userinfo로 확인한 뒤 grant user/org context로 해석한다.
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
-5. service-to-service admin/authz API는 현재 `x-grant-master-key` header로 보호한다.
+5. service-to-service admin과 기존 trusted-provider `/authz/*` API는 `x-grant-master-key`로 보호하고, 최종 사용자 토큰을 판정하는 `/application-authz/*` API는 별도 `x-grant-app-auth-key`로 보호한다. 두 key는 서로 달라야 하며 교차 사용할 수 없다.
 
 Developer console은 기존 organization/application 경계 안에 둔다. 외부 provider는 Grant API만 호출하고, Grant backend가 제한된 Rauthy Admin API key로 해당 application의 Rauthy client redirect URI와 client secret rotation을 동기화한다.
 
 ## Voter And Learner
 
 - voter는 schema migration, seed, write/admin endpoint를 처리한다.
-- learner는 `/api/v1/me`, provider 조회, org read, authz check/filter 같은 read/authz endpoint를 로컬 read 경로로 처리할 수 있다.
+- learner는 schema migration과 bootstrap을 수행하지 않고 `/api/v1/me`, provider 조회, org read, authz check/filter 같은 read/authz endpoint를 로컬 read 경로로 처리할 수 있다. `/readyz`는 사용할 read 경로에서 필수 schema를 read-only로 검증한다.
 - learner의 write/admin surface는 `requires_voter_node`로 막는다.
+- Kubernetes production의 Grant와 Rauthy는 각각 3 voter `StatefulSet`이며 local state는 `emptyDir`이다. 한 노드 손실은 quorum에서 재가입하고 전체 손실은 workload별 S3 backup pair로 복구한다.
+- lifecycle gate는 all-empty `steady` cluster의 자동 bootstrap을 막는다. production은 `fresh`를 거부하고 recovery ID가 결합된 restore authorization과 Pod-local 소비 marker를 사용한다. workload ServiceAccount는 상태를 수정할 권한이 없다.
+- 복구는 Rauthy 1→3, Grant 1→3 순서이고, voter 복구·schema migration 뒤 learner를 재가입시킨다.
 
 ## Related Docs
 

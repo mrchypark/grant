@@ -1,6 +1,31 @@
 use super::core::now_string;
 use super::*;
 
+#[derive(Debug, Clone)]
+struct CachedIdentityWithClientRow {
+    provider: String,
+    external_user_id: String,
+    client_id: Option<String>,
+    email: Option<String>,
+    display_name: String,
+    active: i64,
+    expires_at: String,
+}
+
+impl From<&mut Row<'_>> for CachedIdentityWithClientRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            provider: row.get("provider"),
+            external_user_id: row.get("external_user_id"),
+            client_id: row.get("client_id"),
+            email: row.get("email"),
+            display_name: row.get("display_name"),
+            active: row.get("active"),
+            expires_at: row.get("expires_at"),
+        }
+    }
+}
+
 impl Database {
     pub async fn upsert_organization_with_owner(
         &self,
@@ -177,14 +202,14 @@ impl Database {
         external_user_id: &str,
         email: Option<&str>,
         display_name: &str,
-        active: bool,
+        _active: bool,
     ) -> Result<User> {
         self.resolve_or_create_user_identity_with_consistency(
             provider,
             external_user_id,
             email,
             display_name,
-            active,
+            true,
             None,
         )
         .await
@@ -196,7 +221,7 @@ impl Database {
         external_user_id: &str,
         email: Option<&str>,
         display_name: &str,
-        active: bool,
+        _active: bool,
         consistency: Option<ReadConsistency>,
     ) -> Result<User> {
         let now = now_string();
@@ -251,13 +276,12 @@ impl Database {
                  VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT(id) DO UPDATE SET
                     email = excluded.email,
-                    display_name = excluded.display_name,
-                    active = excluded.active",
+                    display_name = excluded.display_name",
                 params!(
                     user_id.clone(),
                     email.map(ToOwned::to_owned),
                     display_name.to_owned(),
-                    if active { 1_i64 } else { 0_i64 },
+                    1_i64,
                     now.clone()
                 ),
             )
@@ -290,12 +314,9 @@ impl Database {
             .await
             .context("upsert user identity")?;
 
-        Ok(User {
-            id: user_id,
-            email: email.map(ToOwned::to_owned),
-            display_name: display_name.to_owned(),
-            active,
-        })
+        self.find_user_by_id(&user_id, consistency)
+            .await?
+            .ok_or_else(|| anyhow!("user not found after identity sync: {user_id}"))
     }
 
     pub async fn resolve_existing_user_identity_with_consistency(
@@ -373,8 +394,7 @@ impl Database {
                  VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT(id) DO UPDATE SET
                     email = excluded.email,
-                    display_name = excluded.display_name,
-                    active = excluded.active",
+                    display_name = excluded.display_name",
                 params!(
                     target_user.id.clone(),
                     input
@@ -382,7 +402,7 @@ impl Database {
                         .map(ToOwned::to_owned)
                         .or(target_user.email.clone()),
                     input.display_name.to_owned(),
-                    if input.active { 1_i64 } else { 0_i64 },
+                    if target_user.active { 1_i64 } else { 0_i64 },
                     now.clone()
                 ),
             )
@@ -415,12 +435,9 @@ impl Database {
             .await
             .context("bind identity to user")?;
 
-        Ok(User {
-            id: input.user_id.to_owned(),
-            email: input.email.map(ToOwned::to_owned).or(target_user.email),
-            display_name: input.display_name.to_owned(),
-            active: input.active,
-        })
+        self.find_user_by_id(input.user_id, Some(ReadConsistency::Strong))
+            .await?
+            .ok_or_else(|| anyhow!("user not found after identity binding: {}", input.user_id))
     }
 
     async fn find_user_by_id(
@@ -512,13 +529,16 @@ impl Database {
         now: DateTime<Utc>,
         consistency: Option<ReadConsistency>,
     ) -> Result<Option<CachedExternalIdentity>> {
-        let rows: Vec<AuthIdentityCacheRow> = self
+        let rows: Vec<CachedIdentityWithClientRow> = self
             .runtime
             .query_rows(
                 self.validation_read_consistency_with_override(consistency),
-                "SELECT provider, external_user_id, email, display_name, active, expires_at
+                "SELECT provider, external_user_id, client_id, email, display_name, active, expires_at
                  FROM auth_identity_cache
-                 WHERE token_hash = $1 AND expires_at > $2
+                 WHERE token_hash = $1
+                   AND expires_at > $2
+                   AND client_id IS NOT NULL
+                   AND TRIM(client_id) <> ''
                  LIMIT 1",
                 params!(token_hash.to_owned(), now.to_rfc3339()),
             )
@@ -528,6 +548,7 @@ impl Database {
         Ok(rows.into_iter().next().map(|row| CachedExternalIdentity {
             provider: row.provider,
             external_user_id: row.external_user_id,
+            client_id: row.client_id.expect("query requires non-null client_id"),
             email: row.email,
             display_name: row.display_name,
             active: row.active != 0,
@@ -554,11 +575,12 @@ impl Database {
         self.runtime
             .execute(
                 "INSERT INTO auth_identity_cache (
-                    token_hash, provider, external_user_id, email, display_name, active, expires_at, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    token_hash, provider, external_user_id, client_id, email, display_name, active, expires_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT(token_hash) DO UPDATE SET
                     provider = excluded.provider,
                     external_user_id = excluded.external_user_id,
+                    client_id = excluded.client_id,
                     email = excluded.email,
                     display_name = excluded.display_name,
                     active = excluded.active,
@@ -568,6 +590,7 @@ impl Database {
                     token_hash.to_owned(),
                     identity.provider.clone(),
                     identity.external_user_id.clone(),
+                    identity.client_id.clone(),
                     identity.email.clone(),
                     identity.display_name.clone(),
                     if identity.active { 1_i64 } else { 0_i64 },
@@ -578,6 +601,23 @@ impl Database {
             .await
             .context("upsert shared auth identity cache")?;
         Ok(())
+    }
+
+    pub async fn set_user_active(&self, user_id: &str, active: bool) -> Result<User> {
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE users SET active = $1 WHERE id = $2",
+                params!(if active { 1_i64 } else { 0_i64 }, user_id.to_owned()),
+            )
+            .await
+            .context("set user active")?;
+        if updated == 0 {
+            return Err(anyhow!("user not found: {user_id}"));
+        }
+        self.find_user_by_id(user_id, Some(ReadConsistency::Strong))
+            .await?
+            .ok_or_else(|| anyhow!("user not found after active update: {user_id}"))
     }
 
     pub async fn has_active_organization_membership(

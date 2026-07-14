@@ -42,6 +42,8 @@ bash ./scripts/ci-local.sh
 - [데이터베이스 스키마](./docs/database-schema.md)
 - [백업과 복구](./docs/backup-restore.md)
 
+운영 Kubernetes 배포는 `deploy/overlays/production`을 사용한다. Grant와 Rauthy 모두 3-node no-PVC HA로 실행되며, 외부 S3 backup pair와 fail-closed lifecycle state가 필수다. 저장소의 production 파일은 ConfigMap/Secret 형식 예시만 제공하고 실제 credential은 포함하지 않는다.
+
 ## 참고
 
 - `crates/app/src/main.rs`는 시작 시 스키마 마이그레이션을 수행하고, voter/learner 역할에 따라 라우터를 선택한다.

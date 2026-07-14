@@ -22,7 +22,8 @@
   - schema migration, initialize, write/admin 처리 가능
 - `learner`
   - read replica 성격의 노드다.
-  - split/embedded learner에서는 initialize를 건너뛴다.
+  - 모든 runtime mode에서 schema migration과 bootstrap/initialize를 건너뛴다.
+  - `/readyz`에서 현재 read 경로에 필요한 schema가 실제로 조회 가능한지 read-only로 확인한다.
   - `crates/api/src/lib.rs`에서 write/admin 라우트는 `requires_voter_node`로 막는다.
 
 ## 관련 환경변수
@@ -58,7 +59,7 @@ HTTP read 계약은 더 좁다.
 - `?consistency=strong`은 실패 시 실패하며, 로컬로 숨은 폴백을 하지 않는다.
 - `consistency` query는 현재 `strong`만 허용하고 다른 값은 `400`이다.
 
-## healthz 의미
+## healthz와 readyz 의미
 
 `GET /healthz`는 아래 상태를 같이 노출한다.
 
@@ -71,11 +72,23 @@ HTTP read 계약은 더 좁다.
 - `defaultReadConsistency`
   - 기본 읽기 정책
 
+`GET /readyz`는 같은 상태 body를 반환하지만, 사용할 수 있는 read 경로에서 필수 application schema를 read-only query로 확인한 경우에만 `200`을 반환한다. schema가 없거나 아직 복구/migration되지 않았으면 `503`이다. readiness 검사는 migration이나 bootstrap write를 수행하지 않는다. Kubernetes readiness와 lifecycle peer 확인은 `/readyz`를 사용하고 startup/liveness는 `/healthz`를 사용한다.
+
 ## 복구 보조 동작
 
 `HQL_BACKUP_RESTORE`가 설정된 상태에서 `embedded` 또는 `split` 로컬 노드를 기동하면, 앱은 `HQL_DATA_DIR/state_machine/lock`의 stale lock 정리를 시도한다.
 
 이 동작은 restore 직후 재기동 시 local lock 파일 때문에 노드 시작이 막히는 경우를 줄이기 위한 것이다.
+
+Kubernetes production에서는 Grant와 Rauthy 모두 3 voter `emptyDir` 구성이다. StatefulSet ordinal `0`, `1`, `2`는 `HQL_NODE_ID_FROM=k8s`에 의해 hiqlite node ID `1`, `2`, `3`으로 대응한다. `HQL_NODES`의 DNS 순서와 이 대응은 변경하면 안 된다.
+
+production init lifecycle gate는 다음 mode를 사용한다.
+
+- `steady`: 빈 Pod는 다른 ordinal의 direct cluster-readiness가 확인되어야 시작한다. 값이 없거나 잘못되어도 이 mode다.
+- `fresh`: local 개발 profile에서만 허용한다. production gate는 fresh bootstrap을 거부하고 승인된 전체 restore만 허용한다.
+- `restore`: ordinal 0만 시작할 수 있으며 lifecycle recovery ID와 stable restore authorization Secret의 ID가 같아야 한다. main wrapper의 `emptyDir` marker가 같은 Pod의 container restart에서 restore env 재노출을 차단한다.
+
+나머지 ordinal은 `fresh`나 `restore`에서도 ready peer를 기다린 뒤 learner로 가입하고 voter로 승격된다. schema migration과 seed는 voter 경로에서만 실행하며 learner는 voter 복구와 migration이 완료된 후 가입시킨다. 전체 복구의 partition rollout과 checkpoint는 [backup-restore.md](./backup-restore.md)를 따른다.
 
 ## 현재 의존성 메모
 

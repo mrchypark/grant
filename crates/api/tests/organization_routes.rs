@@ -66,6 +66,7 @@ async fn test_service() -> (Arc<AppService>, Database, TempDir) {
         },
         security: SecurityConfig {
             master_key: "dev-only-master-key".to_owned(),
+            app_auth_key: "dev-only-app-auth-key".to_owned(),
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },

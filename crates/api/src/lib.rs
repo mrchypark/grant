@@ -14,18 +14,21 @@ mod mappers;
 mod rauthy_proxy;
 mod request;
 
-use authz::{authz_batch_check, authz_check, authz_filter};
+use authz::{
+    application_authz_batch_check, application_authz_check, application_authz_filter,
+    authz_batch_check, authz_check, authz_filter,
+};
 use backups::{list_backups_local, list_backups_s3, trigger_backup};
 use handlers::{
-    bootstrap_rauthy_owner, create_agreement, create_application, create_application_grant,
-    create_application_redirect_uri, create_role, create_role_binding, deactivate_organization,
-    delete_application_redirect_uri, delete_role_binding, get_agreement, get_application,
-    get_current_user, healthz, list_agreements, list_application_actions, list_application_grants,
-    list_application_redirect_uris, list_applications, list_providers, list_role_bindings,
-    list_roles, reactivate_organization, replace_application_actions,
-    replace_application_grant_actions, replace_provider_actions, replace_role_actions,
-    requires_voter_node, revoke_application_grant, rotate_application_client_secret,
-    update_agreement, update_application, upsert_provider,
+    add_group_member, bootstrap_rauthy_owner, create_agreement, create_application, create_group,
+    create_role, create_role_binding, deactivate_organization, delete_group, delete_role_binding,
+    get_agreement, get_application, get_application_consent, get_current_user, get_group, healthz,
+    list_agreements, list_application_actions, list_application_grants, list_applications,
+    list_group_members, list_groups, list_providers, list_role_bindings, list_roles,
+    reactivate_organization, readyz, remove_group_member, replace_application_actions,
+    replace_application_consent, replace_provider_actions, replace_role_actions,
+    requires_voter_node, revoke_application_consent, set_application_trust, set_user_active,
+    update_agreement, update_group, upsert_provider, verify_application_provisioning,
 };
 use rauthy_proxy::{auth_root, proxy_rauthy_passthrough, proxy_rauthy_root};
 
@@ -41,33 +44,31 @@ pub fn build_router(service: Arc<AppService>) -> Router {
             post(create_application),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}",
-            put(update_application),
-        )
-        .route(
             "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
             put(replace_application_actions),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}/redirect-uris",
-            post(create_application_redirect_uri).delete(delete_application_redirect_uri),
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent",
+            put(replace_application_consent).delete(revoke_application_consent),
+        )
+        .route("/api/v1/orgs/{organizationId}/groups", post(create_group))
+        .route(
+            "/api/v1/orgs/{organizationId}/groups/{groupId}",
+            put(update_group).delete(delete_group),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}/client-secret/rotate",
-            post(rotate_application_client_secret),
+            "/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}",
+            put(add_group_member).delete(remove_group_member),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/app-grants",
-            post(create_application_grant),
+            "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust",
+            put(set_application_trust),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/actions",
-            put(replace_application_grant_actions),
+            "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify",
+            post(verify_application_provisioning),
         )
-        .route(
-            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/revoke",
-            post(revoke_application_grant),
-        )
+        .route("/api/v1/admin/users/{userId}/active", put(set_user_active))
         .route(
             "/api/v1/orgs/{organizationId}/agreements",
             post(create_agreement),
@@ -121,32 +122,36 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
             post(requires_voter_node),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}",
-            put(requires_voter_node),
-        )
-        .route(
             "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions",
             put(requires_voter_node),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}/redirect-uris",
-            post(requires_voter_node).delete(requires_voter_node),
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent",
+            put(requires_voter_node).delete(requires_voter_node),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}/client-secret/rotate",
+            "/api/v1/orgs/{organizationId}/groups",
             post(requires_voter_node),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/app-grants",
-            post(requires_voter_node),
+            "/api/v1/orgs/{organizationId}/groups/{groupId}",
+            put(requires_voter_node).delete(requires_voter_node),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/actions",
+            "/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}",
+            put(requires_voter_node).delete(requires_voter_node),
+        )
+        .route(
+            "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust",
             put(requires_voter_node),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/app-grants/{grantId}/revoke",
+            "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify",
             post(requires_voter_node),
+        )
+        .route(
+            "/api/v1/admin/users/{userId}/active",
+            put(requires_voter_node),
         )
         .route(
             "/api/v1/orgs/{organizationId}/agreements",
@@ -192,6 +197,7 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
 fn build_shared_router() -> Router<Arc<AppService>> {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/auth", get(auth_root))
         .route("/auth/v1", any(proxy_rauthy_root))
         .route("/auth/v1/{*rauthyPath}", any(proxy_rauthy_passthrough))
@@ -207,12 +213,21 @@ fn build_shared_router() -> Router<Arc<AppService>> {
             get(list_application_actions),
         )
         .route(
-            "/api/v1/orgs/{organizationId}/apps/{applicationId}/redirect-uris",
-            get(list_application_redirect_uris),
-        )
-        .route(
             "/api/v1/orgs/{organizationId}/app-grants",
             get(list_application_grants),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent",
+            get(get_application_consent),
+        )
+        .route("/api/v1/orgs/{organizationId}/groups", get(list_groups))
+        .route(
+            "/api/v1/orgs/{organizationId}/groups/{groupId}",
+            get(get_group),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/groups/{groupId}/members",
+            get(list_group_members),
         )
         .route(
             "/api/v1/orgs/{organizationId}/agreements",
@@ -230,6 +245,18 @@ fn build_shared_router() -> Router<Arc<AppService>> {
         .route("/api/v1/authz/check", post(authz_check))
         .route("/api/v1/authz/batch-check", post(authz_batch_check))
         .route("/api/v1/authz/filter", post(authz_filter))
+        .route(
+            "/api/v1/application-authz/check",
+            post(application_authz_check),
+        )
+        .route(
+            "/api/v1/application-authz/batch-check",
+            post(application_authz_batch_check),
+        )
+        .route(
+            "/api/v1/application-authz/filter",
+            post(application_authz_filter),
+        )
 }
 
 #[cfg(test)]

@@ -1,13 +1,13 @@
 use super::codec::{
     action_risk_level_from_str, agreement_status_from_str, agreement_type_from_str,
     application_app_type_from_str, application_consent_policy_from_str,
-    application_grant_status_from_str, application_type_from_str, role_binding_state_from_str,
-    role_binding_subject_type_from_str,
+    application_grant_status_from_str, application_provisioning_status_from_str,
+    application_type_from_str, role_binding_state_from_str, role_binding_subject_type_from_str,
 };
 use anyhow::Result;
 use domain::{
-    Action, Agreement, Application, ApplicationGrant, ApplicationRedirectUri, Organization, Party,
-    Role, RoleBinding, ServiceProvider,
+    Action, Agreement, Application, ApplicationGrant, ApplicationRedirectUri, Group, GroupMember,
+    Organization, Party, Role, RoleBinding, ServiceProvider,
 };
 use hiqlite::Row;
 
@@ -41,16 +41,6 @@ pub(super) struct UserLookupRow {
     pub(super) email: Option<String>,
     pub(super) display_name: String,
     pub(super) active: i64,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct AuthIdentityCacheRow {
-    pub(super) provider: String,
-    pub(super) external_user_id: String,
-    pub(super) email: Option<String>,
-    pub(super) display_name: String,
-    pub(super) active: i64,
-    pub(super) expires_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +96,21 @@ pub(super) struct OrganizationRow {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct GroupRow {
+    pub(super) id: String,
+    pub(super) organization_id: String,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct GroupMemberRow {
+    pub(super) group_id: String,
+    pub(super) organization_membership_id: String,
+    pub(super) user_id: String,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct PartyRow {
     pub(super) id: String,
     pub(super) business_no: String,
@@ -148,8 +153,8 @@ pub(super) struct ApplicationRow {
     pub(super) first_party: i64,
     pub(super) consent_policy: String,
     pub(super) active: i64,
+    pub(super) provisioning_status: String,
     pub(super) rauthy_client_id: Option<String>,
-    pub(super) secret_rotated_at: Option<String>,
     pub(super) created_by_user_id: String,
 }
 
@@ -187,7 +192,9 @@ pub(super) struct ActionLookupRow {
 #[derive(Debug, Clone)]
 pub(super) struct UserActionDecisionRow {
     pub(super) idx: i64,
+    pub(super) rbac_allowed: i64,
     pub(super) allowed: i64,
+    pub(super) trusted_application: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -224,19 +231,6 @@ impl From<&mut Row<'_>> for UserLookupRow {
             email: row.get("email"),
             display_name: row.get("display_name"),
             active: row.get("active"),
-        }
-    }
-}
-
-impl From<&mut Row<'_>> for AuthIdentityCacheRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            provider: row.get("provider"),
-            external_user_id: row.get("external_user_id"),
-            email: row.get("email"),
-            display_name: row.get("display_name"),
-            active: row.get("active"),
-            expires_at: row.get("expires_at"),
         }
     }
 }
@@ -308,6 +302,27 @@ impl From<&mut Row<'_>> for OrganizationRow {
     }
 }
 
+impl From<&mut Row<'_>> for GroupRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            name: row.get("name"),
+            description: row.get("description"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for GroupMemberRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            group_id: row.get("group_id"),
+            organization_membership_id: row.get("organization_membership_id"),
+            user_id: row.get("user_id"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for PartyRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -361,8 +376,8 @@ impl From<&mut Row<'_>> for ApplicationRow {
             first_party: row.get("first_party"),
             consent_policy: row.get("consent_policy"),
             active: row.get("active"),
+            provisioning_status: row.get("provisioning_status"),
             rauthy_client_id: row.get("rauthy_client_id"),
-            secret_rotated_at: row.get("secret_rotated_at"),
             created_by_user_id: row.get("created_by_user_id"),
         }
     }
@@ -411,7 +426,9 @@ impl From<&mut Row<'_>> for UserActionDecisionRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             idx: row.get("idx"),
+            rbac_allowed: row.get("rbac_allowed"),
             allowed: row.get("allowed"),
+            trusted_application: row.get("trusted_application"),
         }
     }
 }
@@ -512,10 +529,33 @@ impl TryFrom<ApplicationRow> for Application {
             first_party: value.first_party == 1,
             consent_policy: application_consent_policy_from_str(&value.consent_policy)?,
             active: value.active == 1,
+            provisioning_status: application_provisioning_status_from_str(
+                &value.provisioning_status,
+            )?,
             rauthy_client_id: value.rauthy_client_id,
-            secret_rotated_at: value.secret_rotated_at,
             created_by_user_id: value.created_by_user_id,
         })
+    }
+}
+
+impl From<GroupRow> for Group {
+    fn from(value: GroupRow) -> Self {
+        Self {
+            id: value.id,
+            organization_id: value.organization_id,
+            name: value.name,
+            description: value.description,
+        }
+    }
+}
+
+impl From<GroupMemberRow> for GroupMember {
+    fn from(value: GroupMemberRow) -> Self {
+        Self {
+            group_id: value.group_id,
+            organization_membership_id: value.organization_membership_id,
+            user_id: value.user_id,
+        }
     }
 }
 

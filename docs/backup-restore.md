@@ -1,87 +1,175 @@
 # Grant Backup / Restore
 
-`grant`의 영속 상태는 grant hiqlite metadata와 Rauthy identity data로 나뉜다.
+Grant의 복구 단위는 Grant 권한 데이터와 Rauthy identity 데이터를 함께 고정한 recovery generation이다. 두 시스템은 모두 3노드 hiqlite `StatefulSet`과 `emptyDir`을 사용한다. PVC 재부착은 복구 수단이 아니며, 전체 손실은 외부 S3 백업 쌍으로 복구한다.
 
-## 범위
+## 운영 불변조건
 
-- grant metadata: hiqlite Raft state machine, logs, snapshots
-- Rauthy identity data: Rauthy `/app/data` directory or the production database/backend chosen for Rauthy
+- `grant-voter`와 `rauthy`는 각각 voter 3개, `podManagementPolicy: Parallel`, `PodDisruptionBudget.minAvailable: 2`로 실행한다.
+- production overlay는 hostname 기준 hard anti-affinity와 `DoNotSchedule` topology spread를 요구한다. 3개 failure domain의 실제 수용량이 없으면 배포하지 않는다.
+- 두 데이터 디렉터리는 `emptyDir`이다. 한 Pod 손실은 남은 quorum에서 재가입하지만, 세 Pod 동시 손실은 S3 복구가 필요하다.
+- production lifecycle mode의 기본값은 `steady`다. 빈 Pod는 직접 ordinal peer가 cluster-ready일 때만 시작한다. production은 `fresh`를 거부하고 `restore`는 recovery state와 이름이 같은 restore authorization Secret이 있을 때만 ordinal 0을 연다. mode 파일이 없거나 잘못되면 즉시 실패한다.
+- restore는 외부 Kubernetes operator 스크립트로만 수행한다. HTTP restore API는 제공하지 않는다.
+- Grant와 Rauthy는 서로 다른 bucket, IAM principal, encryption keyring, recovery generation을 사용한다.
 
-## 기본 원칙
+hiqlite는 bucket root에 `backup_node_<leader-id>_<unix-seconds>.sqlite` 이름으로 저장하며 workload prefix를 지원하지 않는다. 같은 bucket을 공유하면 같은 초의 이름 충돌과 retention 교차 삭제가 가능하므로 별도 bucket이 필수다. 환경이나 cluster generation이 바뀌어도 새 bucket과 새 `BACKUP_GENERATION`을 사용해 이전 retention job과 분리한다.
 
-- repo가 Kubernetes나 Compose 안에 object storage를 배포하지 않는다.
-- hiqlite 원격 백업은 운영자가 준비한 외부 S3 호환 스토리지를 사용한다.
-- 기본 Kubernetes 토폴로지는 `grant-voter` `StatefulSet` 3개다.
-- 기본 Rauthy manifest는 단일 `StatefulSet`과 1Gi `ReadWriteOnce` PVC로 `/app/data`를 보존한다. 운영 배포에서는 용량, storage class, RPO/RTO에 맞는 별도 Rauthy 백업 정책을 추가한다.
-- `deploy/overlays/ephemeral`과 `deploy/overlays/ied`는 검증 전용으로 Rauthy `/app/data`에 `emptyDir`을 사용한다. Pod 교체 시 사용자, client 변경, session, JWKS가 유실되고 bootstrap 데이터만 다시 생성되므로 운영에 사용하지 않는다.
-- voter quorum 복구를 먼저 끝낸 뒤 API를 검증한다.
-- restore는 외부 운영 절차로 수행한다. 앱 프로세스가 자동 restore를 판단하지 않는다.
-- Rauthy data 백업/복구는 Rauthy 운영 절차로 다룬다.
+## Production 입력
 
-## 원격 백업 환경변수
+`deploy/overlays/production`은 다음 외부 리소스를 생성하지 않는다. 값이 없으면 Pod가 fail closed한다.
 
-외부 S3 호환 백업을 켤 때만 아래 값을 `grant-config`와 `grant-secrets`에 설정한다.
+- `grant-production-config`, `grant-production-backup`, `grant-production-secrets`
+- `rauthy-production-config`, `rauthy-production-backup`, `rauthy-production-secrets`
+- operator 소유 `grant-recovery-state`
+- 별도 관리되는 production Ingress/TLS와 실제 digest로 치환한 Grant release image. 저장소의 `REQUIRED_PRODUCTION_DIGEST`는 admission-invalid marker이므로 그대로 배포할 수 없다.
 
-- `HQL_BACKUP_CRON`
-- `HQL_BACKUP_KEEP_DAYS`
-- `HQL_BACKUP_KEEP_DAYS_LOCAL`
-- `HQL_S3_URL`
-- `HQL_S3_BUCKET`
-- `HQL_S3_REGION`
-- `HQL_S3_PATH_STYLE`
-- `HQL_S3_KEY`
-- `HQL_S3_SECRET`
-- `ENC_KEYS`
-- `ENC_KEY_ACTIVE`
+형식만 보여주는 파일은 `deploy/overlays/production/*.example.yaml`에 있다. 저장소에 실제 credential을 넣지 않는다.
 
-예시 버킷 이름은 `grant-backups`다. 로컬 MinIO는 지원하지 않는다.
+두 workload가 각각 요구하는 backup 값은 다음과 같다.
 
-## 정상 운영
+- `HQL_BACKUP_CRON`, `HQL_BACKUP_KEEP_DAYS`, `HQL_BACKUP_KEEP_DAYS_LOCAL`
+- `HQL_S3_URL`, `HQL_S3_BUCKET`, `HQL_S3_REGION`, `HQL_S3_PATH_STYLE`
+- `HQL_S3_KEY`, `HQL_S3_SECRET`
+- `ENC_KEYS`, `ENC_KEY_ACTIVE`, `KEYRING_GENERATION`
 
-`hiqlite`는 cron 기준으로 주기 백업을 생성하고, leader가 외부 S3 호환 버킷으로 업로드한다.
+`ENC_KEYS`는 현재 active key만이 아니라 retention 기간의 모든 백업을 복호화할 수 있는 versioned keyring이어야 한다. Grant keyring과 Rauthy keyring을 별도로 escrow하고, 삭제·회전 이력을 recovery record와 함께 보존한다. record는 `KEYRING_GENERATION`과 `ENC_KEYS` 원문 SHA-256을 모두 고정하며 restore operator는 ordinal 0을 기동하기 전에 실제 Secret을 decode해 같은 digest인지 확인한다. S3 principal은 workload와 역할별 최소 권한으로 분리한다. 평상시 backup writer, object-version materializer, restore reader는 모두 다른 principal이어야 한다.
 
-백업 설정과 최근 로그 확인:
+Rauthy Admin API key는 client read/create/update와 secret rotation에 필요한 최소 scope만 부여한다. bootstrap Secret, 현재 key 이름, 만료, 회전·폐기 기록을 외부 secret manager에서 관리한다. 새 key로 Grant 연동을 확인한 뒤 이전 key를 폐기한다.
+
+## 백업 완료 판정
+
+cron 또는 backup 요청 성공은 local snapshot 생성 요청을 받았다는 뜻이며 S3 업로드 완료 증거가 아니다. 운영 모니터는 다음을 확인한다.
+
+1. 예상 cron 이후 새 object version을 S3에서 polling한다.
+2. object 크기, version ID, ciphertext SHA-256을 기록한다.
+3. Grant와 Rauthy object를 동일한 write-fence 구간에서 recovery generation으로 승인한다.
+4. 고정 image와 escrow keyring을 사용하는 격리 namespace restore가 semantic check를 통과해야 production restore 승인 상태가 된다.
+
+`scripts/materialize-s3-restore.sh`는 exact source `versionId`가 보일 때까지 polling한다. 따라서 비동기 업로드가 아직 끝나지 않았으면 승인하지 않는다.
+
+## Recovery pair 생성
+
+`scripts/create-recovery-pair.sh`는 미리 적용된 traffic/write fence와 서명된 fence evidence를 검증하고, 두 source version을 workload별 bucket의 새 key로 materialize한다. namespace에는 `grant.cypark.dev/recovery-write-fence=<recovery-id>` label이 있어야 하며 public Service endpoint는 비어 있고 모든 CronJob은 suspend 상태여야 한다.
+
+Fence signer는 direct/headless writer, 관리 작업과 외부 queue consumer가 모두 중지된 구간의 namespace UID, 두 source version, 시작/종료 시각을 JSON에 기록하고 detached OpenSSL signature를 만든다. `snapshots.grant`와 `snapshots.rauthy`에는 각각 `snapshotId`, `sourceKey`, `sourceVersionId`, 실제 snapshot `createdAt`을 넣는다. `createdAt`과 source object의 `LastModified`가 모두 서명 구간 안에 있어야 한다. 비동기 업로드의 `LastModified`만으로는 fence 뒤 snapshot 생성을 증명하지 못하므로 승인하지 않는다. `release.cronJobsToResume`에는 fence 전 active였고 완료 후 재개할 CronJob 이름만 넣는다. 단순 환경변수 assertion은 승인 증거로 인정하지 않는다.
+
+필수 metadata:
+
+- recovery ID와 generation
+- workload별 backup generation
+- source bucket, object key, version ID, ciphertext SHA-256
+- exact image digest, schema ID, encryption key ID, complete keyring digest/generation
+- workload별 backup writer, materializer, restore reader ARN
+- isolated drill ID와 성공 상태
+- Object Lock retention 종료 시각
+
+materialized key는 `restore/<workload>/<recovery-id>/<sha256>.enc`이다. bucket versioning과 S3 Object Lock `COMPLIANCE`가 필수이며 retention은 최소 24시간 뒤여야 한다. HQL은 `versionId`를 직접 읽지 못하므로 materializer는 첫 version을 만든 직후 그 exact key에 대한 `PutObject`, `DeleteObject`, `DeleteObjectVersion` explicit Deny bucket-policy 문을 설치한다. 별도 explicit Deny는 평상시 backup writer의 `GetObject`/`GetObjectVersion`도 이 restore key에서 차단한다. 정책 설치 후 current version, exact retention, ciphertext SHA를 다시 확인한다. restore 시 one-shot Secret이 전용 reader의 `HQL_S3_KEY`/`HQL_S3_SECRET`을 Pod에 공급하고 wrapper가 평상시 writer credential을 해당 1회 실행에서만 덮어쓴다. operator가 검증한 reader ARN과 실제 Pod reader가 같은 record 값에 묶인다.
+
+이 exact-key Deny는 Object Lock 만료 뒤에도 자동으로 사라지지 않는다. 보존 정책에 따라 restore record와 승인을 폐기한 뒤 bucket-policy의 해당 `immutablePolicySid`를 별도 변경관리로 제거해야 하며, materializer나 restore workflow가 자동으로 제거하지 않는다.
 
 ```bash
-kubectl -n grant get configmap grant-config -o yaml
-kubectl -n grant get secret grant-secrets -o yaml
-kubectl -n grant logs statefulset/grant-voter --tail=200
-aws s3 ls "s3://${HQL_S3_BUCKET}/"
+export RECOVERY_ID=2026-07-14-prod-01
+export RECOVERY_GENERATION=prod-generation-42
+export GRANT_BACKUP_GENERATION=grant-prod-g42
+export RAUTHY_BACKUP_GENERATION=rauthy-prod-g42
+export GRANT_KEYRING_GENERATION=grant-keyring-g42
+export RAUTHY_KEYRING_GENERATION=rauthy-keyring-g42
+export GRANT_KEYRING_SHA256='<sha256-of-exact-ENC_KEYS-bytes>'
+export RAUTHY_KEYRING_SHA256='<sha256-of-exact-ENC_KEYS-bytes>'
+export GRANT_WRITER_PRINCIPAL_ARN='arn:aws:iam::...:role/grant-backup-writer'
+export RAUTHY_WRITER_PRINCIPAL_ARN='arn:aws:iam::...:role/rauthy-backup-writer'
+export GRANT_RESTORE_READER_PRINCIPAL_ARN='arn:aws:iam::...:role/grant-restore-reader'
+export RAUTHY_RESTORE_READER_PRINCIPAL_ARN='arn:aws:iam::...:role/rauthy-restore-reader'
+export RESTORE_RETAIN_UNTIL=2027-07-14T00:00:00Z
+export ISOLATED_DRILL_ID=pending
+export ISOLATED_DRILL_PASSED=false
+export FENCE_EVIDENCE=/secure/fence-evidence.json
+export FENCE_SIGNATURE=/secure/fence-evidence.sig
+export FENCE_PUBLIC_KEY=/secure/fence-signer-public.pem
+export RECOVERY_FENCE_PUBLIC_KEY_SHA256='<pinned-public-key-DER-sha256>'
+export GRANT_AWS_PROFILE=grant-materializer
+export RAUTHY_AWS_PROFILE=rauthy-materializer
+
+# GRANT_*와 RAUTHY_* source bucket/key/version/SHA/image/schema/key ID를 설정한다.
+scripts/create-recovery-pair.sh --namespace grant --output recovery-pair.json
 ```
 
-`GET /api/v1/admin/backups`는 local backup 목록을 보여주고, restore 대상 이름도 여기서 읽는다.
+최초 record는 production 승인이 아니다. 보호된 `s3-recovery-drill` workflow는 `main` ref에서만 실행되고, UID와 recovery ID annotation으로 고정된 drill namespace에서 저장소의 고정 복구 및 semantic 경로를 실행한다. Secret으로 임의 셸을 받지 않는다. 성공하면 canonical approved JSON 전체에 전용 private key로 detached signature를 만들며 production operator는 별도 배포된 public key로 이를 검증한다. JSON의 `passed` 값을 직접 수정한 파일은 승인으로 인정되지 않는다.
 
-## 전체 클러스터 손실
+복구 record는 credential을 포함하지 않지만 운영 metadata이므로 변경 이력과 승인을 보호한다. PR CI는 `--dry-run`만 실행한다.
 
-복구 순서:
+## 전체 클러스터 복구
 
-1. voter StatefulSet을 중지한다.
-2. 복구할 백업 이름을 `HQL_BACKUP_RESTORE=s3:<backup-name>`로 지정한다.
-3. voter StatefulSet을 다시 시작한다.
-4. quorum과 `writeReady=true`를 확인한다.
-5. `HQL_BACKUP_RESTORE`를 제거한다.
-6. `/healthz`, `/api/v1/providers`, `/api/v1/authz/check`로 API를 확인한다.
-
-예시 명령:
+production destructive restore는 먼저 동일한 recovery pair를 사용한 격리 namespace live drill이 통과해야 한다. 그 후 다음 명령으로 exact recovery ID를 다시 확인한다.
 
 ```bash
-NAMESPACE=grant
-BACKUP_NAME=s3:<backup-name>
+export GRANT_AWS_PROFILE=grant-recovery-reader
+export RAUTHY_AWS_PROFILE=rauthy-recovery-reader
+export RECOVERY_SEMANTIC_BEARER_TOKEN=...
+export RECOVERY_SEMANTIC_APP_AUTH_KEY=...
+export RECOVERY_APPROVAL_PUBLIC_KEY_SHA256='<pinned-public-key-DER-sha256>'
+export RECOVERY_OPERATOR_GIT_COMMIT='<approved-workflow-gitCommit>'
 
-kubectl -n "${NAMESPACE}" scale statefulset/grant-voter --replicas=0
-
-kubectl -n "${NAMESPACE}" set env statefulset/grant-voter HQL_BACKUP_RESTORE="${BACKUP_NAME}"
-kubectl -n "${NAMESPACE}" scale statefulset/grant-voter --replicas=3
-kubectl -n "${NAMESPACE}" rollout status statefulset/grant-voter --timeout=15m
-
-kubectl -n "${NAMESPACE}" set env statefulset/grant-voter HQL_BACKUP_RESTORE-
+scripts/restore-full-cluster.sh \
+  --record recovery-pair.json \
+  --approval-signature recovery-pair.sig \
+  --approval-public-key /secure/recovery-approval-public.pem \
+  --semantic-config semantic-config.json \
+  --namespace grant \
+  --expected-namespace-uid '<immutable-namespace-uid>' \
+  --confirm-recovery-id 2026-07-14-prod-01
 ```
 
-## 검증 포인트
+스크립트의 단계는 다음과 같다.
 
-- `GET /healthz`
-- `readReady` / `writeReady`
-- `kubectl -n grant get pods`
-- `statefulset/grant-voter` rollout 상태
-- `GET /api/v1/admin/backups`
-- 대표 `POST /api/v1/authz/check` 응답
+1. 두 public Service를 fence하고, immutable current version·Object Lock·SHA·image digest를 다시 검증한다.
+2. 아직 복구 데이터가 생성되기 전에만 두 StatefulSet을 0으로 만든다.
+3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. wrapper는 `emptyDir` marker를 원자적으로 만들고 같은 Pod의 container restart에서는 restore env를 다시 노출하지 않는다.
+4. ordinal 0 Ready와 S3 정책/version 재검증 직후 Secret을 삭제한다. 새 Pod는 authorization이 없어 init에서 막히며, 재시도는 operator의 명시적 re-arm이 필요하다.
+5. `partition: 1`에서 no-restore template을 만든 뒤 replicas 3으로 확장한다. 각 Pod readiness와 native membership의 config가 joint consensus가 아닌 정확히 하나의 voter set `1,2,3`인지 확인한다.
+6. lifecycle mode를 `steady`로 바꾸고 `partition: 0`으로 ordinal 0만 quorum-preserving restart한다. restore env와 Secret이 모두 사라졌는지 확인한다.
+7. Grant에 같은 1→3 절차를 적용한다. learner가 있다면 voter migration과 복구가 끝난 후에만 재가입시킨다. schema migration은 voter만 수행한다.
+8. 각 Pod의 native Raft metrics에서 voter IDs `1,2,3`, 같은 leader/term/applied index를 확인한다. Rauthy는 SQLite와 cache Raft를 모두 검사한다. semantic 검사 동안 일반 `rauthy` Service는 계속 fence 상태이며, recovery-only ClusterIP Service와 일시적인 Grant 내부 base URL만 사용한다. 고정 data-only semantic config의 Rauthy health와 Grant application-authz allow/deny 결과가 서명된 drill evidence와 일치하고 내부 route가 원복된 후에만 일반 Service selector를 원복한다.
+
+checkpoint는 operator 소유 `grant-recovery-state` ConfigMap에 recovery ID, generation, phase, checksum, ControllerRevision과 함께 남는다. namespace-scoped Lease가 동시 실행을 막고 ConfigMap은 `resourceVersion` CAS로 정확히 다음 phase로만 교체된다. 알 수 없거나 비어 있는 phase, 건너뛰기, 역행은 모두 거부한다. crash 뒤 남은 Lease는 checkpoint를 확인한 운영자만 수동 삭제한다.
+
+`unfenced`는 terminal audit 상태이며 자동으로 다음 recovery에 넘기지 않는다. 외부 direct writer가 복구되고 namespace의 보호된 `grant.cypark.dev/recovery-direct-writers-released=<recovery-id>` annotation이 설정된 뒤, 같은 서명 record와 `--release-completed`를 다시 사용한다. release는 signed `cronJobsToResume`만 재개하고 namespace write-fence label을 제거한 다음 ConfigMap을 `resourceVersion` CAS로 `recovery-id: none`에 넘긴다. 마지막 recovery ID/generation/checksum/release 시각은 ConfigMap audit field와 namespace annotation에 보존된다.
+
+```bash
+scripts/restore-full-cluster.sh \
+  --record recovery-pair.json --approval-signature recovery-pair.sig \
+  --approval-public-key /secure/recovery-approval-public.pem \
+  --namespace grant --expected-namespace-uid '<immutable-namespace-uid>' \
+  --confirm-recovery-id 2026-07-14-prod-01 --release-completed
+```
+
+live drill은 `RESTORE_STOP_AFTER_PHASE=<phase>`로 checkpoint 직후 operator 중단을 주입할 수 있다. one-shot Secret 삭제 후 아직 peer가 없는 `*-ordinal0-restored` 구간에서 ordinal 0까지 손실했다면 자동 재적용하지 않는다. 같은 immutable record를 다시 확인한 뒤 `--rearm-ordinal0 rauthy` 또는 `--rearm-ordinal0 grant`를 명시해야 한다. 이미 두 peer가 catch-up한 `*-voters-caught-up` 이후에는 re-arm하지 않고 partition cleanup을 재개한다.
+
+## Lifecycle gate와 검증
+
+`deploy/k8s/lifecycle-gate.sh`는 aggregate Service나 Ingress가 아니라 각 StatefulSet ordinal DNS의 cluster-readiness endpoint를 확인한다. production은 local-only `fresh`를 거부하며 restore ID가 state와 Secret에서 일치해야 한다. production workload ServiceAccount는 API token을 mount하지 않고 recovery state를 수정할 RBAC도 받지 않는다.
+
+정적 검증:
+
+```bash
+sh scripts/verify-ephemeral-k8s.sh static
+sh scripts/verify-docs.sh
+```
+
+수동 live drill은 GitHub Actions `s3-recovery-drill` workflow의 보호된 environment와 전용 namespace에서 실행한다. `RECOVERY_SEMANTIC_CONFIG_JSON_B64`는 조직, action, resource, 예상 allow/deny만 담는 data-only JSON이며 bearer와 `GRANT_APP_AUTH_KEY`는 별도 Secret이다. signing private key, namespace-scoped kubeconfig, workload별 read-only S3 reader를 사용한다. 다음 장애 지점을 모두 반복한다.
+
+- all-empty `steady`
+- ordinal 0 restore 전·후 재시작
+- one-shot Secret 삭제 직후 재시작
+- `partition: 1` scale-up 중 operator 중단
+- voter catch-up 후 `partition: 0` cleanup 중단
+- checkpoint별 재실행
+
+정적 CI와 dry-run은 실제 S3 복호화, target Kubernetes controller 동작, Rauthy/Grant semantic data를 증명하지 못한다. 실제 provider live drill이 production readiness의 필수 조건이다.
+
+## 마이그레이션과 제한
+
+기존 PVC 기반 Rauthy StatefulSet의 `volumeClaimTemplates`는 immutable field다. in-place patch하지 않는다. breaking 배포 전 recovery pair와 격리 restore를 승인하고, traffic을 fence한 뒤 기존 StatefulSet과 Pod를 삭제·재생성하여 no-PVC manifest를 적용하고 전체 restore 절차를 수행한다. 이전 PVC는 새 cluster semantic 검증과 rollback 기간이 끝날 때까지 별도 보존하고 자동으로 삭제하지 않는다.
+
+Grant와 Rauthy backup은 분산 transaction이 아니다. write fence가 없는 두 최신 object를 임의로 조합하면 identity와 authorization 시점이 달라질 수 있다. recovery generation 밖의 조합은 금지한다.
+
+RPO 입력은 backup cron 간격, S3 업로드 지연, pair 승인 주기다. RTO 입력은 object polling/materialization, ordinal 0 restore, 두 cluster의 voter catch-up, cleanup rollout, semantic 검증 시간이다. 각 live drill에서 이 시간을 기록해 목표와 비교한다.

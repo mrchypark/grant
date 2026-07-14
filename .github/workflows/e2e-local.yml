@@ -11,6 +11,7 @@ on:
       - "README.md"
       - "crates/**"
       - "deploy/**"
+      - "docs/**"
       - "scripts/**"
 
 concurrency:
@@ -29,6 +30,9 @@ jobs:
 
       - name: Check Rust targets
         run: cargo check --workspace --all-targets
+
+      - name: Lint Rust targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test Rust targets
         run: cargo test --workspace --all-targets
@@ -108,6 +112,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq shellcheck
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
 
       - name: Verify toolchain
         run: |
@@ -116,20 +121,41 @@ jobs:
           vcluster version
           jq --version
           shellcheck --version
+          actionlint -version
 
       - name: Verify local scripts
         run: |
-          scripts=(
+          bash_scripts=(
             scripts/vind-exec.sh
             scripts/vind-cluster.sh
             scripts/ci-local.sh
             scripts/vind-bootstrap.sh
-            scripts/verify-ephemeral-k8s.sh
             scripts/gke-skaffold-run.sh
-            scripts/k8s-secret-helpers.sh
           )
-          bash -n "${scripts[@]}"
-          shellcheck "${scripts[@]}"
+          posix_scripts=(
+            scripts/k8s-secret-helpers.sh
+            scripts/verify-ephemeral-k8s.sh
+            scripts/verify-docs.sh
+            scripts/materialize-s3-restore.sh
+            scripts/create-recovery-pair.sh
+            scripts/restore-full-cluster.sh
+            scripts/recovery-state-machine.sh
+            scripts/verify-recovery-state-machine.sh
+            scripts/verify-restore-once.sh
+            deploy/k8s/lifecycle-gate.sh
+            deploy/k8s/restore-once.sh
+          )
+          bash -n "${bash_scripts[@]}"
+          for script in "${posix_scripts[@]}"; do sh -n "${script}"; done
+          shellcheck "${bash_scripts[@]}" "${posix_scripts[@]}"
+          actionlint -shellcheck= .github/workflows/*.yml
+
+      - name: Verify docs and recovery manifests
+        run: |
+          scripts/verify-docs.sh
+          scripts/verify-recovery-state-machine.sh
+          scripts/verify-restore-once.sh
+          scripts/verify-ephemeral-k8s.sh static
 
       - name: Run local bootstrap regression
         env:
@@ -138,6 +164,7 @@ jobs:
           CI_DOCKER_BUILDER_PRUNE: "1"
           NAMESPACE: grant
           GRANT_MASTER_KEY: local-dev-master-key
+          GRANT_APP_AUTH_KEY: local-dev-app-auth-key
           RESET_CLUSTER: "1"
           KEEP_CLUSTER: "0"
         run: bash scripts/ci-local.sh

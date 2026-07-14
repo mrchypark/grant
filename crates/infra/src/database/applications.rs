@@ -1,5 +1,6 @@
 use super::core::now_string;
 use super::*;
+use domain::ApplicationConsentPolicy;
 
 impl Database {
     async fn validate_application_references(&self, application: &Application) -> Result<()> {
@@ -41,7 +42,7 @@ impl Database {
             .execute(
                 "INSERT INTO applications (
                     id, organization_id, slug, name, description, application_type, app_type,
-                    first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                    first_party, consent_policy, active, provisioning_status, rauthy_client_id,
                     created_by_user_id, created_at, updated_at
                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                 params!(
@@ -59,8 +60,8 @@ impl Database {
                     },
                     application_consent_policy_str(&application.consent_policy),
                     if application.active { 1_i64 } else { 0_i64 },
+                    application_provisioning_status_str(&application.provisioning_status),
                     application.rauthy_client_id.clone(),
-                    application.secret_rotated_at.clone(),
                     application.created_by_user_id.clone(),
                     now.clone(),
                     now
@@ -71,10 +72,11 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_application(
+    pub async fn update_application_with_security_lease(
         &self,
         application: &Application,
         slug_changed: bool,
+        lease_token: &str,
     ) -> Result<()> {
         self.validate_application_references(application).await?;
         let conflict_count = self
@@ -103,15 +105,16 @@ impl Database {
                  description = $5,
                  application_type = $6,
                  app_type = $7,
-                 first_party = $8,
-                 consent_policy = $9,
-                 active = $10,
-                 created_by_user_id = $11,
-                 updated_at = $12
+                 active = $8,
+                 created_by_user_id = $9,
+                 updated_at = $10
              WHERE id = $1
+               AND NOT (first_party = 1 AND consent_policy = 'auto_approve')
+               AND security_mutation_token = $11
+               AND security_mutation_expires_at > $10
                AND NOT EXISTS (
                    SELECT 1 FROM applications existing
-                   WHERE existing.slug = $13 AND existing.id != $14
+                   WHERE existing.slug = $12 AND existing.id != $13
                )"
         } else {
             "UPDATE applications
@@ -121,12 +124,13 @@ impl Database {
                  description = $5,
                  application_type = $6,
                  app_type = $7,
-                 first_party = $8,
-                 consent_policy = $9,
-                 active = $10,
-                 created_by_user_id = $11,
-                 updated_at = $12
-             WHERE id = $1"
+                 active = $8,
+                 created_by_user_id = $9,
+                 updated_at = $10
+             WHERE id = $1
+               AND NOT (first_party = 1 AND consent_policy = 'auto_approve')
+               AND security_mutation_token = $11
+               AND security_mutation_expires_at > $10"
         };
         let mut update_params = params!(
             application.id.clone(),
@@ -136,16 +140,11 @@ impl Database {
             application.description.clone(),
             application_type_str(&application.application_type),
             application_app_type_str(&application.app_type),
-            if application.first_party {
-                1_i64
-            } else {
-                0_i64
-            },
-            application_consent_policy_str(&application.consent_policy),
             if application.active { 1_i64 } else { 0_i64 },
             application.created_by_user_id.clone(),
             now
         );
+        update_params.push(hiqlite::Param::from(lease_token.to_owned()));
         if slug_changed {
             update_params.push(hiqlite::Param::from(application.slug.clone()));
             update_params.push(hiqlite::Param::from(application.id.clone()));
@@ -156,15 +155,21 @@ impl Database {
             .await
             .context("update application")?;
         if updated == 0 {
-            if self
+            let current = self
                 .find_application_by_id_with_consistency(
                     &application.id,
                     Some(ReadConsistency::Strong),
                 )
-                .await?
-                .is_none()
-            {
+                .await?;
+            if current.is_none() {
                 return Err(anyhow!("application not found: {}", application.id));
+            }
+            if current.is_some_and(|app| {
+                app.first_party && app.consent_policy == ApplicationConsentPolicy::AutoApprove
+            }) {
+                return Err(anyhow!(
+                    "forbidden: trusted applications may only be changed by the master administrator"
+                ));
             }
             if slug_changed {
                 return Err(anyhow!(
@@ -176,6 +181,192 @@ impl Database {
         Ok(())
     }
 
+    pub async fn set_application_trust(
+        &self,
+        organization_id: &str,
+        application_id: &str,
+        trusted: bool,
+    ) -> Result<Application> {
+        let now = now_string();
+        let assertion_id = Uuid::new_v4().simple().to_string();
+        let transaction_result = self
+            .runtime
+            .transaction([
+                (
+                    Cow::Borrowed(
+                        "INSERT INTO application_consent_assertions (id, valid)
+                         SELECT $1,
+                                CASE WHEN EXISTS (
+                                    SELECT 1 FROM applications
+                                    WHERE id = $2
+                                      AND organization_id = $3
+                                      AND (
+                                          security_mutation_token IS NULL
+                                          OR security_mutation_expires_at IS NULL
+                                          OR security_mutation_expires_at <= $4
+                                      )
+                                ) THEN 1 ELSE 0 END",
+                    ),
+                    params!(
+                        assertion_id.clone(),
+                        application_id.to_owned(),
+                        organization_id.to_owned(),
+                        now.clone()
+                    ),
+                ),
+                (
+                    Cow::Borrowed(
+                        "UPDATE applications
+                 SET first_party = $1,
+                     consent_policy = $2,
+                     updated_at = $3,
+                     security_mutation_token = NULL,
+                     security_mutation_expires_at = NULL
+                 WHERE id = $4 AND organization_id = $5",
+                    ),
+                    params!(
+                        if trusted { 1_i64 } else { 0_i64 },
+                        if trusted { "auto_approve" } else { "explicit" },
+                        now.clone(),
+                        application_id.to_owned(),
+                        organization_id.to_owned()
+                    ),
+                ),
+                (
+                    Cow::Borrowed(
+                        "UPDATE application_grants
+                         SET status = 'revoked',
+                             revoked_at = $1,
+                             revoked_by_user_id = NULL,
+                             updated_at = $1
+                         WHERE application_id = $2
+                           AND organization_id = $3
+                           AND status = 'active'
+                           AND $4 = 1",
+                    ),
+                    params!(
+                        now,
+                        application_id.to_owned(),
+                        organization_id.to_owned(),
+                        if trusted { 1_i64 } else { 0_i64 }
+                    ),
+                ),
+                (
+                    Cow::Borrowed("DELETE FROM application_consent_assertions WHERE id = $1"),
+                    params!(assertion_id),
+                ),
+            ])
+            .await;
+        if let Err(err) = transaction_result {
+            if !err.chain().any(|cause| {
+                cause
+                    .to_string()
+                    .contains("application_consent_assertion_valid")
+            }) {
+                return Err(err).context("set application trust transaction");
+            }
+            if self
+                .exists_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) AS count FROM applications
+                     WHERE id = $1 AND organization_id = $2",
+                    params!(application_id.to_owned(), organization_id.to_owned()),
+                    "application trust target existence",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "application security mutation already in progress: {application_id}"
+                ));
+            }
+            return Err(anyhow!(
+                "application not found: {application_id} in organization {organization_id}"
+            ));
+        }
+        self.get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
+    pub async fn try_acquire_application_security_mutation(
+        &self,
+        application_id: &str,
+        organization_id: &str,
+        lease_token: &str,
+        acquired_at: &str,
+        expires_at: &str,
+    ) -> Result<bool> {
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE applications
+                 SET security_mutation_token = $1,
+                     security_mutation_expires_at = $2
+                 WHERE id = $3
+                   AND organization_id = $4
+                   AND NOT (first_party = 1 AND consent_policy = 'auto_approve')
+                   AND (
+                       security_mutation_token IS NULL
+                       OR security_mutation_expires_at IS NULL
+                       OR security_mutation_expires_at <= $5
+                   )",
+                params!(
+                    lease_token.to_owned(),
+                    expires_at.to_owned(),
+                    application_id.to_owned(),
+                    organization_id.to_owned(),
+                    acquired_at.to_owned()
+                ),
+            )
+            .await
+            .context("acquire application security mutation lease")?;
+        Ok(updated == 1)
+    }
+
+    pub async fn release_application_security_mutation(
+        &self,
+        application_id: &str,
+        lease_token: &str,
+    ) -> Result<()> {
+        self.runtime
+            .execute(
+                "UPDATE applications
+                 SET security_mutation_token = NULL,
+                     security_mutation_expires_at = NULL
+                 WHERE id = $1 AND security_mutation_token = $2",
+                params!(application_id.to_owned(), lease_token.to_owned()),
+            )
+            .await
+            .context("release application security mutation lease")?;
+        Ok(())
+    }
+
+    async fn acquire_direct_application_security_mutation(
+        &self,
+        application_id: &str,
+    ) -> Result<String> {
+        let application = self
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        let token = Uuid::new_v4().simple().to_string();
+        let acquired_at = Utc::now();
+        let expires_at = acquired_at + chrono::Duration::minutes(10);
+        if !self
+            .try_acquire_application_security_mutation(
+                application_id,
+                &application.organization_id,
+                &token,
+                &acquired_at.to_rfc3339(),
+                &expires_at.to_rfc3339(),
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "application security mutation already in progress or application is trusted: {application_id}"
+            ));
+        }
+        Ok(token)
+    }
+
     pub async fn upsert_application(&self, application: &Application) -> Result<()> {
         self.validate_application_references(application).await?;
         let now = now_string();
@@ -183,7 +374,7 @@ impl Database {
             .execute(
                 "INSERT INTO applications (
                     id, organization_id, slug, name, description, application_type, app_type,
-                    first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                    first_party, consent_policy, active, provisioning_status, rauthy_client_id,
                     created_by_user_id, created_at, updated_at
                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                  ON CONFLICT(id) DO UPDATE SET
@@ -196,8 +387,8 @@ impl Database {
                     first_party = excluded.first_party,
                     consent_policy = excluded.consent_policy,
                     active = excluded.active,
+                    provisioning_status = excluded.provisioning_status,
                     rauthy_client_id = excluded.rauthy_client_id,
-                    secret_rotated_at = excluded.secret_rotated_at,
                     created_by_user_id = excluded.created_by_user_id,
                     updated_at = excluded.updated_at",
                 params!(
@@ -215,8 +406,8 @@ impl Database {
                     },
                     application_consent_policy_str(&application.consent_policy),
                     if application.active { 1_i64 } else { 0_i64 },
+                    application_provisioning_status_str(&application.provisioning_status),
                     application.rauthy_client_id.clone(),
-                    application.secret_rotated_at.clone(),
                     application.created_by_user_id.clone(),
                     now.clone(),
                     now
@@ -236,7 +427,7 @@ impl Database {
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT id, organization_id, slug, name, description, application_type, app_type,
-                        first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                        first_party, consent_policy, active, provisioning_status, rauthy_client_id,
                         created_by_user_id
                  FROM applications
                  WHERE organization_id = $1
@@ -257,7 +448,7 @@ impl Database {
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT id, organization_id, slug, name, description, application_type, app_type,
-                        first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                        first_party, consent_policy, active, provisioning_status, rauthy_client_id,
                         created_by_user_id
                  FROM applications
                  WHERE id = $1
@@ -290,7 +481,7 @@ impl Database {
             .query_rows_with(
                 self.validation_read_consistency_with_override(consistency),
                 "SELECT id, organization_id, slug, name, description, application_type, app_type,
-                        first_party, consent_policy, active, rauthy_client_id, secret_rotated_at,
+                        first_party, consent_policy, active, provisioning_status, rauthy_client_id,
                         created_by_user_id
                  FROM applications
                  WHERE slug = $1
@@ -302,36 +493,135 @@ impl Database {
         rows.into_iter().next().map(TryInto::try_into).transpose()
     }
 
+    pub async fn find_active_application_by_client_for_organization(
+        &self,
+        rauthy_client_id: &str,
+        organization_id: &str,
+    ) -> Result<Option<Application>> {
+        let rows: Vec<ApplicationRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT id, organization_id, slug, name, description, application_type, app_type,
+                        first_party, consent_policy, active, provisioning_status, rauthy_client_id,
+                        created_by_user_id
+                 FROM applications
+                 WHERE rauthy_client_id = $1
+                   AND organization_id = $2
+                   AND active = 1
+                   AND provisioning_status = 'ready'
+                 LIMIT 2",
+                params!(rauthy_client_id.to_owned(), organization_id.to_owned()),
+                "active application by Rauthy client and organization",
+            )
+            .await?;
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "multiple applications map to Rauthy client {rauthy_client_id}"
+            ));
+        }
+        rows.into_iter().next().map(TryInto::try_into).transpose()
+    }
+
+    pub async fn mark_application_provisioning_ready(
+        &self,
+        application_id: &str,
+        organization_id: &str,
+    ) -> Result<Application> {
+        let updated = self
+            .runtime
+            .execute(
+                "UPDATE applications
+                 SET provisioning_status = 'ready', updated_at = $1
+                 WHERE id = $2
+                   AND organization_id = $3
+                   AND provisioning_status = 'unprovisioned'",
+                params!(
+                    now_string(),
+                    application_id.to_owned(),
+                    organization_id.to_owned()
+                ),
+            )
+            .await
+            .context("mark application provisioning ready")?;
+        if updated == 0 {
+            let current = self
+                .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+                .await?;
+            if current.organization_id != organization_id {
+                return Err(anyhow!(
+                    "application not found: {application_id} in organization {organization_id}"
+                ));
+            }
+            if current.provisioning_status == ApplicationProvisioningStatus::Ready {
+                return Ok(current);
+            }
+            return Err(anyhow!(
+                "application provisioning state changed concurrently"
+            ));
+        }
+        self.get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await
+    }
+
     pub async fn insert_application_redirect_uri(
         &self,
         redirect_uri: &ApplicationRedirectUri,
     ) -> Result<()> {
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM applications WHERE id = $1",
-                params!(redirect_uri.application_id.clone()),
-                "application existence for redirect uri",
-            )
-            .await?
-        {
-            return Err(anyhow!(
-                "application {} does not exist",
-                redirect_uri.application_id
-            ));
-        }
-        self.runtime
+        let lease_token = self
+            .acquire_direct_application_security_mutation(&redirect_uri.application_id)
+            .await?;
+        let result = self
+            .insert_application_redirect_uri_with_security_lease(redirect_uri, &lease_token)
+            .await;
+        let _ = self
+            .release_application_security_mutation(&redirect_uri.application_id, &lease_token)
+            .await;
+        result
+    }
+
+    pub async fn insert_application_redirect_uri_with_security_lease(
+        &self,
+        redirect_uri: &ApplicationRedirectUri,
+        lease_token: &str,
+    ) -> Result<()> {
+        let inserted = self
+            .runtime
             .execute(
                 "INSERT INTO application_redirect_uris (application_id, redirect_uri, created_at)
-                 VALUES ($1, $2, $3)",
+                 SELECT $1, $2, $3
+                 FROM applications app
+                 WHERE app.id = $1
+                   AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
+                   AND app.security_mutation_token = $4
+                   AND app.security_mutation_expires_at > $5",
                 params!(
                     redirect_uri.application_id.clone(),
                     redirect_uri.redirect_uri.clone(),
-                    redirect_uri.created_at.clone()
+                    redirect_uri.created_at.clone(),
+                    lease_token.to_owned(),
+                    now_string()
                 ),
             )
             .await
             .context("insert application redirect uri")?;
+        if inserted == 0
+            && !self
+                .exists_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) AS count FROM application_redirect_uris
+                     WHERE application_id = $1 AND redirect_uri = $2",
+                    params!(
+                        redirect_uri.application_id.clone(),
+                        redirect_uri.redirect_uri.clone()
+                    ),
+                    "inserted application redirect uri",
+                )
+                .await?
+        {
+            return Err(anyhow!(
+                "forbidden: trusted applications may only be changed by the master administrator"
+            ));
+        }
         Ok(())
     }
 
@@ -359,30 +649,50 @@ impl Database {
         application_id: &str,
         redirect_uri: &str,
     ) -> Result<()> {
+        let lease_token = self
+            .acquire_direct_application_security_mutation(application_id)
+            .await?;
+        let result = self
+            .delete_application_redirect_uri_with_security_lease(
+                application_id,
+                redirect_uri,
+                &lease_token,
+            )
+            .await;
+        let _ = self
+            .release_application_security_mutation(application_id, &lease_token)
+            .await;
+        result
+    }
+
+    pub async fn delete_application_redirect_uri_with_security_lease(
+        &self,
+        application_id: &str,
+        redirect_uri: &str,
+        lease_token: &str,
+    ) -> Result<()> {
         self.runtime
             .execute(
                 "DELETE FROM application_redirect_uris
                  WHERE application_id = $1
-                   AND redirect_uri = $2",
-                params!(application_id.to_owned(), redirect_uri.to_owned()),
+                   AND redirect_uri = $2
+                   AND EXISTS (
+                       SELECT 1 FROM applications app
+                         WHERE app.id = application_redirect_uris.application_id
+                         AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
+                         AND app.security_mutation_token = $3
+                         AND app.security_mutation_expires_at > $4
+                   )",
+                params!(
+                    application_id.to_owned(),
+                    redirect_uri.to_owned(),
+                    lease_token.to_owned(),
+                    now_string()
+                ),
             )
             .await
             .context("delete application redirect uri")?;
         Ok(())
-    }
-
-    pub async fn update_application_secret_rotated_at(
-        &self,
-        application_id: &str,
-        secret_rotated_at: &str,
-    ) -> Result<()> {
-        let mut application = self
-            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
-            .await?;
-        application.secret_rotated_at = Some(secret_rotated_at.to_owned());
-        self.upsert_application(&application)
-            .await
-            .context("update application secret rotation timestamp")
     }
 
     pub async fn upsert_application_action(
@@ -440,17 +750,28 @@ impl Database {
         application_id: &str,
         action_ids: &[String],
     ) -> Result<Vec<Action>> {
-        if !self
-            .exists_row_with(
-                ReadConsistency::Strong,
-                "SELECT COUNT(*) as count FROM applications WHERE id = $1",
-                params!(application_id.to_owned()),
-                "application existence for action replace",
+        let lease_token = self
+            .acquire_direct_application_security_mutation(application_id)
+            .await?;
+        let result = self
+            .replace_application_actions_with_security_lease(
+                application_id,
+                action_ids,
+                &lease_token,
             )
-            .await?
-        {
-            return Err(anyhow!("application {application_id} does not exist"));
-        }
+            .await;
+        let _ = self
+            .release_application_security_mutation(application_id, &lease_token)
+            .await;
+        result
+    }
+
+    pub async fn replace_application_actions_with_security_lease(
+        &self,
+        application_id: &str,
+        action_ids: &[String],
+        lease_token: &str,
+    ) -> Result<Vec<Action>> {
         let mut deduped = Vec::new();
         let mut seen = HashSet::new();
         for action_id in action_ids {
@@ -497,21 +818,75 @@ impl Database {
             }
         }
 
-        let mut queries = Vec::with_capacity(1 + deduped.len());
+        let assertion_id = Uuid::new_v4().simple().to_string();
+        let mutation_now = now_string();
+        let mut queries = Vec::with_capacity(4 + deduped.len());
         queries.push((
-            Cow::Borrowed("DELETE FROM application_actions WHERE application_id = $1"),
+            Cow::Borrowed(
+                "INSERT INTO application_consent_assertions (id, valid)
+                 SELECT $1,
+                        CASE WHEN EXISTS (
+                            SELECT 1 FROM applications app
+                            WHERE app.id = $2
+                              AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
+                              AND app.security_mutation_token = $3
+                              AND app.security_mutation_expires_at > $4
+                        ) THEN 1 ELSE 0 END",
+            ),
+            params!(
+                assertion_id.clone(),
+                application_id.to_owned(),
+                lease_token.to_owned(),
+                mutation_now
+            ),
+        ));
+        queries.push((
+            Cow::Borrowed(
+                "DELETE FROM application_actions
+                 WHERE application_id = $1
+                   AND EXISTS (
+                       SELECT 1 FROM applications app
+                       WHERE app.id = application_actions.application_id
+                         AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
+                   )",
+            ),
             params!(application_id.to_owned()),
         ));
         for action_id in deduped {
             queries.push((
                 Cow::Borrowed(
                     "INSERT INTO application_actions (application_id, action_id)
-                     VALUES ($1, $2)
+                     SELECT $1, $2 FROM applications app
+                     WHERE app.id = $1
+                       AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
                      ON CONFLICT(application_id, action_id) DO NOTHING",
                 ),
                 params!(application_id.to_owned(), action_id.clone()),
             ));
         }
+        queries.push((
+            Cow::Borrowed(
+                "DELETE FROM application_grant_actions
+                 WHERE application_grant_id IN (
+                     SELECT ag.id FROM application_grants ag
+                     JOIN applications app ON app.id = ag.application_id
+                     WHERE ag.application_id = $1
+                       AND NOT (app.first_party = 1 AND app.consent_policy = 'auto_approve')
+                 )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM application_actions ca
+                       JOIN application_grants cg
+                         ON cg.application_id = ca.application_id
+                       WHERE cg.id = application_grant_actions.application_grant_id
+                         AND ca.action_id = application_grant_actions.action_id
+                   )",
+            ),
+            params!(application_id.to_owned()),
+        ));
+        queries.push((
+            Cow::Borrowed("DELETE FROM application_consent_assertions WHERE id = $1"),
+            params!(assertion_id),
+        ));
 
         self.runtime
             .transaction(queries)

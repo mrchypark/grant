@@ -23,16 +23,3 @@ patches:
       kind: Ingress
       metadata:
         name: grant
-  - target:
-      group: apps
-      version: v1
-      kind: StatefulSet
-      name: rauthy
-    patch: |-
-      - op: add
-        path: /spec/template/spec/volumes/-
-        value:
-          name: rauthy-data
-          emptyDir: {}
-      - op: remove
-        path: /spec/volumeClaimTemplates

@@ -1,15 +1,15 @@
 use domain::Action;
 use infra::service::{
     AuthorizationCheck, AuthorizationDecision, AuthorizationResource, AuthorizationSubject,
-    BackupInfo, CreateApplicationGrantInput, CreateApplicationInput, CreateRoleBindingInput,
-    CreateRoleInput, UpdateApplicationInput, UpsertAgreementInput,
+    BackupInfo, CreateApplicationInput, CreateRoleBindingInput, CreateRoleInput,
+    UpsertAgreementInput, UpsertGroupInput,
 };
 
 use crate::dto::{
     AuthzCheckRequest, AuthzCheckResponse, AuthzFilterRequest, AuthzResourceRequest,
-    AuthzSubjectRequest, BackupItemResponse, CreateApplicationGrantRequest,
-    CreateApplicationRequest, CreateRoleBindingRequest, CreateRoleRequest, ProviderActionRequest,
-    UpdateApplicationRequest, UpsertAgreementRequest,
+    AuthzSubjectRequest, BackupItemResponse, CreateApplicationRequest, CreateGroupRequest,
+    CreateRoleBindingRequest, CreateRoleRequest, ProviderActionRequest, UpdateGroupRequest,
+    UpsertAgreementRequest,
 };
 
 pub(crate) fn create_application_input(body: CreateApplicationRequest) -> CreateApplicationInput {
@@ -20,33 +20,23 @@ pub(crate) fn create_application_input(body: CreateApplicationRequest) -> Create
         description: body.description,
         application_type: body.application_type,
         app_type: body.app_type,
-        first_party: body.first_party,
-        consent_policy: body.consent_policy,
         active: body.active,
     }
 }
 
-pub(crate) fn update_application_input(body: UpdateApplicationRequest) -> UpdateApplicationInput {
-    UpdateApplicationInput {
-        slug: body.slug,
+pub(crate) fn create_group_input(body: CreateGroupRequest) -> UpsertGroupInput {
+    UpsertGroupInput {
+        id: body.id,
         name: body.name,
         description: body.description,
-        application_type: body.application_type,
-        app_type: body.app_type,
-        first_party: body.first_party,
-        consent_policy: body.consent_policy,
-        active: body.active,
     }
 }
 
-pub(crate) fn create_application_grant_input(
-    body: CreateApplicationGrantRequest,
-) -> CreateApplicationGrantInput {
-    CreateApplicationGrantInput {
-        id: body.id,
-        user_id: body.user_id,
-        application_id: body.application_id,
-        action_ids: body.action_ids,
+pub(crate) fn update_group_input(group_id: String, body: UpdateGroupRequest) -> UpsertGroupInput {
+    UpsertGroupInput {
+        id: group_id,
+        name: body.name,
+        description: body.description,
     }
 }
 

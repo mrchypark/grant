@@ -6,7 +6,9 @@ metadata:
     app: rauthy
 spec:
   serviceName: rauthy-headless
-  replicas: 1
+  podManagementPolicy: Parallel
+  minReadySeconds: 10
+  replicas: 3
   selector:
     matchLabels:
       app: rauthy
@@ -21,9 +23,56 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: rauthy
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: rauthy
       initContainers:
+        - name: lifecycle-gate
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          command: ["/bin/sh", "/gate/lifecycle-gate.sh"]
+          env:
+            - name: LIFECYCLE_HEADLESS_SERVICE
+              value: rauthy-headless
+            - name: LIFECYCLE_REPLICAS
+              value: "3"
+            - name: LIFECYCLE_PEER_PORT
+              value: "8200"
+            - name: LIFECYCLE_PEER_PATH
+              value: /ready
+            - name: LIFECYCLE_ALLOW_LOCAL_FRESH
+              value: "true"
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: lifecycle-state
+              mountPath: /lifecycle
+              readOnly: true
+            - name: lifecycle-gate
+              mountPath: /gate
+              readOnly: true
+            - name: restore-authorization
+              mountPath: /restore
+              readOnly: true
         - name: render-bootstrap
-          image: busybox:1.36
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
           securityContext:
             runAsUser: 10001
             runAsGroup: 10001
@@ -42,11 +91,11 @@ spec:
                 secretKeyRef:
                   name: grant-secrets
                   key: GRANT_RAUTHY_CLIENT_SECRET
-            - name: GRANT_RAUTHY_ADMIN_API_KEY
+            - name: GRANT_RAUTHY_CLIENT_READ_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: grant-secrets
-                  key: GRANT_RAUTHY_ADMIN_API_KEY
+                  key: GRANT_RAUTHY_CLIENT_READ_API_KEY
           volumeMounts:
             - name: rauthy-bootstrap-template
               mountPath: /bootstrap-template
@@ -58,8 +107,9 @@ spec:
               mountPath: /bootstrap
       containers:
         - name: rauthy
-          image: ghcr.io/sebadob/rauthy:0.36.0
+          image: ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d
           imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/gate/restore-once.sh"]
           securityContext:
             runAsUser: 10001
             runAsGroup: 10001
@@ -76,6 +126,11 @@ spec:
               containerPort: 8100
             - name: hiq-api
               containerPort: 8200
+          env:
+            - name: RESTORE_ONCE_EXEC
+              value: /app/rauthy
+            - name: RESTORE_ONCE_MARKER
+              value: /app/data/.restore-consumed
           volumeMounts:
             - name: rauthy-data
               mountPath: /app/data
@@ -86,6 +141,15 @@ spec:
             - name: rauthy-bootstrap
               mountPath: /app/bootstrap
               readOnly: true
+            - name: lifecycle-state
+              mountPath: /lifecycle
+              readOnly: true
+            - name: lifecycle-gate
+              mountPath: /gate
+              readOnly: true
+            - name: restore-authorization
+              mountPath: /restore
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -94,6 +158,12 @@ spec:
             limits:
               memory: 512Mi
               ephemeral-storage: 512Mi
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: hiq-api
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /ready
@@ -109,6 +179,20 @@ spec:
             periodSeconds: 30
             failureThreshold: 2
       volumes:
+        - name: lifecycle-state
+          configMap:
+            name: grant-lifecycle-state
+            items:
+              - key: rauthy-mode
+                path: mode
+              - key: recovery-id
+                path: recovery-id
+        - name: lifecycle-gate
+          configMap:
+            name: lifecycle-gate
+            defaultMode: 0555
+        - name: rauthy-data
+          emptyDir: {}
         - name: rauthy-config
           secret:
             secretName: rauthy-config
@@ -126,12 +210,7 @@ spec:
           configMap:
             name: rauthy-bootstrap-renderer
             defaultMode: 0555
-  volumeClaimTemplates:
-    - metadata:
-        name: rauthy-data
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
+        - name: restore-authorization
+          secret:
+            secretName: rauthy-restore-once
+            optional: true

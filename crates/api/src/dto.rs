@@ -1,5 +1,5 @@
 use domain::{
-    ActionRiskLevel, AgreementStatus, AgreementType, ApplicationAppType, ApplicationConsentPolicy,
+    Action, ActionRiskLevel, AgreementStatus, AgreementType, ApplicationAppType, ApplicationGrant,
     ApplicationType, Organization, RoleBindingState, RoleBindingSubjectType, User,
 };
 use serde::{Deserialize, Serialize};
@@ -13,21 +13,44 @@ pub(crate) struct CreateApplicationRequest {
     pub(crate) description: Option<String>,
     pub(crate) application_type: ApplicationType,
     pub(crate) app_type: ApplicationAppType,
-    pub(crate) first_party: bool,
-    pub(crate) consent_policy: ApplicationConsentPolicy,
     pub(crate) active: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UpdateApplicationRequest {
-    pub(crate) slug: String,
+pub(crate) struct ReplaceApplicationConsentRequest {
+    pub(crate) action_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApplicationConsentResponse {
+    pub(crate) grant: ApplicationGrant,
+    pub(crate) actions: Vec<Action>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateGroupRequest {
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: Option<String>,
-    pub(crate) application_type: ApplicationType,
-    pub(crate) app_type: ApplicationAppType,
-    pub(crate) first_party: bool,
-    pub(crate) consent_policy: ApplicationConsentPolicy,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateGroupRequest {
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SetApplicationTrustRequest {
+    pub(crate) trusted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SetUserActiveRequest {
     pub(crate) active: bool,
 }
 
@@ -35,19 +58,6 @@ pub(crate) struct UpdateApplicationRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReplaceApplicationActionsRequest {
     pub(crate) action_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ApplicationRedirectUriRequest {
-    pub(crate) redirect_uri: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RotateClientSecretResponse {
-    pub(crate) client_secret: String,
-    pub(crate) secret_rotated_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,15 +84,6 @@ pub(crate) struct ProviderActionRequest {
     pub(crate) grantable_to_applications: bool,
     pub(crate) consent_label: Option<String>,
     pub(crate) consent_description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CreateApplicationGrantRequest {
-    pub(crate) id: String,
-    pub(crate) user_id: String,
-    pub(crate) application_id: String,
-    pub(crate) action_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +174,23 @@ pub(crate) struct AuthzBatchCheckResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct AuthzFilterResponse {
     pub(crate) resource_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApplicationAuthzCheckRequest {
+    pub(crate) action: String,
+    pub(crate) resource: AuthzResourceRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApplicationAuthzBatchCheckRequest {
+    pub(crate) checks: Vec<ApplicationAuthzCheckRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApplicationAuthzFilterRequest {
+    pub(crate) action: String,
+    pub(crate) resources: Vec<AuthzResourceRequest>,
 }
 
 #[derive(Debug, Serialize)]

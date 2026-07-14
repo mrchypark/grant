@@ -16,13 +16,64 @@ impl Database {
             resource_type: "organization",
             resource_id: target_organization_id,
             action_id,
+            application_id: None,
             consistency,
         })
         .await
     }
 
     pub async fn has_user_actions(&self, checks: &[UserActionCheck<'_>]) -> Result<Vec<bool>> {
-        let mut results = vec![false; checks.len()];
+        Ok(self
+            .evaluate_user_actions(checks)
+            .await?
+            .into_iter()
+            .map(|decision| decision.allowed)
+            .collect())
+    }
+
+    pub async fn evaluate_user_actions(
+        &self,
+        checks: &[UserActionCheck<'_>],
+    ) -> Result<Vec<UserActionDecision>> {
+        self.evaluate_user_actions_with_inactive_organization_policy(checks, false)
+            .await
+    }
+
+    pub async fn has_user_organization_reactivation_action_with_consistency(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<bool> {
+        let check = UserActionCheck {
+            user_id,
+            organization_id,
+            provider_id: "grant",
+            resource_type: "organization",
+            resource_id: organization_id,
+            action_id: "organization.permission.manage",
+            application_id: None,
+            consistency,
+        };
+        Ok(self
+            .evaluate_user_actions_with_inactive_organization_policy(&[check], true)
+            .await?
+            .into_iter()
+            .next()
+            .is_some_and(|decision| decision.allowed))
+    }
+
+    async fn evaluate_user_actions_with_inactive_organization_policy(
+        &self,
+        checks: &[UserActionCheck<'_>],
+        allow_inactive_self_reactivation: bool,
+    ) -> Result<Vec<UserActionDecision>> {
+        let denied = UserActionDecision {
+            allowed: false,
+            rbac_allowed: false,
+            trusted_application: false,
+        };
+        let mut results = vec![denied; checks.len()];
         for (chunk_number, chunk) in checks.chunks(MAX_AUTHZ_CHECKS_PER_QUERY).enumerate() {
             let Some(first) = chunk.first() else {
                 continue;
@@ -30,7 +81,7 @@ impl Database {
             let consistency =
                 self.default_read_consistency_with_override(first.consistency.clone());
             let validation_time = Utc::now().to_rfc3339();
-            let mut query_params = Vec::with_capacity(chunk.len() * 8);
+            let mut query_params = Vec::with_capacity(chunk.len() * 10);
             let values = chunk
                 .iter()
                 .enumerate()
@@ -44,16 +95,26 @@ impl Database {
                     query_params.push(hiqlite::Param::from(check.resource_type.to_owned()));
                     query_params.push(hiqlite::Param::from(check.resource_id.to_owned()));
                     query_params.push(hiqlite::Param::from(check.action_id.to_owned()));
+                    query_params.push(hiqlite::Param::from(
+                        check.application_id.map(ToOwned::to_owned),
+                    ));
                     query_params.push(hiqlite::Param::from(validation_time.clone()));
+                    query_params.push(hiqlite::Param::from(if allow_inactive_self_reactivation {
+                        1_i64
+                    } else {
+                        0_i64
+                    }));
                     format!(
-                        "(${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                        "(${base}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                         base + 1,
                         base + 2,
                         base + 3,
                         base + 4,
                         base + 5,
                         base + 6,
-                        base + 7
+                        base + 7,
+                        base + 8,
+                        base + 9
                     )
                 })
                 .collect::<Vec<_>>()
@@ -65,13 +126,53 @@ impl Database {
                         r#"
                         WITH requested (
                             idx, user_id, organization_id, provider_id, resource_type,
-                            resource_id, action_id, validation_time
+                            resource_id, action_id, application_id, validation_time,
+                            allow_inactive_self_reactivation
                         ) AS (
                             VALUES {values}
                         ),
-                        allowed AS (
-                            SELECT DISTINCT req.idx
+                        eligible_requested AS (
+                            SELECT req.*
                             FROM requested req
+                            JOIN users u
+                              ON u.id = req.user_id
+                             AND u.active = 1
+                            JOIN service_providers sp
+                              ON sp.id = req.provider_id
+                             AND sp.active = 1
+                            JOIN organizations subject_org
+                              ON subject_org.id = req.organization_id
+                            WHERE (
+                                subject_org.inactivated_at IS NULL
+                                OR (
+                                    req.allow_inactive_self_reactivation = 1
+                                    AND req.provider_id = 'grant'
+                                    AND req.resource_type = 'organization'
+                                    AND req.resource_id = req.organization_id
+                                    AND req.action_id = 'organization.permission.manage'
+                                )
+                            )
+                            AND (
+                                req.provider_id <> 'grant'
+                                OR req.resource_type <> 'organization'
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM organizations target_org
+                                    WHERE target_org.id = req.resource_id
+                                      AND target_org.inactivated_at IS NULL
+                                )
+                                OR (
+                                    req.allow_inactive_self_reactivation = 1
+                                    AND req.provider_id = 'grant'
+                                    AND req.resource_type = 'organization'
+                                    AND req.resource_id = req.organization_id
+                                    AND req.action_id = 'organization.permission.manage'
+                                )
+                            )
+                        ),
+                        rbac_allowed AS (
+                            SELECT DISTINCT req.idx
+                            FROM eligible_requested req
                             JOIN role_bindings rb
                               ON rb.subject_type = 'organization'
                              AND rb.subject_id = req.organization_id
@@ -100,7 +201,7 @@ impl Database {
                             UNION
 
                             SELECT DISTINCT req.idx
-                            FROM requested req
+                            FROM eligible_requested req
                             JOIN role_bindings rb
                               ON rb.subject_type = 'user'
                              AND rb.subject_id = req.user_id
@@ -123,7 +224,7 @@ impl Database {
                             UNION
 
                             SELECT DISTINCT req.idx
-                            FROM requested req
+                            FROM eligible_requested req
                             JOIN role_bindings rb
                               ON rb.subject_type = 'group'
                              AND rb.subject_organization_id = req.organization_id
@@ -143,11 +244,56 @@ impl Database {
                              AND om.user_id = req.user_id
                              AND om.organization_id = req.organization_id
                              AND om.status = 'active'
+                        ),
+                        trusted_application_allowed AS (
+                            SELECT DISTINCT req.idx
+                            FROM eligible_requested req
+                            JOIN applications app
+                             ON app.id = req.application_id
+                             AND app.organization_id = req.organization_id
+                             AND app.active = 1
+                             AND app.provisioning_status = 'ready'
+                             AND app.first_party = 1
+                             AND app.consent_policy = 'auto_approve'
+                            JOIN application_actions aa
+                              ON aa.application_id = app.id
+                             AND aa.action_id = req.action_id
+                            WHERE req.application_id IS NOT NULL
+                        ),
+                        explicit_consent_allowed AS (
+                            SELECT DISTINCT req.idx
+                            FROM eligible_requested req
+                            JOIN application_grants ag
+                              ON ag.user_id = req.user_id
+                             AND ag.organization_id = req.organization_id
+                             AND ag.application_id = req.application_id
+                             AND ag.status = 'active'
+                            JOIN applications app
+                              ON app.id = ag.application_id
+                             AND app.organization_id = ag.organization_id
+                             AND app.active = 1
+                             AND app.provisioning_status = 'ready'
+                            JOIN application_grant_actions aga
+                              ON aga.application_grant_id = ag.id
+                             AND aga.action_id = req.action_id
+                            JOIN application_actions aa
+                              ON aa.application_id = ag.application_id
+                             AND aa.action_id = aga.action_id
+                            WHERE req.application_id IS NOT NULL
                         )
                         SELECT req.idx,
-                               CASE WHEN allowed.idx IS NULL THEN 0 ELSE 1 END AS allowed
+                               CASE WHEN rbac.idx IS NULL THEN 0 ELSE 1 END AS rbac_allowed,
+                               CASE
+                                   WHEN rbac.idx IS NULL THEN 0
+                                   WHEN req.application_id IS NULL THEN 1
+                                   WHEN trusted.idx IS NOT NULL OR consent.idx IS NOT NULL THEN 1
+                                   ELSE 0
+                               END AS allowed,
+                               CASE WHEN trusted.idx IS NULL THEN 0 ELSE 1 END AS trusted_application
                         FROM requested req
-                        LEFT JOIN allowed ON allowed.idx = req.idx
+                        LEFT JOIN rbac_allowed rbac ON rbac.idx = req.idx
+                        LEFT JOIN trusted_application_allowed trusted ON trusted.idx = req.idx
+                        LEFT JOIN explicit_consent_allowed consent ON consent.idx = req.idx
                         ORDER BY req.idx ASC
                         "#
                     ),
@@ -157,7 +303,11 @@ impl Database {
                 .await?;
             for row in rows {
                 if let Some(result) = results.get_mut(row.idx as usize) {
-                    *result = row.allowed != 0;
+                    *result = UserActionDecision {
+                        allowed: row.allowed != 0,
+                        rbac_allowed: row.rbac_allowed != 0,
+                        trusted_application: row.trusted_application != 0,
+                    };
                 }
             }
         }
@@ -176,13 +326,38 @@ impl Database {
     pub async fn save_role_binding(&self, binding: &RoleBinding) -> Result<()> {
         validate_role_binding(binding)?;
         self.validate_role_binding_refs(binding).await?;
-        self.runtime
+        let written = self
+            .runtime
             .execute(
                 "INSERT INTO role_bindings (
-	                    id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
-	                    resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
-	                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	                 ON CONFLICT(id) DO UPDATE SET
+		                    id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
+		                    resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
+		                 )
+                         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                         WHERE EXISTS (
+                             SELECT 1 FROM service_providers
+                             WHERE id = $5 AND active = 1
+                         )
+                           AND EXISTS (
+                             SELECT 1 FROM organizations
+                             WHERE id = $4 AND inactivated_at IS NULL
+                         )
+                           AND (
+                             $2 <> 'group'
+                             OR EXISTS (
+                                 SELECT 1 FROM groups
+                                 WHERE id = $3 AND organization_id = $4
+                             )
+                           )
+                           AND (
+                             $5 <> 'grant'
+                             OR $6 <> 'organization'
+                             OR EXISTS (
+                                 SELECT 1 FROM organizations
+                                 WHERE id = $7 AND inactivated_at IS NULL
+                             )
+                           )
+		                 ON CONFLICT(id) DO UPDATE SET
 	                    subject_type = excluded.subject_type,
 	                    subject_id = excluded.subject_id,
 	                    subject_organization_id = excluded.subject_organization_id,
@@ -216,18 +391,48 @@ impl Database {
             )
             .await
             .context("save role binding")?;
+        if written == 0 {
+            return Err(anyhow!(
+                "role binding active provider, organization, resource, or group reference changed before commit"
+            ));
+        }
         Ok(())
     }
 
     pub async fn insert_role_binding(&self, binding: &RoleBinding) -> Result<()> {
         validate_role_binding(binding)?;
         self.validate_role_binding_refs(binding).await?;
-        self.runtime
+        let inserted = self
+            .runtime
             .execute(
                 "INSERT INTO role_bindings (
                     id, subject_type, subject_id, subject_organization_id, provider_id, resource_type,
                     resource_id, role_id, agreement_id, state, created_by_user_id, created_at, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                 )
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                 WHERE EXISTS (
+                     SELECT 1 FROM service_providers
+                     WHERE id = $5 AND active = 1
+                 )
+                   AND EXISTS (
+                     SELECT 1 FROM organizations
+                     WHERE id = $4 AND inactivated_at IS NULL
+                 )
+                   AND (
+                     $2 <> 'group'
+                     OR EXISTS (
+                         SELECT 1 FROM groups
+                         WHERE id = $3 AND organization_id = $4
+                     )
+                   )
+                   AND (
+                     $5 <> 'grant'
+                     OR $6 <> 'organization'
+                     OR EXISTS (
+                         SELECT 1 FROM organizations
+                         WHERE id = $7 AND inactivated_at IS NULL
+                     )
+                   )",
                 params!(
                     binding.id.clone(),
                     role_binding_subject_type_str(&binding.subject_type),
@@ -246,6 +451,11 @@ impl Database {
             )
             .await
             .context("insert role binding")?;
+        if inserted == 0 {
+            return Err(anyhow!(
+                "role binding active provider, organization, resource, or group reference changed before commit"
+            ));
+        }
         Ok(())
     }
 
@@ -382,6 +592,20 @@ impl Database {
                 binding.provider_id
             ));
         }
+        if !self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count FROM service_providers WHERE id = $1 AND active = 1",
+                params!(binding.provider_id.clone()),
+                "binding active provider",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "service provider {} is inactive",
+                binding.provider_id
+            ));
+        }
 
         if !self
             .exists_row_with(
@@ -394,6 +618,20 @@ impl Database {
         {
             return Err(anyhow!(
                 "subject organization {} does not exist",
+                binding.subject_organization_id
+            ));
+        }
+        if !self
+            .exists_row_with(
+                consistency.clone(),
+                "SELECT COUNT(*) as count FROM organizations WHERE id = $1 AND inactivated_at IS NULL",
+                params!(binding.subject_organization_id.clone()),
+                "active subject organization",
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "subject organization {} is inactive",
                 binding.subject_organization_id
             ));
         }
@@ -521,7 +759,12 @@ impl Database {
                 let group_matches = self
                     .query_count(
                         consistency.clone(),
-                        "SELECT COUNT(*) as count FROM groups WHERE id = $1 AND organization_id = $2",
+                        "SELECT COUNT(*) as count
+                         FROM groups g
+                         JOIN organizations o ON o.id = g.organization_id
+                         WHERE g.id = $1
+                           AND g.organization_id = $2
+                           AND o.inactivated_at IS NULL",
                         params!(
                             binding.subject_id.clone(),
                             binding.subject_organization_id.clone()
@@ -559,9 +802,8 @@ impl Database {
             }
         }
 
-        if binding.provider_id == "grant"
-            && binding.resource_type == "organization"
-            && !self
+        if binding.provider_id == "grant" && binding.resource_type == "organization" {
+            if !self
                 .exists_row_with(
                     consistency.clone(),
                     "SELECT COUNT(*) as count FROM organizations WHERE id = $1",
@@ -569,11 +811,26 @@ impl Database {
                     "organization resource existence",
                 )
                 .await?
-        {
-            return Err(anyhow!(
-                "organization resource {} does not exist",
-                binding.resource_id
-            ));
+            {
+                return Err(anyhow!(
+                    "organization resource {} does not exist",
+                    binding.resource_id
+                ));
+            }
+            if !self
+                .exists_row_with(
+                    consistency,
+                    "SELECT COUNT(*) as count FROM organizations WHERE id = $1 AND inactivated_at IS NULL",
+                    params!(binding.resource_id.clone()),
+                    "active organization resource",
+                )
+                .await?
+            {
+                return Err(anyhow!(
+                    "organization resource {} is inactive",
+                    binding.resource_id
+                ));
+            }
         }
 
         Ok(())

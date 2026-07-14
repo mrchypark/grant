@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rauthy
+spec:
+  template:
+    spec:
+      serviceAccountName: rauthy
+      automountServiceAccountToken: false
+      topologySpreadConstraints:
+        - $patch: replace
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: rauthy
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: rauthy
+      initContainers:
+        - name: lifecycle-gate
+          env:
+            - name: LIFECYCLE_ALLOW_LOCAL_FRESH
+              value: "false"
+        - name: render-bootstrap
+          env:
+            - name: GRANT_RAUTHY_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_RAUTHY_CLIENT_SECRET}}
+            - name: GRANT_RAUTHY_CLIENT_READ_API_KEY
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_RAUTHY_CLIENT_READ_API_KEY}}
+      containers:
+        - name: rauthy
+          env:
+            - name: HQL_NODE_ID_FROM
+              value: k8s
+            - name: HQL_DATA_DIR
+              value: /app/data
+            - name: HQL_INSECURE_COOKIE
+              value: "false"
+            - name: HQL_NODES
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_NODES}}
+            - name: HQL_BACKUP_CRON
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_BACKUP_CRON}}
+            - name: HQL_BACKUP_KEEP_DAYS
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_BACKUP_KEEP_DAYS}}
+            - name: HQL_BACKUP_KEEP_DAYS_LOCAL
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_BACKUP_KEEP_DAYS_LOCAL}}
+            - name: HQL_S3_URL
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_S3_URL}}
+            - name: HQL_S3_BUCKET
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_S3_BUCKET}}
+            - name: HQL_S3_REGION
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_S3_REGION}}
+            - name: HQL_S3_PATH_STYLE
+              valueFrom: {configMapKeyRef: {name: rauthy-production-backup, key: HQL_S3_PATH_STYLE}}
+            - name: HQL_SECRET_RAFT
+              valueFrom: {secretKeyRef: {name: rauthy-production-secrets, key: HQL_SECRET_RAFT}}
+            - name: HQL_SECRET_API
+              valueFrom: {secretKeyRef: {name: rauthy-production-secrets, key: HQL_SECRET_API}}
+            - name: ENC_KEYS
+              valueFrom: {secretKeyRef: {name: rauthy-production-secrets, key: ENC_KEYS}}
+            - name: ENC_KEY_ACTIVE
+              valueFrom: {secretKeyRef: {name: rauthy-production-secrets, key: ENC_KEY_ACTIVE}}
+            - name: HQL_S3_KEY
+              valueFrom: {secretKeyRef: {name: rauthy-production-secrets, key: HQL_S3_KEY}}
+            - name: HQL_S3_SECRET
+              valueFrom: {secretKeyRef: {name: rauthy-production-secrets, key: HQL_S3_SECRET}}
+      volumes:
+        - name: lifecycle-state
+          configMap:
+            name: grant-recovery-state
+            items:
+              - key: rauthy-mode
+                path: mode
+              - key: recovery-id
+                path: recovery-id
+        - name: rauthy-config
+          secret:
+            secretName: rauthy-production-config
+        - name: rauthy-bootstrap-template
+          secret:
+            secretName: rauthy-production-config
+            items:
+              - key: clients.json
+                path: clients.json
+              - key: api_keys.json
+                path: api_keys.json

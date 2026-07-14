@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
 use domain::{
     Action, ActionRiskLevel, ApplicationAppType, ApplicationConsentPolicy, ApplicationGrantStatus,
-    ApplicationType, RoleBinding, RoleBindingState, RoleBindingSubjectType,
+    ApplicationProvisioningStatus, ApplicationType, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType,
 };
 use std::collections::HashSet;
 
@@ -127,6 +128,15 @@ pub(super) fn application_consent_policy_str(policy: &ApplicationConsentPolicy) 
     policy.as_db_str()
 }
 
+pub(super) fn application_provisioning_status_str(
+    status: &ApplicationProvisioningStatus,
+) -> &'static str {
+    match status {
+        ApplicationProvisioningStatus::Unprovisioned => "unprovisioned",
+        ApplicationProvisioningStatus::Ready => "ready",
+    }
+}
+
 pub(super) fn application_grant_status_str(status: &ApplicationGrantStatus) -> &'static str {
     status.as_db_str()
 }
@@ -153,4 +163,14 @@ pub(super) fn application_app_type_from_str(value: &str) -> Result<ApplicationAp
 
 pub(super) fn application_consent_policy_from_str(value: &str) -> Result<ApplicationConsentPolicy> {
     ApplicationConsentPolicy::from_db_str(value).map_err(anyhow::Error::msg)
+}
+
+pub(super) fn application_provisioning_status_from_str(
+    value: &str,
+) -> Result<ApplicationProvisioningStatus> {
+    match value {
+        "unprovisioned" => Ok(ApplicationProvisioningStatus::Unprovisioned),
+        "ready" => Ok(ApplicationProvisioningStatus::Ready),
+        other => Err(anyhow!("invalid application provisioning status {other}")),
+    }
 }

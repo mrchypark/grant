@@ -21,9 +21,11 @@ bash ./scripts/vind-cluster.sh ensure-context
 bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
 ```
 
-`vind-bootstrap.sh`는 기본적으로 `deploy/overlays/ephemeral`을 사용한다. 이 overlay는 Rauthy
-`/app/data`를 `emptyDir`에 저장하므로 PVC를 만들지 않으며, Rauthy Pod가 교체되면 사용자,
-client 변경, session, JWKS가 모두 초기화되고 bootstrap 파일이 다시 적용된다.
+`vind-bootstrap.sh`는 기본적으로 `deploy/overlays/ephemeral`을 사용한다. 이 overlay는 Grant와
+Rauthy를 각각 3 voter, `emptyDir`로 실행하므로 PVC를 만들지 않는다. 한 Rauthy Pod 교체는 남은
+quorum에서 재가입하며 identity/JWKS를 초기화하지 않는다. 세 Pod를 동시에 잃으면 로컬 `fresh`
+mode가 bootstrap 데이터를 사용해 새 개발 cluster를 만든다. 이 동작은 production의 fail-closed
+`steady` mode와 다르다.
 local validation Kustomization의 namespace는 `grant`로 고정되어 있으므로 `NAMESPACE`도
 `grant`만 허용한다.
 
@@ -40,15 +42,17 @@ bash ./scripts/ci-local.sh
 ```
 
 Docker Compose와 Kubernetes bootstrap은 `GRANT_RAUTHY_CLIENT_SECRET` 및
-`GRANT_RAUTHY_ADMIN_API_KEY`에서 Rauthy bootstrap 파일을 생성한다. Grant와 Rauthy가 항상 같은
+`GRANT_RAUTHY_CLIENT_READ_API_KEY`에서 읽기 전용 Rauthy bootstrap 파일을 생성한다. Grant와 Rauthy가 항상 같은
 credential을 사용하므로 두 값은 각각 64자 이상의 영숫자 secret을 사용해야 한다.
+Grant는 admin용 `GRANT_MASTER_KEY`와 application-authz용 `GRANT_APP_AUTH_KEY`도 요구하며 두 값은
+반드시 서로 달라야 한다. 로컬 bootstrap script는 구분된 개발 기본값을 secret에 넣는다.
 
 ## 주요 스크립트
 
 - `scripts/ci-local.sh`
   - grant 이미지 빌드와 Rauthy 공식 이미지 pull
   - `vind` cluster lifecycle 관리
-  - no-PVC Kubernetes bootstrap, Rauthy Pod 교체와 재-bootstrap smoke 실행
+  - no-PVC Kubernetes bootstrap, Rauthy Pod 교체와 quorum 재가입 smoke 실행
 - `scripts/vind-cluster.sh`
   - `vcluster` create/connect/delete
   - control-plane taint normalization
@@ -58,12 +62,16 @@ credential을 사용하므로 두 값은 각각 64자 이상의 영숫자 secret
   - ephemeral Kustomization으로 Kubernetes 리소스 배포
   - Rauthy, grant service rollout 대기
 - `scripts/verify-ephemeral-k8s.sh`
-  - production PVC와 ephemeral/ied no-PVC render 검증
+  - base/ephemeral/ied/production의 no-PVC 3-node HA render 검증
+  - production hard spread, digest, 외부 backup/lifecycle 참조와 restore dry-run 검증
   - live cluster의 `emptyDir`, health, proxy, bootstrap client, introspection 검증
+- `scripts/create-recovery-pair.sh`, `scripts/restore-full-cluster.sh`
+  - exact S3 version recovery record 생성과 전체 cluster restore
+  - 로컬에서는 `--dry-run`만 사용하고 실제 복구는 보호된 운영 절차를 따른다.
 주의:
 
 - 로컬/CI 회귀 검증은 `vind` 경로만 신뢰한다.
-- `deploy/k8s` base는 production용 PVC를 유지한다. 운영 배포에 ephemeral overlay를 사용하지 않는다.
+- `deploy/k8s` base도 no-PVC지만 로컬 bootstrap용 `fresh` mode와 개발 설정을 포함한다. 운영에는 외부 Secret/ConfigMap과 `steady` gate를 강제하는 `deploy/overlays/production`만 사용한다.
 - Docker ARM 환경에서 `vind` create가 platform warning으로 실패하면 `docker pull --platform linux/arm64 alpine:latest` 상태를 먼저 확인한다.
 
 ## API Smoke 예시
@@ -76,7 +84,8 @@ Rauthy의 OIDC issuer와 redirect URI도 이 origin에 맞춰져 있으므로 �
 
 ```bash
 export BASE_URL=http://localhost:18080
-export MASTER_KEY=dev-only-master-key
+export MASTER_KEY=local-dev-master-key
+export APP_AUTH_KEY=local-dev-app-auth-key
 export ORG_ID=conalog-grant
 export TOKEN=<rauthy-access-token>
 ```

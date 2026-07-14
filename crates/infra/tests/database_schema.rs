@@ -25,6 +25,7 @@ const AUTHORIZATION_TABLES: &[&str] = &[
     "application_actions",
     "application_grants",
     "application_grant_actions",
+    "application_consent_assertions",
 ];
 
 const REMOVED_GRANT_TABLES: &[&str] = &[
@@ -59,6 +60,26 @@ const REMOVED_GRANT_TABLES: &[&str] = &[
     "rec_records",
     "documents",
 ];
+
+#[tokio::test]
+async fn schema_readiness_requires_the_application_schema_without_mutating_it() {
+    let (runtime, _dir) = test_runtime().await;
+    let db = Database::new(
+        runtime,
+        "schema-ready-user".to_owned(),
+        "Schema Ready User".to_owned(),
+    );
+
+    db.verify_schema_ready(ReadConsistency::Local)
+        .await
+        .expect_err("an empty learner database must not be ready");
+    db.ensure_schema_only()
+        .await
+        .expect("create schema as voter");
+    db.verify_schema_ready(ReadConsistency::Local)
+        .await
+        .expect("created schema is ready");
+}
 
 #[tokio::test]
 async fn ensure_schema_creates_current_authorization_tables() {
@@ -140,8 +161,10 @@ async fn ensure_schema_creates_authorization_columns() {
             "first_party",
             "consent_policy",
             "active",
+            "provisioning_status",
             "rauthy_client_id",
-            "secret_rotated_at",
+            "security_mutation_token",
+            "security_mutation_expires_at",
             "created_by_user_id",
             "created_at",
             "updated_at",
@@ -153,6 +176,23 @@ async fn ensure_schema_creates_authorization_columns() {
         &runtime,
         "application_redirect_uris",
         &["application_id", "redirect_uri", "created_at"],
+    )
+    .await;
+
+    support::assert_table_columns(
+        &runtime,
+        "auth_identity_cache",
+        &[
+            "token_hash",
+            "provider",
+            "external_user_id",
+            "client_id",
+            "email",
+            "display_name",
+            "active",
+            "expires_at",
+            "updated_at",
+        ],
     )
     .await;
 
@@ -237,6 +277,7 @@ async fn ensure_schema_creates_authorization_indexes() {
             "idx_actions_provider_code_unique",
             "idx_application_grants_active_unique",
             "idx_application_grants_user_application",
+            "idx_applications_rauthy_client_id_unique",
             "idx_organization_party_links_org_relation",
             "idx_parties_business_no",
             "idx_roles_global_code",
@@ -265,6 +306,109 @@ async fn ensure_schema_creates_authorization_indexes() {
     assert!(
         !support::has_unique_index_on_columns(&runtime, "actions", &["code"]).await,
         "actions.code must not be globally unique"
+    );
+}
+
+#[tokio::test]
+async fn ensure_schema_rejects_duplicate_rauthy_client_ids_before_unique_index() {
+    let (runtime, db, _dir) = support::ensured_database().await;
+    runtime
+        .batch(
+            r#"
+            DROP INDEX idx_applications_rauthy_client_id_unique;
+            INSERT INTO applications (
+                id, organization_id, slug, name, description, application_type, app_type,
+                first_party, consent_policy, active, provisioning_status, rauthy_client_id,
+                created_by_user_id, created_at, updated_at
+            ) VALUES
+                ('app-duplicate-a', 'org-a', 'duplicate-a', 'Duplicate A', NULL,
+                 'confidential', 'web', 0, 'explicit', 1, 'ready', 'shared-client', 'user-a',
+                 '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z'),
+                ('app-duplicate-b', 'org-b', 'duplicate-b', 'Duplicate B', NULL,
+                 'confidential', 'web', 0, 'explicit', 1, 'ready', 'shared-client', 'user-b',
+                 '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z');
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed duplicate client ids");
+
+    let error = db
+        .ensure_schema_only()
+        .await
+        .expect_err("duplicate Rauthy client ids must stop migration");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate applications.rauthy_client_id shared-client appears 2 times"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn ensure_schema_rejects_cross_organization_group_memberships() {
+    let (runtime, db, _dir) = support::ensured_database().await;
+    runtime
+        .batch(
+            r#"
+            INSERT INTO groups (id, organization_id, name, description, created_at, updated_at)
+            VALUES ('invalid-group', 'org-a', 'Invalid Group', NULL,
+                    '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z');
+            INSERT INTO organization_memberships (
+                id, organization_id, user_id, membership_role, status, created_at, updated_at
+            ) VALUES (
+                'invalid-membership', 'org-b', 'invalid-user', 'member', 'active',
+                '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z'
+            );
+            INSERT INTO group_memberships (group_id, organization_membership_id)
+            VALUES ('invalid-group', 'invalid-membership');
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed invalid group membership");
+
+    let error = db
+        .ensure_schema_only()
+        .await
+        .expect_err("cross-organization group membership must stop startup");
+    assert!(
+        error.to_string().contains("invalid group data"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn ensure_schema_rejects_cross_organization_group_bindings() {
+    let (runtime, db, _dir) = support::ensured_database().await;
+    runtime
+        .batch(
+            r#"
+            INSERT INTO groups (id, organization_id, name, description, created_at, updated_at)
+            VALUES ('bound-group', 'org-a', 'Bound Group', NULL,
+                    '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z');
+            INSERT INTO role_bindings (
+                id, subject_type, subject_id, subject_organization_id, provider_id,
+                resource_type, resource_id, role_id, agreement_id, state,
+                created_by_user_id, created_at, updated_at
+            ) VALUES (
+                'invalid-group-binding', 'group', 'bound-group', 'org-b', 'grant',
+                'organization', 'org-b', 'role-any', NULL, 'active', 'user-any',
+                '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z'
+            );
+            "#
+            .to_owned(),
+        )
+        .await
+        .expect("seed invalid group binding");
+
+    let error = db
+        .ensure_schema_only()
+        .await
+        .expect_err("cross-organization group binding must stop startup");
+    assert!(
+        error.to_string().contains("invalid group data"),
+        "unexpected error: {error:#}"
     );
 }
 
@@ -814,10 +958,16 @@ async fn ensure_schema_adds_developer_console_columns_to_existing_applications()
 
     let columns = support::table_columns(&runtime, "applications").await;
     assert!(columns.contains(&"rauthy_client_id".to_owned()));
-    assert!(columns.contains(&"secret_rotated_at".to_owned()));
+    assert!(columns.contains(&"provisioning_status".to_owned()));
+    assert!(columns.contains(&"security_mutation_token".to_owned()));
+    assert!(columns.contains(&"security_mutation_expires_at".to_owned()));
     let application = db
         .get_application_with_consistency("legacy-app", Some(ReadConsistency::Strong))
         .await
         .expect("legacy application");
-    assert_eq!(application.rauthy_client_id.as_deref(), Some("legacy-app"));
+    assert_eq!(application.rauthy_client_id, None);
+    assert_eq!(
+        application.provisioning_status,
+        domain::ApplicationProvisioningStatus::Unprovisioned
+    );
 }

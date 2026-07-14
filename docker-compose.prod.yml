@@ -12,7 +12,7 @@ services:
         sh /renderer/render-rauthy-bootstrap.sh /bootstrap-template /app/bootstrap
     environment:
       GRANT_RAUTHY_CLIENT_SECRET: ${GRANT_RAUTHY_CLIENT_SECRET}
-      GRANT_RAUTHY_ADMIN_API_KEY: ${GRANT_RAUTHY_ADMIN_API_KEY}
+      GRANT_RAUTHY_CLIENT_READ_API_KEY: ${GRANT_RAUTHY_CLIENT_READ_API_KEY}
     volumes:
       - rauthy_data:/app/data
       - rauthy_bootstrap:/app/bootstrap
@@ -63,6 +63,7 @@ services:
     environment:
       GRANT_BIND_ADDR: 0.0.0.0:8080
       GRANT_MASTER_KEY: ${GRANT_MASTER_KEY}
+      GRANT_APP_AUTH_KEY: ${GRANT_APP_AUTH_KEY}
       GRANT_BOOTSTRAP_USER_ID: ${GRANT_BOOTSTRAP_USER_ID:-conalog-grant}
       GRANT_BOOTSTRAP_USER_NAME: ${GRANT_BOOTSTRAP_USER_NAME:-Conalog Grant}
       GRANT_RAUTHY_BASE_URL: http://rauthy:8080
@@ -70,7 +71,7 @@ services:
       GRANT_RAUTHY_USERINFO_PATH: /auth/v1/oidc/userinfo
       GRANT_RAUTHY_CLIENT_ID: ${GRANT_RAUTHY_CLIENT_ID:-grant}
       GRANT_RAUTHY_CLIENT_SECRET: ${GRANT_RAUTHY_CLIENT_SECRET}
-      GRANT_RAUTHY_ADMIN_API_KEY: ${GRANT_RAUTHY_ADMIN_API_KEY}
+      GRANT_RAUTHY_CLIENT_READ_API_KEY: ${GRANT_RAUTHY_CLIENT_READ_API_KEY}
       GRANT_RAUTHY_CACHE_TTL_SECONDS: ${GRANT_RAUTHY_CACHE_TTL_SECONDS:-30}
       GRANT_RUNTIME_MODE: ${GRANT_RUNTIME_MODE:-embedded}
       GRANT_LOCAL_NODE_ROLE: ${GRANT_LOCAL_NODE_ROLE:-voter}

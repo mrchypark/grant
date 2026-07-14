@@ -7,7 +7,7 @@ NAMESPACE=${NAMESPACE:-grant}
 GRANT_SMOKE_PORT=${GRANT_SMOKE_PORT:-18080}
 GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
 GRANT_RAUTHY_CLIENT_SECRET=${GRANT_RAUTHY_CLIENT_SECRET:-devRauthyClientSecret0000000000000000000000000000000000000000000}
-GRANT_RAUTHY_ADMIN_API_KEY=${GRANT_RAUTHY_ADMIN_API_KEY:-grant-admin\$devRauthyAdminApiKeySecret000000000000000000000000000000000000000}
+GRANT_RAUTHY_CLIENT_READ_API_KEY=${GRANT_RAUTHY_CLIENT_READ_API_KEY:-grant-client-read\$devRauthyClientReadApiKeySecret00000000000000000000000000000000000}
 REPLACE_RAUTHY_POD=${REPLACE_RAUTHY_POD:-0}
 TMP_DIR=
 PORT_FORWARD_PID=
@@ -46,68 +46,134 @@ assert_no_pvc_references() {
     || fail "${label} render does not use emptyDir for rauthy-data"
 }
 
-assert_restricted_bootstrap() {
+assert_ha_contract() {
   manifest=$1
   label=$2
-  rauthy_manifest="${TMP_DIR}/${label}-rauthy.yaml"
-  init_manifest="${TMP_DIR}/${label}-rauthy-init.yaml"
-  awk '
-    $0 == "  serviceName: rauthy-headless" { emit = 1 }
-    emit && /^---$/ { exit }
-    emit { print }
-  ' "${manifest}" >"${rauthy_manifest}"
-  awk '
-    $0 == "      initContainers:" { emit = 1; next }
-    emit && $0 == "      securityContext:" { exit }
-    emit { print }
-  ' "${rauthy_manifest}" >"${init_manifest}"
+  [ "$(grep -c '^  podManagementPolicy: Parallel$' "${manifest}" || true)" -eq 2 ] \
+    || fail "${label} must render two Parallel StatefulSets"
+  [ "$(grep -c '^  replicas: 3$' "${manifest}" || true)" -eq 2 ] \
+    || fail "${label} must render Grant and Rauthy at three replicas"
+  [ "$(grep -c '^  minAvailable: 2$' "${manifest}" || true)" -eq 2 ] \
+    || fail "${label} must render two quorum PDBs"
+  grep -q 'name: lifecycle-gate' "${manifest}" || fail "${label} is missing lifecycle gates"
+  if grep -E 'image: (busybox|ghcr.io/sebadob/rauthy)' "${manifest}" | grep -v '@sha256:' >/dev/null; then
+    fail "${label} contains an unpinned third-party image"
+  fi
+}
 
-  count_line() {
-    [ "$(grep -cFx "$2" "$1" || true)" -eq "$3" ]
-  }
-  if ! {
-    count_line "${rauthy_manifest}" '        seccompProfile:' 1 \
-    && count_line "${rauthy_manifest}" '          type: RuntimeDefault' 1 \
-    && count_line "${init_manifest}" '        name: render-bootstrap' 1 \
-    && count_line "${init_manifest}" '        securityContext:' 1 \
-    && count_line "${init_manifest}" '          runAsUser: 10001' 1 \
-    && count_line "${init_manifest}" '          runAsGroup: 10001' 1 \
-    && count_line "${init_manifest}" '          runAsNonRoot: true' 1 \
-    && count_line "${init_manifest}" '          allowPrivilegeEscalation: false' 1 \
-    && count_line "${init_manifest}" '            - ALL' 1 \
-    && count_line "${init_manifest}" '        envFrom:' 0 \
-    && [ "$(grep -c '^        - name: ' "${init_manifest}" || true)" -eq 2 ] \
-    && count_line "${init_manifest}" '        - name: GRANT_RAUTHY_CLIENT_SECRET' 1 \
-    && count_line "${init_manifest}" '        - name: GRANT_RAUTHY_ADMIN_API_KEY' 1 \
-    && count_line "${init_manifest}" '            secretKeyRef:' 2 \
-    && count_line "${init_manifest}" '              key: GRANT_RAUTHY_CLIENT_SECRET' 1 \
-    && count_line "${init_manifest}" '              key: GRANT_RAUTHY_ADMIN_API_KEY' 1 \
-    && count_line "${init_manifest}" '              name: grant-secrets' 2
-  }; then
-    fail "${label} render does not harden the bootstrap init container"
+assert_recovery_dry_run() {
+  pair="${TMP_DIR}/pair.json"
+  RECOVERY_ID=ci-static RECOVERY_GENERATION=ci-generation RESTORE_RETAIN_UNTIL=2030-01-01T00:00:00Z \
+  ISOLATED_DRILL_ID=pending \
+  GRANT_BUCKET=grant-ci-backups GRANT_SOURCE_KEY=backup_node_1_1.sqlite GRANT_SOURCE_VERSION_ID=grant-v1 \
+  GRANT_SOURCE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  GRANT_IMAGE=registry.example.com/grant@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  GRANT_SCHEMA_ID=grant-schema-ci GRANT_KEY_ID=grant-key-ci \
+  GRANT_BACKUP_GENERATION=grant-ci-g1 \
+  GRANT_KEYRING_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  GRANT_KEYRING_GENERATION=grant-keyring-ci GRANT_WRITER_PRINCIPAL_ARN=arn:aws:iam::111111111111:role/grant-writer \
+  GRANT_RESTORE_READER_PRINCIPAL_ARN=arn:aws:iam::111111111111:role/grant-reader \
+  RAUTHY_BUCKET=rauthy-ci-backups RAUTHY_SOURCE_KEY=backup_node_1_1.sqlite RAUTHY_SOURCE_VERSION_ID=rauthy-v1 \
+  RAUTHY_SOURCE_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  RAUTHY_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d \
+  RAUTHY_SCHEMA_ID=rauthy-0.36.0 RAUTHY_KEY_ID=rauthy-key-ci \
+  RAUTHY_BACKUP_GENERATION=rauthy-ci-g1 \
+  RAUTHY_KEYRING_SHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  RAUTHY_KEYRING_GENERATION=rauthy-keyring-ci RAUTHY_WRITER_PRINCIPAL_ARN=arn:aws:iam::222222222222:role/rauthy-writer \
+  RAUTHY_RESTORE_READER_PRINCIPAL_ARN=arn:aws:iam::222222222222:role/rauthy-reader \
+    "${ROOT_DIR}/scripts/create-recovery-pair.sh" --dry-run --output "${pair}"
+  jq -e '
+    (.grant.restoreReaderPrincipal | length > 0) and (.rauthy.restoreReaderPrincipal | length > 0) and
+    (.grant.writerPrincipal | length > 0) and (.rauthy.writerPrincipal | length > 0) and
+    (.grant.keyringSha256 | test("^[0-9a-f]{64}$")) and (.rauthy.keyringSha256 | test("^[0-9a-f]{64}$")) and
+    (.trafficWriteFence.snapshots.grant.snapshotId | length > 0) and
+    (.trafficWriteFence.snapshots.rauthy.snapshotId | length > 0)
+  ' "${pair}" >/dev/null || fail "recovery pair is missing reader, writer, keyring, or signed snapshot bindings"
+  if "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --record "${pair}" >/dev/null 2>&1; then
+    fail "unapproved recovery record was accepted for production restore"
+  fi
+  "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --record "${pair}" >/dev/null
+  "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --release-completed --record "${pair}" >/dev/null
+
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${TMP_DIR}/approval-private.pem" >/dev/null 2>&1
+  openssl pkey -in "${TMP_DIR}/approval-private.pem" -pubout -out "${TMP_DIR}/approval-public.pem" >/dev/null 2>&1
+  jq '.isolatedDrill={id:"static-test",passed:true,completedAt:"2026-07-14T00:00:00Z"} |
+      .approval={passed:true,approvedAt:"2026-07-14T00:00:00Z",workflowRunId:"static-test",gitCommit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",semanticEvidenceSha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' \
+    "${pair}" >"${TMP_DIR}/approved.json"
+  jq -S -c . "${TMP_DIR}/approved.json" >"${TMP_DIR}/approved.canonical.json"
+  openssl dgst -sha256 -sign "${TMP_DIR}/approval-private.pem" -out "${TMP_DIR}/approved.sig" "${TMP_DIR}/approved.canonical.json"
+  fingerprint=$(openssl pkey -pubin -in "${TMP_DIR}/approval-public.pem" -outform DER | openssl dgst -sha256 | awk '{print $NF}')
+  RECOVERY_APPROVAL_PUBLIC_KEY_SHA256=${fingerprint} RECOVERY_OPERATOR_GIT_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run \
+    --record "${TMP_DIR}/approved.json" --approval-signature "${TMP_DIR}/approved.sig" --approval-public-key "${TMP_DIR}/approval-public.pem" >/dev/null
+  jq '.generation="tampered"' "${TMP_DIR}/approved.json" >"${TMP_DIR}/tampered.json"
+  if RECOVERY_APPROVAL_PUBLIC_KEY_SHA256=${fingerprint} RECOVERY_OPERATOR_GIT_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run \
+    --record "${TMP_DIR}/tampered.json" --approval-signature "${TMP_DIR}/approved.sig" --approval-public-key "${TMP_DIR}/approval-public.pem" >/dev/null 2>&1; then
+    fail "tampered approved recovery record passed signature verification"
   fi
 }
 
 verify_static() {
   need kubectl
   need grep
+  need jq
+  need openssl
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-kustomize.XXXXXX")
 
-  kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/production.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/base.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ephemeral" >"${TMP_DIR}/ephemeral.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied" >"${TMP_DIR}/ied.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/production" >"${TMP_DIR}/production.yaml"
 
-  grep -q 'volumeClaimTemplates:' "${TMP_DIR}/production.yaml" \
-    || fail "production render must retain the Rauthy PVC template"
-  assert_restricted_bootstrap "${TMP_DIR}/production.yaml" production
-  assert_restricted_bootstrap "${TMP_DIR}/ephemeral.yaml" ephemeral
-  assert_restricted_bootstrap "${TMP_DIR}/ied.yaml" ied
+  assert_no_pvc_references "${TMP_DIR}/base.yaml" base
   assert_no_pvc_references "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_no_pvc_references "${TMP_DIR}/ied.yaml" ied
+  assert_no_pvc_references "${TMP_DIR}/production.yaml" production
+  assert_ha_contract "${TMP_DIR}/base.yaml" base
+  assert_ha_contract "${TMP_DIR}/ephemeral.yaml" ephemeral
+  assert_ha_contract "${TMP_DIR}/ied.yaml" ied
+  assert_ha_contract "${TMP_DIR}/production.yaml" production
+
+  [ "$(grep -c 'whenUnsatisfiable: DoNotSchedule' "${TMP_DIR}/production.yaml" || true)" -eq 2 ] \
+    || fail "production must use hard topology spread"
+  [ "$(grep -c 'requiredDuringSchedulingIgnoredDuringExecution:' "${TMP_DIR}/production.yaml" || true)" -eq 2 ] \
+    || fail "production must use hard pod anti-affinity"
+  grep -q 'name: grant-recovery-state' "${TMP_DIR}/production.yaml" \
+    || fail "production must require the external recovery state"
+  grep -q 'name: grant-production-backup' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant backup references are missing"
+  grep -q 'name: rauthy-production-backup' "${TMP_DIR}/production.yaml" \
+    || fail "production Rauthy backup references are missing"
+  grep -q 'image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST' "${TMP_DIR}/production.yaml" \
+    || fail "production template must retain an admission-invalid required image marker"
+  if grep -Eq 'sha256:0{64}|grant\.example\.com|identity\.example\.com|kind: Ingress' "${TMP_DIR}/production.yaml"; then
+    fail "production render contains an unresolved digest, example host, or bundled public ingress"
+  fi
+  grep -q 'name: GRANT_APP_AUTH_KEY' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant app-auth key wiring is missing"
+  grep -q 'key: GRANT_APP_AUTH_KEY' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant app-auth Secret key wiring is missing"
+  if grep -E 'localhost|grant\.local|dev-rauthy|grant:local|SuperSecureSecret|AnotherSecureSecret' "${TMP_DIR}/production.yaml" >/dev/null; then
+    fail "production render contains a development fallback"
+  fi
+  grep -q 'KEYRING_GENERATION:' "${ROOT_DIR}/deploy/overlays/production/grant-production-config.example.yaml" \
+    || fail "Grant keyring generation binding is missing"
+  grep -q 'KEYRING_GENERATION:' "${ROOT_DIR}/deploy/overlays/production/rauthy-production-config.example.yaml" \
+    || fail "Rauthy keyring generation binding is missing"
+  if grep -n -- '--from-literal=.*[$][{]' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" >/dev/null; then
+    fail "Kubernetes secret helper exposes secret values through child argv"
+  fi
+
+  grant_bucket=$(sed -n 's/.*HQL_S3_BUCKET:[[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT_DIR}/deploy/overlays/production/grant-production-config.example.yaml")
+  rauthy_bucket=$(sed -n 's/.*HQL_S3_BUCKET:[[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT_DIR}/deploy/overlays/production/rauthy-production-config.example.yaml")
+  [ -n "${grant_bucket}" ] && [ -n "${rauthy_bucket}" ] && [ "${grant_bucket}" != "${rauthy_bucket}" ] \
+    || fail "Grant and Rauthy examples must use distinct backup buckets"
   grep -Eq 'name: rauthy-bootstrap-renderer-[a-z0-9]+' "${TMP_DIR}/ephemeral.yaml" \
     || fail "ephemeral render is missing the generated bootstrap renderer ConfigMap"
+  assert_recovery_dry_run
+  "${ROOT_DIR}/scripts/verify-recovery-state-machine.sh"
+  "${ROOT_DIR}/scripts/verify-restore-once.sh"
 
-  echo "Kubernetes storage profiles verified"
+  echo "Kubernetes HA, lifecycle, backup, and restore profiles verified"
 }
 
 assert_live_storage() {
@@ -154,7 +220,7 @@ assert_runtime() {
     || fail "Grant health is not ready"
   curl -fsS "${base_url}/auth/v1/health" >/dev/null \
     || fail "Rauthy health proxy failed"
-  curl -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_ADMIN_API_KEY}" \
+  curl -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_CLIENT_READ_API_KEY}" \
     "${base_url}/auth/v1/clients/${GRANT_RAUTHY_CLIENT_ID}" >/dev/null \
     || fail "bootstrapped Rauthy client is unavailable through Grant proxy"
   curl -fsS -u "${GRANT_RAUTHY_CLIENT_ID}:${GRANT_RAUTHY_CLIENT_SECRET}" \

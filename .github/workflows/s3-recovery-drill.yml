@@ -1,0 +1,172 @@
+name: s3-recovery-drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Pre-created namespace labeled grant.cypark.dev/recovery-drill=true
+        required: true
+      namespace_uid:
+        description: Immutable UID of the isolated drill namespace
+        required: true
+      recovery_id:
+        description: Exact recovery ID from the unsigned pair record
+        required: true
+      acknowledge_isolated_namespace:
+        description: Type ISOLATED-DRILL-NOT-PRODUCTION
+        required: true
+      stop_after_phase:
+        description: Optional recovery checkpoint for an intentional operator stop
+        required: false
+        default: ""
+      crash_ordinal0_on_stop:
+        description: Delete the active ordinal 0 after an intentional stop
+        required: false
+        type: boolean
+        default: false
+      rearm_ordinal0:
+        description: Explicit retry after an ordinal0-restored crash
+        required: true
+        type: choice
+        default: none
+        options: [none, rauthy, grant]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s3-recovery-drill-${{ inputs.namespace_uid }}
+  cancel-in-progress: false
+
+jobs:
+  live-drill:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: recovery-drill
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Require trusted immutable inputs and tools
+        env:
+          ACKNOWLEDGEMENT: ${{ inputs.acknowledge_isolated_namespace }}
+          RECOVERY_PAIR_JSON_B64: ${{ secrets.RECOVERY_PAIR_JSON_B64 }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+          SEMANTIC_CONFIG_B64: ${{ secrets.RECOVERY_SEMANTIC_CONFIG_JSON_B64 }}
+        run: |
+          test "${ACKNOWLEDGEMENT}" = 'ISOLATED-DRILL-NOT-PRODUCTION'
+          test -n "${RECOVERY_PAIR_JSON_B64}"
+          test -n "${KUBECONFIG_B64}"
+          test -n "${SEMANTIC_CONFIG_B64}"
+          command -v aws
+          command -v jq
+          command -v kubectl
+          command -v openssl
+
+      - name: Configure namespace-scoped drill credentials
+        env:
+          RECOVERY_PAIR_JSON_B64: ${{ secrets.RECOVERY_PAIR_JSON_B64 }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+          SEMANTIC_CONFIG_B64: ${{ secrets.RECOVERY_SEMANTIC_CONFIG_JSON_B64 }}
+          GRANT_AWS_ACCESS_KEY_ID: ${{ secrets.GRANT_AWS_ACCESS_KEY_ID }}
+          GRANT_AWS_SECRET_ACCESS_KEY: ${{ secrets.GRANT_AWS_SECRET_ACCESS_KEY }}
+          GRANT_AWS_REGION: ${{ secrets.GRANT_AWS_REGION }}
+          RAUTHY_AWS_ACCESS_KEY_ID: ${{ secrets.RAUTHY_AWS_ACCESS_KEY_ID }}
+          RAUTHY_AWS_SECRET_ACCESS_KEY: ${{ secrets.RAUTHY_AWS_SECRET_ACCESS_KEY }}
+          RAUTHY_AWS_REGION: ${{ secrets.RAUTHY_AWS_REGION }}
+          EXPECTED_RECOVERY_ID: ${{ inputs.recovery_id }}
+        run: |
+          umask 077
+          printf '%s' "${RECOVERY_PAIR_JSON_B64}" | base64 --decode > recovery-pair.json
+          printf '%s' "${KUBECONFIG_B64}" | base64 --decode > "${RUNNER_TEMP}/recovery-kubeconfig"
+          printf '%s' "${SEMANTIC_CONFIG_B64}" | base64 --decode > semantic-config.json
+          echo "KUBECONFIG=${RUNNER_TEMP}/recovery-kubeconfig" >> "${GITHUB_ENV}"
+          echo "AWS_SHARED_CREDENTIALS_FILE=${RUNNER_TEMP}/recovery-aws-credentials" >> "${GITHUB_ENV}"
+          echo "AWS_CONFIG_FILE=${RUNNER_TEMP}/recovery-aws-config" >> "${GITHUB_ENV}"
+          {
+            printf '[grant-recovery-reader]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "${GRANT_AWS_ACCESS_KEY_ID}" "${GRANT_AWS_SECRET_ACCESS_KEY}"
+            printf '[rauthy-recovery-reader]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "${RAUTHY_AWS_ACCESS_KEY_ID}" "${RAUTHY_AWS_SECRET_ACCESS_KEY}"
+          } > "${RUNNER_TEMP}/recovery-aws-credentials"
+          {
+            printf '[profile grant-recovery-reader]\nregion = %s\n' "${GRANT_AWS_REGION}"
+            printf '[profile rauthy-recovery-reader]\nregion = %s\n' "${RAUTHY_AWS_REGION}"
+          } > "${RUNNER_TEMP}/recovery-aws-config"
+          test "$(jq -r '.recoveryId' recovery-pair.json)" = "${EXPECTED_RECOVERY_ID}"
+
+      - name: Execute live restore and fixed semantic gate
+        env:
+          GRANT_AWS_PROFILE: grant-recovery-reader
+          RAUTHY_AWS_PROFILE: rauthy-recovery-reader
+          GRANT_S3_ENDPOINT_URL: ${{ secrets.GRANT_S3_ENDPOINT_URL }}
+          RAUTHY_S3_ENDPOINT_URL: ${{ secrets.RAUTHY_S3_ENDPOINT_URL }}
+          RECOVERY_SEMANTIC_BEARER_TOKEN: ${{ secrets.RECOVERY_SEMANTIC_BEARER_TOKEN }}
+          RECOVERY_SEMANTIC_APP_AUTH_KEY: ${{ secrets.RECOVERY_SEMANTIC_APP_AUTH_KEY }}
+          DRILL_NAMESPACE: ${{ inputs.namespace }}
+          EXPECTED_NAMESPACE_UID: ${{ inputs.namespace_uid }}
+          EXPECTED_RECOVERY_ID: ${{ inputs.recovery_id }}
+          RESTORE_STOP_AFTER_PHASE: ${{ inputs.stop_after_phase }}
+          CRASH_ORDINAL0_ON_STOP: ${{ inputs.crash_ordinal0_on_stop }}
+          REARM_ORDINAL0: ${{ inputs.rearm_ordinal0 }}
+        run: |
+          args=(--isolated-drill --record recovery-pair.json --semantic-config semantic-config.json --namespace "${DRILL_NAMESPACE}" --expected-namespace-uid "${EXPECTED_NAMESPACE_UID}" --confirm-recovery-id "${EXPECTED_RECOVERY_ID}")
+          if [ "${REARM_ORDINAL0}" != none ]; then args+=(--rearm-ordinal0 "${REARM_ORDINAL0}"); fi
+          set +e
+          scripts/restore-full-cluster.sh "${args[@]}"
+          status=$?
+          set -e
+          if [ "${status}" -eq 75 ] && [ "${CRASH_ORDINAL0_ON_STOP}" = true ]; then
+            case "${RESTORE_STOP_AFTER_PHASE}" in
+              rauthy-*) kubectl -n "${DRILL_NAMESPACE}" delete pod rauthy-0 --ignore-not-found ;;
+              grant-*) kubectl -n "${DRILL_NAMESPACE}" delete pod grant-voter-0 --ignore-not-found ;;
+              *) echo "stop phase does not identify an ordinal 0 workload" >&2; exit 2 ;;
+            esac
+          fi
+          if [ "${status}" -eq 0 ]; then
+            kubectl annotate namespace "${DRILL_NAMESPACE}" "grant.cypark.dev/recovery-direct-writers-released=${EXPECTED_RECOVERY_ID}" --overwrite
+            scripts/restore-full-cluster.sh "${args[@]}" --release-completed
+          fi
+          exit "${status}"
+
+      - name: Sign immutable approval evidence
+        env:
+          EXPECTED_RECOVERY_ID: ${{ inputs.recovery_id }}
+          APPROVAL_PRIVATE_KEY_B64: ${{ secrets.RECOVERY_APPROVAL_PRIVATE_KEY_B64 }}
+        run: |
+          umask 077
+          test -n "${APPROVAL_PRIVATE_KEY_B64}"
+          printf '%s' "${APPROVAL_PRIVATE_KEY_B64}" | base64 --decode > "${RUNNER_TEMP}/approval-private.pem"
+          openssl pkey -in "${RUNNER_TEMP}/approval-private.pem" -check -noout
+          jq -S -c . semantic-config.json > "${RUNNER_TEMP}/semantic.canonical.json"
+          semantic_sha="$(openssl dgst -sha256 "${RUNNER_TEMP}/semantic.canonical.json" | awk '{print $NF}')"
+          approved_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          jq --arg id "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --arg completedAt "${approved_at}" \
+            --arg runId "${GITHUB_RUN_ID}" --arg commit "${GITHUB_SHA}" --arg semanticSha "${semantic_sha}" '
+              .isolatedDrill = {id:$id,passed:true,completedAt:$completedAt} |
+              .approval = {passed:true,approvedAt:$completedAt,workflowRunId:$runId,gitCommit:$commit,semanticEvidenceSha256:$semanticSha}
+            ' recovery-pair.json > approved-recovery-pair.json
+          jq -S -c . approved-recovery-pair.json > "${RUNNER_TEMP}/approved.canonical.json"
+          openssl dgst -sha256 -sign "${RUNNER_TEMP}/approval-private.pem" -out approved-recovery-pair.sig "${RUNNER_TEMP}/approved.canonical.json"
+          openssl pkey -in "${RUNNER_TEMP}/approval-private.pem" -pubout -out "${RUNNER_TEMP}/approval-public.pem"
+          openssl dgst -sha256 -verify "${RUNNER_TEMP}/approval-public.pem" -signature approved-recovery-pair.sig "${RUNNER_TEMP}/approved.canonical.json"
+          test "$(jq -r '.recoveryId' approved-recovery-pair.json)" = "${EXPECTED_RECOVERY_ID}"
+
+      - name: Publish signed recovery approval
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: approved-recovery-pair-${{ inputs.recovery_id }}
+          path: |
+            approved-recovery-pair.json
+            approved-recovery-pair.sig
+            semantic-config.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove recovery credentials
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/recovery-kubeconfig" "${RUNNER_TEMP}/recovery-aws-credentials" "${RUNNER_TEMP}/recovery-aws-config" \
+            "${RUNNER_TEMP}/approval-private.pem" "${RUNNER_TEMP}/approval-public.pem" "${RUNNER_TEMP}/approved.canonical.json"
+          rm -f "${RUNNER_TEMP}/semantic.canonical.json"
+          rm -f recovery-pair.json approved-recovery-pair.json approved-recovery-pair.sig semantic-config.json

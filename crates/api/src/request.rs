@@ -103,6 +103,17 @@ pub(crate) fn require_master_key(service: &AppService, headers: &HeaderMap) -> A
     Ok(())
 }
 
+pub(crate) fn require_app_auth_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
+    let provided = header_value(headers, "x-grant-app-auth-key")?;
+    if provided != service.app_auth_key() {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "unauthorized: invalid application authorization key".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
     optional_header_value(headers, key)?
         .ok_or_else(|| ApiError::bad_request(anyhow!("missing {key} header")))

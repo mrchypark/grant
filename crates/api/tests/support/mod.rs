@@ -36,6 +36,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub const MASTER_KEY: &str = "dev-only-master-key";
+pub const APP_AUTH_KEY: &str = "dev-only-app-auth-key";
 pub const BOOTSTRAP_USER_ID: &str = "bootstrap-user";
 pub const BOOTSTRAP_USER_NAME: &str = "Bootstrap User";
 pub const FIXED_TEST_TIME: &str = "2026-04-03T00:00:00Z";
@@ -112,7 +113,7 @@ pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
             userinfo_path: "/auth/v1/oidc/userinfo".to_owned(),
             client_id: "grant".to_owned(),
             client_secret: "test-rauthy-secret".to_owned(),
-            admin_api_key: "grant-rauthy-api-key".to_owned(),
+            client_read_api_key: "grant-rauthy-api-key".to_owned(),
             cache_ttl_seconds: 30,
         },
     }
@@ -170,6 +171,7 @@ pub async fn test_service_with_default_consistency(
         },
         security: SecurityConfig {
             master_key: MASTER_KEY.to_owned(),
+            app_auth_key: APP_AUTH_KEY.to_owned(),
             bootstrap_user_id: BOOTSTRAP_USER_ID.to_owned(),
             bootstrap_user_name: BOOTSTRAP_USER_NAME.to_owned(),
         },
@@ -474,7 +476,7 @@ pub async fn start_mock_rauthy() -> String {
         uri.path().to_owned()
     }
 
-    fn require_admin_api_key(headers: &HeaderMap) {
+    fn require_client_read_api_key(headers: &HeaderMap) {
         let authorization = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -487,15 +489,22 @@ pub async fn start_mock_rauthy() -> String {
         headers: HeaderMap,
         Json(body): Json<MockClientRequest>,
     ) -> impl IntoResponse {
-        require_admin_api_key(&headers);
-        assert!(!body.redirect_uris.is_empty());
+        require_client_read_api_key(&headers);
+        let flows_enabled = if body.confidential {
+            vec!["authorization_code", "client_credentials", "refresh_token"]
+        } else {
+            vec!["authorization_code", "refresh_token"]
+        }
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let client = MockClient {
             id: body.id.clone(),
             name: body.name,
             enabled: true,
             confidential: body.confidential,
             redirect_uris: body.redirect_uris,
-            flows_enabled: vec!["authorization_code".to_owned()],
+            flows_enabled,
         };
         let mut clients = state.clients.lock().expect("clients");
         if clients.contains_key(&body.id) {
@@ -522,7 +531,7 @@ pub async fn start_mock_rauthy() -> String {
         axum::extract::Path(client_id): axum::extract::Path<String>,
         Json(raw_body): Json<Value>,
     ) -> impl IntoResponse {
-        require_admin_api_key(&headers);
+        require_client_read_api_key(&headers);
         assert!(
             raw_body.get("id").is_none(),
             "PUT must not include client id"
@@ -620,7 +629,7 @@ pub async fn start_mock_rauthy() -> String {
         headers: HeaderMap,
         axum::extract::Path(client_id): axum::extract::Path<String>,
     ) -> impl IntoResponse {
-        require_admin_api_key(&headers);
+        require_client_read_api_key(&headers);
         let mut clients = state.clients.lock().expect("clients");
         if client_id == "application-create-race" && !clients.contains_key(&client_id) {
             clients.insert(
@@ -695,7 +704,7 @@ pub async fn start_mock_rauthy() -> String {
         headers: HeaderMap,
         axum::extract::Path(client_id): axum::extract::Path<String>,
     ) -> impl IntoResponse {
-        require_admin_api_key(&headers);
+        require_client_read_api_key(&headers);
         let clients = state.clients.lock().expect("clients");
         let Some(client) = clients.get(&client_id) else {
             return (
@@ -722,11 +731,16 @@ pub async fn start_mock_rauthy() -> String {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         assert_eq!(authorization, "Basic Z3JhbnQ6dGVzdC1yYXV0aHktc2VjcmV0");
+        let (client_id, sub) = form
+            .token
+            .strip_prefix("app-token/")
+            .and_then(|value| value.split_once('/'))
+            .unwrap_or(("grant", form.token.as_str()));
         Json(json!({
             "active": true,
-            "sub": form.token,
+            "sub": sub,
             "scope": "openid email profile",
-            "client_id": "grant",
+            "client_id": client_id,
             "exp": 4_102_444_800i64
         }))
     }
@@ -743,10 +757,15 @@ pub async fn start_mock_rauthy() -> String {
                     .and_then(|value| value.strip_prefix("bearer "))
             })
             .unwrap_or("anonymous");
+        let token_sub = token
+            .strip_prefix("app-token/")
+            .and_then(|value| value.split_once('/'))
+            .map(|(_, sub)| sub)
+            .unwrap_or(token);
         let sub = if token == "userinfo-sub-mismatch" {
             "different-subject"
         } else {
-            token
+            token_sub
         };
         Json(json!({
             "id": token,

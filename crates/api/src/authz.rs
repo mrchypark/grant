@@ -9,16 +9,137 @@ use std::sync::Arc;
 
 use crate::{
     dto::{
-        AuthzBatchCheckRequest, AuthzBatchCheckResponse, AuthzCheckRequest, AuthzCheckResponse,
-        AuthzFilterRequest, AuthzFilterResponse, ReadConsistencyQuery,
+        ApplicationAuthzBatchCheckRequest, ApplicationAuthzCheckRequest,
+        ApplicationAuthzFilterRequest, AuthzBatchCheckRequest, AuthzBatchCheckResponse,
+        AuthzCheckRequest, AuthzCheckResponse, AuthzFilterRequest, AuthzFilterResponse,
+        ReadConsistencyQuery,
     },
     error::{ApiError, ApiResult},
     mappers::{authz_check_input, authz_check_response, authz_filter_inputs},
-    request::{read_consistency_override, require_master_key},
+    request::{
+        bearer_token, optional_header_value, read_consistency_override, require_app_auth_key,
+        require_master_key,
+    },
 };
 
 const MAX_AUTHZ_BATCH_CHECKS: usize = 1000;
 const MAX_AUTHZ_FILTER_RESOURCES: usize = 1000;
+
+fn application_check_input(
+    body: ApplicationAuthzCheckRequest,
+) -> infra::service::AuthorizationCheck {
+    infra::service::AuthorizationCheck {
+        subject: infra::service::AuthorizationSubject {
+            subject_type: "user".to_owned(),
+            id: String::new(),
+            organization_id: String::new(),
+        },
+        action: body.action,
+        resource: infra::service::AuthorizationResource {
+            provider_id: body.resource.provider,
+            resource_type: body.resource.resource_type,
+            id: body.resource.id,
+        },
+    }
+}
+
+fn application_auth_headers(
+    service: &AppService,
+    headers: &HeaderMap,
+) -> ApiResult<(String, String)> {
+    require_app_auth_key(service, headers)?;
+    let token = bearer_token(headers)?.ok_or_else(|| ApiError {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        message: "missing authorization header".to_owned(),
+    })?;
+    let organization_id =
+        optional_header_value(headers, "x-organization-id")?.ok_or_else(|| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "missing x-organization-id header".to_owned(),
+        })?;
+    Ok((token, organization_id))
+}
+
+pub(crate) async fn application_authz_check(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplicationAuthzCheckRequest>,
+) -> ApiResult<Json<AuthzCheckResponse>> {
+    let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    let decision = service
+        .check_application_authorizations(
+            Some(&token),
+            &organization_id,
+            &[application_check_input(body)],
+        )
+        .await
+        .map_err(ApiError::from_auth)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::internal("application authorization check failed"))?;
+    Ok(Json(authz_check_response(decision)))
+}
+
+pub(crate) async fn application_authz_batch_check(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplicationAuthzBatchCheckRequest>,
+) -> ApiResult<Json<AuthzBatchCheckResponse>> {
+    let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    if body.checks.len() > MAX_AUTHZ_BATCH_CHECKS {
+        return Err(ApiError::bad_request(anyhow!(
+            "checks must contain at most {MAX_AUTHZ_BATCH_CHECKS} items"
+        )));
+    }
+    let checks = body
+        .checks
+        .into_iter()
+        .map(application_check_input)
+        .collect::<Vec<_>>();
+    let results = service
+        .check_application_authorizations(Some(&token), &organization_id, &checks)
+        .await
+        .map_err(ApiError::from_auth)?
+        .into_iter()
+        .map(authz_check_response)
+        .collect();
+    Ok(Json(AuthzBatchCheckResponse { results }))
+}
+
+pub(crate) async fn application_authz_filter(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplicationAuthzFilterRequest>,
+) -> ApiResult<Json<AuthzFilterResponse>> {
+    let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    if body.resources.len() > MAX_AUTHZ_FILTER_RESOURCES {
+        return Err(ApiError::bad_request(anyhow!(
+            "resources must contain at most {MAX_AUTHZ_FILTER_RESOURCES} items"
+        )));
+    }
+    let mut ids = Vec::with_capacity(body.resources.len());
+    let checks = body
+        .resources
+        .into_iter()
+        .map(|resource| {
+            ids.push(resource.id.clone());
+            application_check_input(ApplicationAuthzCheckRequest {
+                action: body.action.clone(),
+                resource,
+            })
+        })
+        .collect::<Vec<_>>();
+    let decisions = service
+        .check_application_authorizations(Some(&token), &organization_id, &checks)
+        .await
+        .map_err(ApiError::from_auth)?;
+    let resource_ids = ids
+        .into_iter()
+        .zip(decisions)
+        .filter_map(|(id, decision)| decision.allowed.then_some(id))
+        .collect();
+    Ok(Json(AuthzFilterResponse { resource_ids }))
+}
 
 pub(crate) async fn authz_check(
     State(service): State<Arc<AppService>>,
