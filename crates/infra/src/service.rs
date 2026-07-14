@@ -264,6 +264,12 @@ pub struct AuthorizationCheck {
 }
 
 #[derive(Debug, Clone)]
+pub struct ApplicationAuthorizationCheck {
+    pub action: String,
+    pub resource: AuthorizationResource,
+}
+
+#[derive(Debug, Clone)]
 pub struct AuthorizationDecision {
     pub allowed: bool,
     pub reason: String,
@@ -1716,7 +1722,7 @@ impl AppService {
         &self,
         bearer_token: Option<&str>,
         organization_id: &str,
-        checks: &[AuthorizationCheck],
+        checks: &[ApplicationAuthorizationCheck],
     ) -> Result<Vec<AuthorizationDecision>> {
         let organization_id = require_non_empty("organizationId", organization_id)?;
         let identity = self

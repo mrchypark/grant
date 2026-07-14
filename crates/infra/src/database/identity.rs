@@ -1,31 +1,6 @@
 use super::core::now_string;
 use super::*;
 
-#[derive(Debug, Clone)]
-struct CachedIdentityWithClientRow {
-    provider: String,
-    external_user_id: String,
-    client_id: Option<String>,
-    email: Option<String>,
-    display_name: String,
-    active: i64,
-    expires_at: String,
-}
-
-impl From<&mut Row<'_>> for CachedIdentityWithClientRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            provider: row.get("provider"),
-            external_user_id: row.get("external_user_id"),
-            client_id: row.get("client_id"),
-            email: row.get("email"),
-            display_name: row.get("display_name"),
-            active: row.get("active"),
-            expires_at: row.get("expires_at"),
-        }
-    }
-}
-
 impl Database {
     pub async fn upsert_organization_with_owner(
         &self,

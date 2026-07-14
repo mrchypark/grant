@@ -4,7 +4,10 @@ use axum::{
     extract::{Query, State},
     http::HeaderMap,
 };
-use infra::{config::ReadConsistency, service::AppService};
+use infra::{
+    config::ReadConsistency,
+    service::{AppService, ApplicationAuthorizationCheck, AuthorizationResource},
+};
 use std::sync::Arc;
 
 use crate::{
@@ -25,17 +28,10 @@ use crate::{
 const MAX_AUTHZ_BATCH_CHECKS: usize = 1000;
 const MAX_AUTHZ_FILTER_RESOURCES: usize = 1000;
 
-fn application_check_input(
-    body: ApplicationAuthzCheckRequest,
-) -> infra::service::AuthorizationCheck {
-    infra::service::AuthorizationCheck {
-        subject: infra::service::AuthorizationSubject {
-            subject_type: "user".to_owned(),
-            id: String::new(),
-            organization_id: String::new(),
-        },
+fn application_check_input(body: ApplicationAuthzCheckRequest) -> ApplicationAuthorizationCheck {
+    ApplicationAuthorizationCheck {
         action: body.action,
-        resource: infra::service::AuthorizationResource {
+        resource: AuthorizationResource {
             provider_id: body.resource.provider,
             resource_type: body.resource.resource_type,
             id: body.resource.id,

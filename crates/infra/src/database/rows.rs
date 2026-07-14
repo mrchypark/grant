@@ -27,6 +27,31 @@ pub(super) struct UserIdentityLookupRow {
     pub(super) user_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CachedIdentityWithClientRow {
+    pub(super) provider: String,
+    pub(super) external_user_id: String,
+    pub(super) client_id: Option<String>,
+    pub(super) email: Option<String>,
+    pub(super) display_name: String,
+    pub(super) active: i64,
+    pub(super) expires_at: String,
+}
+
+impl From<&mut Row<'_>> for CachedIdentityWithClientRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            provider: row.get("provider"),
+            external_user_id: row.get("external_user_id"),
+            client_id: row.get("client_id"),
+            email: row.get("email"),
+            display_name: row.get("display_name"),
+            active: row.get("active"),
+            expires_at: row.get("expires_at"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for UserIdentityLookupRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
