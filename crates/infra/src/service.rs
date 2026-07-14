@@ -14,7 +14,15 @@ use domain::{
     Role, RoleBinding, RoleBindingState, RoleBindingSubjectType, ServiceProvider, User,
 };
 use serde::Deserialize;
-use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
+use std::{
+    collections::HashSet,
+    error::Error as StdError,
+    fmt,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex;
 
 const MAX_APPLICATION_ACTION_IDS_PER_REQUEST: usize = 999;
 const MAX_ACTION_IDS_PER_REQUEST: usize = 999;
@@ -23,6 +31,9 @@ const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const APPLICATION_SECURITY_MUTATION_LEASE_MINUTES: i64 = 10;
 const MAX_RAUTHY_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_RAUTHY_ERROR_FIELD_CHARS: usize = 256;
+// Schema shape changes only through controlled migrations. Keep this short so an
+// out-of-band schema loss is still detected without issuing a Raft query per probe.
+const SCHEMA_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -68,6 +79,93 @@ pub struct AppService {
     auth: AuthResolver,
     http_client: reqwest::Client,
     proxy_client: reqwest::Client,
+    schema_readiness: Arc<SchemaReadinessCache>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaReadinessRoute {
+    Local,
+    Strong,
+}
+
+#[derive(Debug, Default)]
+struct SchemaReadinessState {
+    local_verified_at: Option<Instant>,
+    strong_verified_at: Option<Instant>,
+}
+
+impl SchemaReadinessState {
+    fn is_fresh(&self, route: SchemaReadinessRoute, now: Instant, ttl: Duration) -> bool {
+        self.verified_at(route)
+            .is_some_and(|verified_at| now.saturating_duration_since(verified_at) < ttl)
+    }
+
+    fn mark_verified(&mut self, route: SchemaReadinessRoute, verified_at: Instant) {
+        match route {
+            SchemaReadinessRoute::Local => self.local_verified_at = Some(verified_at),
+            SchemaReadinessRoute::Strong => self.strong_verified_at = Some(verified_at),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.local_verified_at = None;
+        self.strong_verified_at = None;
+    }
+
+    fn verified_at(&self, route: SchemaReadinessRoute) -> Option<Instant> {
+        match route {
+            SchemaReadinessRoute::Local => self.local_verified_at,
+            SchemaReadinessRoute::Strong => self.strong_verified_at,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SchemaReadinessCache {
+    ttl: Duration,
+    state: Mutex<SchemaReadinessState>,
+}
+
+impl SchemaReadinessCache {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            state: Mutex::new(SchemaReadinessState::default()),
+        }
+    }
+
+    async fn verify<F, Fut>(&self, route: SchemaReadinessRoute, verify: F) -> bool
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let mut state = self.state.lock().await;
+        if state.is_fresh(route, Instant::now(), self.ttl) {
+            return true;
+        }
+        match verify().await {
+            Ok(()) => {
+                state.mark_verified(route, Instant::now());
+                true
+            }
+            Err(_) => {
+                state.clear();
+                false
+            }
+        }
+    }
+
+    async fn while_invalidated<F, Fut, T>(&self, operation: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut state = self.state.lock().await;
+        state.clear();
+        let result = operation().await;
+        state.clear();
+        result
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,15 +302,20 @@ impl AppService {
             auth,
             http_client,
             proxy_client,
+            schema_readiness: Arc::new(SchemaReadinessCache::new(SCHEMA_READINESS_CACHE_TTL)),
         }
     }
 
     pub async fn migrate_schema(&self) -> Result<()> {
-        self.db.ensure_schema_only().await
+        self.schema_readiness
+            .while_invalidated(|| self.db.ensure_schema_only())
+            .await
     }
 
     pub async fn initialize(&self) -> Result<()> {
-        self.db.ensure_schema().await
+        self.schema_readiness
+            .while_invalidated(|| self.db.ensure_schema())
+            .await
     }
 
     pub async fn bootstrap(&self) -> Result<()> {
@@ -224,15 +327,18 @@ impl AppService {
     }
 
     pub async fn is_ready(&self) -> bool {
+        // Cluster/database health remains uncached and is checked on every probe.
         let readiness = self.db.readiness().await;
-        let consistency = if readiness.read_ready {
-            ReadConsistency::Local
+        let (consistency, route) = if readiness.read_ready {
+            (ReadConsistency::Local, SchemaReadinessRoute::Local)
         } else if readiness.write_ready {
-            ReadConsistency::Strong
+            (ReadConsistency::Strong, SchemaReadinessRoute::Strong)
         } else {
             return false;
         };
-        self.db.verify_schema_ready(consistency).await.is_ok()
+        self.schema_readiness
+            .verify(route, || self.db.verify_schema_ready(consistency))
+            .await
     }
 
     pub fn master_key(&self) -> &str {
@@ -2094,7 +2200,103 @@ fn ensure_organization_application_mutable(application: &Application) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_rauthy_error_field;
+    use super::{
+        SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
+        SchemaReadinessState, sanitize_rauthy_error_field,
+    };
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn schema_readiness_cache_is_route_scoped_and_expires() {
+        let started_at = Instant::now();
+        let mut state = SchemaReadinessState::default();
+        state.mark_verified(SchemaReadinessRoute::Local, started_at);
+
+        assert!(state.is_fresh(
+            SchemaReadinessRoute::Local,
+            started_at + SCHEMA_READINESS_CACHE_TTL - Duration::from_millis(1),
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+        assert!(!state.is_fresh(
+            SchemaReadinessRoute::Strong,
+            started_at,
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+        assert!(!state.is_fresh(
+            SchemaReadinessRoute::Local,
+            started_at + SCHEMA_READINESS_CACHE_TTL,
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+
+        state.clear();
+        assert!(!state.is_fresh(
+            SchemaReadinessRoute::Local,
+            started_at,
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+    }
+
+    #[tokio::test]
+    async fn schema_readiness_cache_single_flights_and_invalidates() {
+        let cache = Arc::new(SchemaReadinessCache::new(Duration::from_secs(30)));
+        let verification_count = Arc::new(AtomicUsize::new(0));
+
+        let verify = |cache: Arc<SchemaReadinessCache>, count: Arc<AtomicUsize>| {
+            tokio::spawn(async move {
+                cache
+                    .verify(SchemaReadinessRoute::Local, || async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        let first = verify(cache.clone(), verification_count.clone());
+        let second = verify(cache.clone(), verification_count.clone());
+        let (first, second) = tokio::join!(first, second);
+        assert!(first.expect("first cache task"));
+        assert!(second.expect("second cache task"));
+        assert_eq!(verification_count.load(Ordering::SeqCst), 1);
+
+        cache
+            .while_invalidated(|| async { Ok(()) })
+            .await
+            .expect("invalidate cache");
+        assert!(
+            cache
+                .verify(SchemaReadinessRoute::Local, || async {
+                    verification_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+        );
+        assert_eq!(verification_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn schema_readiness_failures_are_not_cached() {
+        let cache = SchemaReadinessCache::new(Duration::from_secs(30));
+        let verification_count = AtomicUsize::new(0);
+
+        for _ in 0..2 {
+            assert!(
+                !cache
+                    .verify(SchemaReadinessRoute::Strong, || async {
+                        verification_count.fetch_add(1, Ordering::SeqCst);
+                        anyhow::bail!("schema unavailable")
+                    })
+                    .await
+            );
+        }
+        assert_eq!(verification_count.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn preserves_benign_rauthy_error_messages() {
