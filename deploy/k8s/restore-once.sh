@@ -24,10 +24,25 @@ if [ -r "${RESTORE_VALUE_FILE}" ] || [ -r "${RESTORE_ID_FILE}" ]; then
     echo "restore authorization does not match the lifecycle recovery ID" >&2
     exit 1
   }
+  restore_value=$(sed -n '1p' "${RESTORE_VALUE_FILE}")
+  restore_prefix="s3:restore/grant/${restore_id}/"
+  case "${restore_value}" in
+    "${restore_prefix}"*.enc) ;;
+    *) echo "restore directive must reference the authorized Grant recovery object" >&2; exit 1 ;;
+  esac
+  restore_object=${restore_value#"${restore_prefix}"}
+  restore_sha=${restore_object%.enc}
+  case "${restore_sha}" in
+    ''|*[!0-9a-f]*) echo "restore directive must end with a lowercase SHA-256 object name" >&2; exit 1 ;;
+  esac
+  [ "${#restore_sha}" -eq 64 ] && [ "${restore_object}" = "${restore_sha}.enc" ] || {
+    echo "restore directive must end with a lowercase 64-hex SHA-256 object name" >&2
+    exit 1
+  }
   marker_parent=${MARKER%/*}
   [ "${marker_parent}" != "${MARKER}" ] && mkdir -p "${marker_parent}"
   if mkdir "${MARKER}" 2>/dev/null; then
-    HQL_BACKUP_RESTORE=$(sed -n '1p' "${RESTORE_VALUE_FILE}")
+    HQL_BACKUP_RESTORE=${restore_value}
     HQL_S3_KEY=$(sed -n '1p' "${RESTORE_S3_KEY_FILE}")
     HQL_S3_SECRET=$(sed -n '1p' "${RESTORE_S3_SECRET_FILE}")
     [ -n "${HQL_BACKUP_RESTORE}" ] && [ -n "${HQL_S3_KEY}" ] && [ -n "${HQL_S3_SECRET}" ] \

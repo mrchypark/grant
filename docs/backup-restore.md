@@ -135,7 +135,7 @@ scripts/restore-full-cluster.sh \
 
 1. 두 public Service를 fence하고, immutable current version·Object Lock·SHA·image digest를 다시 검증한다.
 2. 아직 복구 데이터가 생성되기 전에만 두 StatefulSet을 0으로 만든다.
-3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. static launcher는 `emptyDir`에 `pending`을 먼저 기록하고 Rauthy/hiqlite ready가 확인된 뒤에만 `completed`로 바꾼다. 불완전한 container restart는 자동 replay하지 않는다.
+3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. static launcher는 `emptyDir`에 `pending`을 먼저 기록하고 Rauthy/hiqlite ready가 확인된 뒤에만 `completed`로 바꾼다. Grant의 one-shot wrapper도 directive가 정확히 `s3:restore/grant/<recovery-id>/<lowercase-sha256>.enc`인지 확인해 live backup, 다른 workload 또는 다른 recovery object를 거부한다. 불완전한 container restart는 자동 replay하지 않는다.
 4. ordinal 0 Ready와 S3 정책/version 재검증 직후 Secret을 삭제한다. 새 Pod는 authorization이 없어 init에서 막히며, 재시도는 operator의 명시적 re-arm이 필요하다.
 5. `partition: 1`에서 no-restore template을 만든 뒤 replicas 3으로 확장한다. 각 Pod readiness와 native membership의 config가 joint consensus가 아닌 정확히 하나의 voter set `1,2,3`인지 확인한다.
 6. lifecycle mode를 `steady`로 바꾸고 `partition: 0`으로 ordinal 0만 quorum-preserving restart한다. restore env와 Secret이 모두 사라졌는지 확인한다.
