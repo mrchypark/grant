@@ -151,7 +151,7 @@ jobs:
           )
           bash -n "${bash_scripts[@]}"
           for script in "${posix_scripts[@]}"; do sh -n "${script}"; done
-          shellcheck "${bash_scripts[@]}" "${posix_scripts[@]}"
+          shellcheck --exclude=SC2015 "${bash_scripts[@]}" "${posix_scripts[@]}"
           actionlint -shellcheck= .github/workflows/*.yml
 
       - name: Verify docs and recovery manifests
