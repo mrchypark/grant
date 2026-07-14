@@ -62,7 +62,7 @@ application은 조직이 만든 실행 주체다. 조직 owner/관리자는 appl
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
-developer console의 redirect URI와 client secret rotation은 기존 `applications`에 붙은 설정이다. 별도 partner 테이블을 만들지 않고, create/list/delete redirect URI와 secret rotate API는 기존 `organization.application.manage` 권한으로 보호한다. Grant backend는 제한된 Rauthy Admin API key로 해당 application의 Rauthy client를 생성/수정하고, secret rotation 결과만 one-time 응답으로 반환한다.
+현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 조직의 application 생성은 generated Rauthy client id를 가진 `unprovisioned` local reservation만 만들고, 별도 운영자/IaC가 Rauthy client를 생성한다. 그 뒤 master provisioning verify가 `Clients` 그룹의 `read` 권한만 가진 API key로 `GET /auth/v1/clients/{client_id}`를 호출해 id, 이름, 활성·confidential 상태, 빈 redirect URI와 flow 설정을 검증해야 application이 `ready`가 된다. Grant는 Rauthy client를 생성·수정하거나 client secret을 회전하지 않으며, 운영자/IaC의 write credential도 보유하지 않는다.
 
 trusted auto-approve는 `first_party = true`와 `consent_policy = auto_approve`가 모두 성립할 때만 적용한다. 조직 application API는 두 신뢰 필드를 입력받지 않으며 master trust API만 승격/해제한다. trusted application은 조직 경로에서 보안 설정을 바꿀 수 없다.
 

@@ -54,7 +54,7 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
 5. service-to-service admin과 기존 trusted-provider `/authz/*` API는 `x-grant-master-key`로 보호하고, 최종 사용자 토큰을 판정하는 `/application-authz/*` API는 별도 `x-grant-app-auth-key`로 보호한다. 두 key는 서로 달라야 하며 교차 사용할 수 없다.
 
-Developer console은 기존 organization/application 경계 안에 둔다. 외부 provider는 Grant API만 호출하고, Grant backend가 제한된 Rauthy Admin API key로 해당 application의 Rauthy client redirect URI와 client secret rotation을 동기화한다.
+Developer console은 기존 organization/application 경계 안에 둔다. 조직 application 생성은 generated Rauthy client id를 예약할 뿐이며, Rauthy client 생성·수정과 client secret 회전은 별도 운영자/IaC 경계에서 수행한다. Grant backend는 `Clients` 그룹의 `read` 권한만 가진 Rauthy API key로 master provisioning verify의 단일 client 조회만 수행하고, 설정이 local reservation과 일치할 때 application을 `ready`로 전환한다.
 
 ## Voter And Learner
 

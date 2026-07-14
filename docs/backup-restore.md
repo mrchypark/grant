@@ -35,7 +35,7 @@ hiqlite는 bucket root에 `backup_node_<leader-id>_<unix-seconds>.sqlite` 이름
 
 `ENC_KEYS`는 현재 active key만이 아니라 retention 기간의 모든 백업을 복호화할 수 있는 versioned keyring이어야 한다. Grant keyring과 Rauthy keyring을 별도로 escrow하고, 삭제·회전 이력을 recovery record와 함께 보존한다. record는 `KEYRING_GENERATION`과 `ENC_KEYS` 원문 SHA-256을 모두 고정하며 restore operator는 ordinal 0을 기동하기 전에 실제 Secret을 decode해 같은 digest인지 확인한다. S3 principal은 workload와 역할별 최소 권한으로 분리한다. 평상시 backup writer, object-version materializer, restore reader는 모두 다른 principal이어야 한다.
 
-Rauthy Admin API key는 client read/create/update와 secret rotation에 필요한 최소 scope만 부여한다. bootstrap Secret, 현재 key 이름, 만료, 회전·폐기 기록을 외부 secret manager에서 관리한다. 새 key로 Grant 연동을 확인한 뒤 이전 key를 폐기한다.
+Grant에 주입하는 Rauthy 검증 API key는 `Clients` 그룹의 `read` 권한만 부여하며, master provisioning verify가 `GET /auth/v1/clients/{client_id}`로 예약된 client 설정을 확인할 때만 사용한다. client 생성·수정과 client secret 회전은 별도 운영자/IaC credential로 수행하고 그 credential은 Grant에 주입하지 않는다. 검증 key의 bootstrap Secret, 현재 key 이름, 만료, 회전·폐기 기록은 외부 secret manager에서 관리하며, 새 read-only key로 Grant 검증 호출을 확인한 뒤 이전 key를 폐기한다.
 
 ## 백업 완료 판정
 
