@@ -10,8 +10,12 @@ stringData:
     bootstrap_dir = "/app/bootstrap"
 
     [cluster]
-    node_id = 1
-    nodes = ["1 localhost:8100 localhost:8200"]
+    node_id_from = "k8s"
+    nodes = [
+      "1 rauthy-0.rauthy-headless:8100 rauthy-0.rauthy-headless:8200",
+      "2 rauthy-1.rauthy-headless:8100 rauthy-1.rauthy-headless:8200",
+      "3 rauthy-2.rauthy-headless:8100 rauthy-2.rauthy-headless:8200",
+    ]
     secret_raft = "dev-rauthy-raft-secret"
     secret_api = "dev-rauthy-api-secret"
 
@@ -80,25 +84,16 @@ stringData:
   api_keys.json: |
     [
       {
-        "name": "__GRANT_RAUTHY_ADMIN_API_KEY_NAME__",
+        "name": "__GRANT_RAUTHY_CLIENT_READ_API_KEY_NAME__",
         "exp": 4070905200,
         "secret": {
-          "Plain": "__GRANT_RAUTHY_ADMIN_API_KEY_SECRET__"
+          "Plain": "__GRANT_RAUTHY_CLIENT_READ_API_KEY_SECRET__"
         },
         "access": [
           {
             "group": "Clients",
             "access_rights": [
-              "read",
-              "create",
-              "update"
-            ]
-          },
-          {
-            "group": "Secrets",
-            "access_rights": [
-              "read",
-              "update"
+              "read"
             ]
           }
         ]

@@ -1,0 +1,46 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../k8s
+  - serviceaccounts.yaml
+
+patches:
+  - path: grant-statefulset.yaml
+  - path: rauthy-statefulset.yaml
+  - target:
+      kind: ConfigMap
+      name: grant-config
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grant-config
+  - target:
+      kind: ConfigMap
+      name: grant-lifecycle-state
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grant-lifecycle-state
+  - target:
+      kind: Secret
+      name: rauthy-config
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: rauthy-config
+  - target:
+      kind: Ingress
+      name: grant
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: grant

@@ -11,6 +11,7 @@ on:
       - "README.md"
       - "crates/**"
       - "deploy/**"
+      - "docs/**"
       - "scripts/**"
 
 concurrency:
@@ -22,13 +23,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check Rust targets
         run: cargo check --workspace --all-targets
+
+      - name: Lint Rust targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test Rust targets
         run: cargo test --workspace --all-targets
@@ -37,8 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: rust-verification
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Reclaim runner disk
         run: |
@@ -108,6 +115,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq shellcheck
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
 
       - name: Verify toolchain
         run: |
@@ -116,28 +125,69 @@ jobs:
           vcluster version
           jq --version
           shellcheck --version
+          actionlint -version
 
       - name: Verify local scripts
         run: |
-          scripts=(
+          bash_scripts=(
             scripts/vind-exec.sh
             scripts/vind-cluster.sh
             scripts/ci-local.sh
             scripts/vind-bootstrap.sh
-            scripts/verify-ephemeral-k8s.sh
             scripts/gke-skaffold-run.sh
-            scripts/k8s-secret-helpers.sh
           )
-          bash -n "${scripts[@]}"
-          shellcheck "${scripts[@]}"
+          posix_scripts=(
+            scripts/k8s-secret-helpers.sh
+            scripts/aws-principal-helpers.sh
+            scripts/check-s3-object-history.sh
+            scripts/verify-lifecycle-values.sh
+            scripts/verify-aws-principal-helpers.sh
+            scripts/verify-ephemeral-k8s.sh
+            scripts/verify-s3-object-history.sh
+            scripts/verify-docs.sh
+            scripts/materialize-s3-restore.sh
+            scripts/create-recovery-pair.sh
+            scripts/restore-full-cluster.sh
+            scripts/recovery-state-machine.sh
+            scripts/verify-recovery-state-machine.sh
+            scripts/verify-restore-once.sh
+            deploy/k8s/lifecycle-gate.sh
+            deploy/k8s/restore-once.sh
+          )
+          bash -n "${bash_scripts[@]}"
+          for script in "${posix_scripts[@]}"; do sh -n "${script}"; done
+          shellcheck --exclude=SC2015 "${bash_scripts[@]}" "${posix_scripts[@]}"
+          actionlint -shellcheck= .github/workflows/*.yml
+
+      - name: Verify docs and recovery manifests
+        env:
+          ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER: "1"
+        run: |
+          scripts/verify-docs.sh
+          scripts/verify-recovery-state-machine.sh
+          scripts/verify-restore-once.sh
+          scripts/verify-ephemeral-k8s.sh static
+
+      - name: Check whether the launcher digest is published
+        id: launcher
+        run: |
+          if grep -q 'RAUTHY_LAUNCHER_IMAGE_DIGEST' deploy/k8s/rauthy-statefulset.yaml; then
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Run local bootstrap regression
+        if: steps.launcher.outputs.published == 'true'
         env:
           CLUSTER_NAME: grant-vind-ci
           CI_CLUSTER_BACKEND: vind
           CI_DOCKER_BUILDER_PRUNE: "1"
           NAMESPACE: grant
           GRANT_MASTER_KEY: local-dev-master-key
+          GRANT_APP_AUTH_KEY: local-dev-app-auth-key
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESET_CLUSTER: "1"
           KEEP_CLUSTER: "0"
         run: bash scripts/ci-local.sh

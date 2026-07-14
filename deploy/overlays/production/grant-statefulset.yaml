@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grant-voter
+spec:
+  template:
+    spec:
+      serviceAccountName: grant
+      automountServiceAccountToken: false
+      topologySpreadConstraints:
+        - $patch: replace
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: grant
+              role: voter
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: grant
+                  role: voter
+      initContainers:
+        - name: lifecycle-gate
+          env:
+            - name: LIFECYCLE_ALLOW_LOCAL_FRESH
+              value: "false"
+      containers:
+        - name: grant
+          image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST
+          envFrom: []
+          env:
+            - name: GRANT_RUNTIME_MODE
+              value: embedded
+            - name: GRANT_LOCAL_NODE_ROLE
+              value: voter
+            - name: GRANT_READ_CONSISTENCY
+              value: strong
+            - name: HQL_NODE_ID_FROM
+              value: k8s
+            - name: GRANT_BIND_ADDR
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: GRANT_BIND_ADDR}}
+            - name: GRANT_RAUTHY_BASE_URL
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: GRANT_RAUTHY_BASE_URL}}
+            - name: GRANT_RAUTHY_INTROSPECT_PATH
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: GRANT_RAUTHY_INTROSPECT_PATH}}
+            - name: GRANT_RAUTHY_USERINFO_PATH
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: GRANT_RAUTHY_USERINFO_PATH}}
+            - name: GRANT_RAUTHY_CACHE_TTL_SECONDS
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: GRANT_RAUTHY_CACHE_TTL_SECONDS}}
+            - name: HQL_NODES
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: HQL_NODES}}
+            - name: HQL_LISTEN_ADDR_API
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: HQL_LISTEN_ADDR_API}}
+            - name: HQL_LISTEN_ADDR_RAFT
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: HQL_LISTEN_ADDR_RAFT}}
+            - name: HQL_DATA_DIR
+              valueFrom: {configMapKeyRef: {name: grant-production-config, key: HQL_DATA_DIR}}
+            - name: HQL_BACKUP_CRON
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_BACKUP_CRON}}
+            - name: HQL_BACKUP_KEEP_DAYS
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_BACKUP_KEEP_DAYS}}
+            - name: HQL_BACKUP_KEEP_DAYS_LOCAL
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_BACKUP_KEEP_DAYS_LOCAL}}
+            - name: HQL_S3_URL
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_S3_URL}}
+            - name: HQL_S3_BUCKET
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_S3_BUCKET}}
+            - name: HQL_S3_REGION
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_S3_REGION}}
+            - name: HQL_S3_PATH_STYLE
+              valueFrom: {configMapKeyRef: {name: grant-production-backup, key: HQL_S3_PATH_STYLE}}
+            - name: GRANT_MASTER_KEY
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_MASTER_KEY}}
+            - name: GRANT_APP_AUTH_KEY
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_APP_AUTH_KEY}}
+            - name: GRANT_RAUTHY_CLIENT_ID
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_RAUTHY_CLIENT_ID}}
+            - name: GRANT_RAUTHY_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_RAUTHY_CLIENT_SECRET}}
+            - name: GRANT_RAUTHY_CLIENT_READ_API_KEY
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: GRANT_RAUTHY_CLIENT_READ_API_KEY}}
+            - name: HQL_SECRET_RAFT
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: HQL_SECRET_RAFT}}
+            - name: HQL_SECRET_API
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: HQL_SECRET_API}}
+            - name: ENC_KEYS
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: ENC_KEYS}}
+            - name: ENC_KEY_ACTIVE
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: ENC_KEY_ACTIVE}}
+            - name: HQL_S3_KEY
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: HQL_S3_KEY}}
+            - name: HQL_S3_SECRET
+              valueFrom: {secretKeyRef: {name: grant-production-secrets, key: HQL_S3_SECRET}}
+      volumes:
+        - name: lifecycle-state
+          configMap:
+            name: grant-recovery-state
+            items:
+              - key: grant-mode
+                path: mode
+              - key: recovery-id
+                path: recovery-id

@@ -9,6 +9,7 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityConfig {
     pub master_key: String,
+    pub app_auth_key: String,
     pub bootstrap_user_id: String,
     pub bootstrap_user_name: String,
 }
@@ -20,7 +21,7 @@ pub struct RauthyAuthConfig {
     pub userinfo_path: String,
     pub client_id: String,
     pub client_secret: String,
-    pub admin_api_key: String,
+    pub client_read_api_key: String,
     pub cache_ttl_seconds: u64,
 }
 
@@ -71,8 +72,14 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
+        let master_key = env_or("GRANT_MASTER_KEY", "dev-only-master-key");
+        let app_auth_key = required_env("GRANT_APP_AUTH_KEY")?;
+        if app_auth_key == master_key {
+            anyhow::bail!("GRANT_APP_AUTH_KEY must differ from GRANT_MASTER_KEY");
+        }
         let security = SecurityConfig {
-            master_key: env_or("GRANT_MASTER_KEY", "dev-only-master-key"),
+            master_key,
+            app_auth_key,
             bootstrap_user_id: env_or("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"),
             bootstrap_user_name: env_or("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant"),
         };
@@ -111,7 +118,7 @@ fn auth_config() -> Result<AuthConfig> {
             userinfo_path: env_or("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo"),
             client_id: required_env("GRANT_RAUTHY_CLIENT_ID")?,
             client_secret: required_env("GRANT_RAUTHY_CLIENT_SECRET")?,
-            admin_api_key: required_env("GRANT_RAUTHY_ADMIN_API_KEY")?,
+            client_read_api_key: required_env("GRANT_RAUTHY_CLIENT_READ_API_KEY")?,
             cache_ttl_seconds: env::var("GRANT_RAUTHY_CACHE_TTL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())

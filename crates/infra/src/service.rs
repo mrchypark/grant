@@ -3,25 +3,40 @@ use crate::{
         AuthResolver, AuthenticatedPrincipal, ExternalIdentity, map_strong_identity_sync_error,
     },
     config::{AppConfig, ReadConsistency},
-    database::{BackupEntry, BindIdentityInput, Database, UserActionCheck},
+    database::{
+        ApplicationConsentWriteError, ApplicationSecurityMutationError,
+        ApplicationTrustMutationError, BackupEntry, BindIdentityInput, Database, UserActionCheck,
+    },
 };
 use anyhow::Result;
 use chrono::Utc;
 use domain::{
     Action, Agreement, AgreementStatus, AgreementType, Application, ApplicationAppType,
-    ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus, ApplicationRedirectUri,
-    ApplicationType, HealthStatus, Organization, Role, RoleBinding, RoleBindingState,
-    RoleBindingSubjectType, ServiceProvider, User,
+    ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus,
+    ApplicationProvisioningStatus, ApplicationType, Group, GroupMember, HealthStatus, Organization,
+    Role, RoleBinding, RoleBindingState, RoleBindingSubjectType, ServiceProvider, User,
 };
-use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
+use serde::Deserialize;
+use std::{
+    collections::HashSet,
+    error::Error as StdError,
+    fmt,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex;
 
 const MAX_APPLICATION_ACTION_IDS_PER_REQUEST: usize = 999;
 const MAX_ACTION_IDS_PER_REQUEST: usize = 999;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const APPLICATION_SECURITY_MUTATION_LEASE_MINUTES: i64 = 10;
 const MAX_RAUTHY_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_RAUTHY_ERROR_FIELD_CHARS: usize = 256;
+// Schema shape changes only through controlled migrations. Keep this short so an
+// out-of-band schema loss is still detected without issuing a Raft query per probe.
+const SCHEMA_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -60,23 +75,6 @@ impl fmt::Display for ServiceError {
 
 impl StdError for ServiceError {}
 
-enum RedirectMutationSyncError {
-    BeforeCommit(anyhow::Error),
-    AfterCommit(anyhow::Error),
-}
-
-impl RedirectMutationSyncError {
-    fn should_rollback(&self) -> bool {
-        matches!(self, Self::BeforeCommit(_))
-    }
-
-    fn into_error(self) -> anyhow::Error {
-        match self {
-            Self::BeforeCommit(err) | Self::AfterCommit(err) => err,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct AppService {
     cfg: AppConfig,
@@ -84,6 +82,93 @@ pub struct AppService {
     auth: AuthResolver,
     http_client: reqwest::Client,
     proxy_client: reqwest::Client,
+    schema_readiness: Arc<SchemaReadinessCache>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaReadinessRoute {
+    Local,
+    Strong,
+}
+
+#[derive(Debug, Default)]
+struct SchemaReadinessState {
+    local_verified_at: Option<Instant>,
+    strong_verified_at: Option<Instant>,
+}
+
+impl SchemaReadinessState {
+    fn is_fresh(&self, route: SchemaReadinessRoute, now: Instant, ttl: Duration) -> bool {
+        self.verified_at(route)
+            .is_some_and(|verified_at| now.saturating_duration_since(verified_at) < ttl)
+    }
+
+    fn mark_verified(&mut self, route: SchemaReadinessRoute, verified_at: Instant) {
+        match route {
+            SchemaReadinessRoute::Local => self.local_verified_at = Some(verified_at),
+            SchemaReadinessRoute::Strong => self.strong_verified_at = Some(verified_at),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.local_verified_at = None;
+        self.strong_verified_at = None;
+    }
+
+    fn verified_at(&self, route: SchemaReadinessRoute) -> Option<Instant> {
+        match route {
+            SchemaReadinessRoute::Local => self.local_verified_at,
+            SchemaReadinessRoute::Strong => self.strong_verified_at,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SchemaReadinessCache {
+    ttl: Duration,
+    state: Mutex<SchemaReadinessState>,
+}
+
+impl SchemaReadinessCache {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            state: Mutex::new(SchemaReadinessState::default()),
+        }
+    }
+
+    async fn verify<F, Fut>(&self, route: SchemaReadinessRoute, verify: F) -> bool
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let mut state = self.state.lock().await;
+        if state.is_fresh(route, Instant::now(), self.ttl) {
+            return true;
+        }
+        match verify().await {
+            Ok(()) => {
+                state.mark_verified(route, Instant::now());
+                true
+            }
+            Err(_) => {
+                state.clear();
+                false
+            }
+        }
+    }
+
+    async fn while_invalidated<F, Fut, T>(&self, operation: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut state = self.state.lock().await;
+        state.clear();
+        let result = operation().await;
+        state.clear();
+        result
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,21 +179,14 @@ pub struct CreateApplicationInput {
     pub description: Option<String>,
     pub application_type: ApplicationType,
     pub app_type: ApplicationAppType,
-    pub first_party: bool,
-    pub consent_policy: ApplicationConsentPolicy,
     pub active: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct UpdateApplicationInput {
-    pub slug: String,
+pub struct UpsertGroupInput {
+    pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub application_type: ApplicationType,
-    pub app_type: ApplicationAppType,
-    pub first_party: bool,
-    pub consent_policy: ApplicationConsentPolicy,
-    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -132,124 +210,14 @@ pub struct CreateApplicationGrantInput {
     pub action_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RotateClientSecretResult {
-    pub client_secret: String,
-    pub secret_rotated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-struct RauthyNewClientRequest {
-    id: String,
-    name: Option<String>,
-    confidential: bool,
-    redirect_uris: Vec<String>,
-}
-
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RauthyClientResponse {
     id: String,
     name: Option<String>,
     enabled: bool,
     confidential: bool,
     redirect_uris: Vec<String>,
-    post_logout_redirect_uris: Option<Vec<String>>,
-    allowed_origins: Option<Vec<String>>,
     flows_enabled: Vec<String>,
-    access_token_alg: String,
-    id_token_alg: String,
-    auth_code_lifetime: i32,
-    access_token_lifetime: i32,
-    scopes: Vec<String>,
-    default_scopes: Vec<String>,
-    challenges: Option<Vec<String>>,
-    force_mfa: bool,
-    client_uri: Option<String>,
-    contacts: Option<Vec<String>>,
-    backchannel_logout_uri: Option<String>,
-    restrict_group_prefix: Option<String>,
-    claims: Option<serde_json::Value>,
-    claims_at_root: bool,
-    allowed_resources: Option<Vec<String>>,
-    default_aud: Option<Vec<String>>,
-    scim: Option<RauthyScimClient>,
-}
-
-#[derive(Debug, Serialize)]
-struct RauthyClientUpdateRequest {
-    name: Option<String>,
-    enabled: bool,
-    confidential: bool,
-    redirect_uris: Vec<String>,
-    post_logout_redirect_uris: Option<Vec<String>>,
-    allowed_origins: Option<Vec<String>>,
-    flows_enabled: Vec<String>,
-    access_token_alg: String,
-    id_token_alg: String,
-    auth_code_lifetime: i32,
-    access_token_lifetime: i32,
-    scopes: Vec<String>,
-    default_scopes: Vec<String>,
-    challenges: Option<Vec<String>>,
-    force_mfa: bool,
-    client_uri: Option<String>,
-    contacts: Option<Vec<String>>,
-    backchannel_logout_uri: Option<String>,
-    restrict_group_prefix: Option<String>,
-    claims: Option<serde_json::Value>,
-    claims_at_root: bool,
-    allowed_resources: Option<Vec<String>>,
-    default_aud: Option<Vec<String>>,
-    scim: Option<RauthyScimClient>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RauthyScimClient {
-    bearer_token: String,
-    base_uri: String,
-    sync_groups: bool,
-    group_sync_prefix: Option<String>,
-}
-
-impl From<RauthyClientResponse> for RauthyClientUpdateRequest {
-    fn from(client: RauthyClientResponse) -> Self {
-        Self {
-            name: client.name,
-            enabled: client.enabled,
-            confidential: client.confidential,
-            redirect_uris: client.redirect_uris,
-            post_logout_redirect_uris: client.post_logout_redirect_uris,
-            allowed_origins: client.allowed_origins,
-            flows_enabled: client.flows_enabled,
-            access_token_alg: client.access_token_alg,
-            id_token_alg: client.id_token_alg,
-            auth_code_lifetime: client.auth_code_lifetime,
-            access_token_lifetime: client.access_token_lifetime,
-            scopes: client.scopes,
-            default_scopes: client.default_scopes,
-            challenges: client.challenges,
-            force_mfa: client.force_mfa,
-            client_uri: client.client_uri,
-            contacts: client.contacts,
-            backchannel_logout_uri: client.backchannel_logout_uri,
-            restrict_group_prefix: client.restrict_group_prefix,
-            claims: client.claims,
-            claims_at_root: client.claims_at_root,
-            allowed_resources: client.allowed_resources,
-            default_aud: client.default_aud,
-            scim: client.scim,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct RauthyClientSecretRequest {}
-
-#[derive(Debug, Deserialize)]
-struct RauthyClientSecretResponse {
-    secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +264,12 @@ pub struct AuthorizationCheck {
 }
 
 #[derive(Debug, Clone)]
+pub struct ApplicationAuthorizationCheck {
+    pub action: String,
+    pub resource: AuthorizationResource,
+}
+
+#[derive(Debug, Clone)]
 pub struct AuthorizationDecision {
     pub allowed: bool,
     pub reason: String,
@@ -337,15 +311,20 @@ impl AppService {
             auth,
             http_client,
             proxy_client,
+            schema_readiness: Arc::new(SchemaReadinessCache::new(SCHEMA_READINESS_CACHE_TTL)),
         }
     }
 
     pub async fn migrate_schema(&self) -> Result<()> {
-        self.db.ensure_schema_only().await
+        self.schema_readiness
+            .while_invalidated(|| self.db.ensure_schema_only())
+            .await
     }
 
     pub async fn initialize(&self) -> Result<()> {
-        self.db.ensure_schema().await
+        self.schema_readiness
+            .while_invalidated(|| self.db.ensure_schema())
+            .await
     }
 
     pub async fn bootstrap(&self) -> Result<()> {
@@ -356,8 +335,27 @@ impl AppService {
         self.db.health_status().await
     }
 
+    pub async fn is_ready(&self) -> bool {
+        // Cluster/database health remains uncached and is checked on every probe.
+        let readiness = self.db.readiness().await;
+        let (consistency, route) = if readiness.read_ready {
+            (ReadConsistency::Local, SchemaReadinessRoute::Local)
+        } else if readiness.write_ready {
+            (ReadConsistency::Strong, SchemaReadinessRoute::Strong)
+        } else {
+            return false;
+        };
+        self.schema_readiness
+            .verify(route, || self.db.verify_schema_ready(consistency))
+            .await
+    }
+
     pub fn master_key(&self) -> &str {
         &self.cfg.security.master_key
+    }
+
+    pub fn app_auth_key(&self) -> &str {
+        &self.cfg.security.app_auth_key
     }
 
     pub fn rauthy_base_url(&self) -> &str {
@@ -429,6 +427,9 @@ impl AppService {
                 allow_rebind: true,
             })
             .await?;
+        if !user.active {
+            return Err(forbidden_error("forbidden: local user is inactive"));
+        }
         Ok(AuthenticatedPrincipal {
             user_id: user.id,
             organization_id: self.cfg.security.bootstrap_user_id.clone(),
@@ -463,7 +464,6 @@ impl AppService {
                     &identity.external_user_id,
                     identity.email.as_deref(),
                     &identity.display_name,
-                    identity.active,
                     effective_read_consistency_override.clone(),
                 )
                 .await
@@ -484,6 +484,9 @@ impl AppService {
                     )
                 })?
         };
+        if !user.active {
+            return Err(forbidden_error("forbidden: local user is inactive"));
+        }
         let organizations = self
             .db
             .list_active_organizations_for_user_with_consistency(
@@ -543,6 +546,11 @@ impl AppService {
         };
         self.db.upsert_service_provider(&provider).await?;
         Ok(provider)
+    }
+
+    pub async fn set_user_active_admin(&self, user_id: &str, active: bool) -> Result<User> {
+        let user_id = require_non_empty("userId", user_id)?;
+        self.db.set_user_active(&user_id, active).await
     }
 
     pub async fn replace_provider_actions_admin(
@@ -648,330 +656,116 @@ impl AppService {
             description: normalize_optional_text(input.description),
             application_type: input.application_type,
             app_type: input.app_type,
-            first_party: input.first_party,
-            consent_policy: input.consent_policy,
+            first_party: false,
+            consent_policy: ApplicationConsentPolicy::Explicit,
             active: input.active,
-            rauthy_client_id: Some(application_id),
-            secret_rotated_at: None,
+            provisioning_status: ApplicationProvisioningStatus::Unprovisioned,
+            rauthy_client_id: Some(format!("grant-{}", uuid::Uuid::new_v4().simple())),
             created_by_user_id: user_id.to_owned(),
         };
         self.db.insert_application(&application).await?;
         Ok(application)
     }
 
-    pub async fn update_application(
+    async fn acquire_application_security_mutation(
         &self,
-        user_id: &str,
         organization_id: &str,
         application_id: &str,
-        input: UpdateApplicationInput,
-    ) -> Result<Application> {
-        let existing = self
-            .get_application_authorized(
-                user_id,
-                organization_id,
-                application_id,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        let previous = existing.clone();
-        let slug = require_non_empty("slug", &input.slug)?;
-        let slug_changed = existing.slug != slug;
-        let application = Application {
-            id: existing.id,
-            organization_id: existing.organization_id,
-            slug,
-            name: require_non_empty("name", &input.name)?,
-            description: normalize_optional_text(input.description),
-            application_type: input.application_type,
-            app_type: input.app_type,
-            first_party: input.first_party,
-            consent_policy: input.consent_policy,
-            active: input.active,
-            rauthy_client_id: existing.rauthy_client_id,
-            secret_rotated_at: existing.secret_rotated_at,
-            created_by_user_id: existing.created_by_user_id,
-        };
-        let redirect_uris = self
+    ) -> Result<(String, Application)> {
+        let lease_token = uuid::Uuid::new_v4().simple().to_string();
+        let acquired_at = Utc::now();
+        let expires_at =
+            acquired_at + chrono::Duration::minutes(APPLICATION_SECURITY_MUTATION_LEASE_MINUTES);
+        if !self
             .db
-            .list_application_redirect_uris_with_consistency(
+            .try_acquire_application_security_mutation(
                 application_id,
-                Some(ReadConsistency::Strong),
+                organization_id,
+                &lease_token,
+                &acquired_at.to_rfc3339(),
+                &expires_at.to_rfc3339(),
             )
             .await?
-            .into_iter()
-            .map(|item| item.redirect_uri)
-            .collect::<Vec<_>>();
-        self.db
-            .update_application(&application, slug_changed)
-            .await?;
-        let sync_result = self
-            .sync_rauthy_application_client(&application, redirect_uris)
-            .await;
-        if let Err(err) = sync_result {
-            let _ = self.db.update_application(&previous, slug_changed).await;
-            return Err(err);
+        {
+            let current = self
+                .db
+                .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+                .await?;
+            ensure_organization_application_mutable(&current)?;
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                "application security mutation is already in progress",
+            ));
         }
-        Ok(application)
-    }
-
-    pub async fn list_application_redirect_uris_authorized(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        application_id: &str,
-        read_consistency: Option<ReadConsistency>,
-    ) -> Result<Vec<ApplicationRedirectUri>> {
-        self.get_application_authorized(
-            user_id,
-            organization_id,
-            application_id,
-            read_consistency.clone(),
-        )
-        .await?;
-        self.db
-            .list_application_redirect_uris_with_consistency(application_id, read_consistency)
-            .await
-    }
-
-    pub async fn create_application_redirect_uri_authorized(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        application_id: &str,
-        redirect_uri: &str,
-    ) -> Result<ApplicationRedirectUri> {
         let application = self
-            .get_application_authorized(
-                user_id,
-                organization_id,
-                application_id,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        let redirect_uri = normalize_redirect_uri(redirect_uri)?;
-        let existing = self
             .db
-            .list_application_redirect_uris_with_consistency(
-                application_id,
-                Some(ReadConsistency::Strong),
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        Ok((lease_token, application))
+    }
+
+    pub async fn verify_application_provisioning_admin(
+        &self,
+        organization_id: &str,
+        application_id: &str,
+    ) -> Result<Application> {
+        let application = self
+            .db
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        if application.organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "application not found: {application_id} in organization {organization_id}"
+            )));
+        }
+        let client_id = rauthy_client_id(&application)?;
+        let response = self
+            .fetch_rauthy_application_client(
+                &self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}")),
             )
             .await?;
-        if existing
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                "Rauthy client is not provisioned",
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(rauthy_admin_response_error("rauthy client fetch", response).await);
+        }
+        let client: RauthyClientResponse = response.json().await.map_err(|err| {
+            service_error(
+                ServiceErrorKind::Unavailable,
+                format!("invalid Rauthy client response: {err}"),
+            )
+        })?;
+        let expected_confidential =
+            matches!(application.application_type, ApplicationType::Confidential);
+        let expected_flows = if expected_confidential {
+            vec!["authorization_code", "client_credentials", "refresh_token"]
+        } else {
+            vec!["authorization_code", "refresh_token"]
+        };
+        let expected_flows = expected_flows.into_iter().collect::<HashSet<_>>();
+        let actual_flows = client
+            .flows_enabled
             .iter()
-            .any(|item| item.redirect_uri == redirect_uri)
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        if client.id != client_id
+            || client.name.as_deref() != Some(application.name.as_str())
+            || client.confidential != expected_confidential
+            || client.enabled != application.active
+            || !client.redirect_uris.is_empty()
+            || actual_flows != expected_flows
         {
             return Err(service_error(
                 ServiceErrorKind::Conflict,
-                "redirectUri already exists for this application",
+                "Rauthy client configuration does not match the local application reservation",
             ));
         }
-        let item = ApplicationRedirectUri {
-            application_id: application_id.to_owned(),
-            redirect_uri: redirect_uri.clone(),
-            created_at: Utc::now().to_rfc3339(),
-        };
-        self.db.insert_application_redirect_uri(&item).await?;
-        let mut redirect_uris: Vec<String> =
-            existing.into_iter().map(|item| item.redirect_uri).collect();
-        redirect_uris.push(redirect_uri);
-        if let Err(err) = self
-            .sync_rauthy_application_client_after_redirect_mutation(&application, redirect_uris)
-            .await
-        {
-            if err.should_rollback() {
-                let _ = self
-                    .db
-                    .delete_application_redirect_uri(application_id, &item.redirect_uri)
-                    .await;
-            }
-            return Err(err.into_error());
-        }
-        Ok(item)
-    }
-
-    pub async fn delete_application_redirect_uri_authorized(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        application_id: &str,
-        redirect_uri: &str,
-    ) -> Result<()> {
-        let application = self
-            .get_application_authorized(
-                user_id,
-                organization_id,
-                application_id,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        let redirect_uri = normalize_redirect_uri(redirect_uri)?;
-        let existing = self
-            .db
-            .list_application_redirect_uris_with_consistency(
-                application_id,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        let mut removed = None;
-        let redirect_uris = existing
-            .into_iter()
-            .filter_map(|item| {
-                if item.redirect_uri == redirect_uri {
-                    removed = Some(item);
-                    None
-                } else {
-                    Some(item.redirect_uri)
-                }
-            })
-            .collect::<Vec<_>>();
         self.db
-            .delete_application_redirect_uri(application_id, &redirect_uri)
-            .await?;
-        if removed.is_none() {
-            return Ok(());
-        }
-        if let Err(err) = self
-            .sync_rauthy_application_client_after_redirect_mutation(&application, redirect_uris)
-            .await
-        {
-            if err.should_rollback()
-                && let Some(item) = removed
-            {
-                let _ = self.db.insert_application_redirect_uri(&item).await;
-            }
-            return Err(err.into_error());
-        }
-        Ok(())
-    }
-
-    pub async fn rotate_application_client_secret_authorized(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        application_id: &str,
-    ) -> Result<RotateClientSecretResult> {
-        let application = self
-            .get_application_authorized(
-                user_id,
-                organization_id,
-                application_id,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        let redirect_uris = self
-            .db
-            .list_application_redirect_uris_with_consistency(
-                application_id,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        if redirect_uris.is_empty() {
-            return Err(bad_request_error(
-                "application must have at least one redirectUri before rotating client secret",
-            ));
-        }
-        let client_secret = self
-            .rotate_rauthy_application_client_secret(&application)
-            .await?;
-        let secret_rotated_at = Utc::now().to_rfc3339();
-        self.db
-            .update_application_secret_rotated_at(application_id, &secret_rotated_at)
-            .await?;
-        Ok(RotateClientSecretResult {
-            client_secret,
-            secret_rotated_at,
-        })
-    }
-
-    async fn sync_rauthy_application_client_after_redirect_mutation(
-        &self,
-        application: &Application,
-        mut attempted_redirect_uris: Vec<String>,
-    ) -> std::result::Result<(), RedirectMutationSyncError> {
-        self.sync_rauthy_application_client(application, attempted_redirect_uris.clone())
-            .await
-            .map_err(RedirectMutationSyncError::BeforeCommit)?;
-        let fresh_redirect_uris = self
-            .db
-            .list_application_redirect_uris_with_consistency(
-                &application.id,
-                Some(ReadConsistency::Strong),
-            )
-            .await
-            .map_err(RedirectMutationSyncError::AfterCommit)?
-            .into_iter()
-            .map(|item| item.redirect_uri)
-            .collect::<Vec<_>>();
-        let mut fresh_for_comparison = fresh_redirect_uris.clone();
-        attempted_redirect_uris.sort_unstable();
-        fresh_for_comparison.sort_unstable();
-        if attempted_redirect_uris != fresh_for_comparison {
-            self.sync_rauthy_application_client(application, fresh_redirect_uris)
-                .await
-                .map_err(RedirectMutationSyncError::AfterCommit)?;
-        }
-        Ok(())
-    }
-
-    async fn sync_rauthy_application_client(
-        &self,
-        application: &Application,
-        redirect_uris: Vec<String>,
-    ) -> Result<()> {
-        let client_id = rauthy_client_id(application)?;
-        let url = self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}"));
-        let existing_response = self.fetch_rauthy_application_client(&url).await?;
-        if existing_response.status() == reqwest::StatusCode::NOT_FOUND {
-            if redirect_uris.is_empty() {
-                return Ok(());
-            }
-            let response = self
-                .http_client
-                .post(self.rauthy_admin_url("/auth/v1/clients"))
-                .header(
-                    "authorization",
-                    format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
-                )
-                .json(&RauthyNewClientRequest {
-                    id: client_id.to_owned(),
-                    name: Some(application.name.clone()),
-                    confidential: matches!(
-                        application.application_type,
-                        ApplicationType::Confidential
-                    ),
-                    redirect_uris: redirect_uris.clone(),
-                })
-                .send()
-                .await
-                .map_err(|err| {
-                    service_error(
-                        ServiceErrorKind::Unavailable,
-                        format!("rauthy client sync failed: {err}"),
-                    )
-                })?;
-            if response.status() == reqwest::StatusCode::CONFLICT {
-                let retry_response = self.fetch_rauthy_application_client(&url).await?;
-                if !retry_response.status().is_success() {
-                    return Err(
-                        rauthy_admin_response_error("rauthy client fetch", retry_response).await,
-                    );
-                }
-                return self
-                    .put_rauthy_application_client(application, redirect_uris, &url, retry_response)
-                    .await;
-            }
-            if !response.status().is_success() {
-                return Err(rauthy_admin_response_error("rauthy client sync", response).await);
-            }
-            return Ok(());
-        }
-        if !existing_response.status().is_success() {
-            return Err(
-                rauthy_admin_response_error("rauthy client fetch", existing_response).await,
-            );
-        }
-        self.put_rauthy_application_client(application, redirect_uris, &url, existing_response)
+            .mark_application_provisioning_ready(application_id, organization_id)
             .await
     }
 
@@ -980,7 +774,7 @@ impl AppService {
             .get(url)
             .header(
                 "authorization",
-                format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
+                format!("API-Key {}", self.cfg.auth.rauthy.client_read_api_key),
             )
             .send()
             .await
@@ -990,102 +784,6 @@ impl AppService {
                     format!("rauthy client fetch failed: {err}"),
                 )
             })
-    }
-
-    async fn put_rauthy_application_client(
-        &self,
-        application: &Application,
-        redirect_uris: Vec<String>,
-        url: &str,
-        response: reqwest::Response,
-    ) -> Result<()> {
-        let client_id = rauthy_client_id(application)?;
-        let existing: RauthyClientResponse = response.json().await.map_err(|err| {
-            service_error(
-                ServiceErrorKind::Unavailable,
-                format!("invalid rauthy client response: {err}"),
-            )
-        })?;
-        if existing.id != client_id {
-            return Err(service_error(
-                ServiceErrorKind::Unavailable,
-                "invalid rauthy client response: client id mismatch",
-            ));
-        }
-        let mut request = RauthyClientUpdateRequest::from(existing);
-        request.name = Some(application.name.clone());
-        request.confidential =
-            matches!(application.application_type, ApplicationType::Confidential);
-        request.redirect_uris = redirect_uris;
-        request.enabled = application.active;
-        request.flows_enabled = if request.confidential {
-            vec!["authorization_code", "client_credentials", "refresh_token"]
-        } else {
-            vec!["authorization_code", "refresh_token"]
-        }
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        let response = self
-            .http_client
-            .put(url)
-            .header(
-                "authorization",
-                format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
-            )
-            .json(&request)
-            .send()
-            .await
-            .map_err(|err| {
-                service_error(
-                    ServiceErrorKind::Unavailable,
-                    format!("rauthy client sync failed: {err}"),
-                )
-            })?;
-        if !response.status().is_success() {
-            return Err(rauthy_admin_response_error("rauthy client sync", response).await);
-        }
-        Ok(())
-    }
-
-    async fn rotate_rauthy_application_client_secret(
-        &self,
-        application: &Application,
-    ) -> Result<String> {
-        let client_id = rauthy_client_id(application)?;
-        let response = self
-            .http_client
-            .put(self.rauthy_admin_url(&format!("/auth/v1/clients/{client_id}/secret")))
-            .header(
-                "authorization",
-                format!("API-Key {}", self.cfg.auth.rauthy.admin_api_key),
-            )
-            .json(&RauthyClientSecretRequest {})
-            .send()
-            .await
-            .map_err(|err| {
-                service_error(
-                    ServiceErrorKind::Unavailable,
-                    format!("rauthy client secret rotation failed: {err}"),
-                )
-            })?;
-        if !response.status().is_success() {
-            return Err(
-                rauthy_admin_response_error("rauthy client secret rotation", response).await,
-            );
-        }
-        let body: RauthyClientSecretResponse = response.json().await.map_err(|err| {
-            service_error(
-                ServiceErrorKind::Unavailable,
-                format!("invalid rauthy client secret response: {err}"),
-            )
-        })?;
-        body.secret.ok_or_else(|| {
-            service_error(
-                ServiceErrorKind::Unavailable,
-                "rauthy client secret response did not include a secret",
-            )
-        })
     }
 
     fn rauthy_admin_url(&self, path: &str) -> String {
@@ -1130,9 +828,22 @@ impl AppService {
                 "actionIds must contain at most {MAX_APPLICATION_ACTION_IDS_PER_REQUEST} items"
             )));
         }
-        self.db
-            .replace_application_actions(application_id, action_ids)
-            .await
+        let (lease_token, _) = self
+            .acquire_application_security_mutation(organization_id, application_id)
+            .await?;
+        let result = self
+            .db
+            .replace_application_actions_with_security_lease(
+                application_id,
+                action_ids,
+                &lease_token,
+            )
+            .await;
+        let _ = self
+            .db
+            .release_application_security_mutation(application_id, &lease_token)
+            .await;
+        result.map_err(map_application_security_mutation_error)
     }
 
     pub async fn list_application_grants_authorized(
@@ -1275,6 +986,335 @@ impl AppService {
             .await?;
         ensure_application_grant_org_scope(&grant, organization_id)?;
         self.db.revoke_application_grant(grant_id, user_id).await
+    }
+
+    pub async fn get_application_consent(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+    ) -> Result<Option<(ApplicationGrant, Vec<Action>)>> {
+        let application = self
+            .db
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        if application.organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "application not found: {application_id} in organization {organization_id}"
+            )));
+        }
+        let Some(grant) = self
+            .db
+            .find_active_application_consent_with_consistency(
+                user_id,
+                application_id,
+                organization_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let actions = self
+            .db
+            .list_application_grant_actions_with_consistency(
+                &grant.id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        Ok(Some((grant, actions)))
+    }
+
+    pub async fn replace_application_consent(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+        action_ids: &[String],
+    ) -> Result<(ApplicationGrant, Vec<Action>)> {
+        if action_ids.is_empty() || action_ids.len() > MAX_ACTION_IDS_PER_REQUEST {
+            return Err(bad_request_error(format!(
+                "actionIds must contain between 1 and {MAX_ACTION_IDS_PER_REQUEST} items"
+            )));
+        }
+        let mut normalized_action_ids = Vec::with_capacity(action_ids.len());
+        let mut seen_action_ids = HashSet::with_capacity(action_ids.len());
+        for action_id in action_ids {
+            let action_id = require_non_empty("actionIds[]", action_id)?;
+            if seen_action_ids.insert(action_id.clone()) {
+                normalized_action_ids.push(action_id);
+            }
+        }
+        let application = self
+            .db
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        if application.organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "application not found: {application_id} in organization {organization_id}"
+            )));
+        }
+        if !application.active {
+            return Err(forbidden_error("forbidden: application is inactive"));
+        }
+        if application.consent_policy != ApplicationConsentPolicy::Explicit {
+            return Err(bad_request_error(
+                "explicit consent cannot be written for an auto-approve application",
+            ));
+        }
+        if !self
+            .db
+            .has_active_organization_membership_with_consistency(
+                user_id,
+                organization_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?
+        {
+            return Err(forbidden_error(format!(
+                "forbidden: user {user_id} is not an active member of organization {organization_id}"
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let grant = ApplicationGrant {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            user_id: user_id.to_owned(),
+            application_id: application_id.to_owned(),
+            organization_id: organization_id.to_owned(),
+            status: ApplicationGrantStatus::Active,
+            consented_at: now.clone(),
+            revoked_at: None,
+            revoked_by_user_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let grant = self
+            .db
+            .replace_active_application_consent(&grant, &normalized_action_ids)
+            .await
+            .map_err(map_application_consent_write_error)?;
+        let actions = self
+            .db
+            .list_application_grant_actions_with_consistency(
+                &grant.id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if actions.len() != normalized_action_ids.len() {
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                "application actions changed while consent was being written",
+            ));
+        }
+        Ok((grant, actions))
+    }
+
+    pub async fn revoke_application_consent(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+    ) -> Result<()> {
+        let application = self
+            .db
+            .get_application_with_consistency(application_id, Some(ReadConsistency::Strong))
+            .await?;
+        if application.organization_id != organization_id {
+            return Err(not_found_error(format!(
+                "application not found: {application_id} in organization {organization_id}"
+            )));
+        }
+        self.db
+            .revoke_active_application_consent(user_id, application_id, organization_id)
+            .await
+    }
+
+    pub async fn set_application_trust_admin(
+        &self,
+        organization_id: &str,
+        application_id: &str,
+        trusted: bool,
+    ) -> Result<Application> {
+        self.db
+            .set_application_trust(organization_id, application_id, trusted)
+            .await
+            .map_err(map_application_trust_mutation_error)
+    }
+
+    pub async fn list_groups_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<Group>> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.group.manage",
+            "manage organization groups",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .list_groups_with_consistency(organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn get_group_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        group_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Group> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.group.manage",
+            "manage organization groups",
+            read_consistency.clone(),
+        )
+        .await?;
+        self.db
+            .find_group_with_consistency(group_id, organization_id, read_consistency)
+            .await?
+            .ok_or_else(|| not_found_error(format!("group not found: {group_id}")))
+    }
+
+    pub async fn create_group_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        input: UpsertGroupInput,
+    ) -> Result<Group> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.group.manage",
+            "manage organization groups",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let group = Group {
+            id: require_non_empty("id", &input.id)?,
+            organization_id: organization_id.to_owned(),
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+        };
+        self.db.insert_group(&group).await?;
+        Ok(group)
+    }
+
+    pub async fn update_group_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        group_id: &str,
+        input: UpsertGroupInput,
+    ) -> Result<Group> {
+        let existing = self
+            .get_group_authorized(
+                user_id,
+                organization_id,
+                group_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        let group = Group {
+            id: existing.id,
+            organization_id: existing.organization_id,
+            name: require_non_empty("name", &input.name)?,
+            description: normalize_optional_text(input.description),
+        };
+        self.db.update_group(&group).await?;
+        Ok(group)
+    }
+
+    pub async fn delete_group_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        group_id: &str,
+    ) -> Result<()> {
+        self.get_group_authorized(
+            user_id,
+            organization_id,
+            group_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        if !self
+            .db
+            .delete_group_if_unbound(group_id, organization_id)
+            .await?
+        {
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                "group cannot be deleted while role bindings reference it",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn list_group_members_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        group_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<Vec<GroupMember>> {
+        self.get_group_authorized(user_id, organization_id, group_id, read_consistency.clone())
+            .await?;
+        self.db
+            .list_group_members_with_consistency(group_id, organization_id, read_consistency)
+            .await
+    }
+
+    pub async fn add_group_member_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        group_id: &str,
+        target_user_id: &str,
+    ) -> Result<GroupMember> {
+        self.get_group_authorized(
+            user_id,
+            organization_id,
+            group_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let target_user_id = require_non_empty("userId", target_user_id)?;
+        self.db
+            .add_group_member_if_active(group_id, organization_id, &target_user_id)
+            .await?
+            .ok_or_else(|| {
+                forbidden_error(format!(
+                    "forbidden: user {target_user_id} is not an active member of organization {organization_id}"
+                ))
+            })
+    }
+
+    pub async fn remove_group_member_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        group_id: &str,
+        target_user_id: &str,
+    ) -> Result<()> {
+        self.get_group_authorized(
+            user_id,
+            organization_id,
+            group_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        self.db
+            .remove_group_member(group_id, organization_id, target_user_id)
+            .await
     }
 
     pub async fn list_agreements_authorized(
@@ -1625,6 +1665,16 @@ impl AppService {
         checks: &[AuthorizationCheck],
         read_consistency: Option<ReadConsistency>,
     ) -> Result<Vec<AuthorizationDecision>> {
+        self.evaluate_authorizations(checks, read_consistency, None)
+            .await
+    }
+
+    async fn evaluate_authorizations(
+        &self,
+        checks: &[AuthorizationCheck],
+        read_consistency: Option<ReadConsistency>,
+        application_id: Option<&str>,
+    ) -> Result<Vec<AuthorizationDecision>> {
         let normalized = checks
             .iter()
             .map(normalize_authorization_check)
@@ -1638,24 +1688,92 @@ impl AppService {
                 resource_type: &check.resource_type,
                 resource_id: &check.resource_id,
                 action_id: &check.action_id,
+                application_id,
                 consistency: read_consistency.clone(),
             })
             .collect::<Vec<_>>();
         self.db
-            .has_user_actions(&db_checks)
+            .evaluate_user_actions(&db_checks)
             .await?
             .into_iter()
-            .map(|allowed| {
+            .map(|decision| {
                 Ok(AuthorizationDecision {
-                    allowed,
-                    reason: if allowed {
-                        "role_binding".to_owned()
+                    allowed: decision.allowed,
+                    reason: if decision.allowed {
+                        if application_id.is_none() {
+                            "role_binding"
+                        } else if decision.trusted_application {
+                            "trusted_application"
+                        } else {
+                            "explicit_consent"
+                        }
+                    } else if decision.rbac_allowed && application_id.is_some() {
+                        "application_consent_required"
                     } else {
-                        "no_matching_binding".to_owned()
-                    },
+                        "no_matching_binding"
+                    }
+                    .to_owned(),
                 })
             })
             .collect()
+    }
+
+    pub async fn check_application_authorizations(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: &str,
+        checks: &[ApplicationAuthorizationCheck],
+    ) -> Result<Vec<AuthorizationDecision>> {
+        let organization_id = require_non_empty("organizationId", organization_id)?;
+        let identity = self
+            .auth
+            .resolve_external_identity(Some(&self.db), bearer_token, Some(ReadConsistency::Strong))
+            .await?;
+        let user = self
+            .db
+            .resolve_or_create_user_identity_with_consistency(
+                &identity.provider,
+                &identity.external_user_id,
+                identity.email.as_deref(),
+                &identity.display_name,
+                Some(ReadConsistency::Strong),
+            )
+            .await
+            .map_err(map_strong_identity_sync_error)?;
+        if !user.active {
+            return Err(forbidden_error("forbidden: local user is inactive"));
+        }
+        let application = self
+            .db
+            .find_active_application_by_client_for_organization(
+                &identity.client_id,
+                &organization_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                forbidden_error(format!(
+                    "forbidden: token client {} is not an active application in organization {}",
+                    identity.client_id, organization_id
+                ))
+            })?;
+        let exact_checks = checks
+            .iter()
+            .map(|check| AuthorizationCheck {
+                subject: AuthorizationSubject {
+                    subject_type: "user".to_owned(),
+                    id: user.id.clone(),
+                    organization_id: organization_id.clone(),
+                },
+                action: check.action.clone(),
+                resource: check.resource.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.evaluate_authorizations(
+            &exact_checks,
+            Some(ReadConsistency::Strong),
+            Some(&application.id),
+        )
+        .await
     }
 
     pub async fn deactivate_organization(
@@ -1684,15 +1802,20 @@ impl AppService {
         organization_id: &str,
         target_organization_id: &str,
     ) -> Result<Organization> {
-        self.authorize_organization_action(
-            user_id,
-            organization_id,
-            target_organization_id,
-            "organization.permission.manage",
-            &format!("reactivate organization {}", target_organization_id),
-            Some(ReadConsistency::Strong),
-        )
-        .await?;
+        if organization_id != target_organization_id
+            || !self
+                .db
+                .has_user_organization_reactivation_action_with_consistency(
+                    user_id,
+                    target_organization_id,
+                    Some(ReadConsistency::Strong),
+                )
+                .await?
+        {
+            return Err(forbidden_error(format!(
+                "forbidden: user {user_id} cannot reactivate organization {target_organization_id}"
+            )));
+        }
         self.db
             .reactivate_organization(target_organization_id)
             .await
@@ -1859,37 +1982,6 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_redirect_uri(value: &str) -> Result<String> {
-    let redirect_uri = require_non_empty("redirectUri", value)?;
-    let authority = redirect_uri
-        .strip_prefix("http://")
-        .or_else(|| redirect_uri.strip_prefix("https://"))
-        .ok_or_else(|| {
-            bad_request_error("redirectUri must use http or https scheme and include a host")
-        })?;
-    if authority.starts_with('/') {
-        return Err(bad_request_error(
-            "redirectUri must use http or https scheme and include a host",
-        ));
-    }
-    let parsed = reqwest::Url::parse(&redirect_uri)
-        .map_err(|_| bad_request_error("redirectUri must be a valid absolute URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(bad_request_error(
-            "redirectUri must use http or https scheme and include a host",
-        ));
-    }
-    if parsed.host_str().is_none_or(|host| host.trim().is_empty()) {
-        return Err(bad_request_error(
-            "redirectUri must use http or https scheme and include a host",
-        ));
-    }
-    if parsed.fragment().is_some() {
-        return Err(bad_request_error("redirectUri must not contain a fragment"));
-    }
-    Ok(parsed.to_string())
-}
-
 fn rauthy_client_id(application: &Application) -> Result<&str> {
     application
         .rauthy_client_id
@@ -1925,6 +2017,46 @@ fn ensure_application_grant_org_scope(
 
 fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(ServiceError::new(kind, message))
+}
+
+fn map_application_consent_write_error(err: anyhow::Error) -> anyhow::Error {
+    if err.downcast_ref::<ApplicationConsentWriteError>()
+        == Some(&ApplicationConsentWriteError::PreconditionsChanged)
+    {
+        return service_error(
+            ServiceErrorKind::Conflict,
+            "application consent preconditions changed while consent was being written",
+        );
+    }
+    err
+}
+
+fn map_application_trust_mutation_error(err: anyhow::Error) -> anyhow::Error {
+    if matches!(
+        err.downcast_ref::<ApplicationTrustMutationError>(),
+        Some(ApplicationTrustMutationError::SecurityMutationInProgress { .. })
+    ) {
+        return service_error(
+            ServiceErrorKind::Conflict,
+            "application security mutation is already in progress",
+        );
+    }
+    err
+}
+
+fn map_application_security_mutation_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast_ref::<ApplicationSecurityMutationError>() {
+        Some(error @ ApplicationSecurityMutationError::TrustedApplication { .. }) => {
+            service_error(ServiceErrorKind::Forbidden, error.to_string())
+        }
+        Some(error @ ApplicationSecurityMutationError::ApplicationNotFound { .. }) => {
+            service_error(ServiceErrorKind::NotFound, error.to_string())
+        }
+        Some(error @ ApplicationSecurityMutationError::LeaseExpiredOrInvalid { .. }) => {
+            service_error(ServiceErrorKind::Conflict, error.to_string())
+        }
+        None => err,
+    }
 }
 
 async fn rauthy_admin_response_error(
@@ -2079,18 +2211,215 @@ fn forbidden_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::Forbidden, message)
 }
 
+fn ensure_organization_application_mutable(application: &Application) -> Result<()> {
+    if application.first_party
+        && application.consent_policy == ApplicationConsentPolicy::AutoApprove
+    {
+        return Err(forbidden_error(
+            "forbidden: trusted applications may only be changed by the master administrator",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RedirectMutationSyncError, sanitize_rauthy_error_field};
+    use super::{
+        SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
+        SchemaReadinessState, ServiceError, ServiceErrorKind, map_application_consent_write_error,
+        map_application_security_mutation_error, map_application_trust_mutation_error,
+        sanitize_rauthy_error_field,
+    };
+    use crate::database::{
+        ApplicationConsentWriteError, ApplicationSecurityMutationError,
+        ApplicationTrustMutationError,
+    };
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
 
     #[test]
-    fn only_pre_commit_redirect_sync_errors_request_local_rollback() {
-        assert!(
-            RedirectMutationSyncError::BeforeCommit(anyhow::anyhow!("before")).should_rollback()
+    fn schema_readiness_cache_is_route_scoped_and_expires() {
+        let started_at = Instant::now();
+        let mut state = SchemaReadinessState::default();
+        state.mark_verified(SchemaReadinessRoute::Local, started_at);
+
+        assert!(state.is_fresh(
+            SchemaReadinessRoute::Local,
+            started_at + SCHEMA_READINESS_CACHE_TTL - Duration::from_millis(1),
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+        assert!(!state.is_fresh(
+            SchemaReadinessRoute::Strong,
+            started_at,
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+        assert!(!state.is_fresh(
+            SchemaReadinessRoute::Local,
+            started_at + SCHEMA_READINESS_CACHE_TTL,
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+
+        state.clear();
+        assert!(!state.is_fresh(
+            SchemaReadinessRoute::Local,
+            started_at,
+            SCHEMA_READINESS_CACHE_TTL,
+        ));
+    }
+
+    #[test]
+    fn maps_only_typed_database_mutation_errors_to_service_errors() {
+        let consent_error = anyhow::Error::new(ApplicationConsentWriteError::PreconditionsChanged)
+            .context("replace active application consent transaction");
+        let consent_error = map_application_consent_write_error(consent_error);
+        let consent_service_error = consent_error
+            .downcast_ref::<ServiceError>()
+            .expect("typed consent conflict maps to a service error");
+        assert_eq!(consent_service_error.kind(), ServiceErrorKind::Conflict);
+
+        let trust_error =
+            anyhow::Error::new(ApplicationTrustMutationError::SecurityMutationInProgress {
+                application_id: "application-1".to_owned(),
+            })
+            .context("set application trust transaction");
+        let trust_error = map_application_trust_mutation_error(trust_error);
+        let trust_service_error = trust_error
+            .downcast_ref::<ServiceError>()
+            .expect("typed trust conflict maps to a service error");
+        assert_eq!(trust_service_error.kind(), ServiceErrorKind::Conflict);
+
+        for (error, expected_kind) in [
+            (
+                ApplicationSecurityMutationError::TrustedApplication {
+                    application_id: "application-trusted".to_owned(),
+                },
+                ServiceErrorKind::Forbidden,
+            ),
+            (
+                ApplicationSecurityMutationError::ApplicationNotFound {
+                    application_id: "application-missing".to_owned(),
+                },
+                ServiceErrorKind::NotFound,
+            ),
+            (
+                ApplicationSecurityMutationError::LeaseExpiredOrInvalid {
+                    application_id: "application-conflict".to_owned(),
+                },
+                ServiceErrorKind::Conflict,
+            ),
+        ] {
+            let mapped = map_application_security_mutation_error(
+                anyhow::Error::new(error).context("application security mutation"),
+            );
+            assert_eq!(
+                mapped
+                    .downcast_ref::<ServiceError>()
+                    .expect("typed application security mutation maps to a service error")
+                    .kind(),
+                expected_kind
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_unexpected_database_errors_internal_even_when_messages_match() {
+        let consent_message =
+            "application consent preconditions changed while consent was being written";
+        let consent_error = map_application_consent_write_error(
+            anyhow::anyhow!(consent_message).context("unexpected database failure"),
         );
+        assert!(consent_error.downcast_ref::<ServiceError>().is_none());
+        assert_eq!(consent_error.to_string(), "unexpected database failure");
         assert!(
-            !RedirectMutationSyncError::AfterCommit(anyhow::anyhow!("after")).should_rollback()
+            consent_error
+                .chain()
+                .any(|cause| cause.to_string() == consent_message)
         );
+
+        let trust_message = "application security mutation already in progress";
+        let trust_error = map_application_trust_mutation_error(
+            anyhow::anyhow!(trust_message).context("unexpected database failure"),
+        );
+        assert!(trust_error.downcast_ref::<ServiceError>().is_none());
+        assert_eq!(trust_error.to_string(), "unexpected database failure");
+        assert!(
+            trust_error
+                .chain()
+                .any(|cause| cause.to_string() == trust_message)
+        );
+
+        let security_message = "application security lease expired or invalid: application-1";
+        let security_error = map_application_security_mutation_error(
+            anyhow::anyhow!(security_message).context("unexpected database failure"),
+        );
+        assert!(security_error.downcast_ref::<ServiceError>().is_none());
+        assert_eq!(security_error.to_string(), "unexpected database failure");
+        assert!(
+            security_error
+                .chain()
+                .any(|cause| cause.to_string() == security_message)
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_readiness_cache_single_flights_and_invalidates() {
+        let cache = Arc::new(SchemaReadinessCache::new(Duration::from_secs(30)));
+        let verification_count = Arc::new(AtomicUsize::new(0));
+
+        let verify = |cache: Arc<SchemaReadinessCache>, count: Arc<AtomicUsize>| {
+            tokio::spawn(async move {
+                cache
+                    .verify(SchemaReadinessRoute::Local, || async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        let first = verify(cache.clone(), verification_count.clone());
+        let second = verify(cache.clone(), verification_count.clone());
+        let (first, second) = tokio::join!(first, second);
+        assert!(first.expect("first cache task"));
+        assert!(second.expect("second cache task"));
+        assert_eq!(verification_count.load(Ordering::SeqCst), 1);
+
+        cache
+            .while_invalidated(|| async { Ok(()) })
+            .await
+            .expect("invalidate cache");
+        assert!(
+            cache
+                .verify(SchemaReadinessRoute::Local, || async {
+                    verification_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+        );
+        assert_eq!(verification_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn schema_readiness_failures_are_not_cached() {
+        let cache = SchemaReadinessCache::new(Duration::from_secs(30));
+        let verification_count = AtomicUsize::new(0);
+
+        for _ in 0..2 {
+            assert!(
+                !cache
+                    .verify(SchemaReadinessRoute::Strong, || async {
+                        verification_count.fetch_add(1, Ordering::SeqCst);
+                        anyhow::bail!("schema unavailable")
+                    })
+                    .await
+            );
+        }
+        assert_eq!(verification_count.load(Ordering::SeqCst), 2);
     }
 
     #[test]

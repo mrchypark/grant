@@ -6,12 +6,12 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use domain::{
     Action, Agreement, Application, ApplicationAction, ApplicationGrant, ApplicationGrantAction,
-    ApplicationGrantStatus, ApplicationRedirectUri, HealthStatus, Organization, Role, RoleBinding,
-    RoleBindingState, RoleBindingSubjectType, ServiceProvider, User,
+    ApplicationGrantStatus, ApplicationProvisioningStatus, ApplicationRedirectUri, Group,
+    GroupMember, HealthStatus, Organization, Role, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType, ServiceProvider, User,
 };
 use hiqlite::Row;
-use std::borrow::Cow;
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet, error::Error as StdError, fmt};
 use uuid::Uuid;
 
 mod codec;
@@ -26,6 +26,7 @@ mod applications;
 mod authz;
 mod backups;
 mod catalog;
+mod groups;
 mod identity;
 mod organizations;
 mod roles;
@@ -34,7 +35,8 @@ mod schema;
 use codec::*;
 use rows::*;
 
-const MAX_AUTHZ_CHECKS_PER_QUERY: usize = 100;
+// Each check binds ten SQLite parameters. Stay below conservative 999-variable builds.
+const MAX_AUTHZ_CHECKS_PER_QUERY: usize = 90;
 
 #[derive(Clone)]
 pub struct Database {
@@ -49,6 +51,67 @@ pub struct BackupEntry {
     pub last_modified: i64,
     pub size: Option<u64>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationConsentWriteError {
+    PreconditionsChanged,
+}
+
+impl fmt::Display for ApplicationConsentWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PreconditionsChanged => f.write_str(
+                "application consent preconditions changed while consent was being written",
+            ),
+        }
+    }
+}
+
+impl StdError for ApplicationConsentWriteError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationTrustMutationError {
+    SecurityMutationInProgress { application_id: String },
+}
+
+impl fmt::Display for ApplicationTrustMutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SecurityMutationInProgress { application_id } => write!(
+                f,
+                "application security mutation already in progress: {application_id}"
+            ),
+        }
+    }
+}
+
+impl StdError for ApplicationTrustMutationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationSecurityMutationError {
+    ApplicationNotFound { application_id: String },
+    TrustedApplication { application_id: String },
+    LeaseExpiredOrInvalid { application_id: String },
+}
+
+impl fmt::Display for ApplicationSecurityMutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApplicationNotFound { application_id } => {
+                write!(f, "application not found: {application_id}")
+            }
+            Self::TrustedApplication { .. } => f.write_str(
+                "forbidden: trusted applications may only be changed by the master administrator",
+            ),
+            Self::LeaseExpiredOrInvalid { application_id } => write!(
+                f,
+                "application security lease expired or invalid: {application_id}"
+            ),
+        }
+    }
+}
+
+impl StdError for ApplicationSecurityMutationError {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BindIdentityInput<'a> {
@@ -69,13 +132,22 @@ pub struct UserActionCheck<'a> {
     pub resource_type: &'a str,
     pub resource_id: &'a str,
     pub action_id: &'a str,
+    pub application_id: Option<&'a str>,
     pub consistency: Option<ReadConsistency>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserActionDecision {
+    pub allowed: bool,
+    pub rbac_allowed: bool,
+    pub trusted_application: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct CachedExternalIdentity {
     pub provider: String,
     pub external_user_id: String,
+    pub client_id: String,
     pub email: Option<String>,
     pub display_name: String,
     pub active: bool,

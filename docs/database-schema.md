@@ -1,6 +1,6 @@
 # Database Schema
 
-이 문서는 현재 [`crates/infra/src/database.rs`](../crates/infra/src/database.rs) 기준의 실제 스키마를 설명한다.
+이 문서는 현재 [`crates/infra/src/database/mod.rs`](../crates/infra/src/database/mod.rs)와 [`schema.rs`](../crates/infra/src/database/schema.rs) 기준의 실제 스키마를 설명한다.
 
 ## 프로젝트 경계
 
@@ -22,7 +22,7 @@
 
 ### `users`
 
-사용자 기본 프로필. 로그인 주체의 내부 ID, 이메일 스냅샷, 표시 이름, 활성 여부를 저장한다.
+사용자 기본 프로필. 로그인 주체의 내부 ID, 이메일 스냅샷, 표시 이름, 활성 여부를 저장한다. `users.active`는 Grant의 로컬 kill switch다. identity 동기화나 bootstrap은 기존 사용자의 값을 덮어쓰지 않으며, master 관리자 API만 이 값을 변경한다. 비활성 사용자는 인증 및 모든 권한 판정에서 거부된다.
 
 ### `user_identities`
 
@@ -30,7 +30,7 @@
 
 ### `auth_identity_cache`
 
-외부 토큰 introspection 캐시. 현재 Rauthy bearer token 확인 결과를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다.
+외부 토큰 introspection 캐시. 현재 Rauthy bearer token 확인 결과와 `client_id`를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다. 과거처럼 client 정보가 없는 cache row는 application authz에 사용하지 않는다.
 
 ### `parties`
 
@@ -50,7 +50,7 @@
 
 ### `groups`, `group_memberships`
 
-조직 내부 권한 그룹과 membership 연결. 권한 전개 입력이라 grant 경계에 남긴다.
+조직 내부 권한 그룹과 membership 연결. `group_memberships.organization_membership_id`는 같은 조직의 active membership만 연결할 수 있다. 조회도 group과 membership의 조직이 같은 row만 반환한다. 그룹 삭제는 `subject_organization_id` 값과 관계없이 해당 group id를 참조하는 group-subject `role_bindings`가 하나라도 있으면 거부되고, 참조가 없을 때 membership과 그룹을 한 트랜잭션에서 삭제한다. 시작 시 missing reference 또는 cross-organization membership/group binding을 발견하면 자동 삭제하지 않고 schema validation을 실패시킨다. 권한 전개 입력이라 grant 경계에 남긴다.
 
 ### `service_providers`
 
@@ -71,9 +71,15 @@ grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을
 
 API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 grant 경계에 남긴다.
 
-`applications.rauthy_client_id`는 Rauthy client id와 연결된다. 기존 application은 schema migration에서 application id로 backfill된다. developer console에서 redirect URI를 처음 추가하면 Grant backend가 같은 id로 Rauthy client를 생성하고, 이후 application 또는 redirect URI 변경은 Rauthy client update로 동기화한다. `applications.secret_rotated_at`은 Rauthy client secret이 마지막으로 회전된 시각만 저장한다. secret 원문은 저장하지 않고 rotate 응답에서 한 번만 반환한다.
+`applications.rauthy_client_id`는 Rauthy client id와 연결된다. 조직 `POST /apps`는 사용자 application id를 Rauthy id로 재사용하지 않고 충돌 가능성이 사실상 없는 `grant-<uuid>` id를 서버에서 생성하며, `provisioning_status = unprovisioned`인 local reservation만 저장한다. Grant는 Rauthy client를 생성·수정하거나 secret을 회전하지 않는다. 운영자/IaC가 그 generated id와 반환된 application 설정으로 Rauthy client를 먼저 만든 뒤, master provisioning verify API가 read-only Rauthy GET으로 id, name, enabled/confidential, redirect URI, flow 설정을 정확히 검증해야 `ready`로 전환된다. 기존 application id를 client id로 backfill하지 않으며 legacy row는 `unprovisioned`로 남는다.
 
-`application_redirect_uris`는 application별 허용 redirect URI 목록이다. key는 `(application_id, redirect_uri)`이고, API에서는 `http`/`https` scheme과 non-empty host만 허용한다.
+`applications.rauthy_client_id`는 Rauthy client와 연결된 실제 값에 대해 전역 partial unique index를 가진다. legacy row의 `NULL`, 빈 문자열, SQLite 기본 `TRIM` 기준의 ASCII space-only 문자열은 미연결 값으로 보아 index와 migration 중복 검사에서 제외한다. 기본 `TRIM`이 제거하지 않는 탭 등의 문자는 실제 client id 문자로 간주해 unique 제약을 적용한다. application authz는 토큰에서 검증한 비어 있지 않은 `client_id`를 이 컬럼의 `ready` application에 정확히 하나 매핑하며, 같은 조직의 active/ready application이 아니면 fail closed한다.
+
+`first_party = 1`과 `consent_policy = auto_approve`의 조합만 trusted application이다. 조직 API는 이 두 값을 생성·수정하지 못하며 master trust API만 동시에 승격하거나 해제한다. trust 승격은 기존 active explicit grant를 같은 트랜잭션에서 revoke해 trusted 상태에 explicit grant가 남지 않게 한다. trusted application의 조직 보안 설정 변경은 write boundary에서 거부된다. `security_mutation_token`과 `security_mutation_expires_at`은 action set 같은 권한 상태 변경과 trust 변경을 직렬화하는 10분 lease다. 정상·실패 경로에서는 token을 해제하고, 프로세스 중단 시에는 만료 뒤 다음 변경이 stale lease를 회수한다.
+
+`application_grants`는 `(user_id, application_id, organization_id)`의 active row를 하나만 허용한다. 사용자 self-consent PUT은 body의 action 목록만 받아 exact 로그인 사용자에 대해 active grant를 natural-key upsert하고 grant/action 전체 교체를 원자적으로 수행한다. 같은 사용자의 첫 PUT이 동시에 실행되어도 partial unique key의 conflict update로 하나의 active grant에 수렴한다. application이 same-org active explicit non-trusted 상태이고 사용자가 active member이며 action이 현재 `application_actions`의 exact subset인지는 같은 트랜잭션에서 재검증한다. 최대 999개 action은 250개씩 multi-row insert해 Raft transaction statement 수를 제한한다. `application_consent_assertions`는 consent와 application security/trust 트랜잭션의 CHECK 기반 내부 assertion용 임시 row만 담고 성공 시 즉시 비워지며, 실제 action id를 sentinel로 사용하지 않는다. application action을 축소하면 stale grant action도 같은 트랜잭션에서 제거되며, 권한 판정도 항상 현재 `application_actions`와 다시 join한다. revoke는 active grant를 idempotent하게 revoked 상태로 바꾼다.
+
+`application_redirect_uris`는 향후 검증 가능한 provisioning manifest를 위한 application별 redirect URI 목록이며 key는 `(application_id, redirect_uri)`다. 현재 release는 조직 redirect mutation을 노출하지 않으므로 reservation은 빈 목록을 의도 설정으로 사용하고 verify도 Rauthy의 빈 redirect 목록을 요구한다.
 
 ## 제거된 테이블
 

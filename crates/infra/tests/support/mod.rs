@@ -188,7 +188,7 @@ pub fn test_application(id: &str, organization_id: &str) -> Application {
         consent_policy: ApplicationConsentPolicy::Explicit,
         active: true,
         rauthy_client_id: None,
-        secret_rotated_at: None,
+        provisioning_status: domain::ApplicationProvisioningStatus::Ready,
         created_by_user_id: BOOTSTRAP_USER_ID.to_owned(),
     }
 }

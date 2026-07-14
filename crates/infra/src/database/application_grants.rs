@@ -2,6 +2,292 @@ use super::core::now_string;
 use super::*;
 
 impl Database {
+    pub async fn has_application_consent_for_action(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+        action_id: &str,
+    ) -> Result<bool> {
+        let trusted = self
+            .exists_row_with(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) AS count
+                 FROM applications app
+                 JOIN application_actions aa ON aa.application_id = app.id
+                 WHERE app.id = $1
+                   AND app.organization_id = $2
+                   AND app.active = 1
+                   AND app.provisioning_status = 'ready'
+                   AND app.first_party = 1
+                   AND app.consent_policy = 'auto_approve'
+                   AND aa.action_id = $3",
+                params!(
+                    application_id.to_owned(),
+                    organization_id.to_owned(),
+                    action_id.to_owned()
+                ),
+                "trusted application action decision",
+            )
+            .await?;
+        if trusted {
+            return Ok(true);
+        }
+        self.exists_row_with(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count
+             FROM application_grants ag
+             JOIN applications app
+               ON app.id = ag.application_id
+              AND app.organization_id = ag.organization_id
+              AND app.active = 1
+              AND app.provisioning_status = 'ready'
+             JOIN application_grant_actions aga
+               ON aga.application_grant_id = ag.id
+             JOIN application_actions aa
+               ON aa.application_id = ag.application_id
+              AND aa.action_id = aga.action_id
+             WHERE ag.user_id = $1
+               AND ag.organization_id = $2
+               AND ag.application_id = $3
+               AND ag.status = 'active'
+               AND aga.action_id = $4",
+            params!(
+                user_id.to_owned(),
+                organization_id.to_owned(),
+                application_id.to_owned(),
+                action_id.to_owned()
+            ),
+            "explicit application consent action decision",
+        )
+        .await
+    }
+
+    pub async fn find_active_application_consent_with_consistency(
+        &self,
+        user_id: &str,
+        application_id: &str,
+        organization_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<ApplicationGrant>> {
+        let rows: Vec<ApplicationGrantRow> = self
+            .query_rows_with(
+                self.validation_read_consistency_with_override(consistency),
+                "SELECT id, user_id, application_id, organization_id, status, consented_at,
+                        revoked_at, revoked_by_user_id, created_at, updated_at
+                 FROM application_grants
+                 WHERE user_id = $1
+                   AND application_id = $2
+                   AND organization_id = $3
+                   AND status = 'active'
+                 LIMIT 1",
+                params!(
+                    user_id.to_owned(),
+                    application_id.to_owned(),
+                    organization_id.to_owned()
+                ),
+                "active application consent",
+            )
+            .await?;
+        rows.into_iter().next().map(TryInto::try_into).transpose()
+    }
+
+    pub async fn replace_active_application_consent(
+        &self,
+        application_grant: &ApplicationGrant,
+        action_ids: &[String],
+    ) -> Result<ApplicationGrant> {
+        self.validate_application_grant_refs(application_grant)
+            .await?;
+        let deduped = self
+            .validate_application_grant_action_subset(&application_grant.application_id, action_ids)
+            .await?;
+        let expected_action_count = deduped.len() as i64;
+        let assertion_id = Uuid::new_v4().simple().to_string();
+        let mut queries = Vec::with_capacity(9);
+        queries.push((
+            Cow::Borrowed(
+                "INSERT INTO application_grants (
+                    id, user_id, application_id, organization_id, status, consented_at,
+                    revoked_at, revoked_by_user_id, created_at, updated_at
+                 )
+                 SELECT $1, $2, $3, $4, 'active', $5, NULL, NULL, $6, $7
+                 FROM applications app
+                 JOIN organization_memberships om
+                   ON om.organization_id = app.organization_id
+                  AND om.user_id = $2
+                  AND om.status = 'active'
+                 JOIN users u ON u.id = om.user_id AND u.active = 1
+                 WHERE app.id = $3
+                   AND app.organization_id = $4
+                   AND app.active = 1
+                   AND app.first_party = 0
+                   AND app.consent_policy = 'explicit'
+                 ON CONFLICT(user_id, application_id, organization_id)
+                 WHERE status = 'active'
+                 DO UPDATE SET
+                    status = 'active',
+                    consented_at = excluded.consented_at,
+                    revoked_at = NULL,
+                    revoked_by_user_id = NULL,
+                    updated_at = excluded.updated_at",
+            ),
+            params!(
+                application_grant.id.clone(),
+                application_grant.user_id.clone(),
+                application_grant.application_id.clone(),
+                application_grant.organization_id.clone(),
+                application_grant.consented_at.clone(),
+                application_grant.created_at.clone(),
+                application_grant.updated_at.clone()
+            ),
+        ));
+        queries.push((
+            Cow::Borrowed(
+                "DELETE FROM application_grant_actions
+                 WHERE application_grant_id = (
+                     SELECT id FROM application_grants
+                     WHERE user_id = $1
+                       AND application_id = $2
+                       AND organization_id = $3
+                       AND status = 'active'
+                 )",
+            ),
+            params!(
+                application_grant.user_id.clone(),
+                application_grant.application_id.clone(),
+                application_grant.organization_id.clone()
+            ),
+        ));
+
+        for action_ids in deduped.chunks(250) {
+            let values = (1..=action_ids.len())
+                .map(|index| format!("(${index})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let user_param = action_ids.len() + 1;
+            let app_param = action_ids.len() + 2;
+            let org_param = action_ids.len() + 3;
+            let mut insert_params = action_ids
+                .iter()
+                .cloned()
+                .map(hiqlite::Param::from)
+                .collect::<Vec<_>>();
+            insert_params.push(hiqlite::Param::from(application_grant.user_id.clone()));
+            insert_params.push(hiqlite::Param::from(
+                application_grant.application_id.clone(),
+            ));
+            insert_params.push(hiqlite::Param::from(
+                application_grant.organization_id.clone(),
+            ));
+            queries.push((
+                Cow::Owned(format!(
+                    "WITH requested(action_id) AS (VALUES {values})
+                     INSERT INTO application_grant_actions (application_grant_id, action_id)
+                     SELECT ag.id, requested.action_id
+                     FROM requested
+                     JOIN application_grants ag
+                       ON ag.user_id = ${user_param}
+                      AND ag.application_id = ${app_param}
+                      AND ag.organization_id = ${org_param}
+                      AND ag.status = 'active'
+                     JOIN application_actions aa
+                       ON aa.application_id = ag.application_id
+                      AND aa.action_id = requested.action_id"
+                )),
+                insert_params,
+            ));
+        }
+        queries.push((
+            Cow::Borrowed(
+                "INSERT INTO application_consent_assertions (id, valid)
+                 SELECT $1,
+                        CASE WHEN EXISTS (
+                            SELECT 1
+                            FROM applications app
+                            JOIN organization_memberships om
+                              ON om.organization_id = app.organization_id
+                             AND om.user_id = $2
+                             AND om.status = 'active'
+                            JOIN users u ON u.id = om.user_id AND u.active = 1
+                            JOIN application_grants ag
+                              ON ag.user_id = $2
+                             AND ag.application_id = app.id
+                             AND ag.organization_id = app.organization_id
+                             AND ag.status = 'active'
+                            WHERE app.id = $3
+                              AND app.organization_id = $4
+                              AND app.active = 1
+                              AND app.first_party = 0
+                              AND app.consent_policy = 'explicit'
+                              AND (
+                                  SELECT COUNT(*)
+                                  FROM application_grant_actions aga
+                                  WHERE aga.application_grant_id = ag.id
+                              ) = $5
+                        ) THEN 1 ELSE 0 END",
+            ),
+            params!(
+                assertion_id.clone(),
+                application_grant.user_id.clone(),
+                application_grant.application_id.clone(),
+                application_grant.organization_id.clone(),
+                expected_action_count
+            ),
+        ));
+        queries.push((
+            Cow::Borrowed("DELETE FROM application_consent_assertions WHERE id = $1"),
+            params!(assertion_id),
+        ));
+        let transaction_result = self.runtime.transaction(queries).await;
+        if let Err(err) = transaction_result {
+            if err.chain().any(|cause| {
+                cause
+                    .to_string()
+                    .contains("application_consent_assertion_valid")
+            }) {
+                return Err(ApplicationConsentWriteError::PreconditionsChanged.into());
+            }
+            return Err(err).context("replace active application consent transaction");
+        }
+        self.find_active_application_consent_with_consistency(
+            &application_grant.user_id,
+            &application_grant.application_id,
+            &application_grant.organization_id,
+            Some(ReadConsistency::Strong),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("active application consent missing after replacement"))
+    }
+
+    pub async fn revoke_active_application_consent(
+        &self,
+        user_id: &str,
+        application_id: &str,
+        organization_id: &str,
+    ) -> Result<()> {
+        let now = now_string();
+        self.runtime
+            .execute(
+                "UPDATE application_grants
+                 SET status = 'revoked', revoked_at = $1, revoked_by_user_id = $2, updated_at = $3
+                 WHERE user_id = $2
+                   AND application_id = $4
+                   AND organization_id = $5
+                   AND status = 'active'",
+                params!(
+                    now.clone(),
+                    user_id.to_owned(),
+                    now,
+                    application_id.to_owned(),
+                    organization_id.to_owned()
+                ),
+            )
+            .await
+            .context("revoke active application consent")?;
+        Ok(())
+    }
+
     pub async fn upsert_application_grant(
         &self,
         application_grant: &ApplicationGrant,
@@ -333,6 +619,10 @@ impl Database {
                         a.visibility_granting, a.grantable_to_applications, a.consent_label,
                         a.consent_description
                  FROM application_grant_actions cga
+                 JOIN application_grants cg ON cg.id = cga.application_grant_id
+                 JOIN application_actions ca
+                   ON ca.application_id = cg.application_id
+                  AND ca.action_id = cga.action_id
                  JOIN actions a ON a.id = cga.action_id
                  WHERE cga.application_grant_id = $1
                  ORDER BY a.code ASC",

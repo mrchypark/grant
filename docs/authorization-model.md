@@ -43,6 +43,8 @@ binding subject는 세 가지다.
 
 group/user binding은 반드시 `subject_organization_id` 안에서만 유효하다. organization subject binding으로 다른 조직 resource에 접근시키려면 active `agreements`가 필요하다.
 
+그룹 관리 API는 `organization.group.manage`로 보호한다. list/get은 learner에서도 읽을 수 있지만 create/update/delete와 member 변경은 voter에서만 수행한다. member 추가는 같은 조직의 active 사용자 membership에 한정되고, group binding이 남아 있으면 group 삭제는 `409 Conflict`다.
+
 ## Agreements
 
 조직 간 권한 부여는 active agreement를 근거로 둔다.
@@ -56,11 +58,15 @@ grant 내부 organization resource에 대해 `resource_id != subject_organizatio
 
 ## Applications
 
-application은 조직이 만든 실행 주체다. 조직 owner/관리자는 application 자체를 허가하거나 비활성화할 수 있고, 사용자는 application grant로 자신이 허용한 action subset을 가진다.
+application은 조직이 만든 실행 주체다. 조직 owner/관리자는 application 자체를 허가하거나 비활성화할 수 있고, 사용자는 `/api/v1/orgs/{org}/apps/{app}/consent`의 GET/PUT/DELETE로 자기 자신의 명시적 consent만 관리한다. body로 다른 `userId`나 application id를 지정할 수 없다. 과거의 조직 관리자 grant mutation 경로는 제공하지 않는다.
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
-developer console의 redirect URI와 client secret rotation은 기존 `applications`에 붙은 설정이다. 별도 partner 테이블을 만들지 않고, create/list/delete redirect URI와 secret rotate API는 기존 `organization.application.manage` 권한으로 보호한다. Grant backend는 제한된 Rauthy Admin API key로 해당 application의 Rauthy client를 생성/수정하고, secret rotation 결과만 one-time 응답으로 반환한다.
+현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 조직의 application 생성은 generated Rauthy client id를 가진 `unprovisioned` local reservation만 만들고, 별도 운영자/IaC가 Rauthy client를 생성한다. 그 뒤 master provisioning verify가 `Clients` 그룹의 `read` 권한만 가진 API key로 `GET /auth/v1/clients/{client_id}`를 호출해 id, 이름, 활성·confidential 상태, 빈 redirect URI와 flow 설정을 검증해야 application이 `ready`가 된다. Grant는 Rauthy client를 생성·수정하거나 client secret을 회전하지 않으며, 운영자/IaC의 write credential도 보유하지 않는다.
+
+trusted auto-approve는 `first_party = true`와 `consent_policy = auto_approve`가 모두 성립할 때만 적용한다. 조직 application API는 두 신뢰 필드를 입력받지 않으며 master trust API만 승격/해제한다. trusted application은 조직 경로에서 보안 설정을 바꿀 수 없다.
+
+application action 판정은 `RBAC ∩ active user/org/provider/application ∩ current application_actions ∩ consent`다. consent는 exact 사용자 active grant의 현재 action이거나 trusted auto-approve여야 한다. action 축소 뒤 stale grant를 재사용하는 fallback은 없다.
 
 ## Authz API
 
@@ -75,6 +81,16 @@ POST /api/v1/authz/filter
 `check`는 단일 resource 판정, `batch-check`는 여러 판정, `filter`는 서비스가 넘긴 후보 resource 중 허용된 id만 반환한다.
 
 grant는 외부 provider의 전체 resource 목록을 모른다. 따라서 unbounded list API는 제공하지 않는다.
+
+애플리케이션이 최종 사용자 토큰으로 판정을 요청할 때는 별도 API를 사용한다.
+
+```text
+POST /api/v1/application-authz/check
+POST /api/v1/application-authz/batch-check
+POST /api/v1/application-authz/filter
+```
+
+이 경로는 전용 `x-grant-app-auth-key`, Bearer token, `x-organization-id`를 모두 요구하고 strong consistency만 사용한다. `GRANT_APP_AUTH_KEY`는 필수이며 `GRANT_MASTER_KEY`와 다른 값이어야 한다. master key는 application-authz 인증에 사용할 수 없고 app-auth key도 admin 인증에 사용할 수 없다. subject와 application id는 body에서 받지 않는다. 서버가 검증된 토큰 `sub`와 `client_id`를 사용해 exact 사용자와 동일 조직의 active application을 결정한다. client mismatch, 모호한 매핑, 검증 정보가 없는 cache 또는 identity provider 장애에서 안전한 cache가 없으면 fail closed한다. 기존 `/api/v1/authz/*` master API는 `x-grant-master-key`로 명시한 subject를 검사하는 trusted-provider 계약으로 유지한다.
 
 ## 업데이트 규칙
 

@@ -28,6 +28,7 @@ pub struct AuthenticatedPrincipal {
 pub struct ExternalIdentity {
     pub provider: String,
     pub external_user_id: String,
+    pub client_id: String,
     pub email: Option<String>,
     pub display_name: String,
     pub active: bool,
@@ -59,6 +60,7 @@ struct CachedRauthyIdentity {
 #[derive(Debug, Clone)]
 struct RauthyIdentity {
     external_user_id: String,
+    client_id: String,
     email: Option<String>,
     display_name: String,
     active: bool,
@@ -67,6 +69,7 @@ struct RauthyIdentity {
 #[derive(Debug, Deserialize)]
 struct RauthyIntrospectionResponse {
     sub: String,
+    client_id: String,
     exp: Option<i64>,
 }
 
@@ -136,7 +139,6 @@ impl AuthResolver {
                 &identity.external_user_id,
                 identity.email.as_deref(),
                 &identity.display_name,
-                identity.active,
                 effective_read_consistency_override.clone(),
             )
             .await
@@ -155,6 +157,9 @@ impl AuthResolver {
                 )
             })?
         };
+        if !user.active {
+            anyhow::bail!("forbidden: user {} is inactive", user.id);
+        }
         let is_member = db
             .has_active_organization_membership_with_consistency(
                 &user.id,
@@ -202,6 +207,7 @@ impl AuthResolver {
         Ok(ExternalIdentity {
             provider: AUTH_PROVIDER.to_owned(),
             external_user_id: identity.external_user_id,
+            client_id: identity.client_id,
             email: identity.email,
             display_name: identity.display_name,
             active: identity.active,
@@ -297,11 +303,18 @@ impl RauthyResolver {
     ) -> Result<(RauthyIdentity, Duration)> {
         let token_info = parse_introspection_response(response).await?;
         let ttl = cache_ttl_for_exp(self.cache_ttl, token_info.exp, Utc::now().timestamp())?;
-        let identity = self.fetch_userinfo(token, &token_info.sub).await?;
+        let identity = self
+            .fetch_userinfo(token, &token_info.sub, &token_info.client_id)
+            .await?;
         Ok((identity, ttl))
     }
 
-    async fn fetch_userinfo(&self, token: &str, expected_sub: &str) -> Result<RauthyIdentity> {
+    async fn fetch_userinfo(
+        &self,
+        token: &str,
+        expected_sub: &str,
+        client_id: &str,
+    ) -> Result<RauthyIdentity> {
         let url = format!("{}{}", self.base_url, self.userinfo_path);
         let response = self
             .client
@@ -335,6 +348,7 @@ impl RauthyResolver {
         .unwrap_or_else(|| "Rauthy User".to_owned());
         Ok(RauthyIdentity {
             external_user_id: expected_sub.to_owned(),
+            client_id: client_id.to_owned(),
             email,
             display_name,
             active: true,
@@ -382,6 +396,7 @@ impl RauthyResolver {
         }
         let identity = RauthyIdentity {
             external_user_id: cached.external_user_id,
+            client_id: cached.client_id,
             email: cached.email,
             display_name: cached.display_name,
             active: cached.active,
@@ -414,6 +429,7 @@ impl RauthyResolver {
             &CachedExternalIdentity {
                 provider: AUTH_PROVIDER.to_owned(),
                 external_user_id: identity.external_user_id.clone(),
+                client_id: identity.client_id.clone(),
                 email: identity.email.clone(),
                 display_name: identity.display_name.clone(),
                 active: identity.active,
@@ -445,6 +461,7 @@ fn reject_unauthorized_introspection(response: &reqwest::Response) -> Result<()>
 struct RauthyIntrospectionPayload {
     active: bool,
     sub: Option<String>,
+    client_id: Option<String>,
     exp: Option<i64>,
 }
 
@@ -468,8 +485,16 @@ async fn parse_introspection_response(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("unauthorized: rauthy token has no subject"))?
         .to_owned();
+    let client_id = payload
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("unauthorized: rauthy token has no client_id"))?
+        .to_owned();
     Ok(RauthyIntrospectionResponse {
         sub,
+        client_id,
         exp: payload.exp,
     })
 }
@@ -614,13 +639,14 @@ mod tests {
                 userinfo_path: "/userinfo".to_owned(),
                 client_id: "client".to_owned(),
                 client_secret: "secret".to_owned(),
-                admin_api_key: "admin".to_owned(),
+                client_read_api_key: "client-read".to_owned(),
                 cache_ttl_seconds: 30,
             },
         })
         .rauthy;
         let identity = RauthyIdentity {
             external_user_id: "user".to_owned(),
+            client_id: "client".to_owned(),
             email: None,
             display_name: "User".to_owned(),
             active: true,

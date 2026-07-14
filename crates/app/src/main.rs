@@ -23,14 +23,21 @@ async fn main() -> anyhow::Result<()> {
         config.security.bootstrap_user_name.clone(),
     );
     let service = Arc::new(AppService::new(config.clone(), db));
-    service.migrate_schema().await.context("migrate schema")?;
+    if should_migrate_schema(&config.hiqlite.local_node_role) {
+        service.migrate_schema().await.context("migrate schema")?;
+    } else {
+        tracing::info!(
+            local_node_role = local_node_role_str(&config.hiqlite.local_node_role),
+            "skipping schema migration on learner"
+        );
+    }
     if should_initialize_service(&config) {
         service.bootstrap().await.context("bootstrap service")?;
     } else {
         tracing::info!(
             runtime_mode = config.hiqlite.runtime_mode.as_str(),
             local_node_role = local_node_role_str(&config.hiqlite.local_node_role),
-            "skipping service initialization on split learner"
+            "skipping service bootstrap on this node"
         );
     }
     spawn_k8s_reconcile_task(service.clone(), &config);
@@ -185,17 +192,33 @@ fn init_tracing() {
 }
 
 fn should_initialize_service(config: &AppConfig) -> bool {
-    match (
+    should_initialize_for_node(
         &config.hiqlite.runtime_mode,
         &config.hiqlite.local_node_role,
-    ) {
-        (RuntimeMode::Split, LocalNodeRole::Learner) => false,
-        (RuntimeMode::Embedded, LocalNodeRole::Learner) => false,
-        (RuntimeMode::Embedded, LocalNodeRole::Voter) if is_k8s_node_id_source() => {
-            is_bootstrap_voter_pod() && needs_bootstrap_initialization()
-        }
-        _ => true,
+        is_k8s_node_id_source(),
+        is_bootstrap_voter_pod(),
+        needs_bootstrap_initialization(),
+    )
+}
+
+fn should_migrate_schema(role: &LocalNodeRole) -> bool {
+    matches!(role, LocalNodeRole::Voter)
+}
+
+fn should_initialize_for_node(
+    runtime_mode: &RuntimeMode,
+    role: &LocalNodeRole,
+    uses_k8s_node_ids: bool,
+    is_bootstrap_voter: bool,
+    needs_bootstrap: bool,
+) -> bool {
+    if matches!(role, LocalNodeRole::Learner) {
+        return false;
     }
+    if matches!(runtime_mode, RuntimeMode::Embedded) && uses_k8s_node_ids {
+        return is_bootstrap_voter && needs_bootstrap;
+    }
+    true
 }
 
 fn local_node_role_str(role: &LocalNodeRole) -> &'static str {
@@ -222,4 +245,54 @@ fn needs_bootstrap_initialization() -> bool {
         std::env::var("HQL_DATA_DIR").unwrap_or_else(|_| "/var/lib/grant/hiqlite".to_string());
     let state_machine_dir = Path::new(&data_dir).join("state_machine");
     !state_machine_dir.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_initialize_for_node, should_migrate_schema};
+    use infra::config::{LocalNodeRole, RuntimeMode};
+
+    #[test]
+    fn learners_never_migrate_or_bootstrap() {
+        assert!(!should_migrate_schema(&LocalNodeRole::Learner));
+        for runtime_mode in [
+            RuntimeMode::Embedded,
+            RuntimeMode::Remote,
+            RuntimeMode::Split,
+        ] {
+            assert!(!should_initialize_for_node(
+                &runtime_mode,
+                &LocalNodeRole::Learner,
+                false,
+                true,
+                true,
+            ));
+        }
+    }
+
+    #[test]
+    fn voters_migrate_and_keep_bootstrap_ownership_rules() {
+        assert!(should_migrate_schema(&LocalNodeRole::Voter));
+        assert!(should_initialize_for_node(
+            &RuntimeMode::Remote,
+            &LocalNodeRole::Voter,
+            false,
+            false,
+            false,
+        ));
+        assert!(should_initialize_for_node(
+            &RuntimeMode::Embedded,
+            &LocalNodeRole::Voter,
+            true,
+            true,
+            true,
+        ));
+        assert!(!should_initialize_for_node(
+            &RuntimeMode::Embedded,
+            &LocalNodeRole::Voter,
+            true,
+            false,
+            true,
+        ));
+    }
 }

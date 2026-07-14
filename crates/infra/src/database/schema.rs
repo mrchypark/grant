@@ -1,7 +1,82 @@
 use super::core::now_string;
 use super::*;
 
+#[derive(Debug, Clone)]
+struct DuplicateRauthyClientIdRow {
+    rauthy_client_id: String,
+    count: i64,
+}
+
+impl From<&mut Row<'_>> for DuplicateRauthyClientIdRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            rauthy_client_id: row.get("rauthy_client_id"),
+            count: row.get("count"),
+        }
+    }
+}
+
 impl Database {
+    pub async fn verify_schema_ready(&self, consistency: ReadConsistency) -> Result<()> {
+        let _: Vec<CountRow> = self
+            .query_rows_with(
+                consistency,
+                "SELECT COUNT(*) AS count
+                 FROM (
+                     SELECT u.active,
+                            ui.external_user_id,
+                            p.active AS party_active,
+                            o.inactivated_at,
+                            opl.relation_type,
+                            om.status AS membership_status,
+                            sp.active AS provider_active,
+                            a.provider_id,
+                            r.organization_id AS role_organization_id,
+                            ra.action_id AS role_action_id,
+                            rb.subject_organization_id,
+                            app.rauthy_client_id,
+                            app.provisioning_status,
+                            app.security_mutation_token,
+                            app.security_mutation_expires_at,
+                            aru.application_id AS redirect_application_id,
+                            cache.client_id,
+                            g.organization_id AS group_organization_id,
+                            gm.organization_membership_id,
+                            agr.status AS agreement_status,
+                            aa.action_id AS application_action_id,
+                            ag.status AS application_grant_status,
+                            aga.action_id AS consent_action_id,
+                            aca.valid AS consent_assertion_valid
+                     FROM users u
+                     LEFT JOIN user_identities ui ON 1 = 0
+                     LEFT JOIN parties p ON 1 = 0
+                     LEFT JOIN organizations o ON 1 = 0
+                     LEFT JOIN organization_party_links opl ON 1 = 0
+                     LEFT JOIN organization_memberships om ON 1 = 0
+                     LEFT JOIN service_providers sp ON 1 = 0
+                     LEFT JOIN actions a ON 1 = 0
+                     LEFT JOIN roles r ON 1 = 0
+                     LEFT JOIN role_actions ra ON 1 = 0
+                     LEFT JOIN role_bindings rb ON 1 = 0
+                     LEFT JOIN applications app ON 1 = 0
+                     LEFT JOIN application_redirect_uris aru ON 1 = 0
+                     LEFT JOIN auth_identity_cache cache ON 1 = 0
+                     LEFT JOIN groups g ON 1 = 0
+                     LEFT JOIN group_memberships gm ON 1 = 0
+                     LEFT JOIN agreements agr ON 1 = 0
+                     LEFT JOIN application_actions aa ON 1 = 0
+                     LEFT JOIN application_grants ag ON 1 = 0
+                     LEFT JOIN application_grant_actions aga ON 1 = 0
+                     LEFT JOIN application_consent_assertions aca ON 1 = 0
+                     LIMIT 0
+                 ) required_schema",
+                params!(),
+                "verify required application schema",
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn ensure_schema_only(&self) -> Result<()> {
         self.drop_removed_grant_tables().await?;
         self.runtime
@@ -29,6 +104,7 @@ impl Database {
                     token_hash TEXT PRIMARY KEY,
                     provider TEXT NOT NULL,
                     external_user_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
                     email TEXT,
                     display_name TEXT NOT NULL,
                     active INTEGER NOT NULL,
@@ -159,8 +235,10 @@ impl Database {
                     first_party INTEGER NOT NULL DEFAULT 0,
                     consent_policy TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
+                    provisioning_status TEXT NOT NULL DEFAULT 'unprovisioned',
                     rauthy_client_id TEXT,
-                    secret_rotated_at TEXT,
+                    security_mutation_token TEXT,
+                    security_mutation_expires_at TEXT,
                     created_by_user_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -193,6 +271,11 @@ impl Database {
                     action_id TEXT NOT NULL,
                     PRIMARY KEY (application_grant_id, action_id)
                 );
+                CREATE TABLE IF NOT EXISTS application_consent_assertions (
+                    id TEXT PRIMARY KEY,
+                    valid INTEGER NOT NULL
+                        CONSTRAINT application_consent_assertion_valid CHECK (valid = 1)
+                );
                 "#
                 .to_owned(),
             )
@@ -208,20 +291,23 @@ impl Database {
         .await?;
         self.add_column_if_missing("applications", "rauthy_client_id", "TEXT")
             .await?;
-        self.add_column_if_missing("applications", "secret_rotated_at", "TEXT")
+        self.add_column_if_missing("auth_identity_cache", "client_id", "TEXT")
             .await?;
-        self.runtime
-            .batch(
-                "UPDATE applications
-                 SET rauthy_client_id = id
-                 WHERE rauthy_client_id IS NULL OR TRIM(rauthy_client_id) = '';"
-                    .to_owned(),
-            )
-            .await
-            .context("backfill application Rauthy client ids")?;
+        self.add_column_if_missing(
+            "applications",
+            "provisioning_status",
+            "TEXT NOT NULL DEFAULT 'unprovisioned'",
+        )
+        .await?;
+        self.add_column_if_missing("applications", "security_mutation_token", "TEXT")
+            .await?;
+        self.add_column_if_missing("applications", "security_mutation_expires_at", "TEXT")
+            .await?;
+        self.reject_duplicate_rauthy_client_ids().await?;
         self.migrate_actions_provider_scoped_uniqueness().await?;
         self.migrate_legacy_account_organization_authorization()
             .await?;
+        self.reject_invalid_group_integrity().await?;
         self.ensure_indexes().await?;
         self.drop_removed_grant_tables().await?;
         self.delete_removed_grant_authorization_rows().await?;
@@ -244,6 +330,11 @@ impl Database {
                     ON user_identities (provider, external_user_id);
                 CREATE INDEX IF NOT EXISTS idx_auth_identity_cache_expires_at
                     ON auth_identity_cache (expires_at);
+                DROP INDEX IF EXISTS idx_applications_rauthy_client_id_unique;
+                CREATE UNIQUE INDEX idx_applications_rauthy_client_id_unique
+                    ON applications (rauthy_client_id)
+                    WHERE rauthy_client_id IS NOT NULL
+                      AND TRIM(rauthy_client_id) <> '';
                 CREATE INDEX IF NOT EXISTS idx_group_memberships_group_member
                     ON group_memberships (group_id, organization_membership_id);
                 CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
@@ -281,6 +372,74 @@ impl Database {
             )
             .await
             .context("create indexes")?;
+        Ok(())
+    }
+
+    async fn reject_duplicate_rauthy_client_ids(&self) -> Result<()> {
+        let duplicates: Vec<DuplicateRauthyClientIdRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT rauthy_client_id, COUNT(*) AS count
+                 FROM applications
+                 WHERE rauthy_client_id IS NOT NULL
+                   AND TRIM(rauthy_client_id) <> ''
+                 GROUP BY rauthy_client_id
+                 HAVING COUNT(*) > 1
+                 ORDER BY rauthy_client_id ASC
+                 LIMIT 1",
+                params!(),
+                "duplicate application Rauthy client ids",
+            )
+            .await?;
+        if let Some(duplicate) = duplicates.into_iter().next() {
+            return Err(anyhow!(
+                "duplicate applications.rauthy_client_id {} appears {} times",
+                duplicate.rauthy_client_id,
+                duplicate.count
+            ));
+        }
+        Ok(())
+    }
+
+    async fn reject_invalid_group_integrity(&self) -> Result<()> {
+        let invalid_memberships = self
+            .query_count(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) AS count
+                 FROM group_memberships gm
+                 LEFT JOIN groups g ON g.id = gm.group_id
+                 LEFT JOIN organization_memberships om
+                   ON om.id = gm.organization_membership_id
+                 WHERE g.id IS NULL
+                    OR om.id IS NULL
+                    OR g.organization_id <> om.organization_id",
+                params!(),
+                "invalid group membership integrity",
+            )
+            .await?;
+        if invalid_memberships > 0 {
+            return Err(anyhow!(
+                "invalid group data: {invalid_memberships} group memberships are missing references or cross organization boundaries"
+            ));
+        }
+
+        let invalid_bindings = self
+            .query_count(
+                ReadConsistency::Strong,
+                "SELECT COUNT(*) AS count
+                 FROM role_bindings rb
+                 LEFT JOIN groups g ON g.id = rb.subject_id
+                 WHERE rb.subject_type = 'group'
+                   AND (g.id IS NULL OR g.organization_id <> rb.subject_organization_id)",
+                params!(),
+                "invalid group role binding integrity",
+            )
+            .await?;
+        if invalid_bindings > 0 {
+            return Err(anyhow!(
+                "invalid group data: {invalid_bindings} group role bindings are missing groups or cross organization boundaries"
+            ));
+        }
         Ok(())
     }
 
@@ -730,7 +889,7 @@ impl Database {
         self.runtime
             .execute(
                 "INSERT INTO users (id, email, display_name, active, created_at) VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, active = excluded.active",
+                 ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name",
                 params!(
                     self.bootstrap_user_id.clone(),
                     Option::<String>::None,
@@ -779,12 +938,7 @@ impl Database {
             )
             .await
             .context("upsert bootstrap organization membership")?;
-        Ok(User {
-            id: self.bootstrap_user_id.clone(),
-            email: None,
-            display_name: self.bootstrap_user_name.clone(),
-            active: true,
-        })
+        self.get_user(&self.bootstrap_user_id).await
     }
 
     async fn ensure_bootstrap_authorization(&self) -> Result<()> {

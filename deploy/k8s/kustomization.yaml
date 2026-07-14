@@ -9,10 +9,16 @@ resources:
   - app-pdb.yaml
   - app-statefulset.yaml
   - rauthy-service.yaml
+  - rauthy-pdb.yaml
   - rauthy-statefulset.yaml
   - ingress.yaml
   - rauthy-config.yaml
+  - lifecycle-state.yaml
 configMapGenerator:
   - name: rauthy-bootstrap-renderer
     files:
       - render-rauthy-bootstrap.sh
+  - name: lifecycle-gate
+    files:
+      - lifecycle-gate.sh
+      - restore-once.sh
