@@ -180,7 +180,6 @@ async fn current_user_returns_local_user_and_active_organizations() {
             "me-user",
             Some("me-user@rauthy.test"),
             "Me User",
-            true,
         )
         .await
         .expect("create shadow user");
@@ -319,7 +318,6 @@ async fn rauthy_identity_relinks_same_email_after_restore() {
             "original-rauthy-user",
             Some("restore-user@rauthy.test"),
             "Restore User",
-            true,
         )
         .await
         .expect("create original shadow user");
@@ -346,7 +344,6 @@ async fn rauthy_identity_relinks_same_email_after_restore() {
             "restored-rauthy-user",
             Some("restore-user@rauthy.test"),
             "Restore User",
-            true,
         )
         .await
         .expect("relink restored shadow user");

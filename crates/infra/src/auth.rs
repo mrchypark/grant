@@ -139,7 +139,6 @@ impl AuthResolver {
                 &identity.external_user_id,
                 identity.email.as_deref(),
                 &identity.display_name,
-                identity.active,
                 effective_read_consistency_override.clone(),
             )
             .await

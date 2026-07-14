@@ -355,9 +355,8 @@ pub async fn seed_identity(
     external_user_id: &str,
     email: Option<&str>,
     display_name: &str,
-    active: bool,
 ) -> User {
-    db.resolve_or_create_user_identity("rauthy", external_user_id, email, display_name, active)
+    db.resolve_or_create_user_identity("rauthy", external_user_id, email, display_name)
         .await
         .expect("seed identity")
 }
@@ -401,7 +400,6 @@ pub async fn seed_org_with_user(
         external_user_id,
         Some(&format!("{external_user_id}@rauthy.test")),
         display_name,
-        true,
     )
     .await;
     seed_org_user_membership(

@@ -41,7 +41,6 @@ async fn application_authz_derives_client_and_subject_and_requires_consent_or_tr
         "bootstrap-user",
         Some("bootstrap-user@rauthy.test"),
         "Bootstrap User",
-        true,
     )
     .await;
     if !test

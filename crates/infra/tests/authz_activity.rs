@@ -62,7 +62,6 @@ async fn identity_sync_bind_and_bootstrap_preserve_local_inactive_state() {
             USER_ID,
             Some("activity@example.com"),
             "Synced Name",
-            true,
         )
         .await
         .expect("sync identity");

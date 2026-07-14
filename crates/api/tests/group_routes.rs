@@ -14,7 +14,6 @@ async fn group_crud_membership_scope_and_bound_delete_are_enforced() {
         "group-member",
         Some("group-member@rauthy.test"),
         "Group Member",
-        true,
     )
     .await;
     support::seed_org_user_membership(
@@ -29,7 +28,6 @@ async fn group_crud_membership_scope_and_bound_delete_are_enforced() {
         "group-outsider",
         Some("group-outsider@rauthy.test"),
         "Group Outsider",
-        true,
     )
     .await;
 

@@ -349,7 +349,6 @@ impl AppService {
                     &identity.external_user_id,
                     identity.email.as_deref(),
                     &identity.display_name,
-                    identity.active,
                     effective_read_consistency_override.clone(),
                 )
                 .await
@@ -1647,7 +1646,6 @@ impl AppService {
                 &identity.external_user_id,
                 identity.email.as_deref(),
                 &identity.display_name,
-                identity.active,
                 Some(ReadConsistency::Strong),
             )
             .await

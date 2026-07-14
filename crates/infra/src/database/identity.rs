@@ -202,14 +202,12 @@ impl Database {
         external_user_id: &str,
         email: Option<&str>,
         display_name: &str,
-        _active: bool,
     ) -> Result<User> {
         self.resolve_or_create_user_identity_with_consistency(
             provider,
             external_user_id,
             email,
             display_name,
-            true,
             None,
         )
         .await
@@ -221,7 +219,6 @@ impl Database {
         external_user_id: &str,
         email: Option<&str>,
         display_name: &str,
-        _active: bool,
         consistency: Option<ReadConsistency>,
     ) -> Result<User> {
         let now = now_string();

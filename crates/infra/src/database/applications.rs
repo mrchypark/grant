@@ -367,6 +367,25 @@ impl Database {
         Ok(token)
     }
 
+    async fn with_direct_application_security_mutation<T, F, Fut>(
+        &self,
+        application_id: &str,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let lease_token = self
+            .acquire_direct_application_security_mutation(application_id)
+            .await?;
+        let result = operation(lease_token.clone()).await;
+        let _ = self
+            .release_application_security_mutation(application_id, &lease_token)
+            .await;
+        result
+    }
+
     pub async fn upsert_application(&self, application: &Application) -> Result<()> {
         self.validate_application_references(application).await?;
         let now = now_string();
@@ -567,16 +586,14 @@ impl Database {
         &self,
         redirect_uri: &ApplicationRedirectUri,
     ) -> Result<()> {
-        let lease_token = self
-            .acquire_direct_application_security_mutation(&redirect_uri.application_id)
-            .await?;
-        let result = self
-            .insert_application_redirect_uri_with_security_lease(redirect_uri, &lease_token)
-            .await;
-        let _ = self
-            .release_application_security_mutation(&redirect_uri.application_id, &lease_token)
-            .await;
-        result
+        self.with_direct_application_security_mutation(
+            &redirect_uri.application_id,
+            |lease_token| async move {
+                self.insert_application_redirect_uri_with_security_lease(redirect_uri, &lease_token)
+                    .await
+            },
+        )
+        .await
     }
 
     pub async fn insert_application_redirect_uri_with_security_lease(
@@ -649,20 +666,15 @@ impl Database {
         application_id: &str,
         redirect_uri: &str,
     ) -> Result<()> {
-        let lease_token = self
-            .acquire_direct_application_security_mutation(application_id)
-            .await?;
-        let result = self
-            .delete_application_redirect_uri_with_security_lease(
+        self.with_direct_application_security_mutation(application_id, |lease_token| async move {
+            self.delete_application_redirect_uri_with_security_lease(
                 application_id,
                 redirect_uri,
                 &lease_token,
             )
-            .await;
-        let _ = self
-            .release_application_security_mutation(application_id, &lease_token)
-            .await;
-        result
+            .await
+        })
+        .await
     }
 
     pub async fn delete_application_redirect_uri_with_security_lease(
@@ -750,20 +762,15 @@ impl Database {
         application_id: &str,
         action_ids: &[String],
     ) -> Result<Vec<Action>> {
-        let lease_token = self
-            .acquire_direct_application_security_mutation(application_id)
-            .await?;
-        let result = self
-            .replace_application_actions_with_security_lease(
+        self.with_direct_application_security_mutation(application_id, |lease_token| async move {
+            self.replace_application_actions_with_security_lease(
                 application_id,
                 action_ids,
                 &lease_token,
             )
-            .await;
-        let _ = self
-            .release_application_security_mutation(application_id, &lease_token)
-            .await;
-        result
+            .await
+        })
+        .await
     }
 
     pub async fn replace_application_actions_with_security_lease(
