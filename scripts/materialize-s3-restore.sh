@@ -153,10 +153,21 @@ TARGET_VERSION=$(aws_s3api put-object \
 S3_ENDPOINT_URL="${S3_ENDPOINT_URL}" \
   "${SCRIPT_DIR}/check-s3-object-history.sh" "${BUCKET}" "${TARGET_KEY}" "${TARGET_VERSION}"
 
-if EXISTING_POLICY=$(aws_s3api get-bucket-policy --bucket "${BUCKET}" --query Policy --output text 2>/dev/null); then
+POLICY_ERROR_FILE="${TMP_DIR}/get-bucket-policy.stderr"
+if EXISTING_POLICY=$(LC_ALL=C aws_s3api get-bucket-policy --bucket "${BUCKET}" --query Policy --output text 2>"${POLICY_ERROR_FILE}"); then
   printf '%s\n' "${EXISTING_POLICY}" >"${TMP_DIR}/bucket-policy.json"
 else
-  printf '%s\n' '{"Version":"2012-10-17","Statement":[]}' >"${TMP_DIR}/bucket-policy.json"
+  policy_status=$?
+  # AWS CLI service failures share one exit status and expose the service error
+  # code only in this canonical prefix. Match the exact code, never message text.
+  policy_error_code=$(sed -n 's/^An error occurred (\([^)]*\)) when calling the GetBucketPolicy operation:.*$/\1/p' "${POLICY_ERROR_FILE}" | sed -n '1p')
+  if [ "${policy_status}" -eq 254 ] && [ "${policy_error_code}" = NoSuchBucketPolicy ]; then
+    printf '%s\n' '{"Version":"2012-10-17","Statement":[]}' >"${TMP_DIR}/bucket-policy.json"
+  else
+    cat "${POLICY_ERROR_FILE}" >&2
+    echo "failed to query bucket policy (aws exit ${policy_status}): ${BUCKET}" >&2
+    exit 1
+  fi
 fi
 jq --arg sid "${POLICY_SID}" --arg writerSid "${WRITER_DENY_SID}" --arg writer "${WRITER_PRINCIPAL}" --arg resource "${TARGET_ARN}" '
   .Statement = (

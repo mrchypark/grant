@@ -101,6 +101,18 @@ case "${MOCK_CASE:-}" in
           policy-null)
             printf '%s\n' '{"Version":"2012-10-17","Id":"keep-null","Statement":null}'
             ;;
+          policy-absent)
+            echo 'An error occurred (NoSuchBucketPolicy) when calling the GetBucketPolicy operation: The bucket policy does not exist' >&2
+            exit 254
+            ;;
+          policy-access-denied)
+            echo 'An error occurred (AccessDenied) when calling the GetBucketPolicy operation: Access Denied' >&2
+            exit 254
+            ;;
+          policy-network-error)
+            echo 'Could not connect to the endpoint URL: "https://s3.example.test/test-bucket?policy"' >&2
+            exit 255
+            ;;
           policy-invalid-scalar)
             printf '%s\n' '{"Version":"2012-10-17","Id":"keep-invalid","Statement":"not-a-policy-statement"}'
             ;;
@@ -298,7 +310,7 @@ run_policy_materialize() {
     "${POLICY_WRITER}" "${policy_state_dir}/materialized.tsv"
 }
 
-for policy_case in policy-single-object policy-array policy-missing policy-null; do
+for policy_case in policy-single-object policy-array policy-missing policy-null policy-absent; do
   policy_output="${TMP_DIR}/${policy_case}.out"
   run_policy_materialize "${policy_case}" >"${policy_output}" 2>&1
   policy_file="${TMP_DIR}/${policy_case}/installed-policy.json"
@@ -323,6 +335,9 @@ for policy_case in policy-single-object policy-array policy-missing policy-null;
     policy-null)
       jq -e '.Id == "keep-null" and (.Statement | length) == 2' "${policy_file}" >/dev/null
       ;;
+    policy-absent)
+      jq -e 'keys == ["Statement", "Version"] and (.Statement | length) == 2' "${policy_file}" >/dev/null
+      ;;
   esac
   jq -e --arg resource "${POLICY_TARGET_ARN}" --arg writer "${POLICY_WRITER}" '
     .Version == "2012-10-17" and (.Statement | type) == "array" and
@@ -343,6 +358,34 @@ for policy_case in policy-single-object policy-array policy-missing policy-null;
   ' "${policy_file}" >/dev/null || { echo "materializer changed the exact ${policy_case} policy contract" >&2; exit 1; }
   if grep -Fq "${SECRET_SENTINEL}" "${policy_output}"; then
     echo "materializer exposed an AWS secret for ${policy_case}" >&2
+    exit 1
+  fi
+done
+
+for policy_failure_case in policy-access-denied policy-network-error; do
+  policy_failure_output="${TMP_DIR}/${policy_failure_case}.out"
+  if run_policy_materialize "${policy_failure_case}" >"${policy_failure_output}" 2>&1; then
+    echo "materializer accepted bucket policy lookup failure ${policy_failure_case}" >&2
+    exit 1
+  fi
+  case "${policy_failure_case}" in
+    policy-access-denied)
+      grep -q 'An error occurred (AccessDenied) when calling the GetBucketPolicy operation: Access Denied' "${policy_failure_output}" \
+        || { echo "materializer hid the AccessDenied bucket policy diagnostic" >&2; exit 1; }
+      grep -q 'failed to query bucket policy (aws exit 254): test-bucket' "${policy_failure_output}" \
+        || { echo "materializer did not report the AccessDenied exit status" >&2; exit 1; }
+      ;;
+    policy-network-error)
+      grep -q 'Could not connect to the endpoint URL' "${policy_failure_output}" \
+        || { echo "materializer hid the network bucket policy diagnostic" >&2; exit 1; }
+      grep -q 'failed to query bucket policy (aws exit 255): test-bucket' "${policy_failure_output}" \
+        || { echo "materializer did not report the network failure exit status" >&2; exit 1; }
+      ;;
+  esac
+  [ ! -e "${TMP_DIR}/${policy_failure_case}/installed-policy.json" ] \
+    || { echo "materializer installed a policy after ${policy_failure_case}" >&2; exit 1; }
+  if grep -Fq "${SECRET_SENTINEL}" "${policy_failure_output}"; then
+    echo "materializer exposed an AWS secret for ${policy_failure_case}" >&2
     exit 1
   fi
 done
