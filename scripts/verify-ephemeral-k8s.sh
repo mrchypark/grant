@@ -118,7 +118,25 @@ assert_recovery_dry_run() {
   if "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --record "${pair}" >/dev/null 2>&1; then
     fail "unapproved recovery record was accepted for production restore"
   fi
-  "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --record "${pair}" >/dev/null
+  recovery_dry_log="${TMP_DIR}/full-cluster-recovery.log"
+  "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --record "${pair}" \
+    >/dev/null 2>"${recovery_dry_log}"
+  secret_delete_line=$(grep -n 'delete secret rauthy-restore-once' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
+  steady_checkpoint_line=$(grep -n 'checkpoint rauthy-ordinal0-restored (grant=restore, rauthy=steady)' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
+  peer_seed_guard_line=$(grep -n 'require absent rauthy-restore-once and revalidate rauthy-0 Ready before peer scale-up' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
+  steady_guard_line=$(grep -n 'ensure active lifecycle modes (grant=restore, rauthy=steady) at rauthy-ordinal0-restored' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
+  peer_scale_line=$(grep -n 'scale statefulset/rauthy --replicas=3' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
+  if ! { [ -n "${secret_delete_line}" ] && [ -n "${steady_checkpoint_line}" ] \
+    && [ -n "${peer_seed_guard_line}" ] && [ -n "${steady_guard_line}" ] && [ -n "${peer_scale_line}" ] \
+    && [ "${secret_delete_line}" -lt "${steady_checkpoint_line}" ] \
+    && [ "${steady_checkpoint_line}" -le "${peer_seed_guard_line}" ] \
+    && [ "${peer_seed_guard_line}" -lt "${steady_guard_line}" ] \
+    && [ "${steady_guard_line}" -lt "${peer_scale_line}" ]; }; then
+    fail "Rauthy peers can scale before the one-shot Secret is consumed and lifecycle is steady"
+  fi
+  if grep -q 'checkpoint rauthy-ordinal0-restored (grant=restore, rauthy=restore)' "${recovery_dry_log}"; then
+    fail "Rauthy ordinal 0 checkpoint leaves fresh peers in unauthorized restore mode"
+  fi
   "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --release-completed --record "${pair}" >/dev/null
 
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${TMP_DIR}/approval-private.pem" >/dev/null 2>&1

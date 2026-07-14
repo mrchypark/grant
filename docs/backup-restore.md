@@ -137,8 +137,8 @@ scripts/restore-full-cluster.sh \
 2. 아직 복구 데이터가 생성되기 전에만 두 StatefulSet을 0으로 만든다.
 3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. static launcher는 `emptyDir`에 `pending`을 먼저 기록하고 Rauthy/hiqlite ready가 확인된 뒤에만 `completed`로 바꾼다. Grant의 one-shot wrapper도 directive가 정확히 `s3:restore/grant/<recovery-id>/<lowercase-sha256>.enc`인지 확인해 live backup, 다른 workload 또는 다른 recovery object를 거부한다. 불완전한 container restart는 자동 replay하지 않는다.
 4. ordinal 0 Ready와 S3 정책/version 재검증 직후 Secret을 삭제한다. 새 Pod는 authorization이 없어 init에서 막히며, 재시도는 operator의 명시적 re-arm이 필요하다.
-5. `partition: 1`에서 no-restore template을 만든 뒤 replicas 3으로 확장한다. 각 Pod readiness와 native membership의 config가 joint consensus가 아닌 정확히 하나의 voter set `1,2,3`인지 확인한다.
-6. lifecycle mode를 `steady`로 바꾸고 `partition: 0`으로 ordinal 0만 quorum-preserving restart한다. restore env와 Secret이 모두 사라졌는지 확인한다.
+5. Rauthy ordinal 0의 one-shot Secret을 삭제하고 checkpoint의 Rauthy lifecycle을 `steady`로 CAS 전환한 뒤 ordinal 0 Ready를 다시 확인한다. 이 Secret 부재·mode 전환·seed readiness가 모두 확인된 상태에서만 `partition: 1` no-restore template과 replicas 3 확장을 적용한다. fresh `emptyDir` peer는 restore authorization이나 로컬 completed marker가 없으므로 `restore` mode로 기동하지 않는다. 명시적 ordinal 0 re-arm은 확장 전에만 lifecycle을 다시 `restore`로 바꾸고, 검증·Secret 삭제 뒤 `steady`로 되돌린다. Grant wrapper는 peer-ready 상태에서 restore directive 없이 일반 join이 가능하지만 같은 one-shot Secret 삭제와 no-restore template 순서를 유지한다. 각 Pod readiness와 native membership의 config가 joint consensus가 아닌 정확히 하나의 voter set `1,2,3`인지 확인한다.
+6. lifecycle mode가 `steady`로 유지되는지 확인하고 `partition: 0`으로 ordinal 0만 quorum-preserving restart한다. restore env와 Secret이 모두 사라졌는지 확인한다.
 7. Grant에 같은 1→3 절차를 적용한다. learner가 있다면 voter migration과 복구가 끝난 후에만 재가입시킨다. schema migration은 voter만 수행한다.
 8. 각 Pod의 native Raft metrics에서 voter IDs `1,2,3`, 같은 leader/term/applied index를 확인한다. Rauthy는 SQLite와 cache Raft를 모두 검사한다. semantic 검사 동안 일반 `rauthy` Service는 계속 fence 상태이며, recovery-only ClusterIP Service와 일시적인 Grant 내부 base URL만 사용한다. 고정 data-only semantic config의 Rauthy health와 Grant application-authz allow/deny 결과가 서명된 drill evidence와 일치하고 내부 route가 원복된 후에만 일반 Service selector를 원복한다.
 

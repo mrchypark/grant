@@ -231,6 +231,27 @@ update_state() {
   fi
 }
 
+set_active_lifecycle_modes() {
+  grant_mode=$1 rauthy_mode=$2
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "dry-run: ensure active lifecycle modes (grant=${grant_mode}, rauthy=${rauthy_mode}) at ${CURRENT_PHASE}"
+    return
+  fi
+  current_object=$(kubectl -n "${NAMESPACE}" get configmap "${STATE_CONFIGMAP}" -o json)
+  [ "$(printf '%s\n' "${current_object}" | jq -r '.data["recovery-id"] // empty')" = "${RECOVERY_ID}" ] \
+    && [ "$(printf '%s\n' "${current_object}" | jq -r '.data.phase // empty')" = "${CURRENT_PHASE}" ] \
+    || { echo "checkpoint changed before lifecycle mode transition" >&2; exit 1; }
+  current_grant_mode=$(printf '%s\n' "${current_object}" | jq -r '.data["grant-mode"] // empty')
+  current_rauthy_mode=$(printf '%s\n' "${current_object}" | jq -r '.data["rauthy-mode"] // empty')
+  if [ "${current_grant_mode}" = "${grant_mode}" ] && [ "${current_rauthy_mode}" = "${rauthy_mode}" ]; then
+    return
+  fi
+  updated=$(printf '%s\n' "${current_object}" | jq --arg gm "${grant_mode}" --arg rm "${rauthy_mode}" \
+    '.data["grant-mode"]=$gm | .data["rauthy-mode"]=$rm')
+  printf '%s\n' "${updated}" | kubectl replace -f - >/dev/null \
+    || { echo "lifecycle mode transition CAS failed" >&2; exit 1; }
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -466,6 +487,20 @@ expand_and_cleanup() {
   if [ "${workload}" = rauthy ]; then voters_phase=rauthy-voters-caught-up
   else voters_phase=grant-voters-caught-up; fi
   if ! at_least "${voters_phase}"; then
+    if [ "${workload}" = rauthy ]; then
+      # Fresh emptyDir peers have no completed launcher state or restore Secret. They must join
+      # ordinal 0 in steady mode; restore mode intentionally fails closed without authorization.
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        log "dry-run: would require absent ${secret} and revalidate ${sts}-0 Ready before peer scale-up"
+      else
+        if kubectl -n "${NAMESPACE}" get secret "${secret}" >/dev/null 2>&1; then
+          echo "Rauthy restore Secret still exists before peer scale-up" >&2
+          exit 1
+        fi
+        wait_ready "${sts}" 1
+      fi
+      set_active_lifecycle_modes restore steady
+    fi
     run kubectl -n "${NAMESPACE}" patch statefulset "${sts}" --type merge -p '{"spec":{"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"partition":1}},"template":{"metadata":{"annotations":{"grant.cypark.dev/restore-authorization":null}}}}}'
     run kubectl -n "${NAMESPACE}" scale "statefulset/${sts}" --replicas=3
     wait_ready "${sts}" 3
@@ -612,6 +647,7 @@ case "${REARM_ORDINAL0}" in
   '') ;;
   rauthy)
     [ "${CURRENT_PHASE}" = rauthy-ordinal0-restored ] || { echo "Rauthy re-arm is only valid at rauthy-ordinal0-restored" >&2; exit 2; }
+    set_active_lifecycle_modes restore restore
     RAUTHY_KEY=$(jq -r '.rauthy.restore.key' "${RECORD}")
     arm_restore rauthy rauthy rauthy rauthy-restore-once "${RAUTHY_KEY}"
     run kubectl -n "${NAMESPACE}" delete pod rauthy-0 --ignore-not-found
@@ -619,6 +655,7 @@ case "${REARM_ORDINAL0}" in
     wait_ready rauthy 1
     verify_restore_object rauthy
     consume_restore_secret rauthy-restore-once
+    set_active_lifecycle_modes restore steady
     ;;
   grant)
     [ "${CURRENT_PHASE}" = grant-ordinal0-restored ] || { echo "Grant re-arm is only valid at grant-ordinal0-restored" >&2; exit 2; }
@@ -649,7 +686,7 @@ if ! at_least rauthy-ordinal0-restored; then
   wait_ready rauthy 1
   verify_restore_object rauthy
   consume_restore_secret rauthy-restore-once
-  update_state rauthy-ordinal0-restored restore restore
+  update_state rauthy-ordinal0-restored restore steady
 fi
 if ! at_least rauthy-cleanup-complete; then
   expand_and_cleanup rauthy rauthy rauthy-restore-once rauthy-headless "${RAUTHY_SECRET_NAME}" 28200
