@@ -11,8 +11,7 @@ use domain::{
     RoleBindingSubjectType, ServiceProvider, User,
 };
 use hiqlite::Row;
-use std::borrow::Cow;
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet, error::Error as StdError, fmt};
 use uuid::Uuid;
 
 mod codec;
@@ -52,6 +51,41 @@ pub struct BackupEntry {
     pub last_modified: i64,
     pub size: Option<u64>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationConsentWriteError {
+    PreconditionsChanged,
+}
+
+impl fmt::Display for ApplicationConsentWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PreconditionsChanged => f.write_str(
+                "application consent preconditions changed while consent was being written",
+            ),
+        }
+    }
+}
+
+impl StdError for ApplicationConsentWriteError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationTrustMutationError {
+    SecurityMutationInProgress { application_id: String },
+}
+
+impl fmt::Display for ApplicationTrustMutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SecurityMutationInProgress { application_id } => write!(
+                f,
+                "application security mutation already in progress: {application_id}"
+            ),
+        }
+    }
+}
+
+impl StdError for ApplicationTrustMutationError {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BindIdentityInput<'a> {

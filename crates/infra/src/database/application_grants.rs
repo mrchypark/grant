@@ -246,9 +246,7 @@ impl Database {
                     .to_string()
                     .contains("application_consent_assertion_valid")
             }) {
-                return Err(anyhow!(
-                    "application consent preconditions changed while consent was being written"
-                ));
+                return Err(ApplicationConsentWriteError::PreconditionsChanged.into());
             }
             return Err(err).context("replace active application consent transaction");
         }

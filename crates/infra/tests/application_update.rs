@@ -6,7 +6,11 @@ use domain::{
     ApplicationType,
 };
 use hiqlite::Row;
-use infra::{config::ReadConsistency, database::Database, runtime::HiqliteRuntime};
+use infra::{
+    config::ReadConsistency,
+    database::{ApplicationConsentWriteError, ApplicationTrustMutationError, Database},
+    runtime::HiqliteRuntime,
+};
 
 const USER_ID: &str = "application-update-user";
 const ORGANIZATION_ID: &str = "application-update-org";
@@ -269,6 +273,53 @@ async fn update_application_rejects_wrong_and_expired_leases_without_corruption(
             security_mutation_token: Some("expired-lease".to_owned()),
             security_mutation_expires_at: Some(expired_at),
         }
+    );
+}
+
+#[tokio::test]
+async fn database_emits_typed_consent_and_trust_conflicts() {
+    let (db, runtime, _dir, application) =
+        application_database("application-typed-conflicts", "typed-conflicts").await;
+
+    runtime
+        .execute(
+            "UPDATE applications SET active = 0 WHERE id = $1",
+            vec![hiqlite::Param::from(application.id.clone())],
+        )
+        .await
+        .expect("deactivate application");
+    let grant = support::test_application_grant(
+        "typed-consent-grant",
+        USER_ID,
+        &application.id,
+        ORGANIZATION_ID,
+    );
+    let consent_error = db
+        .replace_active_application_consent(&grant, &[])
+        .await
+        .expect_err("inactive application must fail consent preconditions");
+    assert_eq!(
+        consent_error.downcast_ref::<ApplicationConsentWriteError>(),
+        Some(&ApplicationConsentWriteError::PreconditionsChanged)
+    );
+
+    runtime
+        .execute(
+            "UPDATE applications SET active = 1 WHERE id = $1",
+            vec![hiqlite::Param::from(application.id.clone())],
+        )
+        .await
+        .expect("reactivate application");
+    acquire_lease(&db, &application.id, "typed-conflict-lease").await;
+    let trust_error = db
+        .set_application_trust(ORGANIZATION_ID, &application.id, true)
+        .await
+        .expect_err("active security lease must block trust mutation");
+    assert_eq!(
+        trust_error.downcast_ref::<ApplicationTrustMutationError>(),
+        Some(&ApplicationTrustMutationError::SecurityMutationInProgress {
+            application_id: application.id,
+        })
     );
 }
 

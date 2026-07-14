@@ -275,9 +275,10 @@ impl Database {
                 )
                 .await?
             {
-                return Err(anyhow!(
-                    "application security mutation already in progress: {application_id}"
-                ));
+                return Err(ApplicationTrustMutationError::SecurityMutationInProgress {
+                    application_id: application_id.to_owned(),
+                }
+                .into());
             }
             return Err(anyhow!(
                 "application not found: {application_id} in organization {organization_id}"

@@ -3,7 +3,10 @@ use crate::{
         AuthResolver, AuthenticatedPrincipal, ExternalIdentity, map_strong_identity_sync_error,
     },
     config::{AppConfig, ReadConsistency},
-    database::{BackupEntry, BindIdentityInput, Database, UserActionCheck},
+    database::{
+        ApplicationConsentWriteError, ApplicationTrustMutationError, BackupEntry,
+        BindIdentityInput, Database, UserActionCheck,
+    },
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -1083,19 +1086,7 @@ impl AppService {
             .db
             .replace_active_application_consent(&grant, &normalized_action_ids)
             .await
-            .map_err(|err| {
-                if err
-                    .chain()
-                    .any(|cause| cause.to_string().contains("consent preconditions changed"))
-                {
-                    service_error(
-                        ServiceErrorKind::Conflict,
-                        "application consent preconditions changed while consent was being written",
-                    )
-                } else {
-                    err
-                }
-            })?;
+            .map_err(map_application_consent_write_error)?;
         let actions = self
             .db
             .list_application_grant_actions_with_consistency(
@@ -1141,20 +1132,7 @@ impl AppService {
         self.db
             .set_application_trust(organization_id, application_id, trusted)
             .await
-            .map_err(|err| {
-                if err.chain().any(|cause| {
-                    cause
-                        .to_string()
-                        .contains("application security mutation already in progress")
-                }) {
-                    service_error(
-                        ServiceErrorKind::Conflict,
-                        "application security mutation is already in progress",
-                    )
-                } else {
-                    err
-                }
-            })
+            .map_err(map_application_trust_mutation_error)
     }
 
     pub async fn list_groups_authorized(
@@ -2035,6 +2013,31 @@ fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::
     anyhow::Error::new(ServiceError::new(kind, message))
 }
 
+fn map_application_consent_write_error(err: anyhow::Error) -> anyhow::Error {
+    if err.downcast_ref::<ApplicationConsentWriteError>()
+        == Some(&ApplicationConsentWriteError::PreconditionsChanged)
+    {
+        return service_error(
+            ServiceErrorKind::Conflict,
+            "application consent preconditions changed while consent was being written",
+        );
+    }
+    err
+}
+
+fn map_application_trust_mutation_error(err: anyhow::Error) -> anyhow::Error {
+    if matches!(
+        err.downcast_ref::<ApplicationTrustMutationError>(),
+        Some(ApplicationTrustMutationError::SecurityMutationInProgress { .. })
+    ) {
+        return service_error(
+            ServiceErrorKind::Conflict,
+            "application security mutation is already in progress",
+        );
+    }
+    err
+}
+
 async fn rauthy_admin_response_error(
     operation: &str,
     mut response: reqwest::Response,
@@ -2202,8 +2205,10 @@ fn ensure_organization_application_mutable(application: &Application) -> Result<
 mod tests {
     use super::{
         SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
-        SchemaReadinessState, sanitize_rauthy_error_field,
+        SchemaReadinessState, ServiceError, ServiceErrorKind, map_application_consent_write_error,
+        map_application_trust_mutation_error, sanitize_rauthy_error_field,
     };
+    use crate::database::{ApplicationConsentWriteError, ApplicationTrustMutationError};
     use std::{
         sync::{
             Arc,
@@ -2240,6 +2245,56 @@ mod tests {
             started_at,
             SCHEMA_READINESS_CACHE_TTL,
         ));
+    }
+
+    #[test]
+    fn maps_only_typed_database_conflicts_to_service_conflicts() {
+        let consent_error = anyhow::Error::new(ApplicationConsentWriteError::PreconditionsChanged)
+            .context("replace active application consent transaction");
+        let consent_error = map_application_consent_write_error(consent_error);
+        let consent_service_error = consent_error
+            .downcast_ref::<ServiceError>()
+            .expect("typed consent conflict maps to a service error");
+        assert_eq!(consent_service_error.kind(), ServiceErrorKind::Conflict);
+
+        let trust_error =
+            anyhow::Error::new(ApplicationTrustMutationError::SecurityMutationInProgress {
+                application_id: "application-1".to_owned(),
+            })
+            .context("set application trust transaction");
+        let trust_error = map_application_trust_mutation_error(trust_error);
+        let trust_service_error = trust_error
+            .downcast_ref::<ServiceError>()
+            .expect("typed trust conflict maps to a service error");
+        assert_eq!(trust_service_error.kind(), ServiceErrorKind::Conflict);
+    }
+
+    #[test]
+    fn leaves_unexpected_database_errors_internal_even_when_messages_match() {
+        let consent_message =
+            "application consent preconditions changed while consent was being written";
+        let consent_error = map_application_consent_write_error(
+            anyhow::anyhow!(consent_message).context("unexpected database failure"),
+        );
+        assert!(consent_error.downcast_ref::<ServiceError>().is_none());
+        assert_eq!(consent_error.to_string(), "unexpected database failure");
+        assert!(
+            consent_error
+                .chain()
+                .any(|cause| cause.to_string() == consent_message)
+        );
+
+        let trust_message = "application security mutation already in progress";
+        let trust_error = map_application_trust_mutation_error(
+            anyhow::anyhow!(trust_message).context("unexpected database failure"),
+        );
+        assert!(trust_error.downcast_ref::<ServiceError>().is_none());
+        assert_eq!(trust_error.to_string(), "unexpected database failure");
+        assert!(
+            trust_error
+                .chain()
+                .any(|cause| cause.to_string() == trust_message)
+        );
     }
 
     #[tokio::test]
