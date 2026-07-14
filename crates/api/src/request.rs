@@ -1,6 +1,8 @@
 use anyhow::anyhow;
 use axum::http::{HeaderMap, StatusCode, header};
 use infra::{config::ReadConsistency, service::AppService};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::{
     dto::ReadConsistencyQuery,
@@ -94,7 +96,7 @@ pub(crate) fn ensure_request_context_organization(
 
 pub(crate) fn require_master_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
     let provided = header_value(headers, "x-grant-master-key")?;
-    if provided != service.master_key() {
+    if !secrets_match(&provided, service.master_key()) {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
             message: "unauthorized: invalid master key".to_owned(),
@@ -105,13 +107,19 @@ pub(crate) fn require_master_key(service: &AppService, headers: &HeaderMap) -> A
 
 pub(crate) fn require_app_auth_key(service: &AppService, headers: &HeaderMap) -> ApiResult<()> {
     let provided = header_value(headers, "x-grant-app-auth-key")?;
-    if provided != service.app_auth_key() {
+    if !secrets_match(&provided, service.app_auth_key()) {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
             message: "unauthorized: invalid application authorization key".to_owned(),
         });
     }
     Ok(())
+}
+
+fn secrets_match(provided: &str, expected: &str) -> bool {
+    let provided_digest = Sha256::digest(provided.as_bytes());
+    let expected_digest = Sha256::digest(expected.as_bytes());
+    bool::from(provided_digest.ct_eq(&expected_digest))
 }
 
 fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
@@ -168,7 +176,7 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> ApiResult<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_active_organization_path_matches;
+    use super::{ensure_active_organization_path_matches, secrets_match};
     use axum::http::StatusCode;
 
     #[test]
@@ -180,5 +188,30 @@ mod tests {
             err.message,
             "forbidden: organization path org-b does not match active organization org-a"
         );
+    }
+
+    #[test]
+    fn secret_comparison_accepts_equal_values() {
+        assert!(secrets_match("master-secret", "master-secret"));
+    }
+
+    #[test]
+    fn secret_comparison_rejects_first_character_mismatch() {
+        assert!(!secrets_match("Master-secret", "master-secret"));
+    }
+
+    #[test]
+    fn secret_comparison_rejects_middle_character_mismatch() {
+        assert!(!secrets_match("master-Secret", "master-secret"));
+    }
+
+    #[test]
+    fn secret_comparison_rejects_last_character_mismatch() {
+        assert!(!secrets_match("master-secreT", "master-secret"));
+    }
+
+    #[test]
+    fn secret_comparison_rejects_length_mismatch() {
+        assert!(!secrets_match("master-secret-extra", "master-secret"));
     }
 }
