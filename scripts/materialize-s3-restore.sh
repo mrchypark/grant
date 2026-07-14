@@ -93,10 +93,16 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-materialize.XXXXXX")
 cleanup() { rm -rf "${TMP_DIR}"; }
 trap cleanup 0 HUP INT TERM
 
-LOCK_ENABLED=$(aws_s3api get-object-lock-configuration \
+if LOCK_ENABLED=$(aws_s3api get-object-lock-configuration \
   --bucket "${BUCKET}" \
   --query 'ObjectLockConfiguration.ObjectLockEnabled' \
-  --output text)
+  --output text); then
+  :
+else
+  lock_status=$?
+  echo "failed to query bucket Object Lock configuration (aws exit ${lock_status}): ${BUCKET}" >&2
+  exit 1
+fi
 [ "${LOCK_ENABLED}" = "Enabled" ] || { echo "bucket Object Lock is not enabled: ${BUCKET}" >&2; exit 1; }
 VERSIONING_STATUS=$(aws_s3api get-bucket-versioning \
   --bucket "${BUCKET}" \
