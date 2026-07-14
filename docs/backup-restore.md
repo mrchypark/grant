@@ -23,6 +23,7 @@ hiqlite는 bucket root에 `backup_node_<leader-id>_<unix-seconds>.sqlite` 이름
 - 별도 관리되는 production Ingress/TLS와 실제 digest로 치환한 Grant release image. 저장소의 `REQUIRED_PRODUCTION_DIGEST`는 admission-invalid marker이므로 그대로 배포할 수 없다.
 - 공식 Rauthy 0.36.0 digest에서 빌드한 `grant-rauthy-launcher` multi-architecture image의 실제 manifest digest. 저장소의 launcher digest token은 publish 전 fail-closed marker이며 그대로 배포할 수 없다.
 - private GHCR package를 읽는 namespace Secret `rauthy-launcher-pull`. `deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml`은 형식만 보여주며 실제 `.dockerconfigjson`은 외부 secret manager에서 공급한다.
+- workload별 materializer와 restore operator AWS profile의 `iam:GetRole` 권한. `deploy/overlays/production/recovery-role-resolution-policy.example.json`을 각 workload account와 실제 role path에 맞춰 별도로 적용한다.
 
 형식만 보여주는 파일은 `deploy/overlays/production/*.example.yaml`에 있다. 저장소에 실제 credential을 넣지 않는다.
 
@@ -34,6 +35,8 @@ hiqlite는 bucket root에 `backup_node_<leader-id>_<unix-seconds>.sqlite` 이름
 - `ENC_KEYS`, `ENC_KEY_ACTIVE`, `KEYRING_GENERATION`
 
 `ENC_KEYS`는 현재 active key만이 아니라 retention 기간의 모든 백업을 복호화할 수 있는 versioned keyring이어야 한다. Grant keyring과 Rauthy keyring을 별도로 escrow하고, 삭제·회전 이력을 recovery record와 함께 보존한다. record는 `KEYRING_GENERATION`과 `ENC_KEYS` 원문 SHA-256을 모두 고정하며 restore operator는 ordinal 0을 기동하기 전에 실제 Secret을 decode해 같은 digest인지 확인한다. S3 principal은 workload와 역할별 최소 권한으로 분리한다. 평상시 backup writer, object-version materializer, restore reader는 모두 다른 principal이어야 한다.
+
+STS `assumed-role/<role-name>/<session-name>` ARN에는 IAM role path가 들어 있지 않으므로 문자열 조합으로 static role ARN을 만들지 않는다. recovery pair 생성과 전체 복구 스크립트는 assumed-role principal을 비교하기 전에 해당 workload profile로 `iam:GetRole`을 호출하고 AWS가 반환한 exact `Role.Arn`으로만 비교한다. role name은 최대 64자, session name은 2~64자와 AWS 허용 문자 집합을 만족해야 하며 lookup 실패, account/partition/name 불일치, 잘못된 path 추정은 모두 fail closed한다. static IAM role ARN은 입력 그대로 exact 비교한다. materializer profile과 restore-reader profile에는 그 workload의 writer, materializer, reader role만 Resource로 제한한 `iam:GetRole`을 부여한다. Grant와 Rauthy가 다른 account라면 policy도 분리하며 cross-account role을 한 profile에서 해석한다고 가정하지 않는다.
 
 Grant에 주입하는 Rauthy 검증 API key는 `Clients` 그룹의 `read` 권한만 부여하며, master provisioning verify가 `GET /auth/v1/clients/{client_id}`로 예약된 client 설정을 확인할 때만 사용한다. client 생성·수정과 client secret 회전은 별도 운영자/IaC credential로 수행하고 그 credential은 Grant에 주입하지 않는다. 검증 key의 bootstrap Secret, 현재 key 이름, 만료, 회전·폐기 기록은 외부 secret manager에서 관리하며, 새 read-only key로 Grant 검증 호출을 확인한 뒤 이전 key를 폐기한다.
 
@@ -71,6 +74,8 @@ materialized key는 `restore/<workload>/<recovery-id>/<sha256>.enc`이다. bucke
 공식 Rauthy 0.36.0 image는 distroless이고 `/bin/sh`가 없으므로 main container에서 shell restore wrapper를 실행하지 않는다. `deploy/rauthy-launcher`의 stdlib-only Go binary를 `CGO_ENABLED=0`으로 빌드해 digest-pinned 공식 image에 복사한다. launcher는 Secret 값을 인자나 로그에 출력하지 않으며 `/app/rauthy` child에만 환경변수로 전달한다. 종료 신호는 child에 전달하고 child exit code를 보존한다. Secret이 없으면 일반 Rauthy 시작 경로로 동작한다.
 
 복구를 처음 소비하기 전에 launcher는 `/app/data/.rauthy-restore-state.json`을 `pending`으로 원자 기록한다. recovery ID는 32자 이하 lowercase DNS label이어야 하며 `s3:restore/rauthy/<recovery-id>/<sha256>.enc` 형식, lifecycle `restore` mode를 모두 검증한다. child가 hiqlite `/ready`에 연속 3회 성공하고 그 사이 종료하지 않은 뒤에만 상태를 `completed`로 원자 교체한다. `pending` 상태에서 container가 재시작되면 자동 replay하지 않고 실패한다. Secret이 삭제됐어도 `completed` recovery ID와 lifecycle ID가 같으면 일반 시작할 수 있다. `restore`인데 authorization과 같은 completed 상태가 모두 없으면 실패한다. 운영자는 불완전한 복구를 같은 Pod에서 재개하지 않고 전체 recovery checkpoint와 immutable object를 재검증한 뒤 ordinal 0을 명시적으로 re-arm한다.
+
+Grant의 `/gate/restore-once.sh`도 authorization을 검증한 뒤 `/var/lib/grant/hiqlite/.restore-consumed`를 `pending`, recovery ID, exact immutable restore directive로 원자 교체하고 child를 시작한다. 로컬 `/healthz`와 `/readyz`가 제한 시간 안에 연속 3회 모두 성공하고 child가 계속 실행 중일 때만 같은 파일을 `completed`로 원자 교체한다. child가 readiness 전에 종료되거나 신호를 받으면 exit status를 보존하고 `pending`을 유지하며, timeout은 child를 종료한 뒤 124로 실패한다. 같은 recovery ID와 exact directive의 stale `pending`은 authorization이 유지된 동안 재시도하고, 같은 binding의 `completed`만 restore 환경변수를 제거한 일반 시작으로 replay를 억제한다. supervisor는 HUP/INT/TERM을 child에 전달하고 grace 종료 뒤에도 남은 child를 회수한다. 기본 readiness 제한은 300초, probe 간격은 2초이며 image에는 로컬 HTTP probe용 `curl`이 포함된다.
 
 PR의 `rauthy-launcher-image` workflow는 read-only 권한으로 unit/race/vet, 실제 `/app/rauthy --help` 실행 계약과 amd64/arm64 no-push build를 검사한다. PR에서는 launcher digest marker를 source/contract 검증에 한해 허용하며 production 정적 검증의 기본 동작은 계속 fail closed다. PR 또는 feature ref에는 `packages:write`를 부여하지 않는다. merge 후 production publish만 `main`의 `rauthy-launcher-image`를 정확한 main HEAD SHA와 confirmation `publish-rauthy-launcher-production`으로 실행하며 보호 환경 `rauthy-launcher-production-publish` 승인이 필요하다. 결과 summary의 `sha256:` digest를 받은 운영자는 새 `feature/pin-rauthy-launcher-<main-short-sha>` branch에서 `deploy/k8s/rauthy-statefulset.yaml`의 단일 marker를 치환하고 정적 검증을 통과시키는 후속 PR을 만든다. workflow는 repository contents를 쓰거나 branch/PR을 자동 생성하지 않는다. package visibility를 public으로 바꾸거나 mutable tag만 record/StatefulSet에 사용하면 안 된다.
 
@@ -135,7 +140,7 @@ scripts/restore-full-cluster.sh \
 
 1. 두 public Service를 fence하고, immutable current version·Object Lock·SHA·image digest를 다시 검증한다.
 2. 아직 복구 데이터가 생성되기 전에만 두 StatefulSet을 0으로 만든다.
-3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. static launcher는 `emptyDir`에 `pending`을 먼저 기록하고 Rauthy/hiqlite ready가 확인된 뒤에만 `completed`로 바꾼다. Grant의 one-shot wrapper도 directive가 정확히 `s3:restore/grant/<recovery-id>/<lowercase-sha256>.enc`인지 확인해 live backup, 다른 workload 또는 다른 recovery object를 거부한다. 불완전한 container restart는 자동 replay하지 않는다.
+3. Rauthy ordinal 0에 recovery ID가 결합된 `rauthy-restore-once` Secret을 연결하고 `restore` mode에서 기동한다. static launcher는 `emptyDir`에 `pending`을 먼저 기록하고 Rauthy/hiqlite ready가 확인된 뒤에만 `completed`로 바꾼다. Grant의 one-shot wrapper도 directive가 정확히 `s3:restore/grant/<recovery-id>/<lowercase-sha256>.enc`인지 확인해 live backup, 다른 workload 또는 다른 recovery object를 거부하고, health/readiness 확인 뒤에만 `completed`로 바꾼다. Rauthy의 stale `pending`은 명시적 re-arm 전까지 fail closed하고 Grant의 같은-ID stale `pending`은 authorization이 유지된 동안 재시도한다.
 4. ordinal 0 Ready와 S3 정책/version 재검증 직후 Secret을 삭제한다. 새 Pod는 authorization이 없어 init에서 막히며, 재시도는 operator의 명시적 re-arm이 필요하다.
 5. Rauthy ordinal 0의 one-shot Secret을 삭제하고 checkpoint의 Rauthy lifecycle을 `steady`로 CAS 전환한 뒤 ordinal 0 Ready를 다시 확인한다. 이 Secret 부재·mode 전환·seed readiness가 모두 확인된 상태에서만 `partition: 1` no-restore template과 replicas 3 확장을 적용한다. fresh `emptyDir` peer는 restore authorization이나 로컬 completed marker가 없으므로 `restore` mode로 기동하지 않는다. 명시적 ordinal 0 re-arm은 확장 전에만 lifecycle을 다시 `restore`로 바꾸고, 검증·Secret 삭제 뒤 `steady`로 되돌린다. Grant wrapper는 peer-ready 상태에서 restore directive 없이 일반 join이 가능하지만 같은 one-shot Secret 삭제와 no-restore template 순서를 유지한다. 각 Pod readiness와 native membership의 config가 joint consensus가 아닌 정확히 하나의 voter set `1,2,3`인지 확인한다.
 6. lifecycle mode가 `steady`로 유지되는지 확인하고 `partition: 0`으로 ordinal 0만 quorum-preserving restart한다. restore env와 Secret이 모두 사라졌는지 확인한다.

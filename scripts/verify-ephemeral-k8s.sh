@@ -78,6 +78,18 @@ assert_ha_contract() {
     || fail "${label} does not reference the private GHCR pull Secret"
 }
 
+assert_recovery_role_resolution_policy() {
+  policy=${ROOT_DIR}/deploy/overlays/production/recovery-role-resolution-policy.example.json
+  jq -e '
+    .Version == "2012-10-17" and
+    any(.Statement[]?;
+      .Effect == "Allow" and .Action == "iam:GetRole" and
+      (.Resource | type == "array" and length == 3) and
+      all(.Resource[]; test("^arn:aws:iam::[0-9]{12}:role/.+")))
+  ' "${policy}" >/dev/null \
+    || fail "production recovery role-resolution policy does not grant scoped iam:GetRole"
+}
+
 assert_recovery_dry_run() {
   pair="${TMP_DIR}/pair.json"
   normalized="${TMP_DIR}/normalized-materialization.tsv"
@@ -686,6 +698,8 @@ verify_static() {
     || fail "Rauthy launcher does not derive from the pinned official 0.36.0 image"
   grep -q 'ENTRYPOINT \["/usr/local/bin/rauthy-launcher"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
     || fail "Rauthy launcher image entrypoint contract is missing"
+  grep -q 'ca-certificates curl libcurl4 libssl3' "${ROOT_DIR}/Dockerfile" \
+    || fail "Grant runtime image is missing the restore readiness HTTP probe"
   grep -q 'REQUIRED_BASE64_DOCKER_CONFIG_JSON' "${ROOT_DIR}/deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml" \
     || fail "production private registry pull Secret example is missing"
   grep -q -- '--password-stdin' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
@@ -749,6 +763,20 @@ verify_static() {
     || fail "production Grant app-auth key wiring is missing"
   grep -q 'key: GRANT_APP_AUTH_KEY' "${TMP_DIR}/production.yaml" \
     || fail "production Grant app-auth Secret key wiring is missing"
+  for restore_setting in RESTORE_ONCE_HEALTH_URL RESTORE_ONCE_READY_URL RESTORE_ONCE_READY_TIMEOUT_SECONDS \
+    RESTORE_ONCE_READY_INTERVAL_SECONDS RESTORE_ONCE_READY_SUCCESSES RESTORE_ONCE_PROBE_TIMEOUT_SECONDS \
+    RESTORE_ONCE_SIGNAL_GRACE_SECONDS; do
+    grep -q "name: ${restore_setting}" "${TMP_DIR}/production.yaml" \
+      || fail "production Grant restore supervisor is missing ${restore_setting}"
+  done
+  awk '
+    $0 ~ /name: RESTORE_ONCE_READY_SUCCESSES$/ {
+      getline
+      if ($0 ~ /value: "3"$/) found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant restore supervisor must require three consecutive readiness successes"
   if grep -E 'localhost|grant\.local|dev-rauthy|grant:local|SuperSecureSecret|AnotherSecureSecret' "${TMP_DIR}/production.yaml" >/dev/null; then
     fail "production render contains a development fallback"
   fi
@@ -769,6 +797,8 @@ verify_static() {
   assert_ci_local_placeholder_guard
   assert_ci_local_registry_auth_contract
   assert_gke_skaffold_registry_secret_contract
+  assert_recovery_role_resolution_policy
+  "${ROOT_DIR}/scripts/verify-aws-principal-helpers.sh"
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
   assert_recovery_dry_run
   "${ROOT_DIR}/scripts/verify-recovery-state-machine.sh"

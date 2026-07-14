@@ -62,7 +62,7 @@ Developer console은 기존 organization/application 경계 안에 둔다. 조�
 - learner는 schema migration과 bootstrap을 수행하지 않고 `/api/v1/me`, provider 조회, org read, authz check/filter 같은 read/authz endpoint를 로컬 read 경로로 처리할 수 있다. `/readyz`는 사용할 read 경로에서 필수 schema를 read-only로 검증한다.
 - learner의 write/admin surface는 `requires_voter_node`로 막는다.
 - Kubernetes production의 Grant와 Rauthy는 각각 3 voter `StatefulSet`이며 local state는 `emptyDir`이다. 한 노드 손실은 quorum에서 재가입하고 전체 손실은 workload별 S3 backup pair로 복구한다.
-- lifecycle gate는 all-empty `steady` cluster의 자동 bootstrap을 막는다. production은 `fresh`를 거부하고 recovery ID가 결합된 restore authorization을 사용한다. Grant는 Pod-local 소비 marker를, distroless Rauthy derivative image의 static launcher는 health-gated `pending/completed` 상태를 사용한다. workload ServiceAccount는 상태를 수정할 권한이 없다.
+- lifecycle gate는 all-empty `steady` cluster의 자동 bootstrap을 막는다. production은 `fresh`를 거부하고 recovery ID가 결합된 restore authorization을 사용한다. Grant shell supervisor와 distroless Rauthy derivative image의 static launcher는 모두 Pod-local health-gated `pending/completed` 상태를 사용한다. Grant는 같은 recovery의 stale `pending`을 재시도하고 Rauthy는 명시적 re-arm 전까지 거부한다. workload ServiceAccount는 상태를 수정할 권한이 없다.
 - 복구는 Rauthy 1→3, Grant 1→3 순서이고, voter 복구·schema migration 뒤 learner를 재가입시킨다.
 
 ## Related Docs

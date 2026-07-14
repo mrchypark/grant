@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=grant-cargo-registry,target=/usr/local/cargo/registry,
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libcurl4 libssl3 \
+    && apt-get install -y --no-install-recommends ca-certificates curl libcurl4 libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 grant \
     && useradd --system --uid 10001 --gid 10001 --home /app --shell /usr/sbin/nologin grant \

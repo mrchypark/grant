@@ -2,6 +2,9 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
+# shellcheck source=aws-principal-helpers.sh
+# shellcheck disable=SC1091
+. "${ROOT_DIR}/scripts/aws-principal-helpers.sh"
 DRY_RUN=0
 NAMESPACE=${NAMESPACE:-grant}
 OUTPUT=${OUTPUT:-recovery-pair.json}
@@ -34,9 +37,17 @@ case "${RECOVERY_ID}" in ''|*[!a-z0-9-]*|-*|*-) echo "RECOVERY_ID must be a lowe
 GRANT_AWS_PROFILE=${GRANT_AWS_PROFILE:-grant-dry-run}
 RAUTHY_AWS_PROFILE=${RAUTHY_AWS_PROFILE:-rauthy-dry-run}
 [ "${GRANT_AWS_PROFILE}" != "${RAUTHY_AWS_PROFILE}" ] || { echo "distinct workload AWS profiles are required" >&2; exit 2; }
-[ "${GRANT_WRITER_PRINCIPAL_ARN}" != "${GRANT_RESTORE_READER_PRINCIPAL_ARN}" ] \
-  && [ "${RAUTHY_WRITER_PRINCIPAL_ARN}" != "${RAUTHY_RESTORE_READER_PRINCIPAL_ARN}" ] \
-  && [ "${GRANT_RESTORE_READER_PRINCIPAL_ARN}" != "${RAUTHY_RESTORE_READER_PRINCIPAL_ARN}" ] \
+GRANT_WRITER_IDENTITY=$(canonical_aws_role_principal "${GRANT_WRITER_PRINCIPAL_ARN}" "${GRANT_AWS_PROFILE}") \
+  || { echo "cannot resolve the Grant writer principal" >&2; exit 2; }
+GRANT_RESTORE_READER_IDENTITY=$(canonical_aws_role_principal "${GRANT_RESTORE_READER_PRINCIPAL_ARN}" "${GRANT_AWS_PROFILE}") \
+  || { echo "cannot resolve the Grant restore-reader principal" >&2; exit 2; }
+RAUTHY_WRITER_IDENTITY=$(canonical_aws_role_principal "${RAUTHY_WRITER_PRINCIPAL_ARN}" "${RAUTHY_AWS_PROFILE}") \
+  || { echo "cannot resolve the Rauthy writer principal" >&2; exit 2; }
+RAUTHY_RESTORE_READER_IDENTITY=$(canonical_aws_role_principal "${RAUTHY_RESTORE_READER_PRINCIPAL_ARN}" "${RAUTHY_AWS_PROFILE}") \
+  || { echo "cannot resolve the Rauthy restore-reader principal" >&2; exit 2; }
+[ "${GRANT_WRITER_IDENTITY}" != "${GRANT_RESTORE_READER_IDENTITY}" ] \
+  && [ "${RAUTHY_WRITER_IDENTITY}" != "${RAUTHY_RESTORE_READER_IDENTITY}" ] \
+  && [ "${GRANT_RESTORE_READER_IDENTITY}" != "${RAUTHY_RESTORE_READER_IDENTITY}" ] \
   || { echo "writer and restore-reader principals must be separated by role and workload" >&2; exit 2; }
 
 command -v jq >/dev/null 2>&1 || { echo "missing command: jq" >&2; exit 1; }
@@ -144,9 +155,13 @@ materialize rauthy "${RAUTHY_AWS_PROFILE}" "${RAUTHY_BUCKET}" "${RAUTHY_SOURCE_K
 TAB=$(printf '\t')
 IFS="${TAB}" read -r GRANT_RESTORE_KEY GRANT_RESTORE_VERSION GRANT_RESTORE_SHA GRANT_LOCK_UNTIL GRANT_POLICY_SID GRANT_WRITER_DENY_SID GRANT_PRINCIPAL <"${TMP_DIR}/grant.tsv"
 IFS="${TAB}" read -r RAUTHY_RESTORE_KEY RAUTHY_RESTORE_VERSION RAUTHY_RESTORE_SHA RAUTHY_LOCK_UNTIL RAUTHY_POLICY_SID RAUTHY_WRITER_DENY_SID RAUTHY_PRINCIPAL <"${TMP_DIR}/rauthy.tsv"
-[ "${GRANT_PRINCIPAL}" != "${RAUTHY_PRINCIPAL}" ] || { echo "Grant and Rauthy materialization principals must be distinct" >&2; exit 1; }
-[ "${GRANT_PRINCIPAL}" != "${GRANT_WRITER_PRINCIPAL_ARN}" ] && [ "${GRANT_PRINCIPAL}" != "${GRANT_RESTORE_READER_PRINCIPAL_ARN}" ] \
-  && [ "${RAUTHY_PRINCIPAL}" != "${RAUTHY_WRITER_PRINCIPAL_ARN}" ] && [ "${RAUTHY_PRINCIPAL}" != "${RAUTHY_RESTORE_READER_PRINCIPAL_ARN}" ] \
+GRANT_MATERIALIZATION_IDENTITY=$(canonical_aws_role_principal "${GRANT_PRINCIPAL}" "${GRANT_AWS_PROFILE}") \
+  || { echo "cannot resolve the Grant materialization principal" >&2; exit 1; }
+RAUTHY_MATERIALIZATION_IDENTITY=$(canonical_aws_role_principal "${RAUTHY_PRINCIPAL}" "${RAUTHY_AWS_PROFILE}") \
+  || { echo "cannot resolve the Rauthy materialization principal" >&2; exit 1; }
+[ "${GRANT_MATERIALIZATION_IDENTITY}" != "${RAUTHY_MATERIALIZATION_IDENTITY}" ] || { echo "Grant and Rauthy materialization principals must be distinct" >&2; exit 1; }
+[ "${GRANT_MATERIALIZATION_IDENTITY}" != "${GRANT_WRITER_IDENTITY}" ] && [ "${GRANT_MATERIALIZATION_IDENTITY}" != "${GRANT_RESTORE_READER_IDENTITY}" ] \
+  && [ "${RAUTHY_MATERIALIZATION_IDENTITY}" != "${RAUTHY_WRITER_IDENTITY}" ] && [ "${RAUTHY_MATERIALIZATION_IDENTITY}" != "${RAUTHY_RESTORE_READER_IDENTITY}" ] \
   || { echo "materialization principals must differ from writer and restore-reader principals" >&2; exit 1; }
 
 umask 077

@@ -138,7 +138,9 @@ jobs:
           )
           posix_scripts=(
             scripts/k8s-secret-helpers.sh
+            scripts/aws-principal-helpers.sh
             scripts/check-s3-object-history.sh
+            scripts/verify-aws-principal-helpers.sh
             scripts/verify-ephemeral-k8s.sh
             scripts/verify-s3-object-history.sh
             scripts/verify-docs.sh

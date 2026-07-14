@@ -56,6 +56,9 @@ ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 # shellcheck source=recovery-state-machine.sh
 # shellcheck disable=SC1091
 . "${ROOT_DIR}/scripts/recovery-state-machine.sh"
+# shellcheck source=aws-principal-helpers.sh
+# shellcheck disable=SC1091
+. "${ROOT_DIR}/scripts/aws-principal-helpers.sh"
 
 jq -e '
   .version == 2 and
@@ -80,8 +83,16 @@ fi
 jq -e '.trafficWriteFence.directWritersStopped == true and (.trafficWriteFence.evidenceSha256 | length > 0) and (.trafficWriteFence.signerFingerprint | length > 0)' "${RECORD}" >/dev/null \
   || { echo "record lacks signed coordinated write-fence evidence" >&2; exit 1; }
 [ "$(jq -r '.grant.bucket' "${RECORD}")" != "$(jq -r '.rauthy.bucket' "${RECORD}")" ] || { echo "workloads must use distinct buckets" >&2; exit 1; }
-[ "$(jq -r '.grant.materializationPrincipal' "${RECORD}")" != "$(jq -r '.rauthy.materializationPrincipal' "${RECORD}")" ] || { echo "materialization principals must be distinct" >&2; exit 1; }
-[ "$(jq -r '.grant.restoreReaderPrincipal' "${RECORD}")" != "$(jq -r '.rauthy.restoreReaderPrincipal' "${RECORD}")" ] || { echo "restore-reader principals must be distinct" >&2; exit 1; }
+grant_materialization_identity=$(canonical_aws_role_principal "$(jq -r '.grant.materializationPrincipal' "${RECORD}")" "${GRANT_AWS_PROFILE:-}") \
+  || { echo "cannot resolve the signed Grant materialization principal" >&2; exit 1; }
+rauthy_materialization_identity=$(canonical_aws_role_principal "$(jq -r '.rauthy.materializationPrincipal' "${RECORD}")" "${RAUTHY_AWS_PROFILE:-}") \
+  || { echo "cannot resolve the signed Rauthy materialization principal" >&2; exit 1; }
+grant_record_reader_identity=$(canonical_aws_role_principal "$(jq -r '.grant.restoreReaderPrincipal' "${RECORD}")" "${GRANT_AWS_PROFILE:-}") \
+  || { echo "cannot resolve the signed Grant restore-reader principal" >&2; exit 1; }
+rauthy_record_reader_identity=$(canonical_aws_role_principal "$(jq -r '.rauthy.restoreReaderPrincipal' "${RECORD}")" "${RAUTHY_AWS_PROFILE:-}") \
+  || { echo "cannot resolve the signed Rauthy restore-reader principal" >&2; exit 1; }
+[ "${grant_materialization_identity}" != "${rauthy_materialization_identity}" ] || { echo "materialization principals must be distinct" >&2; exit 1; }
+[ "${grant_record_reader_identity}" != "${rauthy_record_reader_identity}" ] || { echo "restore-reader principals must be distinct" >&2; exit 1; }
 
 if [ "${ISOLATED_DRILL}" -eq 0 ]; then
   [ -r "${APPROVAL_SIGNATURE}" ] && [ -r "${APPROVAL_PUBLIC_KEY}" ] || { echo "production restore requires approval signature and public key" >&2; exit 2; }
@@ -315,9 +326,17 @@ verify_restore_object() {
     else AWS_PROFILE=${profile} aws s3api "$@"; fi
   }
   restore_principal=$(AWS_PROFILE=${profile} aws sts get-caller-identity --query Arn --output text)
-  [ "${restore_principal}" = "${expected_restore_principal}" ] || { echo "${workload} restore reader differs from the signed record" >&2; exit 1; }
-  [ "${restore_principal}" != "${materialization_principal}" ] || { echo "${workload} restore reader must differ from the materialization principal" >&2; exit 1; }
-  [ "${restore_principal}" != "${writer_principal}" ] || { echo "${workload} restore reader must differ from the normal backup writer" >&2; exit 1; }
+  restore_identity=$(canonical_aws_role_principal "${restore_principal}" "${profile}") \
+    || { echo "${workload} actual restore reader cannot be resolved" >&2; exit 1; }
+  expected_restore_identity=$(canonical_aws_role_principal "${expected_restore_principal}" "${profile}") \
+    || { echo "${workload} signed restore reader cannot be resolved" >&2; exit 1; }
+  materialization_identity=$(canonical_aws_role_principal "${materialization_principal}" "${profile}") \
+    || { echo "${workload} materialization principal cannot be resolved" >&2; exit 1; }
+  writer_identity=$(canonical_aws_role_principal "${writer_principal}" "${profile}") \
+    || { echo "${workload} backup writer principal cannot be resolved" >&2; exit 1; }
+  [ "${restore_identity}" = "${expected_restore_identity}" ] || { echo "${workload} restore reader differs from the signed record" >&2; exit 1; }
+  [ "${restore_identity}" != "${materialization_identity}" ] || { echo "${workload} restore reader must differ from the materialization principal" >&2; exit 1; }
+  [ "${restore_identity}" != "${writer_identity}" ] || { echo "${workload} restore reader must differ from the normal backup writer" >&2; exit 1; }
   head_values=$(aws_s3api head-object --bucket "${bucket}" --key "${key}" --query '[VersionId,ObjectLockMode,ObjectLockRetainUntilDate]' --output text)
   current_version=$(printf '%s\n' "${head_values}" | awk '{print $1}')
   lock_mode=$(printf '%s\n' "${head_values}" | awk '{print $2}')
@@ -651,7 +670,11 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   [ "${GRANT_AWS_PROFILE}" != "${RAUTHY_AWS_PROFILE}" ] || { echo "distinct restore AWS profiles are required" >&2; exit 1; }
   grant_reader=$(AWS_PROFILE=${GRANT_AWS_PROFILE} aws sts get-caller-identity --query Arn --output text)
   rauthy_reader=$(AWS_PROFILE=${RAUTHY_AWS_PROFILE} aws sts get-caller-identity --query Arn --output text)
-  [ "${grant_reader}" != "${rauthy_reader}" ] || { echo "Grant and Rauthy restore readers must be distinct principals" >&2; exit 1; }
+  grant_reader_identity=$(canonical_aws_role_principal "${grant_reader}" "${GRANT_AWS_PROFILE}") \
+    || { echo "Grant restore reader cannot be resolved" >&2; exit 1; }
+  rauthy_reader_identity=$(canonical_aws_role_principal "${rauthy_reader}" "${RAUTHY_AWS_PROFILE}") \
+    || { echo "Rauthy restore reader cannot be resolved" >&2; exit 1; }
+  [ "${grant_reader_identity}" != "${rauthy_reader_identity}" ] || { echo "Grant and Rauthy restore readers must be distinct principals" >&2; exit 1; }
 fi
 
 fence_services

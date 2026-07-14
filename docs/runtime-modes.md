@@ -86,7 +86,7 @@ production init lifecycle gate는 다음 mode를 사용한다.
 
 - `steady`: 빈 Pod는 다른 ordinal의 direct cluster-readiness가 확인되어야 시작한다. 값이 없거나 잘못되어도 이 mode다.
 - `fresh`: local 개발 profile에서만 허용한다. production gate는 fresh bootstrap을 거부하고 승인된 전체 restore만 허용한다.
-- `restore`: ordinal 0만 시작할 수 있으며 32자 이하 lowercase DNS recovery ID가 lifecycle state와 restore authorization에서 같아야 한다. Grant shell wrapper는 소비 marker를 사용한다. Rauthy static launcher는 `/app/data`의 원자적 `pending/completed` 상태와 연속 hiqlite `/ready` 확인으로 replay를 차단한다. `pending` container restart는 자동으로 재실행하지 않는다. Secret이 없어도 같은 recovery의 `completed` 상태는 일반 시작할 수 있지만, authorization과 completed 상태가 모두 없으면 fail closed한다.
+- `restore`: ordinal 0만 시작할 수 있으며 32자 이하 lowercase DNS recovery ID가 lifecycle state와 restore authorization에서 같아야 한다. Grant shell supervisor는 원자적 `pending/completed` marker와 제한된 로컬 `/healthz`·`/readyz` 확인으로 replay를 차단한다. 같은-ID stale `pending`은 authorization이 유지된 동안 재시도하고 `completed`만 일반 시작으로 전환한다. Rauthy static launcher는 `/app/data`의 원자적 `pending/completed` 상태와 연속 hiqlite `/ready` 확인을 사용하지만, Rauthy `pending` container restart는 자동으로 재실행하지 않는다. Secret이 없어도 같은 recovery의 `completed` 상태는 일반 시작할 수 있지만, authorization과 completed 상태가 모두 없으면 fail closed한다.
 
 나머지 ordinal은 `fresh`나 `restore`에서도 ready peer를 기다린 뒤 learner로 가입하고 voter로 승격된다. schema migration과 seed는 voter 경로에서만 실행하며 learner는 voter 복구와 migration이 완료된 후 가입시킨다. 전체 복구의 partition rollout과 checkpoint는 [backup-restore.md](./backup-restore.md)를 따른다.
 

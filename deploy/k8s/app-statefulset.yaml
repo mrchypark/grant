@@ -130,6 +130,20 @@ spec:
               value: /usr/local/bin/grant
             - name: RESTORE_ONCE_MARKER
               value: /var/lib/grant/hiqlite/.restore-consumed
+            - name: RESTORE_ONCE_HEALTH_URL
+              value: http://127.0.0.1:8080/healthz
+            - name: RESTORE_ONCE_READY_URL
+              value: http://127.0.0.1:8080/readyz
+            - name: RESTORE_ONCE_READY_TIMEOUT_SECONDS
+              value: "300"
+            - name: RESTORE_ONCE_READY_INTERVAL_SECONDS
+              value: "2"
+            - name: RESTORE_ONCE_READY_SUCCESSES
+              value: "3"
+            - name: RESTORE_ONCE_PROBE_TIMEOUT_SECONDS
+              value: "2"
+            - name: RESTORE_ONCE_SIGNAL_GRACE_SECONDS
+              value: "10"
           ports:
             - name: http
               containerPort: 8080
