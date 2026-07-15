@@ -32,12 +32,13 @@ AMD_ATTEST=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ARM_ATTEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 SOURCE_SHA=1111111111111111111111111111111111111111
 SOURCE_REPOSITORY=https://github.com/Conalog/grant
+CURRENT_BUILDER_ID=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/1
 TEST_GHCR_USERNAME='username-must-not-leak"back\slash'
 TEST_GHCR_TOKEN='credential-must-not-leak"back\slash'
 TEST_AUTH_SHA=$(printf '%s:%s' "${TEST_GHCR_USERNAME}" "${TEST_GHCR_TOKEN}" | openssl dgst -sha256 | awk '{print $NF}')
 TEST_REGISTRY_TOKEN='registry-token-must-not-leak"back\slash'
 TEST_REGISTRY_TOKEN_SHA=$(printf '%s' "${TEST_REGISTRY_TOKEN}" | openssl dgst -sha256 | awk '{print $NF}')
-export EXPECTED AMD ARM AMD_ATTEST ARM_ATTEST SOURCE_SHA SOURCE_REPOSITORY
+export EXPECTED AMD ARM AMD_ATTEST ARM_ATTEST SOURCE_SHA SOURCE_REPOSITORY CURRENT_BUILDER_ID
 mkdir -p "${TMP_DIR}/bin" "${TMP_DIR}/fixtures" "${TMP_DIR}/verifier-tmp"
 
 digest_file() {
@@ -59,16 +60,22 @@ write_provenance_fixture() {
     malformed-provenance:linux/amd64|malformed-statement:linux/amd64) printf '%s\n' '{' >"${output}"; return ;;
   esac
   statement_type=https://in-toto.io/Statement/v0.1
-  predicate_type=https://slsa.dev/provenance/v0.2
+  predicate_type=https://slsa.dev/provenance/v1
   subject_sha=${platform_digest#sha256:}
   subject_name="pkg:docker/${EXPECTED_REPOSITORY}@${EXPECTED_DIGEST:-${EXPECTED}}?platform=${platform}"
-  builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/1
-  build_type=https://mobyproject.org/buildkit@v1
+  builder_id=${CURRENT_BUILDER_ID}
+  build_type=https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md
   label_sha=${SOURCE_SHA}
   label_source=${SOURCE_REPOSITORY}
+  config_source_path=Dockerfile
   vcs_revision=${SOURCE_SHA}
   vcs_source=${SOURCE_REPOSITORY}
-  materials='[{"uri":"pkg:docker/alpine@latest","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]'
+  vcs_context_dir=deploy/rauthy-launcher
+  vcs_dockerfile_dir=deploy/rauthy-launcher
+  resolved_dependencies='[{"uri":"pkg:docker/docker/buildkit-syft-scanner@stable-1","digest":{"sha256":"79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68"}},{"uri":"pkg:docker/docker/dockerfile@1.7","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]'
+  builder_platform=linux/amd64
+  llb_definition='[{"id":"step0","op":{"Op":{}}}]'
+  request_complete=true
   subject_mode=present
   case "${mode}:${platform}" in
     missing-subject:linux/amd64) subject_mode=missing ;;
@@ -76,13 +83,27 @@ write_provenance_fixture() {
     wrong-type:linux/amd64) statement_type=https://example.invalid/Statement ;;
     wrong-predicate-type:linux/amd64) predicate_type=https://example.invalid/Predicate ;;
     wrong-builder:linux/amd64|empty-builder:linux/amd64) builder_id=https://example.invalid/builder ;;
+    prior-wrong-run:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/999/attempts/1 ;;
+    prior-current-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/2 ;;
+    prior-future-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/3 ;;
+    prior-zero-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/0 ;;
+    prior-leading-zero-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/01 ;;
+    prior-nonnumeric-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/nope ;;
+    prior-platform-disagreement:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/2 ;;
     wrong-source-sha:linux/amd64) label_sha=2222222222222222222222222222222222222222; vcs_revision=${label_sha} ;;
     wrong-source-repository:linux/amd64) label_source=https://github.com/example/wrong; vcs_source=${label_source} ;;
+    wrong-config-source:linux/amd64) config_source_path=Wrongfile ;;
     wrong-vcs-revision:linux/amd64) vcs_revision=3333333333333333333333333333333333333333 ;;
     wrong-vcs-source:linux/amd64) vcs_source=https://github.com/example/wrong-vcs ;;
-    wrong-platform:linux/amd64) platform=linux/s390x ;;
+    wrong-vcs-context-dir:linux/amd64) vcs_context_dir=. ;;
+    wrong-vcs-dockerfile-dir:linux/amd64) vcs_dockerfile_dir=. ;;
     wrong-build-type:linux/amd64) build_type=https://example.invalid/build ;;
-    empty-materials:linux/amd64) materials='[]' ;;
+    empty-resolved-dependencies:linux/amd64) resolved_dependencies='[]' ;;
+    wrong-sbom-generator-dependency:linux/amd64) resolved_dependencies='[{"uri":"pkg:docker/docker/dockerfile@1.7","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]' ;;
+    wrong-builder-platform:linux/amd64) builder_platform=linux/arm64 ;;
+    empty-llb-definition:linux/amd64) llb_definition='[]' ;;
+    incomplete-request:linux/amd64) request_complete=false ;;
+    provenance-v0.2:linux/amd64) predicate_type=https://slsa.dev/provenance/v0.2 ;;
   esac
   jq -n \
     --arg statementType "${statement_type}" \
@@ -91,33 +112,57 @@ write_provenance_fixture() {
     --arg subjectName "${subject_name}" \
     --arg subjectSha "${subject_sha}" \
     --arg builderId "${builder_id}" \
+    --arg builderPlatform "${builder_platform}" \
     --arg buildType "${build_type}" \
-    --argjson materials "${materials}" \
-    --arg platform "${platform}" \
+    --arg configSourcePath "${config_source_path}" \
+    --argjson llbDefinition "${llb_definition}" \
+    --argjson requestComplete "${request_complete}" \
+    --argjson resolvedDependencies "${resolved_dependencies}" \
     --arg labelSha "${label_sha}" \
     --arg labelSource "${label_source}" \
     --arg vcsRevision "${vcs_revision}" \
+    --arg vcsContextDir "${vcs_context_dir}" \
+    --arg vcsDockerfileDir "${vcs_dockerfile_dir}" \
     --arg vcsSource "${vcs_source}" '
     {
       _type: $statementType,
       predicateType: $predicateType,
       subject: (if $subjectMode == "missing" then [] else [{name: $subjectName, digest: {sha256: $subjectSha}}] end),
       predicate: {
-        builder: {id: $builderId},
-        buildType: $buildType,
-        materials: $materials,
-        invocation: {
-          parameters: {
-            args: {
-              "label:org.opencontainers.image.revision": $labelSha,
-              "label:org.opencontainers.image.source": $labelSource
-            },
-            root: {request: {args: {
-              "vcs:revision": $vcsRevision,
-              "vcs:source": $vcsSource
-            }}}
+        buildDefinition: {
+          buildType: $buildType,
+          resolvedDependencies: $resolvedDependencies,
+          internalParameters: {
+            builderPlatform: $builderPlatform,
+            buildConfig: {llbDefinition: $llbDefinition}
           },
-          environment: {platform: $platform}
+          externalParameters: {
+            configSource: {path: $configSourcePath},
+            request: {
+              args: {
+                "label:org.opencontainers.image.revision": $labelSha,
+                "label:org.opencontainers.image.source": $labelSource
+              },
+              root: {
+                configSource: {path: $configSourcePath},
+                request: {args: {
+                  "vcs:localdir:context": $vcsContextDir,
+                  "vcs:localdir:dockerfile": $vcsDockerfileDir,
+                  "vcs:revision": $vcsRevision,
+                  "vcs:source": $vcsSource
+                }}
+              }
+            }
+          }
+        },
+        runDetails: {
+          builder: {id: $builderId},
+          metadata: {
+            invocationId: "fixture-invocation",
+            startedOn: "2026-07-15T09:34:29Z",
+            finishedOn: "2026-07-15T09:35:17Z",
+            buildkit_completeness: {request: $requestComplete}
+          }
         }
       }
     }' >"${output}"
@@ -396,6 +441,9 @@ case "$5" in
     else
       platforms=$(printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","platform":{"os":"linux","architecture":"amd64"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","platform":{"os":"linux","architecture":"arm64"}}' "${amd_digest}" "${ARM}")
     fi
+    if [ "${MOCK_MODE}" = extra-index-manifest ]; then
+      platforms=${platforms},'{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","platform":{"os":"linux","architecture":"s390x"}}'
+    fi
     amd_reference=${amd_digest}
     [ "${MOCK_MODE}" != missing-reference ] || amd_reference=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
     printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[%s,{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","platform":{"os":"unknown","architecture":"unknown"},"annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"%s"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s","platform":{"os":"unknown","architecture":"unknown"},"annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"%s"}}]}\n' \
@@ -404,22 +452,29 @@ case "$5" in
   *@"${AMD_ATTEST}")
     provenance_digest=${AMD_PROVENANCE_DIGEST}
     provenance_size=${AMD_PROVENANCE_SIZE}
+    provenance_predicate_type=https://slsa.dev/provenance/v1
+    [ "${MOCK_MODE}" != provenance-v0.2 ] \
+      || provenance_predicate_type=https://slsa.dev/provenance/v0.2
     [ "${MOCK_MODE}" != uppercase-layer-digest ] \
       || provenance_digest=sha256:$(printf '%s' "${provenance_digest#sha256:}" | tr '[:lower:]' '[:upper:]')
     [ "${MOCK_MODE}" != wrong-blob-digest ] \
       || provenance_digest=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
     [ "${MOCK_MODE}" != wrong-layer-size ] || provenance_size=$((provenance_size + 1))
     if [ "${MOCK_MODE}" = missing-sbom ]; then
-      printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://slsa.dev/provenance/v0.2"}}]}\n' "${provenance_digest}" "${provenance_size}"
+      printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"%s"}}]}\n' "${provenance_digest}" "${provenance_size}" "${provenance_predicate_type}"
     elif [ "${MOCK_MODE}" = missing-provenance ]; then
       printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}}]}\n' "${AMD_SPDX_DIGEST}" "${AMD_SPDX_SIZE}"
+    elif [ "${MOCK_MODE}" = extra-attestation-layer ]; then
+      printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"%s"}},{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}},{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}}]}\n' \
+        "${provenance_digest}" "${provenance_size}" "${provenance_predicate_type}" \
+        "${AMD_SPDX_DIGEST}" "${AMD_SPDX_SIZE}" "${AMD_SPDX_DIGEST}" "${AMD_SPDX_SIZE}"
     else
-      printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://slsa.dev/provenance/v0.2"}},{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}}]}\n' \
-        "${provenance_digest}" "${provenance_size}" "${AMD_SPDX_DIGEST}" "${AMD_SPDX_SIZE}"
+      printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"%s"}},{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}}]}\n' \
+        "${provenance_digest}" "${provenance_size}" "${provenance_predicate_type}" "${AMD_SPDX_DIGEST}" "${AMD_SPDX_SIZE}"
     fi
     ;;
   *@"${ARM_ATTEST}")
-    printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://slsa.dev/provenance/v0.2"}},{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}}]}\n' \
+    printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://slsa.dev/provenance/v1"}},{"mediaType":"application/vnd.in-toto+json","digest":"%s","size":%s,"annotations":{"in-toto.io/predicate-type":"https://spdx.dev/Document"}}]}\n' \
       "${ARM_PROVENANCE_DIGEST}" "${ARM_PROVENANCE_SIZE}" "${ARM_SPDX_DIGEST}" "${ARM_SPDX_SIZE}"
     ;;
   *) exit 91 ;;
@@ -533,7 +588,22 @@ run_verifier() {
   verifier_token=${3-${TEST_GHCR_TOKEN}}
   prepare_fixtures "${requested_mode}"
   repository=${EXPECTED_REPOSITORY}
+  expected_builder_id=${CURRENT_BUILDER_ID}
+  expected_builder_mode=current
   [ "${requested_mode}" != wrong-repository ] || repository=ghcr.io/conalog/wrong
+  case "${requested_mode}" in
+    prior-success|prior-wrong-run|prior-current-attempt|prior-future-attempt|\
+    prior-zero-attempt|prior-leading-zero-attempt|prior-nonnumeric-attempt)
+      expected_builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/2
+      expected_builder_mode=prior-attempt
+      ;;
+    prior-platform-disagreement)
+      expected_builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/3
+      expected_builder_mode=prior-attempt
+      ;;
+    invalid-expected-builder-id) expected_builder_id=https://example.invalid/builder ;;
+    invalid-builder-mode) expected_builder_mode=unexpected ;;
+  esac
   set -- sh "${ROOT_DIR}/scripts/verify-oci-attestations.sh"
   [ "${requested_mode}" != allexport ] || set -- sh -a "${ROOT_DIR}/scripts/verify-oci-attestations.sh"
   MOCK_MODE=${requested_mode} \
@@ -549,6 +619,7 @@ run_verifier() {
     CURL_HOME="${TMP_DIR}/malicious-curl-home" TMPDIR="${TMP_DIR}/verifier-tmp" PATH="${TMP_DIR}/bin:${PATH}" \
     IMAGE_REPOSITORY=${repository} IMAGE_REF=${repository}:source-tag \
     EXPECTED_DIGEST=${EXPECTED} EXPECTED_SOURCE_SHA=${SOURCE_SHA} \
+    EXPECTED_BUILDER_ID=${expected_builder_id} EXPECTED_BUILDER_MODE=${expected_builder_mode} \
     "$@"
 }
 
@@ -556,12 +627,20 @@ start_redirect_fixture
 verify_real_curl_redirect_contract
 run_verifier success >"${TMP_DIR}/success.log"
 run_verifier allexport >"${TMP_DIR}/allexport.log"
+run_verifier prior-success >"${TMP_DIR}/prior-success.log"
 for rejected_mode in \
-  wrong-repository wrong-digest missing-platform missing-reference missing-sbom missing-provenance \
+  wrong-repository wrong-digest missing-platform missing-reference extra-index-manifest \
+  missing-sbom missing-provenance extra-attestation-layer \
   uppercase-platform-digest uppercase-attestation-digest uppercase-layer-digest wrong-layer-size \
   wrong-blob-digest missing-subject wrong-subject wrong-type wrong-predicate-type malformed-statement \
   empty-provenance malformed-provenance wrong-builder wrong-source-sha wrong-source-repository \
-  wrong-vcs-revision wrong-vcs-source wrong-platform wrong-build-type empty-materials \
+  invalid-expected-builder-id invalid-builder-mode prior-wrong-run prior-current-attempt \
+  prior-future-attempt prior-zero-attempt prior-leading-zero-attempt \
+  prior-nonnumeric-attempt prior-platform-disagreement \
+  wrong-config-source wrong-vcs-revision wrong-vcs-source wrong-vcs-context-dir \
+  wrong-vcs-dockerfile-dir wrong-build-type empty-resolved-dependencies \
+  wrong-sbom-generator-dependency \
+  wrong-builder-platform empty-llb-definition incomplete-request provenance-v0.2 \
   empty-spdx malformed-spdx invalid-spdx empty-packages \
   registry-token-empty registry-token-lf registry-token-cr; do
   if run_verifier "${rejected_mode}" >"${TMP_DIR}/${rejected_mode}.log" 2>&1; then

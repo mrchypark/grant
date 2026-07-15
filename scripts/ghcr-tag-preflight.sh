@@ -7,6 +7,7 @@ set -eu
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+: "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 printf '%s\n' "${SOURCE_SHA}" | grep -Eq '^[0-9a-f]{40}$'
 
@@ -112,10 +113,11 @@ fi
 status=$(cat "${status_response}")
 case "${status}" in
   200)
-    echo "production commit tag already exists and will not be overwritten" >&2
-    exit 1
+    printf 'tag_exists=true\n' >> "${GITHUB_OUTPUT}"
+    echo "production commit tag exists; build and push will be skipped"
     ;;
   404)
+    printf 'tag_exists=false\n' >> "${GITHUB_OUTPUT}"
     ;;
   *)
     echo "unexpected GHCR manifest response: HTTP ${status}" >&2
