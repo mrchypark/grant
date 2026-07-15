@@ -49,14 +49,43 @@ assert_no_pvc_references() {
 
 read_rauthy_launcher_image() {
   awk '
-    /^[[:space:]]*image:[[:space:]]*ghcr[.]io\/conalog\/grant-rauthy-launcher[^[:space:]]*/ {
-      image = $0
-      sub(/^[[:space:]]*image:[[:space:]]*/, "", image)
-      sub(/[[:space:]].*$/, "", image)
+    BEGIN {
+      single_quote = sprintf("%c", 39)
+      double_quote = "\""
+    }
+    /^[[:space:]]*image:[[:space:]]*/ {
+      raw = $0
+      sub(/^[[:space:]]*image:[[:space:]]*/, "", raw)
+      sub(/[[:space:]]+$/, "", raw)
+      if (index(raw, "ghcr.io/conalog/grant-rauthy-launcher") == 0) next
+
+      quote = substr(raw, 1, 1)
+      if (quote == single_quote || quote == double_quote) {
+        if (length(raw) < 2 || substr(raw, length(raw), 1) != quote) {
+          invalid = 1
+          next
+        }
+        image = substr(raw, 2, length(raw) - 2)
+        if (index(image, single_quote) != 0 || index(image, double_quote) != 0) {
+          invalid = 1
+          next
+        }
+      } else {
+        image = raw
+        if (index(image, single_quote) != 0 || index(image, double_quote) != 0) {
+          invalid = 1
+          next
+        }
+      }
+      if (image == "" || image ~ /[[:space:]]/ ||
+          image !~ /^ghcr[.]io\/conalog\/grant-rauthy-launcher([:@]|$)/) {
+        invalid = 1
+        next
+      }
       count++
     }
     END {
-      if (count != 1 || image == "") exit 1
+      if (invalid || count != 1 || image == "") exit 1
       print image
     }
   ' "$1"
@@ -766,6 +795,35 @@ verify_static() {
   if read_rauthy_launcher_image "${parser_empty_fixture}" >/dev/null 2>&1; then
     fail "Rauthy launcher image parser accepted a manifest without the launcher repository"
   fi
+  parser_single_quote_fixture=${TMP_DIR}/rauthy-parser-single-quote.yaml
+  parser_double_quote_fixture=${TMP_DIR}/rauthy-parser-double-quote.yaml
+  printf "image: '%s'\n" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_single_quote_fixture}"
+  printf 'image: "%s"\n' "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_double_quote_fixture}"
+  for parser_quoted_fixture in "${parser_single_quote_fixture}" "${parser_double_quote_fixture}"; do
+    parsed_quoted_image=$(read_rauthy_launcher_image "${parser_quoted_fixture}") \
+      || fail "Rauthy launcher image parser rejected a whole-value YAML quote"
+    [ "${parsed_quoted_image}" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ] \
+      || fail "Rauthy launcher image parser changed a whole-value YAML quote"
+  done
+  parser_unclosed_fixture=${TMP_DIR}/rauthy-parser-unclosed.yaml
+  parser_mixed_fixture=${TMP_DIR}/rauthy-parser-mixed.yaml
+  parser_trailing_fixture=${TMP_DIR}/rauthy-parser-trailing.yaml
+  parser_multiple_fixture=${TMP_DIR}/rauthy-parser-multiple.yaml
+  parser_quoted_empty_fixture=${TMP_DIR}/rauthy-parser-quoted-empty.yaml
+  printf "image: '%s\n" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_unclosed_fixture}"
+  printf "image: '%s\"\n" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_mixed_fixture}"
+  printf 'image: "%s" junk\n' "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_trailing_fixture}"
+  printf 'image: %s\nimage: "%s"\n' \
+    "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" \
+    >"${parser_multiple_fixture}"
+  printf '%s\n' 'image: ""' >"${parser_quoted_empty_fixture}"
+  for parser_invalid_fixture in \
+    "${parser_unclosed_fixture}" "${parser_mixed_fixture}" "${parser_trailing_fixture}" \
+    "${parser_multiple_fixture}" "${parser_quoted_empty_fixture}"; do
+    if read_rauthy_launcher_image "${parser_invalid_fixture}" >/dev/null 2>&1; then
+      fail "Rauthy launcher image parser accepted malformed or ambiguous YAML"
+    fi
+  done
 
   grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d' \
     "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
