@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -219,5 +218,4 @@ func main() {
 	shutdowns.Wait()
 	os.Remove(*readyPath)
 	os.Remove(caPath)
-	os.Remove(filepath.Clean(tmpReady))
 }
