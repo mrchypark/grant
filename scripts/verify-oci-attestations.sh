@@ -256,7 +256,7 @@ while IFS="${TAB}" read -r platform_digest attestation_digest; do
           .predicate.runDetails.metadata.buildkit_completeness.request == true and
           (.predicate.buildDefinition.resolvedDependencies | type == "array" and length > 0) and
           any(.predicate.buildDefinition.resolvedDependencies[];
-            .uri == "pkg:docker/docker/buildkit-syft-scanner@stable-1" and
+            .uri == "pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68" and
             .digest.sha256 == "79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68") and
           .predicate.buildDefinition.externalParameters.request.args[
             "label:org.opencontainers.image.revision"] == $sourceSha and
