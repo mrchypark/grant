@@ -735,9 +735,16 @@ verify_static() {
     || fail "Rauthy launcher image entrypoint contract is missing"
   grep -q 'CMD \["/app/rauthy", "serve"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
     || fail "Rauthy launcher image does not preserve the official serve command"
-  if ! grep -q 'provenance: mode=max' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
-    || ! grep -q 'sbom: true' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+  if ! grep -q 'provenance: mode=max,version=v1' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || [ "$(grep -c 'driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml")" -ne 2 ] \
     || ! grep -q 'EXPECTED_SOURCE_SHA:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'EXPECTED_BUILDER_ID:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q "EXPECTED_BUILDER_MODE:.*prior-attempt.*current" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -Fq "EXPECTED_DIGEST: \${{ steps.digest.outputs.digest }}" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q "if: steps.preflight.outputs.tag_exists == 'false'" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q "if: steps.preflight.outputs.tag_exists == 'true'" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -Fq "test \"\${GITHUB_RUN_ATTEMPT}\" -gt 1" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q 'run: sh scripts/verify-oci-attestations.sh' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q 'fetch_blob' "${ROOT_DIR}/scripts/verify-oci-attestations.sh" \
     || ! grep -q 'https://in-toto.io/Statement/v0.1' "${ROOT_DIR}/scripts/verify-oci-attestations.sh"; then

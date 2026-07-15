@@ -65,6 +65,7 @@ run_case() {
   expected_message=$3
   case_dir="${TMP_DIR}/case-${result}"
   log="${TMP_DIR}/${result}.log"
+  output="${TMP_DIR}/${result}.output"
   mkdir -p "${case_dir}"
 
   set +e
@@ -72,6 +73,7 @@ run_case() {
     SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     GHCR_USERNAME=mock-user GHCR_TOKEN=mock-ghcr-secret \
     RUNNER_TEMP="${case_dir}" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="${output}" \
     sh "${ROOT_DIR}/scripts/ghcr-tag-preflight.sh" > "${log}" 2>&1
   actual_status=$?
   set -e
@@ -86,6 +88,11 @@ run_case() {
       exit 1
     }
   fi
+  case "${result}" in
+    200) grep -qx 'tag_exists=true' "${output}" ;;
+    404) grep -qx 'tag_exists=false' "${output}" ;;
+    *) [ ! -s "${output}" ] ;;
+  esac
   if grep -Fq 'mock-ghcr-secret' "${log}" || grep -Fq 'mock-registry-reader-token' "${log}"; then
     echo "GHCR preflight ${result} exposed credentials" >&2
     exit 1
@@ -97,7 +104,7 @@ run_case() {
 }
 
 run_case 404 0 ''
-run_case 200 1 'production commit tag already exists and will not be overwritten'
+run_case 200 0 'production commit tag exists; build and push will be skipped'
 run_case 503 1 'unexpected GHCR manifest response: HTTP 503'
 run_case network 1 'cannot verify whether the production commit tag exists'
 
@@ -112,6 +119,7 @@ run_signal_case() {
   timeout_marker="${TMP_DIR}/${signal_name}.timeout"
   continuation="${TMP_DIR}/${signal_name}.continued"
   log="${TMP_DIR}/${signal_name}.log"
+  output="${TMP_DIR}/${signal_name}.output"
   mkdir -p "${case_dir}"
 
   (
@@ -140,6 +148,7 @@ run_signal_case() {
     SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     GHCR_USERNAME=mock-user GHCR_TOKEN=mock-ghcr-secret \
     RUNNER_TEMP="${case_dir}" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="${output}" \
     sh "${ROOT_DIR}/scripts/ghcr-tag-preflight.sh" > "${log}" 2>&1
   actual_status=$?
   set -e
@@ -199,6 +208,7 @@ run_spawn_signal_case() {
   continuation="${TMP_DIR}/${signal_name}.spawn-continued"
   hook="${TMP_DIR}/spawn-${signal_name}.sh"
   log="${TMP_DIR}/${signal_name}.spawn.log"
+  output="${TMP_DIR}/${signal_name}.spawn.output"
   mkdir -p "${case_dir}"
 
   cat > "${hook}" <<'EOF'
@@ -249,6 +259,7 @@ EOF
     SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     GHCR_USERNAME=mock-user GHCR_TOKEN=mock-ghcr-secret \
     RUNNER_TEMP="${case_dir}" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="${output}" \
     sh "${ROOT_DIR}/scripts/ghcr-tag-preflight.sh" > "${log}" 2>&1
   actual_status=$?
   set -e
