@@ -837,6 +837,7 @@ verify_static() {
     || fail "ephemeral render is missing the generated bootstrap renderer ConfigMap"
   assert_ci_local_placeholder_guard
   assert_ci_local_registry_auth_contract
+  "${ROOT_DIR}/scripts/verify-vind-bootstrap.sh"
   assert_gke_skaffold_registry_secret_contract
   assert_recovery_role_resolution_policy
   "${ROOT_DIR}/scripts/verify-oci-attestations-tests.sh"

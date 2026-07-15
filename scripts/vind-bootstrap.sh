@@ -39,10 +39,46 @@ image_refs_to_match() {
   fi
 }
 
-import_image_with_ctr_vcluster() {
+redact_image_import_log() {
+  local log_file="$1"
+
+  sed -E \
+    -e 's#(https?://)[^/@[:space:]]+@#\1[redacted]@#g' \
+    -e 's#([Aa]uthorization:[[:space:]]*(Basic|Bearer)[[:space:]]+)[^[:space:]]+#\1[redacted]#g' \
+    -e 's#([?&](access_token|password|token)=)[^&[:space:]]+#\1[redacted]#g' \
+    "${log_file}" >&2
+}
+
+report_image_import_failure() {
+  local image="$1"
+  local step="$2"
+  local log_file="$3"
+
+  echo "failed to import image into vcluster runtime during ${step}: ${image}" >&2
+  if [[ -s "${log_file}" ]]; then
+    redact_image_import_log "${log_file}"
+  fi
+}
+
+import_image_with_ctr_vcluster() (
   local image="$1"
   local container_name
-  local tar_file
+  import_log=""
+  tar_file=""
+
+  # shellcheck disable=SC2329 # Invoked by the EXIT trap.
+  cleanup_image_import() {
+    if [[ -n "${tar_file}" ]]; then
+      rm -f "${tar_file}"
+    fi
+    if [[ -n "${import_log}" ]]; then
+      rm -f "${import_log}"
+    fi
+  }
+  trap cleanup_image_import EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   container_name="$(cluster_container_name)"
   docker inspect "${container_name}" >/dev/null 2>&1 || {
@@ -51,9 +87,21 @@ import_image_with_ctr_vcluster() {
   }
 
   tar_file="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.image.XXXXXX")"
-  docker save "${image}" -o "${tar_file}"
-  docker exec -i "${container_name}" ctr -n k8s.io images import - >/dev/null <"${tar_file}"
-  rm -f "${tar_file}"
+  import_log="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.image-import.XXXXXX")"
+
+  if ! docker save "${image}" -o "${tar_file}" >"${import_log}" 2>&1; then
+    report_image_import_failure "${image}" "Docker archive creation" "${import_log}"
+    return 1
+  fi
+
+  if ! docker exec -i "${container_name}" ctr -n k8s.io images import - >"${import_log}" 2>&1 <"${tar_file}"; then
+    report_image_import_failure "${image}" "containerd archive import" "${import_log}"
+    return 1
+  fi
+)
+
+is_digest_qualified_image() {
+  [[ "$1" =~ @sha256:[0-9a-f]{64}$ ]]
 }
 
 ensure_runtime_image() {
@@ -82,11 +130,20 @@ ensure_runtime_image() {
   docker exec "${container_name}" ctr -n k8s.io images ls -q \
     | grep -F -x -f "${refs_file}" >/dev/null 2>&1 || {
     rm -f "${refs_file}"
-    echo "failed to import image into vcluster runtime: ${image}" >&2
+    echo "image archive import completed but the runtime reference is missing: ${image}" >&2
     exit 1
   }
 
   rm -f "${refs_file}"
+}
+
+ensure_rauthy_runtime_image() {
+  if is_digest_qualified_image "${RAUTHY_IMAGE}"; then
+    echo "[vind] leaving digest-qualified Rauthy image for authenticated kubelet pull: ${RAUTHY_IMAGE}"
+    return 0
+  fi
+
+  ensure_runtime_image "${RAUTHY_IMAGE}"
 }
 
 GRANT_MASTER_KEY="${GRANT_MASTER_KEY:-local-dev-master-key}"
@@ -127,7 +184,7 @@ docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 \
   || docker --context "${RAUTHY_DOCKER_CONTEXT}" --config "${RAUTHY_REGISTRY_CONFIG_DIR}" pull "${RAUTHY_IMAGE}"
 
 ensure_runtime_image "${IMAGE_NAME}"
-ensure_runtime_image "${RAUTHY_IMAGE}"
+ensure_rauthy_runtime_image
 
 dump_rauthy_debug() {
   echo "[rauthy-debug] statefulset state" >&2

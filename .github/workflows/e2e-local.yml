@@ -134,6 +134,7 @@ jobs:
             scripts/vind-cluster.sh
             scripts/ci-local.sh
             scripts/vind-bootstrap.sh
+            scripts/verify-vind-bootstrap.sh
             scripts/gke-skaffold-run.sh
           )
           posix_scripts=(
