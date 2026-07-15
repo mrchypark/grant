@@ -737,7 +737,7 @@ verify_static() {
     || fail "Rauthy launcher image does not preserve the official serve command"
   if ! grep -q 'provenance: mode=max,version=v1' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q 'sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
-    || [ "$(grep -c 'driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml")" -ne 2 ] \
+    || [ "$(grep -c 'driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" || :)" -ne 2 ] \
     || ! grep -q 'EXPECTED_SOURCE_SHA:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q 'EXPECTED_BUILDER_ID:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q "EXPECTED_BUILDER_MODE:.*prior-attempt.*current" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \

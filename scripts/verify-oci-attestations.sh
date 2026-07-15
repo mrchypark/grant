@@ -227,12 +227,7 @@ while IFS="${TAB}" read -r platform_digest attestation_digest; do
               || { echo "platform provenance builder is not from the current workflow run" >&2; exit 1; }
             observed_builder_attempt=${observed_builder_id##*/}
             case "${observed_builder_attempt}" in
-              [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|\
-              [1-9][0-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9][0-9]|\
-              [1-9][0-9][0-9][0-9][0-9][0-9][0-9]|\
-              [1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]|\
-              [1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-              *) echo "platform provenance builder attempt is invalid" >&2; exit 1 ;;
+              *[!0-9]*|""|0*) echo "platform provenance builder attempt is invalid" >&2; exit 1 ;;
             esac
             [ "${observed_builder_attempt}" -lt "${expected_builder_attempt}" ] \
               || { echo "platform provenance builder is not from a prior run attempt" >&2; exit 1; }

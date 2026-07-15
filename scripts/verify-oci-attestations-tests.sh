@@ -86,6 +86,9 @@ write_provenance_fixture() {
     prior-wrong-run:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/999/attempts/1 ;;
     prior-current-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/2 ;;
     prior-future-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/3 ;;
+    prior-zero-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/0 ;;
+    prior-leading-zero-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/01 ;;
+    prior-nonnumeric-attempt:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/nope ;;
     prior-platform-disagreement:linux/amd64) builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/2 ;;
     wrong-source-sha:linux/amd64) label_sha=2222222222222222222222222222222222222222; vcs_revision=${label_sha} ;;
     wrong-source-repository:linux/amd64) label_source=https://github.com/example/wrong; vcs_source=${label_source} ;;
@@ -589,7 +592,8 @@ run_verifier() {
   expected_builder_mode=current
   [ "${requested_mode}" != wrong-repository ] || repository=ghcr.io/conalog/wrong
   case "${requested_mode}" in
-    prior-success|prior-wrong-run|prior-current-attempt|prior-future-attempt)
+    prior-success|prior-wrong-run|prior-current-attempt|prior-future-attempt|\
+    prior-zero-attempt|prior-leading-zero-attempt|prior-nonnumeric-attempt)
       expected_builder_id=https://github.com/Conalog/grant/actions/runs/29366035201/attempts/2
       expected_builder_mode=prior-attempt
       ;;
@@ -631,7 +635,8 @@ for rejected_mode in \
   wrong-blob-digest missing-subject wrong-subject wrong-type wrong-predicate-type malformed-statement \
   empty-provenance malformed-provenance wrong-builder wrong-source-sha wrong-source-repository \
   invalid-expected-builder-id invalid-builder-mode prior-wrong-run prior-current-attempt \
-  prior-future-attempt prior-platform-disagreement \
+  prior-future-attempt prior-zero-attempt prior-leading-zero-attempt \
+  prior-nonnumeric-attempt prior-platform-disagreement \
   wrong-config-source wrong-vcs-revision wrong-vcs-source wrong-vcs-context-dir \
   wrong-vcs-dockerfile-dir wrong-build-type empty-resolved-dependencies \
   wrong-sbom-generator-dependency \
