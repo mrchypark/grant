@@ -72,7 +72,7 @@ write_provenance_fixture() {
   vcs_source=${SOURCE_REPOSITORY}
   vcs_context_dir=deploy/rauthy-launcher
   vcs_dockerfile_dir=deploy/rauthy-launcher
-  resolved_dependencies='[{"uri":"pkg:docker/docker/buildkit-syft-scanner@stable-1","digest":{"sha256":"79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68"}},{"uri":"pkg:docker/docker/dockerfile@1.7","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]'
+  resolved_dependencies='[{"uri":"pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68","digest":{"sha256":"79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68"}},{"uri":"pkg:docker/docker/dockerfile@1.7","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]'
   builder_platform=linux/amd64
   llb_definition='[{"id":"step0","op":{"Op":{}}}]'
   request_complete=true
@@ -100,6 +100,8 @@ write_provenance_fixture() {
     wrong-build-type:linux/amd64) build_type=https://example.invalid/build ;;
     empty-resolved-dependencies:linux/amd64) resolved_dependencies='[]' ;;
     wrong-sbom-generator-dependency:linux/amd64) resolved_dependencies='[{"uri":"pkg:docker/docker/dockerfile@1.7","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]' ;;
+    wrong-sbom-query-digest:linux/amd64) resolved_dependencies='[{"uri":"pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","digest":{"sha256":"79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68"}}]' ;;
+    wrong-sbom-object-digest:linux/amd64) resolved_dependencies='[{"uri":"pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68","digest":{"sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}}]' ;;
     wrong-builder-platform:linux/amd64) builder_platform=linux/arm64 ;;
     empty-llb-definition:linux/amd64) llb_definition='[]' ;;
     incomplete-request:linux/amd64) request_complete=false ;;
@@ -639,7 +641,7 @@ for rejected_mode in \
   prior-nonnumeric-attempt prior-platform-disagreement \
   wrong-config-source wrong-vcs-revision wrong-vcs-source wrong-vcs-context-dir \
   wrong-vcs-dockerfile-dir wrong-build-type empty-resolved-dependencies \
-  wrong-sbom-generator-dependency \
+  wrong-sbom-generator-dependency wrong-sbom-query-digest wrong-sbom-object-digest \
   wrong-builder-platform empty-llb-definition incomplete-request provenance-v0.2 \
   empty-spdx malformed-spdx invalid-spdx empty-packages \
   registry-token-empty registry-token-lf registry-token-cr; do
