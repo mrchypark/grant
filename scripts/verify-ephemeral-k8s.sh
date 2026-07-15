@@ -10,6 +10,7 @@ GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
 GRANT_RAUTHY_CLIENT_SECRET=${GRANT_RAUTHY_CLIENT_SECRET:-devRauthyClientSecret0000000000000000000000000000000000000000000}
 GRANT_RAUTHY_CLIENT_READ_API_KEY=${GRANT_RAUTHY_CLIENT_READ_API_KEY:-grant-client-read\$devRauthyClientReadApiKeySecret00000000000000000000000000000000000}
 REPLACE_RAUTHY_POD=${REPLACE_RAUTHY_POD:-0}
+EXPECTED_RAUTHY_LAUNCHER_IMAGE=ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0-9d95f0f7513b7e26559a87d22d9fb90ccf4ee530@sha256:d1bf34bc156f7227d782c231c3bb0111d1cb8317017f1539f8ef22cdc10f2f7a
 TMP_DIR=
 PORT_FORWARD_PID=
 
@@ -65,10 +66,12 @@ assert_ha_contract() {
   if grep -q 'image: ghcr.io/sebadob/rauthy' "${manifest}"; then
     fail "${label} runs the official distroless Rauthy image without the static launcher"
   fi
-  grep -q 'image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:' "${manifest}" \
+  grep -Fq "image: ${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${manifest}" \
     || fail "${label} does not use the derivative Rauthy launcher image"
   expected_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
     "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
+  [ "${expected_rauthy_image}" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ] \
+    || fail "repository Rauthy launcher image does not match the verified production pin"
   [ "$(grep -c 'image: ghcr.io/conalog/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
     || fail "${label} must render exactly one Rauthy launcher image"
   actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
@@ -809,7 +812,7 @@ verify_static() {
   grep -q 'image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST' "${TMP_DIR}/production.yaml" \
     || fail "production template must retain an admission-invalid required image marker"
   if [ "${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER}" != 1 ]; then
-    grep -Eq 'image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:[a-f0-9]{64}$' "${TMP_DIR}/production.yaml" \
+    grep -Fq "image: ${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${TMP_DIR}/production.yaml" \
       || fail "production Rauthy launcher image is not digest-pinned"
   fi
   if grep -Eq 'sha256:0{64}|grant\.example\.com|identity\.example\.com|kind: Ingress' "${TMP_DIR}/production.yaml"; then
