@@ -208,9 +208,15 @@ func main() {
 	<-signals
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	originServer.Shutdown(ctx)
-	targetServer.Shutdown(ctx)
-	httpTargetServer.Shutdown(ctx)
+	var shutdowns sync.WaitGroup
+	for _, server := range []*http.Server{originServer, targetServer, httpTargetServer} {
+		shutdowns.Add(1)
+		go func(server *http.Server) {
+			defer shutdowns.Done()
+			_ = server.Shutdown(ctx)
+		}(server)
+	}
+	shutdowns.Wait()
 	os.Remove(*readyPath)
 	os.Remove(caPath)
 	os.Remove(filepath.Clean(tmpReady))

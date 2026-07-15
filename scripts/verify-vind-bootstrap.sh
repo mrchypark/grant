@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/verify-vind-bootstrap.XXXXXX")"
-FUNCTIONS_FILE="${TMP_DIR}/vind-bootstrap-functions.sh"
 MOCK_LOG="${TMP_DIR}/docker.log"
 RUNTIME_REFS="${TMP_DIR}/runtime-refs"
 IMPORT_COUNT="${TMP_DIR}/import-count"
@@ -19,17 +18,10 @@ fail() {
   exit 1
 }
 
-# Exercise the production functions without running the Kubernetes bootstrap.
-awk '
-  /^cluster_container_name\(\)/ { copying = 1 }
-  /^GRANT_MASTER_KEY=/ { exit }
-  copying { print }
-' "${ROOT_DIR}/scripts/vind-bootstrap.sh" >"${FUNCTIONS_FILE}"
-
 # shellcheck disable=SC2034 # Referenced by the sourced production functions.
 CLUSTER_NAME=grant-ci
-# shellcheck source=/dev/null
-. "${FUNCTIONS_FILE}"
+# shellcheck source=scripts/vind-image-helpers.sh
+. "${ROOT_DIR}/scripts/vind-image-helpers.sh"
 
 : >"${MOCK_LOG}"
 : >"${RUNTIME_REFS}"
