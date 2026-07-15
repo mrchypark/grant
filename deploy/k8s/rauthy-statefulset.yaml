@@ -109,10 +109,10 @@ spec:
               mountPath: /bootstrap
       containers:
         - name: rauthy
-          image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST
+          image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:73cc8033c99b766e5af6a14703c29464b484c229b408c7e59d066ed474cbb20b
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/rauthy-launcher"]
-          args: ["/app/rauthy"]
+          args: ["/app/rauthy", "serve"]
           securityContext:
             runAsUser: 10001
             runAsGroup: 10001

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-grant-ci}"
 NAMESPACE="${NAMESPACE:-grant}"
 IMAGE_NAME="${IMAGE_NAME:-grant:local}"
@@ -26,68 +27,8 @@ need() {
 need docker
 need kubectl
 
-cluster_container_name() {
-  printf 'vcluster.cp.%s' "${CLUSTER_NAME}"
-}
-
-image_refs_to_match() {
-  local image="$1"
-
-  printf '%s\n' "${image}"
-  if [[ "${image%%/*}" == "${image}" ]]; then
-    printf 'docker.io/library/%s\n' "${image}"
-  fi
-}
-
-import_image_with_ctr_vcluster() {
-  local image="$1"
-  local container_name
-  local tar_file
-
-  container_name="$(cluster_container_name)"
-  docker inspect "${container_name}" >/dev/null 2>&1 || {
-    echo "missing vcluster container ${container_name}" >&2
-    exit 1
-  }
-
-  tar_file="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.image.XXXXXX")"
-  docker save "${image}" -o "${tar_file}"
-  docker exec -i "${container_name}" ctr -n k8s.io images import - >/dev/null <"${tar_file}"
-  rm -f "${tar_file}"
-}
-
-ensure_runtime_image() {
-  local image="$1"
-  local container_name
-  local refs_file
-
-  container_name="$(cluster_container_name)"
-  docker inspect "${container_name}" >/dev/null 2>&1 || {
-    echo "missing vind runtime for ${CLUSTER_NAME}; expected vcluster" >&2
-    exit 1
-  }
-
-  refs_file="$(mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}.refs.XXXXXX")"
-  image_refs_to_match "${image}" >"${refs_file}"
-
-  if docker exec "${container_name}" ctr -n k8s.io images ls -q \
-    | grep -F -x -f "${refs_file}" >/dev/null 2>&1; then
-    echo "[vind] image already present in runtime: ${image}"
-    rm -f "${refs_file}"
-    return 0
-  fi
-
-  echo "[vind] importing image into runtime: ${image}"
-  import_image_with_ctr_vcluster "${image}"
-  docker exec "${container_name}" ctr -n k8s.io images ls -q \
-    | grep -F -x -f "${refs_file}" >/dev/null 2>&1 || {
-    rm -f "${refs_file}"
-    echo "failed to import image into vcluster runtime: ${image}" >&2
-    exit 1
-  }
-
-  rm -f "${refs_file}"
-}
+# shellcheck source=scripts/vind-image-helpers.sh
+. "${SCRIPT_DIR}/vind-image-helpers.sh"
 
 GRANT_MASTER_KEY="${GRANT_MASTER_KEY:-local-dev-master-key}"
 GRANT_APP_AUTH_KEY="${GRANT_APP_AUTH_KEY:-local-dev-app-auth-key}"
@@ -127,7 +68,7 @@ docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 \
   || docker --context "${RAUTHY_DOCKER_CONTEXT}" --config "${RAUTHY_REGISTRY_CONFIG_DIR}" pull "${RAUTHY_IMAGE}"
 
 ensure_runtime_image "${IMAGE_NAME}"
-ensure_runtime_image "${RAUTHY_IMAGE}"
+ensure_rauthy_runtime_image
 
 dump_rauthy_debug() {
   echo "[rauthy-debug] statefulset state" >&2
