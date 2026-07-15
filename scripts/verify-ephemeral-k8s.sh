@@ -3,7 +3,6 @@ set -eu
 
 ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 MODE=${1:-static}
-ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER=${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER:-0}
 NAMESPACE=${NAMESPACE:-grant}
 GRANT_SMOKE_PORT=${GRANT_SMOKE_PORT:-18080}
 GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
@@ -48,6 +47,14 @@ assert_no_pvc_references() {
     || fail "${label} render does not use emptyDir for rauthy-data"
 }
 
+read_rauthy_launcher_image() {
+  sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "$1"
+}
+
+assert_repository_rauthy_launcher_pin() {
+  [ "$(read_rauthy_launcher_image "$1")" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ]
+}
+
 assert_ha_contract() {
   manifest=$1
   label=$2
@@ -66,12 +73,9 @@ assert_ha_contract() {
   if grep -q 'image: ghcr.io/sebadob/rauthy' "${manifest}"; then
     fail "${label} runs the official distroless Rauthy image without the static launcher"
   fi
-  grep -Fq "image: ${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${manifest}" \
-    || fail "${label} does not use the derivative Rauthy launcher image"
-  expected_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
-    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
-  [ "${expected_rauthy_image}" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ] \
-    || fail "repository Rauthy launcher image does not match the verified production pin"
+  expected_rauthy_image=$(read_rauthy_launcher_image "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
+  grep -Fq "image: ${expected_rauthy_image}" "${manifest}" \
+    || fail "${label} does not use the repository Rauthy launcher image"
   [ "$(grep -c 'image: ghcr.io/conalog/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
     || fail "${label} must render exactly one Rauthy launcher image"
   actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
@@ -731,6 +735,17 @@ verify_static() {
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied" >"${TMP_DIR}/ied.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/production" >"${TMP_DIR}/production.yaml"
 
+  assert_repository_rauthy_launcher_pin "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" \
+    || fail "repository Rauthy launcher image does not match the verified production pin"
+  placeholder_pin_fixture=${TMP_DIR}/rauthy-placeholder-pin.yaml
+  printf '%s\n' \
+    'image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST' \
+    >"${placeholder_pin_fixture}"
+  if (ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER=1; export ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER; \
+      assert_repository_rauthy_launcher_pin "${placeholder_pin_fixture}"); then
+    fail "legacy unpublished-launcher environment bypassed the repository production pin"
+  fi
+
   grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d' \
     "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
     || fail "Rauthy launcher does not derive from the pinned official 0.36.0 image"
@@ -781,15 +796,6 @@ verify_static() {
   if grep -q 'command: \["/bin/sh", "/gate/restore-once.sh"\]' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml"; then
     fail "Rauthy cannot use the shell restore wrapper from its distroless image"
   fi
-  rauthy_pin=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
-    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
-  if [ "${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER}" = 1 ] && printf '%s\n' "${rauthy_pin}" | grep -q 'RAUTHY_LAUNCHER_IMAGE_DIGEST$'; then
-    : # PR source/contract validation may precede the main-only publication.
-  else
-    printf '%s\n' "${rauthy_pin}" | grep -Eq '@sha256:[a-f0-9]{64}$' \
-      || fail "Rauthy launcher image has not been published and pinned by digest"
-  fi
-
   assert_no_pvc_references "${TMP_DIR}/base.yaml" base
   assert_no_pvc_references "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_no_pvc_references "${TMP_DIR}/ied.yaml" ied
@@ -811,10 +817,8 @@ verify_static() {
     || fail "production Rauthy backup references are missing"
   grep -q 'image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST' "${TMP_DIR}/production.yaml" \
     || fail "production template must retain an admission-invalid required image marker"
-  if [ "${ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER}" != 1 ]; then
-    grep -Fq "image: ${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${TMP_DIR}/production.yaml" \
-      || fail "production Rauthy launcher image is not digest-pinned"
-  fi
+  grep -Fq "image: ${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${TMP_DIR}/production.yaml" \
+    || fail "production Rauthy launcher image is not digest-pinned"
   if grep -Eq 'sha256:0{64}|grant\.example\.com|identity\.example\.com|kind: Ingress' "${TMP_DIR}/production.yaml"; then
     fail "production render contains an unresolved digest, example host, or bundled public ingress"
   fi
