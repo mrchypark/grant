@@ -4,6 +4,9 @@ set -eu
 ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oci-attestation-test.XXXXXX")
 REAL_CURL=$(command -v curl)
+REAL_MKTEMP=$(command -v mktemp)
+CREDENTIAL_SCAN_MATCHES=${TMP_DIR}.credential-scan.matches
+CREDENTIAL_SCAN_ERROR=${TMP_DIR}.credential-scan.error
 REDIRECT_FIXTURE_PID=
 cleanup() {
   status=$?
@@ -13,6 +16,7 @@ cleanup() {
     wait "${REDIRECT_FIXTURE_PID}" 2>/dev/null || :
   fi
   rm -rf "${TMP_DIR}"
+  rm -f "${CREDENTIAL_SCAN_MATCHES}" "${CREDENTIAL_SCAN_ERROR}"
   exit "${status}"
 }
 trap cleanup 0
@@ -28,6 +32,11 @@ AMD_ATTEST=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ARM_ATTEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 SOURCE_SHA=1111111111111111111111111111111111111111
 SOURCE_REPOSITORY=https://github.com/Conalog/grant
+TEST_GHCR_USERNAME='username-must-not-leak"back\slash'
+TEST_GHCR_TOKEN='credential-must-not-leak"back\slash'
+TEST_AUTH_SHA=$(printf '%s:%s' "${TEST_GHCR_USERNAME}" "${TEST_GHCR_TOKEN}" | openssl dgst -sha256 | awk '{print $NF}')
+TEST_REGISTRY_TOKEN='registry-token-must-not-leak"back\slash'
+TEST_REGISTRY_TOKEN_SHA=$(printf '%s' "${TEST_REGISTRY_TOKEN}" | openssl dgst -sha256 | awk '{print $NF}')
 export EXPECTED AMD ARM AMD_ATTEST ARM_ATTEST SOURCE_SHA SOURCE_REPOSITORY
 mkdir -p "${TMP_DIR}/bin" "${TMP_DIR}/fixtures" "${TMP_DIR}/verifier-tmp"
 
@@ -284,13 +293,83 @@ verify_real_curl_redirect_contract() {
     echo "HTTPS fixture logged the redirect credential" >&2
     exit 1
   fi
+
+  malicious_home=${TMP_DIR}/malicious-curl-home
+  malicious_xdg=${TMP_DIR}/malicious-curl-xdg
+  mkdir -p "${malicious_home}" "${malicious_xdg}"
+  printf 'proxy = "http://127.0.0.1:1"\n' >"${malicious_home}/.curlrc"
+  printf 'proxy = "http://127.0.0.1:1"\n' >"${malicious_xdg}/curlrc"
+  if HOME=${malicious_home} XDG_CONFIG_HOME=${malicious_xdg} CURL_HOME=${malicious_home} NO_PROXY='' no_proxy='' \
+    "${REAL_CURL}" --config "${redirect_config}" --url "${ORIGIN_URL}/success" \
+      >"${redirect_output}" 2>"${TMP_DIR}/malicious-curlrc.log"; then
+    echo "malicious default curlrc negative control unexpectedly succeeded" >&2
+    exit 1
+  fi
+  HOME=${malicious_home} XDG_CONFIG_HOME=${malicious_xdg} CURL_HOME=${malicious_home} NO_PROXY='' no_proxy='' \
+    "${REAL_CURL}" -q --config "${redirect_config}" --url "${ORIGIN_URL}/success" >"${redirect_output}"
+  cmp "${redirect_body}" "${redirect_output}" >/dev/null \
+    || { echo "curl -q did not ignore the malicious default curlrc" >&2; exit 1; }
 }
+
+scan_for_credentials() {
+  scan_root=$1
+  : >"${CREDENTIAL_SCAN_MATCHES}"
+  : >"${CREDENTIAL_SCAN_ERROR}"
+  find_status=0
+  find "${scan_root}" -type f -exec sh -c '
+    matches=$1
+    error_marker=$2
+    shift 2
+    for scan_file do
+      if grep -F -l \
+        -e "username-must-not-leak" \
+        -e "credential-must-not-leak" \
+        -e "registry-token-must-not-leak" \
+        -e "github-credential-must-not-leak" \
+        "${scan_file}" >>"${matches}" 2>/dev/null; then
+        :
+      else
+        grep_status=$?
+        if [ "${grep_status}" -ne 1 ]; then
+          printf "%s\n" grep-error >"${error_marker}"
+          exit "${grep_status}"
+        fi
+      fi
+    done
+  ' credential-scan "${CREDENTIAL_SCAN_MATCHES}" "${CREDENTIAL_SCAN_ERROR}" {} + \
+    || find_status=$?
+  if [ "${find_status}" -ne 0 ] || [ -s "${CREDENTIAL_SCAN_ERROR}" ]; then
+    return 2
+  fi
+  [ ! -s "${CREDENTIAL_SCAN_MATCHES}" ] || return 1
+}
+
+cat >"${TMP_DIR}/bin/mktemp" <<'EOF'
+#!/bin/sh
+set -eu
+[ "${raw_username+x}" != x ] || { echo 'mktemp inherited raw_username' >&2; exit 110; }
+[ "${raw_token+x}" != x ] || { echo 'mktemp inherited raw_token' >&2; exit 111; }
+[ "${escaped_username+x}" != x ] || { echo 'mktemp inherited escaped_username' >&2; exit 112; }
+[ "${escaped_token+x}" != x ] || { echo 'mktemp inherited escaped_token' >&2; exit 113; }
+[ "${registry_token+x}" != x ] || { echo 'mktemp inherited registry_token' >&2; exit 114; }
+[ "${registry_token_with_sentinel+x}" != x ] || { echo 'mktemp inherited registry_token_with_sentinel' >&2; exit 123; }
+[ "${escaped_registry_token+x}" != x ] || { echo 'mktemp inherited escaped_registry_token' >&2; exit 115; }
+exec "${REAL_MKTEMP}" "$@"
+EOF
 
 cat >"${TMP_DIR}/bin/docker" <<'EOF'
 #!/bin/sh
 set -eu
 [ "${GHCR_TOKEN+x}" != x ] || { echo 'docker inherited GHCR_TOKEN' >&2; exit 92; }
+[ "${GHCR_USERNAME+x}" != x ] || { echo 'docker inherited GHCR_USERNAME' >&2; exit 94; }
 [ "${GITHUB_TOKEN+x}" != x ] || { echo 'docker inherited GITHUB_TOKEN' >&2; exit 93; }
+[ "${raw_username+x}" != x ] || { echo 'docker inherited raw_username' >&2; exit 116; }
+[ "${raw_token+x}" != x ] || { echo 'docker inherited raw_token' >&2; exit 117; }
+[ "${escaped_username+x}" != x ] || { echo 'docker inherited escaped_username' >&2; exit 118; }
+[ "${escaped_token+x}" != x ] || { echo 'docker inherited escaped_token' >&2; exit 119; }
+[ "${registry_token+x}" != x ] || { echo 'docker inherited registry_token' >&2; exit 120; }
+[ "${registry_token_with_sentinel+x}" != x ] || { echo 'docker inherited registry_token_with_sentinel' >&2; exit 123; }
+[ "${escaped_registry_token+x}" != x ] || { echo 'docker inherited escaped_registry_token' >&2; exit 121; }
 printf '%s\n' "$*" >>"${MOCK_DOCKER_LOG}"
 [ "$1 $2 $3" = "buildx imagetools inspect" ] || exit 90
 case "${MOCK_MODE}" in
@@ -351,27 +430,88 @@ cat >"${TMP_DIR}/bin/curl" <<'EOF'
 #!/bin/sh
 set -eu
 [ "${GHCR_TOKEN+x}" != x ] || { echo 'curl inherited GHCR_TOKEN' >&2; exit 96; }
+[ "${GHCR_USERNAME+x}" != x ] || { echo 'curl inherited GHCR_USERNAME' >&2; exit 95; }
 [ "${GITHUB_TOKEN+x}" != x ] || { echo 'curl inherited GITHUB_TOKEN' >&2; exit 97; }
+[ "${raw_username+x}" != x ] || { echo 'curl inherited raw_username' >&2; exit 116; }
+[ "${raw_token+x}" != x ] || { echo 'curl inherited raw_token' >&2; exit 117; }
+[ "${escaped_username+x}" != x ] || { echo 'curl inherited escaped_username' >&2; exit 118; }
+[ "${escaped_token+x}" != x ] || { echo 'curl inherited escaped_token' >&2; exit 119; }
+[ "${registry_token+x}" != x ] || { echo 'curl inherited registry_token' >&2; exit 120; }
+[ "${registry_token_with_sentinel+x}" != x ] || { echo 'curl inherited registry_token_with_sentinel' >&2; exit 123; }
+[ "${escaped_registry_token+x}" != x ] || { echo 'curl inherited escaped_registry_token' >&2; exit 121; }
+
+parse_curl_config_value() {
+  prefix=$1
+  config_path=$2
+  awk -v prefix="${prefix}" '
+    index($0, prefix) == 1 {
+      if (found) exit 2
+      value = substr($0, length(prefix) + 1)
+      if (substr(value, length(value), 1) != "\"") exit 3
+      value = substr(value, 1, length(value) - 1)
+      decoded = ""
+      escaped = 0
+      for (i = 1; i <= length(value); i++) {
+        character = substr(value, i, 1)
+        if (escaped) {
+          if (character != "\"" && character != "\\") exit 4
+          decoded = decoded character
+          escaped = 0
+        } else if (character == "\\") {
+          escaped = 1
+        } else if (character == "\"") {
+          exit 5
+        } else {
+          decoded = decoded character
+        }
+      }
+      if (escaped) exit 6
+      found = 1
+    }
+    END {
+      if (found != 1) exit 7
+      printf "%s", decoded
+    }
+  ' "${config_path}"
+}
+
 printf '%s\n' "$*" >>"${MOCK_CURL_LOG}"
 case "${MOCK_MODE}" in
   signal-hup-curl) kill -HUP "${PPID}"; exit 0 ;;
   signal-int-curl) kill -INT "${PPID}"; exit 0 ;;
   signal-term-curl) kill -TERM "${PPID}"; exit 0 ;;
 esac
-[ "${1-}" = --config ] || exit 98
-config=$2
+[ "${1-}" = -q ] || exit 98
+[ "${2-}" = --config ] || exit 109
+config=$3
 if grep -q 'ghcr.io/token?' "${config}"; then
-  grep -q '^user = ' "${config}" || exit 99
-  printf '%s\n' '{"token":"mock-bearer-token"}'
+  auth_value=$(parse_curl_config_value 'user = "' "${config}") || exit 99
+  auth_sha=$(printf '%s' "${auth_value}" | openssl dgst -sha256 | awk '{print $NF}')
+  unset auth_value
+  [ "${auth_sha}" = "${MOCK_EXPECTED_AUTH_SHA}" ] || exit 108
+  unset auth_sha
+  mock_registry_token=${MOCK_REGISTRY_TOKEN}
+  case "${MOCK_MODE}" in
+    registry-token-empty) mock_registry_token= ;;
+    registry-token-lf) mock_registry_token="${mock_registry_token}
+" ;;
+    registry-token-cr) mock_registry_token="${mock_registry_token}$(printf '\r')" ;;
+  esac
+  printf '%s' "${mock_registry_token}" | jq -Rs '{token: .}'
+  unset mock_registry_token
   exit 0
 fi
-grep -q '^header = "Authorization: Bearer mock-bearer-token"$' "${config}" || exit 100
+registry_auth_value=$(parse_curl_config_value 'header = "Authorization: Bearer ' "${config}") || exit 100
+registry_auth_sha=$(printf '%s' "${registry_auth_value}" | openssl dgst -sha256 | awk '{print $NF}')
+unset registry_auth_value
+[ "${registry_auth_sha}" = "${MOCK_EXPECTED_REGISTRY_AUTH_SHA}" ] || exit 122
+unset registry_auth_sha
 grep -q '^location$' "${config}" || exit 104
 grep -q '^proto-redir = "=https"$' "${config}" || exit 105
 grep -q '^max-redirs = 3$' "${config}" || exit 106
 if grep -q '^location-trusted' "${config}"; then exit 107; fi
-[ "${3-}" = --url ] || exit 101
-digest=${4##*/}
+[ "${4-}" = --url ] || exit 101
+digest=${5##*/}
 case "${digest}" in
   "${AMD_PROVENANCE_DIGEST}") file=${AMD_PROVENANCE_FILE} ;;
   "${AMD_SPDX_DIGEST}") file=${AMD_SPDX_FILE} ;;
@@ -385,34 +525,45 @@ case "${digest}" in
 esac
 cat "${file}"
 EOF
-chmod 0700 "${TMP_DIR}/bin/docker" "${TMP_DIR}/bin/curl"
+chmod 0700 "${TMP_DIR}/bin/mktemp" "${TMP_DIR}/bin/docker" "${TMP_DIR}/bin/curl"
 
 run_verifier() {
   requested_mode=$1
+  verifier_username=${2-${TEST_GHCR_USERNAME}}
+  verifier_token=${3-${TEST_GHCR_TOKEN}}
   prepare_fixtures "${requested_mode}"
   repository=${EXPECTED_REPOSITORY}
   [ "${requested_mode}" != wrong-repository ] || repository=ghcr.io/conalog/wrong
+  set -- sh "${ROOT_DIR}/scripts/verify-oci-attestations.sh"
+  [ "${requested_mode}" != allexport ] || set -- sh -a "${ROOT_DIR}/scripts/verify-oci-attestations.sh"
   MOCK_MODE=${requested_mode} \
     MOCK_DOCKER_LOG="${TMP_DIR}/${requested_mode}.docker.log" \
     MOCK_CURL_LOG="${TMP_DIR}/${requested_mode}.curl.log" \
-    GHCR_USERNAME=ci-user GHCR_TOKEN=credential-must-not-leak \
+    MOCK_EXPECTED_AUTH_SHA=${TEST_AUTH_SHA} \
+    MOCK_REGISTRY_TOKEN=${TEST_REGISTRY_TOKEN} \
+    MOCK_EXPECTED_REGISTRY_AUTH_SHA=${TEST_REGISTRY_TOKEN_SHA} \
+    REAL_MKTEMP=${REAL_MKTEMP} \
+    GHCR_USERNAME=${verifier_username} GHCR_TOKEN=${verifier_token} \
     GITHUB_TOKEN=github-credential-must-not-leak \
-    TMPDIR="${TMP_DIR}/verifier-tmp" PATH="${TMP_DIR}/bin:${PATH}" \
+    HOME="${TMP_DIR}/malicious-curl-home" XDG_CONFIG_HOME="${TMP_DIR}/malicious-curl-xdg" \
+    CURL_HOME="${TMP_DIR}/malicious-curl-home" TMPDIR="${TMP_DIR}/verifier-tmp" PATH="${TMP_DIR}/bin:${PATH}" \
     IMAGE_REPOSITORY=${repository} IMAGE_REF=${repository}:source-tag \
     EXPECTED_DIGEST=${EXPECTED} EXPECTED_SOURCE_SHA=${SOURCE_SHA} \
-    sh "${ROOT_DIR}/scripts/verify-oci-attestations.sh"
+    "$@"
 }
 
 start_redirect_fixture
 verify_real_curl_redirect_contract
 run_verifier success >"${TMP_DIR}/success.log"
+run_verifier allexport >"${TMP_DIR}/allexport.log"
 for rejected_mode in \
   wrong-repository wrong-digest missing-platform missing-reference missing-sbom missing-provenance \
   uppercase-platform-digest uppercase-attestation-digest uppercase-layer-digest wrong-layer-size \
   wrong-blob-digest missing-subject wrong-subject wrong-type wrong-predicate-type malformed-statement \
   empty-provenance malformed-provenance wrong-builder wrong-source-sha wrong-source-repository \
   wrong-vcs-revision wrong-vcs-source wrong-platform wrong-build-type empty-materials \
-  empty-spdx malformed-spdx invalid-spdx empty-packages; do
+  empty-spdx malformed-spdx invalid-spdx empty-packages \
+  registry-token-empty registry-token-lf registry-token-cr; do
   if run_verifier "${rejected_mode}" >"${TMP_DIR}/${rejected_mode}.log" 2>&1; then
     echo "invalid OCI attestation fixture was accepted: ${rejected_mode}" >&2
     exit 1
@@ -432,13 +583,79 @@ for signal_contract in \
     exit 1
   fi
 done
-if find "${TMP_DIR}/verifier-tmp" -mindepth 1 -maxdepth 1 -name 'oci-attestations.*' | grep -q .; then
+has_stale_files=0
+for stale_file in "${TMP_DIR}/verifier-tmp"/oci-attestations.*; do
+  if [ -e "${stale_file}" ]; then
+    has_stale_files=1
+    break
+  fi
+done
+if [ "${has_stale_files}" -eq 1 ]; then
   echo "registry verifier did not clean its temporary directory after a signal" >&2
   exit 1
 fi
-if grep -R 'credential-must-not-leak\|github-credential-must-not-leak' "${TMP_DIR}" >/dev/null 2>&1; then
-  echo "registry verifier exposed a credential" >&2
-  exit 1
-fi
+
+newline='
+'
+carriage_return=$(printf '\r')
+for injection_contract in username-lf:username username-cr:username token-lf:token token-cr:token; do
+  injection_mode=${injection_contract%:*}
+  injection_field=${injection_contract#*:}
+  injection_username=${TEST_GHCR_USERNAME}
+  injection_token=${TEST_GHCR_TOKEN}
+  case "${injection_mode}" in
+    *-lf) injection_character=${newline} ;;
+    *-cr) injection_character=${carriage_return} ;;
+  esac
+  case "${injection_field}" in
+    username) injection_username="${TEST_GHCR_USERNAME}${injection_character}injected" ;;
+    token) injection_token="${TEST_GHCR_TOKEN}${injection_character}injected" ;;
+  esac
+  set +e
+  run_verifier "${injection_mode}" "${injection_username}" "${injection_token}" \
+    >"${TMP_DIR}/${injection_mode}.log" 2>&1
+  injection_status=$?
+  set -e
+  [ "${injection_status}" -eq 2 ] \
+    || { echo "${injection_mode} credential exited ${injection_status}, expected 2" >&2; exit 1; }
+  grep -F 'GHCR credentials must not contain carriage return or newline characters' \
+    "${TMP_DIR}/${injection_mode}.log" >/dev/null \
+    || { echo "${injection_mode} credential did not fail closed" >&2; exit 1; }
+  if [ -s "${TMP_DIR}/${injection_mode}.curl.log" ]; then
+    echo "${injection_mode} credential reached curl" >&2
+    exit 1
+  fi
+done
+unset newline carriage_return injection_character injection_username injection_token
+
+mkdir -p "${TMP_DIR}/credential-scan-error" "${TMP_DIR}/scan-bin"
+printf '%s\n' harmless >"${TMP_DIR}/credential-scan-error/unreadable"
+cat >"${TMP_DIR}/scan-bin/grep" <<'EOF'
+#!/bin/sh
+exit 2
+EOF
+chmod 0700 "${TMP_DIR}/scan-bin/grep"
+original_path=${PATH}
+PATH="${TMP_DIR}/scan-bin:${PATH}"
+export PATH
+set +e
+scan_for_credentials "${TMP_DIR}/credential-scan-error"
+forced_scan_status=$?
+set -e
+PATH=${original_path}
+export PATH
+[ "${forced_scan_status}" -eq 2 ] \
+  || { echo "credential scan ignored a forced grep read error" >&2; exit 1; }
+rm -rf "${TMP_DIR}/credential-scan-error" "${TMP_DIR}/scan-bin"
+
+set +e
+scan_for_credentials "${TMP_DIR}"
+credential_scan_status=$?
+set -e
+case "${credential_scan_status}" in
+  0) ;;
+  1) echo "registry verifier exposed a credential" >&2; exit 1 ;;
+  *) echo "registry verifier credential scan failed" >&2; exit 1 ;;
+esac
 
 echo 'OCI digest-bound in-toto provenance and SPDX envelope verification contract passed'

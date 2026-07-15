@@ -78,7 +78,7 @@ func (e childExitError) ExitCode() int { return e.code }
 
 func configFromEnv(args []string) (config, error) {
 	if len(args) == 0 {
-		args = []string{"/app/rauthy"}
+		args = []string{"/app/rauthy", "serve"}
 	}
 	interval, err := durationEnv("RAUTHY_LAUNCHER_HEALTH_INTERVAL", time.Second)
 	if err != nil {

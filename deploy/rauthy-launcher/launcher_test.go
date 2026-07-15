@@ -20,6 +20,28 @@ import (
 const testRecoveryID = "recovery-test-1"
 const testRestoreSpec = "s3:restore/rauthy/recovery-test-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.enc"
 
+func TestConfigFromEnvDefaultsToRauthyServe(t *testing.T) {
+	cfg, err := configFromEnv(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/app/rauthy", "serve"}
+	if !reflect.DeepEqual(cfg.command, want) {
+		t.Fatalf("default command = %#v, want %#v", cfg.command, want)
+	}
+}
+
+func TestConfigFromEnvPreservesExplicitCommand(t *testing.T) {
+	want := []string{"/custom/rauthy", "serve", "--config-file", "/config.toml"}
+	cfg, err := configFromEnv(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.command, want) {
+		t.Fatalf("explicit command = %#v, want %#v", cfg.command, want)
+	}
+}
+
 func TestRestoreCompletesOnlyAfterHealthAndSuppressesReplay(t *testing.T) {
 	tmp := t.TempDir()
 	var healthHits atomic.Int32

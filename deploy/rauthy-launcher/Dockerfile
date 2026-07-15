@@ -13,4 +13,4 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 FROM ${RAUTHY_BASE_IMAGE}
 COPY --from=build --chmod=0555 /out/rauthy-launcher /usr/local/bin/rauthy-launcher
 ENTRYPOINT ["/usr/local/bin/rauthy-launcher"]
-CMD ["/app/rauthy"]
+CMD ["/app/rauthy", "serve"]

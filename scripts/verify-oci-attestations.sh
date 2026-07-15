@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+set +a
 
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:?IMAGE_REPOSITORY is required}
 IMAGE_REF=${IMAGE_REF:?IMAGE_REF is required}
@@ -7,6 +8,10 @@ EXPECTED_DIGEST=${EXPECTED_DIGEST:?EXPECTED_DIGEST is required}
 EXPECTED_SOURCE_SHA=${EXPECTED_SOURCE_SHA:?EXPECTED_SOURCE_SHA is required}
 GHCR_USERNAME=${GHCR_USERNAME:?GHCR_USERNAME is required}
 GHCR_TOKEN=${GHCR_TOKEN:?GHCR_TOKEN is required}
+unset raw_username raw_token escaped_username escaped_token registry_token registry_token_with_sentinel escaped_registry_token
+raw_username=${GHCR_USERNAME}
+raw_token=${GHCR_TOKEN}
+unset GHCR_USERNAME GHCR_TOKEN GITHUB_TOKEN
 EXPECTED_IMAGE_REPOSITORY=ghcr.io/conalog/grant-rauthy-launcher
 EXPECTED_SOURCE_REPOSITORY=https://github.com/Conalog/grant
 
@@ -18,6 +23,10 @@ valid_digest() {
   case "${1#sha256:}" in *[!0-9a-f]*) return 1 ;; esac
 }
 
+escape_curl_config_value() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 [ "${IMAGE_REPOSITORY}" = "${EXPECTED_IMAGE_REPOSITORY}" ] \
   || { echo "image repository must be ${EXPECTED_IMAGE_REPOSITORY}" >&2; exit 2; }
 valid_digest "${EXPECTED_DIGEST}" \
@@ -27,6 +36,15 @@ case "${EXPECTED_SOURCE_SHA}" in
   *) echo "expected source SHA must contain exactly 40 lowercase hex characters" >&2; exit 2 ;;
 esac
 case "${EXPECTED_SOURCE_SHA}" in *[!0-9a-f]*) echo "expected source SHA is not lowercase hexadecimal" >&2; exit 2 ;; esac
+config_newline='
+'
+config_carriage_return=$(printf '\r')
+case "${raw_username}${raw_token}" in
+  *"${config_newline}"*|*"${config_carriage_return}"*)
+    echo "GHCR credentials must not contain carriage return or newline characters" >&2
+    exit 2
+    ;;
+esac
 for command_name in curl docker jq mktemp openssl; do
   command -v "${command_name}" >/dev/null 2>&1 || { echo "missing command: ${command_name}" >&2; exit 1; }
 done
@@ -36,7 +54,7 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oci-attestations.XXXXXX")
 cleanup() {
   status=$?
   trap - 0 HUP INT TERM
-  unset GHCR_TOKEN GITHUB_TOKEN registry_token
+  unset GHCR_USERNAME GHCR_TOKEN GITHUB_TOKEN raw_username raw_token escaped_username escaped_token registry_token registry_token_with_sentinel escaped_registry_token
   rm -rf "${TMP_DIR}"
   exit "${status}"
 }
@@ -48,18 +66,33 @@ trap 'exit 143' TERM
 auth_config=${TMP_DIR}/ghcr-auth.curlrc
 token_response=${TMP_DIR}/ghcr-token.json
 registry_config=${TMP_DIR}/ghcr-registry.curlrc
-raw_username=${GHCR_USERNAME}
-raw_token=${GHCR_TOKEN}
+escaped_username=$(escape_curl_config_value "${raw_username}")
+escaped_token=$(escape_curl_config_value "${raw_token}")
 {
   printf 'silent\n'
   printf 'show-error\n'
   printf 'fail\n'
-  printf 'user = "%s:%s"\n' "${raw_username}" "${raw_token}"
+  printf 'user = "%s:%s"\n' "${escaped_username}" "${escaped_token}"
   printf 'url = "https://ghcr.io/token?service=ghcr.io&scope=repository:conalog/grant-rauthy-launcher:pull"\n'
 } >"${auth_config}"
-unset raw_username raw_token GHCR_USERNAME GHCR_TOKEN GITHUB_TOKEN
-curl --config "${auth_config}" >"${token_response}"
-registry_token=$(jq -er '.token // .access_token' "${token_response}")
+unset raw_username raw_token escaped_username escaped_token
+curl -q --config "${auth_config}" >"${token_response}"
+if ! registry_token_with_sentinel=$(
+  jq -ej '(.token // .access_token) | select(type == "string" and length > 0)' "${token_response}" \
+    && printf x
+); then
+  echo "GHCR token response did not contain a non-empty token" >&2
+  exit 1
+fi
+registry_token=${registry_token_with_sentinel%?}
+unset registry_token_with_sentinel
+case "${registry_token}" in
+  *"${config_newline}"*|*"${config_carriage_return}"*)
+    echo "GHCR token response contained an invalid token" >&2
+    exit 1
+    ;;
+esac
+escaped_registry_token=$(escape_curl_config_value "${registry_token}")
 {
   printf 'silent\n'
   printf 'show-error\n'
@@ -67,15 +100,15 @@ registry_token=$(jq -er '.token // .access_token' "${token_response}")
   printf 'location\n'
   printf 'proto-redir = "=https"\n'
   printf 'max-redirs = 3\n'
-  printf 'header = "Authorization: Bearer %s"\n' "${registry_token}"
+  printf 'header = "Authorization: Bearer %s"\n' "${escaped_registry_token}"
 } >"${registry_config}"
-unset registry_token
+unset registry_token escaped_registry_token config_newline config_carriage_return
 rm -f "${auth_config}" "${token_response}"
 
 fetch_blob() {
   blob_digest=$1
   blob_output=$2
-  curl --config "${registry_config}" \
+  curl -q --config "${registry_config}" \
     --url "https://ghcr.io/v2/conalog/grant-rauthy-launcher/blobs/${blob_digest}" >"${blob_output}"
 }
 

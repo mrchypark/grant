@@ -10,7 +10,7 @@ import (
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--contract-check" {
-		if err := verifyExecutableContract("/app/rauthy", []string{"--help"}, 10*time.Second); err != nil {
+		if err := verifyExecutableContract("/app/rauthy", []string{"serve", "--help"}, 10*time.Second); err != nil {
 			fmt.Fprintf(os.Stderr, "rauthy-launcher contract: %v\n", err)
 			os.Exit(1)
 		}

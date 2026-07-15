@@ -76,6 +76,12 @@ assert_ha_contract() {
     || fail "${label} overrides or corrupts the Rauthy launcher image pin"
   grep -q '/usr/local/bin/rauthy-launcher' "${manifest}" \
     || fail "${label} does not execute the static Rauthy launcher"
+  awk '
+    previous_rauthy && $0 == "        - serve" { found = 1 }
+    { previous_rauthy = $0 == "        - /app/rauthy" }
+    END { exit found ? 0 : 1 }
+  ' "${manifest}" \
+    || fail "${label} does not pass the required Rauthy serve subcommand"
   grep -q 'name: rauthy-launcher-pull' "${manifest}" \
     || fail "${label} does not reference the private GHCR pull Secret"
 }
@@ -727,6 +733,8 @@ verify_static() {
     || fail "Rauthy launcher does not derive from the pinned official 0.36.0 image"
   grep -q 'ENTRYPOINT \["/usr/local/bin/rauthy-launcher"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
     || fail "Rauthy launcher image entrypoint contract is missing"
+  grep -q 'CMD \["/app/rauthy", "serve"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
+    || fail "Rauthy launcher image does not preserve the official serve command"
   if ! grep -q 'provenance: mode=max' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q 'sbom: true' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
     || ! grep -q 'EXPECTED_SOURCE_SHA:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
