@@ -48,11 +48,24 @@ assert_no_pvc_references() {
 }
 
 read_rauthy_launcher_image() {
-  sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "$1"
+  awk '
+    /^[[:space:]]*image:[[:space:]]*ghcr[.]io\/conalog\/grant-rauthy-launcher[^[:space:]]*/ {
+      image = $0
+      sub(/^[[:space:]]*image:[[:space:]]*/, "", image)
+      sub(/[[:space:]].*$/, "", image)
+      count++
+    }
+    END {
+      if (count != 1 || image == "") exit 1
+      print image
+    }
+  ' "$1"
 }
 
 assert_repository_rauthy_launcher_pin() {
-  [ "$(read_rauthy_launcher_image "$1")" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ]
+  repository_rauthy_image=$(read_rauthy_launcher_image "$1") || return 1
+  [ -n "${repository_rauthy_image}" ] \
+    && [ "${repository_rauthy_image}" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ]
 }
 
 assert_ha_contract() {
@@ -73,7 +86,10 @@ assert_ha_contract() {
   if grep -q 'image: ghcr.io/sebadob/rauthy' "${manifest}"; then
     fail "${label} runs the official distroless Rauthy image without the static launcher"
   fi
-  expected_rauthy_image=$(read_rauthy_launcher_image "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
+  expected_rauthy_image=$(read_rauthy_launcher_image "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml") \
+    || fail "repository Rauthy launcher image is missing or ambiguous"
+  [ -n "${expected_rauthy_image}" ] \
+    || fail "repository Rauthy launcher image is empty"
   grep -Fq "image: ${expected_rauthy_image}" "${manifest}" \
     || fail "${label} does not use the repository Rauthy launcher image"
   [ "$(grep -c 'image: ghcr.io/conalog/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
@@ -744,6 +760,11 @@ verify_static() {
   if (ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER=1; export ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER; \
       assert_repository_rauthy_launcher_pin "${placeholder_pin_fixture}"); then
     fail "legacy unpublished-launcher environment bypassed the repository production pin"
+  fi
+  parser_empty_fixture=${TMP_DIR}/rauthy-parser-empty.yaml
+  printf '%s\n' 'image: docker.io/library/busybox:1.37' >"${parser_empty_fixture}"
+  if read_rauthy_launcher_image "${parser_empty_fixture}" >/dev/null 2>&1; then
+    fail "Rauthy launcher image parser accepted a manifest without the launcher repository"
   fi
 
   grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d' \
