@@ -16,11 +16,110 @@ impl From<&mut Row<'_>> for DuplicateRauthyClientIdRow {
     }
 }
 
+fn has_required_view_mode_check(sql: &str) -> bool {
+    strip_sql_comments(sql)
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| {
+            !character.is_ascii_whitespace() && !matches!(character, '"' | '`' | '[' | ']')
+        })
+        .collect::<String>()
+        .contains(
+            "view_modetextnotnullconstraintrole_action_field_view_modecheck(view_modein('real','anonymized'))",
+        )
+}
+
+fn strip_sql_comments(sql: &str) -> String {
+    let mut stripped = String::with_capacity(sql.len());
+    let mut characters = sql.chars().peekable();
+    let mut quote = None;
+
+    while let Some(character) = characters.next() {
+        if let Some(delimiter) = quote {
+            stripped.push(character);
+            if character == delimiter {
+                if characters.peek() == Some(&delimiter) {
+                    stripped.push(characters.next().expect("peeked quote"));
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match character {
+            '\'' | '"' | '`' => {
+                quote = Some(character);
+                stripped.push(character);
+            }
+            '[' => {
+                quote = Some(']');
+                stripped.push(character);
+            }
+            '-' if characters.peek() == Some(&'-') => {
+                characters.next();
+                stripped.push(' ');
+                for comment_character in characters.by_ref() {
+                    if comment_character == '\n' {
+                        stripped.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if characters.peek() == Some(&'*') => {
+                characters.next();
+                stripped.push(' ');
+                while let Some(comment_character) = characters.next() {
+                    if comment_character == '*' && characters.peek() == Some(&'/') {
+                        characters.next();
+                        break;
+                    }
+                }
+            }
+            _ => stripped.push(character),
+        }
+    }
+
+    stripped
+}
+
+#[derive(Debug, Clone)]
+struct SchemaColumnRow {
+    name: String,
+    not_null: i64,
+}
+
+impl From<&mut Row<'_>> for SchemaColumnRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            not_null: row.get("not_null"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IndexMetadataRow {
+    name: String,
+    is_unique: i64,
+    is_partial: i64,
+}
+
+impl From<&mut Row<'_>> for IndexMetadataRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            is_unique: row.get("is_unique"),
+            is_partial: row.get("is_partial"),
+        }
+    }
+}
+
 impl Database {
     pub async fn verify_schema_ready(&self, consistency: ReadConsistency) -> Result<()> {
         let _: Vec<CountRow> = self
             .query_rows_with(
-                consistency,
+                consistency.clone(),
                 "SELECT COUNT(*) AS count
                  FROM (
                      SELECT u.active,
@@ -74,6 +173,7 @@ impl Database {
                 "verify required application schema",
             )
             .await?;
+        self.verify_field_view_schema_readiness(consistency).await?;
         Ok(())
     }
 
@@ -208,6 +308,43 @@ impl Database {
                     role_id TEXT NOT NULL,
                     action_id TEXT NOT NULL,
                     PRIMARY KEY (role_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS role_action_field_views (
+                    role_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    schema_key TEXT NOT NULL,
+                    field_pointer TEXT NOT NULL,
+                    view_mode TEXT NOT NULL
+                        CONSTRAINT role_action_field_view_mode
+                        CHECK (view_mode IN ('real', 'anonymized')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        role_id,
+                        action_id,
+                        resource_type,
+                        schema_key,
+                        field_pointer
+                    ),
+                    FOREIGN KEY (role_id) REFERENCES roles(id),
+                    FOREIGN KEY (action_id) REFERENCES actions(id),
+                    FOREIGN KEY (role_id, action_id)
+                        REFERENCES role_actions(role_id, action_id)
+                );
+                CREATE TABLE IF NOT EXISTS field_view_policy_audit_outbox (
+                    event_id TEXT NOT NULL PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_hash TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    role_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    schema_key TEXT NOT NULL,
+                    before_json TEXT NOT NULL,
+                    after_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS role_bindings (
                     id TEXT PRIMARY KEY,
@@ -349,6 +486,13 @@ impl Database {
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_global_code
                     ON roles (code)
                     WHERE organization_id IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_role_action_field_views_lookup
+                    ON role_action_field_views (
+                        role_id,
+                        action_id,
+                        resource_type,
+                        schema_key
+                    );
                 CREATE INDEX IF NOT EXISTS idx_role_bindings_subject_resource_state
                     ON role_bindings (subject_type, subject_id, provider_id, resource_type, resource_id, state);
                 DROP INDEX IF EXISTS idx_role_bindings_logical_unique;
@@ -498,6 +642,286 @@ impl Database {
         Ok(())
     }
 
+    async fn verify_field_view_schema_readiness(&self, consistency: ReadConsistency) -> Result<()> {
+        let field_view_columns = [
+            "role_id",
+            "action_id",
+            "resource_type",
+            "schema_key",
+            "field_pointer",
+            "view_mode",
+            "created_at",
+            "updated_at",
+        ];
+        let columns = self
+            .schema_table_columns(consistency.clone(), "role_action_field_views")
+            .await?;
+        if !field_view_columns.iter().all(|required| {
+            columns
+                .iter()
+                .any(|column| column.name == *required && column.not_null != 0)
+        }) {
+            return Err(anyhow!(
+                "role_action_field_views is missing required NOT NULL columns"
+            ));
+        }
+        if !has_required_view_mode_check(
+            &self
+                .schema_table_sql(consistency.clone(), "role_action_field_views")
+                .await?,
+        ) {
+            return Err(anyhow!(
+                "role_action_field_views is missing the required view_mode CHECK for real and anonymized"
+            ));
+        }
+
+        let foreign_keys = self
+            .schema_foreign_key_mappings(consistency.clone(), "role_action_field_views")
+            .await?;
+        for required in [
+            "roles:role_id:id",
+            "actions:action_id:id",
+            "role_actions:role_id:role_id,action_id:action_id",
+        ] {
+            if !foreign_keys
+                .iter()
+                .any(|foreign_key| foreign_key == required)
+            {
+                return Err(anyhow!(
+                    "role_action_field_views is missing required foreign key {required}"
+                ));
+            }
+        }
+
+        let field_view_primary_key = [
+            "role_id",
+            "action_id",
+            "resource_type",
+            "schema_key",
+            "field_pointer",
+        ];
+        if self
+            .schema_primary_key_columns(consistency.clone(), "role_action_field_views")
+            .await?
+            != field_view_primary_key
+        {
+            return Err(anyhow!(
+                "role_action_field_views has an incompatible primary key"
+            ));
+        }
+        let lookup_index: Vec<IndexMetadataRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                "SELECT name, \"unique\" AS is_unique, partial AS is_partial
+                 FROM pragma_index_list('role_action_field_views')
+                 WHERE name = 'idx_role_action_field_views_lookup'",
+                params!(),
+                "field view lookup index",
+            )
+            .await?;
+        if lookup_index.len() != 1
+            || lookup_index[0].is_unique != 0
+            || lookup_index[0].is_partial != 0
+            || self
+                .schema_index_columns(consistency.clone(), "idx_role_action_field_views_lookup")
+                .await?
+                != ["role_id", "action_id", "resource_type", "schema_key"]
+        {
+            return Err(anyhow!(
+                "role_action_field_views.idx_role_action_field_views_lookup has incompatible columns"
+            ));
+        }
+
+        let audit_columns = [
+            "event_id",
+            "idempotency_key",
+            "request_hash",
+            "organization_id",
+            "actor_user_id",
+            "role_id",
+            "action_id",
+            "resource_type",
+            "schema_key",
+            "before_json",
+            "after_json",
+            "created_at",
+        ];
+        let columns = self
+            .schema_table_columns(consistency.clone(), "field_view_policy_audit_outbox")
+            .await?;
+        if !audit_columns.iter().all(|required| {
+            columns
+                .iter()
+                .any(|column| column.name == *required && column.not_null != 0)
+        }) {
+            return Err(anyhow!(
+                "field_view_policy_audit_outbox is missing required NOT NULL columns"
+            ));
+        }
+        if self
+            .schema_primary_key_columns(consistency.clone(), "field_view_policy_audit_outbox")
+            .await?
+            != ["event_id"]
+        {
+            return Err(anyhow!(
+                "field_view_policy_audit_outbox has an incompatible primary key"
+            ));
+        }
+        if !self
+            .has_unique_index(
+                consistency,
+                "field_view_policy_audit_outbox",
+                &["idempotency_key"],
+            )
+            .await?
+        {
+            return Err(anyhow!(
+                "field_view_policy_audit_outbox is missing a unique index on (idempotency_key)"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn schema_table_columns(
+        &self,
+        consistency: ReadConsistency,
+        table_name: &str,
+    ) -> Result<Vec<SchemaColumnRow>> {
+        let escaped_table_name = table_name.replace('\'', "''");
+        let rows: Vec<SchemaColumnRow> = self
+            .query_rows_with(
+                consistency,
+                format!(
+                    "SELECT name, \"notnull\" AS not_null
+                     FROM pragma_table_info('{escaped_table_name}')
+                     ORDER BY cid ASC"
+                ),
+                params!(),
+                "schema table columns",
+            )
+            .await?;
+        Ok(rows)
+    }
+
+    async fn schema_table_sql(
+        &self,
+        consistency: ReadConsistency,
+        table_name: &str,
+    ) -> Result<String> {
+        let rows: Vec<TableSqlRow> = self
+            .query_rows_with(
+                consistency,
+                "SELECT sql
+                 FROM sqlite_schema
+                 WHERE type = 'table' AND name = $1",
+                params!(table_name.to_owned()),
+                "schema table SQL",
+            )
+            .await?;
+        rows.into_iter()
+            .next()
+            .and_then(|row| row.sql)
+            .ok_or_else(|| anyhow!("missing required table {table_name}"))
+    }
+
+    async fn schema_primary_key_columns(
+        &self,
+        consistency: ReadConsistency,
+        table_name: &str,
+    ) -> Result<Vec<String>> {
+        let escaped_table_name = table_name.replace('\'', "''");
+        let rows: Vec<ColumnNameRow> = self
+            .query_rows_with(
+                consistency,
+                format!(
+                    "SELECT name
+                     FROM pragma_table_info('{escaped_table_name}')
+                     WHERE pk > 0
+                     ORDER BY pk ASC"
+                ),
+                params!(),
+                "schema primary key columns",
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.name).collect())
+    }
+
+    async fn schema_foreign_key_mappings(
+        &self,
+        consistency: ReadConsistency,
+        table_name: &str,
+    ) -> Result<Vec<String>> {
+        let escaped_table_name = table_name.replace('\'', "''");
+        let rows: Vec<ColumnNameRow> = self
+            .query_rows_with(
+                consistency,
+                format!(
+                    "SELECT \"table\" || ':' || group_concat(mapping, ',') AS name
+                 FROM (
+                     SELECT id, \"table\", \"from\" || ':' || \"to\" AS mapping
+                     FROM pragma_foreign_key_list('{escaped_table_name}')
+                     ORDER BY id ASC, seq ASC
+                 )
+                 GROUP BY id, \"table\"
+                 ORDER BY id ASC"
+                ),
+                params!(),
+                "schema foreign keys",
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.name).collect())
+    }
+
+    async fn schema_index_columns(
+        &self,
+        consistency: ReadConsistency,
+        index_name: &str,
+    ) -> Result<Vec<String>> {
+        let escaped_index_name = index_name.replace('\'', "''");
+        let rows: Vec<ColumnNameRow> = self
+            .query_rows_with(
+                consistency,
+                format!(
+                    "SELECT name FROM pragma_index_info('{escaped_index_name}') ORDER BY seqno ASC"
+                ),
+                params!(),
+                "schema index columns",
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.name).collect())
+    }
+
+    async fn has_unique_index(
+        &self,
+        consistency: ReadConsistency,
+        table_name: &str,
+        expected_columns: &[&str],
+    ) -> Result<bool> {
+        let escaped_table_name = table_name.replace('\'', "''");
+        let indexes: Vec<IndexMetadataRow> = self
+            .query_rows_with(
+                consistency.clone(),
+                format!(
+                    "SELECT name, \"unique\" AS is_unique, partial AS is_partial
+                     FROM pragma_index_list('{escaped_table_name}')
+                     WHERE \"unique\" = 1 AND partial = 0"
+                ),
+                params!(),
+                "schema unique index list",
+            )
+            .await?;
+        for index in indexes {
+            if self
+                .schema_index_columns(consistency.clone(), &index.name)
+                .await?
+                == expected_columns
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn add_column_if_missing(
         &self,
         table_name: &str,
@@ -599,6 +1023,20 @@ impl Database {
                           OR code = 'organization.credential.use'
                       )
                 );
+                DELETE FROM role_action_field_views
+                WHERE action_id IN (
+                    SELECT id FROM actions
+                    WHERE provider_id IN ('grant', 'account')
+                      AND (
+                          code LIKE 'plant.%'
+                          OR code LIKE 'asset.%'
+                          OR code LIKE 'document.%'
+                          OR code LIKE 'cert-data.%'
+                          OR code LIKE 'cert_data.%'
+                          OR code LIKE 'organization.plant.%'
+                          OR code = 'organization.credential.use'
+                      )
+                );
                 DELETE FROM role_actions
                 WHERE action_id IN (
                     SELECT id FROM actions
@@ -639,6 +1077,17 @@ impl Database {
         self.runtime
             .batch(
                 r#"
+                DELETE FROM role_action_field_views
+                WHERE action_id IN (
+                    SELECT account_action.id
+                    FROM actions AS account_action
+                    JOIN actions AS grant_action
+                      ON grant_action.provider_id = 'grant'
+                     AND grant_action.code = account_action.code
+                    WHERE account_action.provider_id = 'account'
+                      AND account_action.code LIKE 'organization.%'
+                );
+
                 UPDATE OR IGNORE role_actions
                 SET action_id = (
                     SELECT grant_action.id

@@ -22,13 +22,14 @@ use backups::{list_backups_local, list_backups_s3, trigger_backup};
 use handlers::{
     add_group_member, bootstrap_rauthy_owner, create_agreement, create_application, create_group,
     create_role, create_role_binding, deactivate_organization, delete_group, delete_role_binding,
-    get_agreement, get_application, get_application_consent, get_current_user, get_group, healthz,
-    list_agreements, list_application_actions, list_application_grants, list_applications,
-    list_group_members, list_groups, list_providers, list_role_bindings, list_roles,
-    reactivate_organization, readyz, remove_group_member, replace_application_actions,
-    replace_application_consent, replace_provider_actions, replace_role_actions,
-    requires_voter_node, revoke_application_consent, set_application_trust, set_user_active,
-    update_agreement, update_group, upsert_provider, verify_application_provisioning,
+    get_agreement, get_application, get_application_consent, get_current_user,
+    get_field_view_policy, get_group, healthz, list_agreements, list_application_actions,
+    list_application_grants, list_applications, list_group_members, list_groups, list_providers,
+    list_role_bindings, list_roles, reactivate_organization, readyz, remove_group_member,
+    replace_application_actions, replace_application_consent, replace_field_view_policy,
+    replace_provider_actions, replace_role_actions, requires_voter_node,
+    revoke_application_consent, set_application_trust, set_user_active, update_agreement,
+    update_group, upsert_provider, verify_application_provisioning,
 };
 use rauthy_proxy::{auth_root, proxy_rauthy_passthrough, proxy_rauthy_root};
 
@@ -81,6 +82,10 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/orgs/{organizationId}/roles/{roleId}/actions",
             put(replace_role_actions),
+        )
+        .route(
+            "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}/field-views",
+            put(replace_field_view_policy),
         )
         .route(
             "/api/v1/orgs/{organizationId}/bindings",
@@ -170,6 +175,10 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
             put(requires_voter_node),
         )
         .route(
+            "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}/field-views",
+            put(requires_voter_node),
+        )
+        .route(
             "/api/v1/orgs/{organizationId}/bindings",
             post(requires_voter_node),
         )
@@ -238,6 +247,10 @@ fn build_shared_router() -> Router<Arc<AppService>> {
             get(get_agreement),
         )
         .route("/api/v1/orgs/{organizationId}/roles", get(list_roles))
+        .route(
+            "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}/field-views",
+            get(get_field_view_policy),
+        )
         .route(
             "/api/v1/orgs/{organizationId}/bindings",
             get(list_role_bindings),

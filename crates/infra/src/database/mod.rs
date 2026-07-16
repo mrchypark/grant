@@ -11,7 +11,12 @@ use domain::{
     RoleBindingSubjectType, ServiceProvider, User,
 };
 use hiqlite::Row;
-use std::{borrow::Cow, collections::HashSet, error::Error as StdError, fmt};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
+    error::Error as StdError,
+    fmt,
+};
 use uuid::Uuid;
 
 mod codec;
@@ -26,6 +31,7 @@ mod applications;
 mod authz;
 mod backups;
 mod catalog;
+mod field_views;
 mod groups;
 mod identity;
 mod organizations;
@@ -35,8 +41,10 @@ mod schema;
 use codec::*;
 use rows::*;
 
-// Each check binds ten SQLite parameters. Stay below conservative 999-variable builds.
-const MAX_AUTHZ_CHECKS_PER_QUERY: usize = 90;
+// Each check binds twelve SQLite parameters. Stay below conservative 999-variable builds.
+const MAX_AUTHZ_CHECKS_PER_QUERY: usize = 80;
+// Bound policy expansion per check. Overflow is a configuration/capacity error, not a partial result.
+const MAX_CANDIDATE_ROLES_PER_CHECK: usize = 256;
 
 #[derive(Clone)]
 pub struct Database {
@@ -68,6 +76,25 @@ impl fmt::Display for ApplicationConsentWriteError {
 }
 
 impl StdError for ApplicationConsentWriteError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRoleLimitExceeded {
+    pub check_index: usize,
+    pub candidate_roles: usize,
+    pub limit: usize,
+}
+
+impl fmt::Display for CandidateRoleLimitExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "authorization check {} expanded to {} candidate roles; limit is {}",
+            self.check_index, self.candidate_roles, self.limit
+        )
+    }
+}
+
+impl StdError for CandidateRoleLimitExceeded {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationTrustMutationError {
@@ -136,11 +163,52 @@ pub struct UserActionCheck<'a> {
     pub consistency: Option<ReadConsistency>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct UserActionFieldViewCheck<'a> {
+    pub schema_key: &'a str,
+    pub fields: &'a [String],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserActionDecision {
     pub allowed: bool,
     pub rbac_allowed: bool,
     pub trusted_application: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserActionEvaluation {
+    pub decision: UserActionDecision,
+    pub field_views: Option<BTreeMap<String, domain::FieldViewMode>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleActionFieldViewPolicy {
+    pub role_id: String,
+    pub action_id: String,
+    pub resource_type: String,
+    pub schema_key: String,
+    pub field_views: BTreeMap<String, domain::FieldViewMode>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplaceRoleActionFieldViewPolicy {
+    pub organization_id: String,
+    pub actor_user_id: String,
+    pub role_id: String,
+    pub action_id: String,
+    pub resource_type: String,
+    pub schema_key: String,
+    pub field_views: BTreeMap<String, domain::FieldViewMode>,
+    pub idempotency_key: String,
+    pub request_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplaceRoleActionFieldViewPolicyOutcome {
+    Stored(RoleActionFieldViewPolicy),
+    IdempotencyConflict,
 }
 
 #[derive(Debug, Clone)]

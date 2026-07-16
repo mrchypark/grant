@@ -11,6 +11,7 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `service_providers`는 grant, compos 같은 권한 provider를 선언한다.
 - `actions`는 provider별 action catalog다.
 - `role_bindings`는 `provider_id + resource_type + resource_id` scope에 role을 부여한다.
+- `role_action_field_views`와 `field_view_policy_audit_outbox`는 provider-neutral field-view rollout의 필수 schema다.
 - grant는 외부 provider 리소스 목록을 소유하지 않으므로 unbounded authz list API를 제공하지 않는다.
 - 외부 서비스는 후보 리소스를 넘기고 `/api/v1/authz/filter`로 허용된 항목만 걸러간다.
 
@@ -19,9 +20,9 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `crates/domain`
   - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationRedirectUri`, `ApplicationGrant`, `Agreement`.
 - `crates/infra`
-  - 설정 로딩, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, 권한 판정 service layer를 가진다.
+  - 설정 로딩, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, 권한 판정 service layer를 가진다. field-view evaluator, 두 table의 readiness 검증, admin policy 저장과 child-first lifecycle cleanup도 이 계층에 있다.
 - `crates/api`
-  - `/api/v1/me`, `/api/v1/providers`, `/api/v1/orgs/*`, `/api/v1/authz/*`, backup/admin, Rauthy `/auth/v1/*` proxy 라우트를 제공한다.
+  - `/api/v1/me`, `/api/v1/providers`, `/api/v1/orgs/*`, `/api/v1/authz/*`, `/api/v1/application-authz/*`, backup/admin, Rauthy `/auth/v1/*` proxy 라우트를 제공한다. check/batch의 optional `fieldViews` 응답과 role-action field-view policy API가 이 계층에 구현되어 있다.
 - `crates/app`
   - 환경변수로 설정을 읽고 voter/learner 역할에 맞는 Axum router를 띄운다.
 
@@ -40,11 +41,15 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `GET|PUT /api/v1/orgs/{orgId}/agreements/{agreementId}`
 - `GET|POST /api/v1/orgs/{orgId}/roles`
 - `PUT /api/v1/orgs/{orgId}/roles/{roleId}/actions`
+- `GET|PUT /api/v1/orgs/{orgId}/roles/{roleId}/actions/{actionId}/field-views`
 - `GET|POST /api/v1/orgs/{orgId}/bindings`
 - `DELETE /api/v1/orgs/{orgId}/bindings/{bindingId}`
 - `POST /api/v1/authz/check`
 - `POST /api/v1/authz/batch-check`
 - `POST /api/v1/authz/filter`
+- `POST /api/v1/application-authz/check`
+- `POST /api/v1/application-authz/batch-check`
+- `POST /api/v1/application-authz/filter`
 
 ## Request Flow
 
@@ -55,6 +60,21 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 5. service-to-service admin과 기존 trusted-provider `/authz/*` API는 `x-grant-master-key`로 보호하고, 최종 사용자 토큰을 판정하는 `/application-authz/*` API는 별도 `x-grant-app-auth-key`로 보호한다. 두 key는 서로 달라야 하며 교차 사용할 수 없다.
 
 Developer console은 기존 organization/application 경계 안에 둔다. 조직 application 생성은 generated Rauthy client id를 예약할 뿐이며, Rauthy client 생성·수정과 client secret 회전은 별도 운영자/IaC 경계에서 수행한다. Grant backend는 `Clients` 그룹의 `read` 권한만 가진 Rauthy API key로 master provisioning verify의 단일 client 조회만 수행하고, 설정이 local reservation과 일치할 때 application을 `ready`로 전환한다.
+
+## Field View Authorization And Consumer Rollout
+
+현재 구현은 `role_action_field_views`와 `field_view_policy_audit_outbox`를 mandatory schema로
+생성하고 learner readiness에서 검증한다. role action 또는 provider action을 제거할 때는 field-view
+row를 먼저 삭제하는 child-first cleanup을 수행한다.
+
+field-aware evaluator와 trusted/application check 및 batch-check wire가 구현되어 있고, 정확한
+role-action scope의 `GET`/voter-only full-replace `PUT .../field-views` admin API도 제공한다. learner는
+admin GET을 읽을 수 있고 PUT은 `requires_voter_node`로 거부한다. field-view 기능은 특정 provider나
+action 이름을 하드코딩하지 않는다. active provider catalog에서 `visibility_granting = true`로 선언된
+action이면 exact provider/action/resource tuple에 적용할 수 있고, `resource_type`, `resource_id`,
+`schema_key`의 의미와 object-schema 연결은 consumer가 소유한다. Grant는 이 값들을 opaque exact
+identifier로만 비교한다. 남은 rollout 작업은 Compos를 포함한 각 consumer runtime에서 판정 결과를
+실제 응답 필드에 적용하는 enforcement와 existing policy backfill이다.
 
 ## Voter And Learner
 

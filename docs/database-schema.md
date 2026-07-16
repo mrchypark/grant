@@ -60,12 +60,20 @@ grant가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. �
 
 권한 엔진의 원본 데이터. `actions.provider_id`는 action을 제공하는 `service_providers.id`를 가리킨다. `actions.code`는 provider 안에서만 unique이며, 같은 code를 서로 다른 provider가 재사용할 수 있다. 실제 참조 key인 `actions.id`는 전역 PK라 grant provider는 기존처럼 code를 id로 쓰고, 외부 provider action은 provider/code 조합에서 정규화한 id를 사용한다.
 
-`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. compos 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다.
+`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. 외부 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다.
 
 `agreements`는 별도 테이블로 다시 살아났지만, `role_bindings.agreement_id`는 물리 FK 없이 앱 레벨로 검증한다.
 grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을 만들 수 있다.
 
 과거 `account` provider에 남아 있던 `organization.*` action과 `organization` resource binding은 schema migration에서 `grant` provider로 이동한다. 동일 logical binding이 이미 `grant`에 있으면 legacy `account` row의 active 상태와 agreement 참조를 `grant` row에 병합한 뒤 legacy row를 삭제한다.
+
+### `role_action_field_views`
+
+role-action에 연결된 provider-neutral 필드 열람 정책이다. `(role_id, action_id, resource_type, schema_key, field_pointer)`가 저장 key이며 `view_mode`는 `real` 또는 `anonymized`만 허용한다. 애플리케이션 write/evaluator와 교체 transaction precondition은 active provider catalog에서 `visibility_granting = 1`인 action만 허용하며, `actions.id`와 `actions.code`가 같다고 가정하지 않는다. `resource_type`과 `schema_key`는 provider/consumer가 정의하는 opaque exact identifier이고 Grant는 object-schema 대응 관계를 검증하지 않는다. `field_pointer`는 정규화된 non-root RFC 6901 JSON Pointer여야 한다. Grant 코어는 `/id`를 포함한 모든 유효 pointer를 동일하게 취급한다. consumer가 고정 envelope field를 field-view 대상에서 제외하려면 요청 전후의 adapter 경계에서 자체 규칙으로 처리해야 한다. 별도의 wildcard/prefix/glob/sentinel policy 문법은 지원하지 않지만, RFC 6901 token 안의 `*`는 일반 문자로 허용하고 pointer 전체를 exact string으로 비교한다. 저장 row와 audit replay의 pointer key도 읽을 때 다시 검증하며 손상된 값은 internal error로 fail closed한다. role과 action 및 해당 `role_actions` row를 외래 키로 참조하고, `(role_id, action_id, resource_type, schema_key)` 조회 index를 가진다. positive row가 없으면 정책 결과는 `none`이며, 필드 값이나 provider의 resource/schema catalog 자체를 저장하지 않는다.
+
+### `field_view_policy_audit_outbox`
+
+필드 열람 정책 교체의 append-only audit event outbox다. `event_id`가 primary key이고 `idempotency_key`는 unique다. 요청 hash, 조직/행위자/role/action 범위, resource/schema key, before/after JSON snapshot과 생성 시각을 같은 DB transaction에 기록할 수 있도록 저장한다.
 
 ### `applications`, `application_redirect_uris`, `application_actions`, `application_grants`, `application_grant_actions`
 
@@ -132,6 +140,9 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `roles.organization_id` -> `organizations.id`
 - `role_actions.role_id` -> `roles.id`
 - `role_actions.action_id` -> `actions.id`
+- `role_action_field_views.role_id` -> `roles.id`
+- `role_action_field_views.action_id` -> `actions.id`
+- `role_action_field_views.(role_id, action_id)` -> `role_actions.(role_id, action_id)`
 - `role_bindings.role_id` -> `roles.id`
 - `role_bindings.agreement_id` -> `agreements.id`
 - `role_bindings.subject_organization_id` -> `organizations.id`

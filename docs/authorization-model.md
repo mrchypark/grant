@@ -11,6 +11,7 @@
 - `actions`: provider별 action catalog다.
 - `roles`: 조직 안에서 action 묶음을 이름 붙인 것이다.
 - `role_bindings`: subject가 어떤 provider/resource scope에 어떤 role을 가지는지 저장하는 권한 원본이다.
+- `role_action_field_views`: role-action별 provider-neutral 필드 열람의 positive policy row다.
 - `agreements`: 조직 간 권한 부여의 근거다.
 - `applications`: 조직 내부 또는 first-party application이다.
 - `application_grants`: 사용자가 application에 동의한 action subset이다.
@@ -44,6 +45,43 @@ binding subject는 세 가지다.
 group/user binding은 반드시 `subject_organization_id` 안에서만 유효하다. organization subject binding으로 다른 조직 resource에 접근시키려면 active `agreements`가 필요하다.
 
 그룹 관리 API는 `organization.group.manage`로 보호한다. list/get은 learner에서도 읽을 수 있지만 create/update/delete와 member 변경은 voter에서만 수행한다. member 추가는 같은 조직의 active 사용자 membership에 한정되고, group binding이 남아 있으면 group 삭제는 `409 Conflict`다.
+
+## Field View Authorization
+
+`role_action_field_views`는 `(role_id, action_id, resource_type, schema_key, field_pointer)`별로
+`real` 또는 `anonymized`만 저장한다. row가 없으면 해당 field의 결과는 `none`이다. matching role의
+positive row는 `none < anonymized < real` 순서로 병합하며 가장 높은 mode가 적용된다. absence는 deny가
+아니며, 한 role의 absence 또는 더 낮은 mode가 다른 role의 `real`을 취소하지 않는다.
+
+field grant는 exact normalized RFC 6901 pointer만 사용한다. wildcard, prefix, glob, schema-wide
+sentinel 같은 별도 policy 문법은 지원하지 않는다. RFC 6901 token 안의 `*`는 일반 문자이며 pointer
+전체가 exact string으로 비교된다. `/id`도 Grant 코어에서는 일반 pointer다. provider/consumer의 fixed
+envelope field를 제외하는 규칙은 Grant 전역 정책이 아니라 해당 consumer adapter가 소유한다. 새 pointer는
+명시적 positive row가 생기기 전까지 `none`이다.
+
+현재 구현은 schema/readiness, child-first lifecycle cleanup, field-aware evaluator와 trusted/application
+check 및 batch-check wire, exact role-action scope의 admin GET 및 voter-only full-replace PUT을 제공한다.
+PUT은 `Idempotency-Key`와 transaction audit outbox를 사용한다.
+
+field-view capability는 특정 provider/action/resource type 목록이 아니라 action catalog의
+`visibility_granting = true`로 선언한다. admin policy는 조직이 소유한 exact role-action에만 연결되고,
+runtime view 요청은 active provider의 동일 action id와 exact RBAC binding tuple로 평가한다.
+`actions.id`와 `actions.code`는 서로 다른 식별자일 수 있으므로 field-view 판정은 action id를 code와
+같다고 가정하지 않는다. `resource_type`, `resource_id`, `schema_key`는 opaque exact identifier다.
+Grant는 object와 schema의 대응 관계를 알거나 검증하지 않으며 그 무결성은 요청 consumer가 책임진다.
+
+field-aware check 하나는 field pointer를 1개 이상 256개 이하로 요청할 수 있다. field-aware
+`provider`, `action`, `resourceType`, resource `id`, `schemaKey`는 exact identifier라서 앞뒤 공백을
+trim하지 않고 거부한다. field-aware `resourceType`과 `schemaKey`만 각각 128 bytes 이하이고, legacy
+viewless binary check에는 이 신규 길이 제한을 적용하지 않는다. 각 pointer는 RFC 6901 normalization 후
+512 bytes 이하여야 한다. evaluator는 check별 distinct candidate role을 최대 256개까지 확장한다. 이
+내부 cap을 넘으면 일부 role만 평가하거나 truncate하지 않고 요청 전체를 `503 Service Unavailable`로
+실패시킨다. admin PUT의 idempotency hash는 이 검증을 통과한 exact scope와 canonical pointer map을
+사용하므로 서로 다른 유효 request body는 replay로 취급되지 않는다.
+
+남은 rollout 작업은 Grant 밖의 각 consumer runtime에서 판정 결과를 실제 응답 필드에 적용하는
+enforcement와 기존 policy backfill이다. Compos는 그 consumer 중 하나다. evaluator, wire contract,
+admin policy API 자체는 provider-neutral 계약으로 구현된 상태다.
 
 ## Agreements
 
@@ -101,3 +139,4 @@ POST /api/v1/application-authz/filter
 - application grant action subset 규칙
 - developer console application 설정 권한 규칙
 - authz check/filter 응답 계약
+- field-view policy 및 consumer rollout 상태

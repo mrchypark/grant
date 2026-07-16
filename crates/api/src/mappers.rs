@@ -1,15 +1,15 @@
 use domain::Action;
 use infra::service::{
-    AuthorizationCheck, AuthorizationDecision, AuthorizationResource, AuthorizationSubject,
-    BackupInfo, CreateApplicationInput, CreateRoleBindingInput, CreateRoleInput,
-    UpsertAgreementInput, UpsertGroupInput,
+    AuthorizationCheck, AuthorizationDecision, AuthorizationResource, AuthorizationResourceView,
+    AuthorizationSubject, BackupInfo, CreateApplicationInput, CreateRoleBindingInput,
+    CreateRoleInput, ReplaceFieldViewPolicyInput, UpsertAgreementInput, UpsertGroupInput,
 };
 
 use crate::dto::{
     AuthzCheckRequest, AuthzCheckResponse, AuthzFilterRequest, AuthzResourceRequest,
     AuthzSubjectRequest, BackupItemResponse, CreateApplicationRequest, CreateGroupRequest,
-    CreateRoleBindingRequest, CreateRoleRequest, ProviderActionRequest, UpdateGroupRequest,
-    UpsertAgreementRequest,
+    CreateRoleBindingRequest, CreateRoleRequest, ProviderActionRequest,
+    ReplaceFieldViewPolicyRequest, UpdateGroupRequest, UpsertAgreementRequest,
 };
 
 pub(crate) fn create_application_input(body: CreateApplicationRequest) -> CreateApplicationInput {
@@ -61,6 +61,16 @@ pub(crate) fn create_role_binding_input(body: CreateRoleBindingRequest) -> Creat
         role_id: body.role_id,
         agreement_id: body.agreement_id,
         state: body.state,
+    }
+}
+
+pub(crate) fn replace_field_view_policy_input(
+    body: ReplaceFieldViewPolicyRequest,
+) -> ReplaceFieldViewPolicyInput {
+    ReplaceFieldViewPolicyInput {
+        resource_type: body.resource_type,
+        schema_key: body.schema_key,
+        field_views: body.field_views,
     }
 }
 
@@ -144,6 +154,10 @@ fn authz_resource_input(body: AuthzResourceRequest) -> AuthorizationResource {
         provider_id: body.provider,
         resource_type: body.resource_type,
         id: body.id,
+        view: body.view.map(|view| AuthorizationResourceView {
+            schema_key: view.schema_key,
+            fields: view.fields,
+        }),
     }
 }
 
@@ -151,5 +165,6 @@ pub(crate) fn authz_check_response(decision: AuthorizationDecision) -> AuthzChec
     AuthzCheckResponse {
         allowed: decision.allowed,
         reason: decision.reason,
+        field_views: decision.field_views,
     }
 }

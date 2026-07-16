@@ -35,7 +35,21 @@ impl Database {
         &self,
         checks: &[UserActionCheck<'_>],
     ) -> Result<Vec<UserActionDecision>> {
-        self.evaluate_user_actions_with_inactive_organization_policy(checks, false)
+        let field_views = vec![None; checks.len()];
+        Ok(self
+            .evaluate_user_actions_with_inactive_organization_policy(checks, &field_views, false)
+            .await?
+            .into_iter()
+            .map(|evaluation| evaluation.decision)
+            .collect())
+    }
+
+    pub async fn evaluate_user_actions_with_field_views(
+        &self,
+        checks: &[UserActionCheck<'_>],
+        field_views: &[Option<UserActionFieldViewCheck<'_>>],
+    ) -> Result<Vec<UserActionEvaluation>> {
+        self.evaluate_user_actions_with_inactive_organization_policy(checks, field_views, false)
             .await
     }
 
@@ -56,24 +70,32 @@ impl Database {
             consistency,
         };
         Ok(self
-            .evaluate_user_actions_with_inactive_organization_policy(&[check], true)
+            .evaluate_user_actions_with_inactive_organization_policy(&[check], &[None], true)
             .await?
             .into_iter()
             .next()
-            .is_some_and(|decision| decision.allowed))
+            .is_some_and(|evaluation| evaluation.decision.allowed))
     }
 
     async fn evaluate_user_actions_with_inactive_organization_policy(
         &self,
         checks: &[UserActionCheck<'_>],
+        field_views: &[Option<UserActionFieldViewCheck<'_>>],
         allow_inactive_self_reactivation: bool,
-    ) -> Result<Vec<UserActionDecision>> {
-        let denied = UserActionDecision {
-            allowed: false,
-            rbac_allowed: false,
-            trusted_application: false,
-        };
-        let mut results = vec![denied; checks.len()];
+    ) -> Result<Vec<UserActionEvaluation>> {
+        if checks.len() != field_views.len() {
+            return Err(anyhow!(
+                "authorization field view input length {} does not match check length {}",
+                field_views.len(),
+                checks.len()
+            ));
+        }
+        let force_strong = field_views.iter().any(Option::is_some);
+        let mut decisions = vec![None; checks.len()];
+        let mut merged_modes = field_views
+            .iter()
+            .map(|view| view.map(|view| vec![(false, None); view.fields.len()]))
+            .collect::<Vec<_>>();
         for (chunk_number, chunk) in checks.chunks(MAX_AUTHZ_CHECKS_PER_QUERY).enumerate() {
             let chunk_start = chunk_number
                 .checked_mul(MAX_AUTHZ_CHECKS_PER_QUERY)
@@ -84,10 +106,13 @@ impl Database {
             let Some(first) = chunk.first() else {
                 continue;
             };
-            let consistency =
-                self.default_read_consistency_with_override(first.consistency.clone());
+            let consistency = if force_strong {
+                ReadConsistency::Strong
+            } else {
+                self.default_read_consistency_with_override(first.consistency.clone())
+            };
             let validation_time = Utc::now().to_rfc3339();
-            let mut query_params = Vec::with_capacity(chunk.len() * 10);
+            let mut query_params = Vec::with_capacity(chunk.len() * 12);
             let mut values = Vec::with_capacity(chunk.len());
             for (chunk_index, check) in chunk.iter().enumerate() {
                 let absolute_index = chunk_start
@@ -112,8 +137,15 @@ impl Database {
                 } else {
                     0_i64
                 }));
+                let field_view = field_views[absolute_index];
+                query_params.push(hiqlite::Param::from(
+                    field_view.map(|view| view.schema_key.to_owned()),
+                ));
+                query_params.push(hiqlite::Param::from(serde_json::to_string(
+                    &field_view.map_or(&[][..], |view| view.fields),
+                )?));
                 values.push(format!(
-                    "(${p1}, ${p2}, ${p3}, ${p4}, ${p5}, ${p6}, ${p7}, ${p8}, ${p9}, ${p10})",
+                    "(${p1}, ${p2}, ${p3}, ${p4}, ${p5}, ${p6}, ${p7}, ${p8}, ${p9}, ${p10}, ${p11}, ${p12})",
                     p1 = base,
                     p2 = base + 1,
                     p3 = base + 2,
@@ -123,7 +155,9 @@ impl Database {
                     p7 = base + 6,
                     p8 = base + 7,
                     p9 = base + 8,
-                    p10 = base + 9
+                    p10 = base + 9,
+                    p11 = base + 10,
+                    p12 = base + 11
                 ));
             }
             let values = values.join(", ");
@@ -135,7 +169,7 @@ impl Database {
                         WITH requested (
                             idx, user_id, organization_id, provider_id, resource_type,
                             resource_id, action_id, application_id, validation_time,
-                            allow_inactive_self_reactivation
+                            allow_inactive_self_reactivation, schema_key, fields_json
                         ) AS (
                             VALUES {values}
                         ),
@@ -178,8 +212,8 @@ impl Database {
                                 )
                             )
                         ),
-                        rbac_allowed AS (
-                            SELECT DISTINCT req.idx
+                        candidate_roles AS (
+                            SELECT DISTINCT req.idx, rb.role_id, ra.action_id
                             FROM eligible_requested req
                             JOIN role_bindings rb
                               ON rb.subject_type = 'organization'
@@ -195,6 +229,7 @@ impl Database {
                             JOIN actions act
                               ON act.id = ra.action_id
                              AND act.provider_id = rb.provider_id
+                             AND (req.schema_key IS NULL OR act.visibility_granting = 1)
                             JOIN organization_memberships om
                               ON om.organization_id = rb.subject_id
                              AND om.user_id = req.user_id
@@ -208,7 +243,7 @@ impl Database {
 
                             UNION
 
-                            SELECT DISTINCT req.idx
+                            SELECT DISTINCT req.idx, rb.role_id, ra.action_id
                             FROM eligible_requested req
                             JOIN role_bindings rb
                               ON rb.subject_type = 'user'
@@ -224,6 +259,7 @@ impl Database {
                             JOIN actions act
                               ON act.id = ra.action_id
                              AND act.provider_id = rb.provider_id
+                             AND (req.schema_key IS NULL OR act.visibility_granting = 1)
                             JOIN organization_memberships om
                               ON om.organization_id = rb.subject_organization_id
                              AND om.user_id = rb.subject_id
@@ -231,7 +267,7 @@ impl Database {
 
                             UNION
 
-                            SELECT DISTINCT req.idx
+                            SELECT DISTINCT req.idx, rb.role_id, ra.action_id
                             FROM eligible_requested req
                             JOIN role_bindings rb
                               ON rb.subject_type = 'group'
@@ -246,12 +282,21 @@ impl Database {
                             JOIN actions act
                               ON act.id = ra.action_id
                              AND act.provider_id = rb.provider_id
+                             AND (req.schema_key IS NULL OR act.visibility_granting = 1)
                             JOIN group_memberships gm ON gm.group_id = rb.subject_id
                             JOIN organization_memberships om
                               ON om.id = gm.organization_membership_id
                              AND om.user_id = req.user_id
                              AND om.organization_id = req.organization_id
                              AND om.status = 'active'
+                        ),
+                        candidate_role_counts AS (
+                            SELECT idx, COUNT(*) AS candidate_role_count
+                            FROM candidate_roles
+                            GROUP BY idx
+                        ),
+                        rbac_allowed AS (
+                            SELECT idx FROM candidate_role_counts
                         ),
                         trusted_application_allowed AS (
                             SELECT DISTINCT req.idx
@@ -288,8 +333,72 @@ impl Database {
                               ON aa.application_id = ag.application_id
                              AND aa.action_id = aga.action_id
                             WHERE req.application_id IS NOT NULL
+                        ),
+                        requested_fields AS (
+                            SELECT req.idx,
+                                   CAST(field.key AS INTEGER) AS field_idx,
+                                   CAST(field.value AS TEXT) AS field_pointer,
+                                   req.resource_type,
+                                   req.schema_key
+                            FROM requested req
+                            JOIN json_each(req.fields_json) field
+                        ),
+                        aggregated_field_modes AS (
+                            SELECT field.idx,
+                                   field.field_idx,
+                                   field.field_pointer,
+                                   MAX(
+                                       CASE
+                                           WHEN policy.view_mode NOT IN ('real', 'anonymized')
+                                           THEN 1
+                                           ELSE 0
+                                       END
+                                   ) AS has_invalid_mode,
+                                   MAX(
+                                       CASE policy.view_mode
+                                           WHEN 'real' THEN 2
+                                           WHEN 'anonymized' THEN 1
+                                           ELSE 0
+                                       END
+                                   ) AS merged_mode,
+                                   MAX(
+                                       CASE
+                                           WHEN policy.view_mode NOT IN ('real', 'anonymized')
+                                           THEN policy.view_mode
+                                       END
+                                   ) AS invalid_mode
+                            FROM requested_fields field
+                            JOIN candidate_roles candidate
+                              ON candidate.idx = field.idx
+                            JOIN candidate_role_counts candidate_count
+                              ON candidate_count.idx = candidate.idx
+                             AND candidate_count.candidate_role_count <= {MAX_CANDIDATE_ROLES_PER_CHECK}
+                            JOIN role_action_field_views policy
+                              ON policy.role_id = candidate.role_id
+                             AND policy.action_id = candidate.action_id
+                             AND policy.resource_type = field.resource_type
+                             AND policy.schema_key = field.schema_key
+                             AND policy.field_pointer = field.field_pointer
+                            GROUP BY field.idx, field.field_idx, field.field_pointer
+                        ),
+                        field_results AS (
+                            SELECT field.idx,
+                                   field.field_idx,
+                                   field.field_pointer,
+                                   CASE
+                                       WHEN mode.has_invalid_mode = 1 THEN mode.invalid_mode
+                                       WHEN mode.merged_mode = 2 THEN 'real'
+                                       WHEN mode.merged_mode = 1 THEN 'anonymized'
+                                       ELSE NULL
+                                   END AS view_mode
+                            FROM requested_fields field
+                            LEFT JOIN aggregated_field_modes mode
+                              ON mode.idx = field.idx
+                             AND mode.field_idx = field.field_idx
+                             AND mode.field_pointer = field.field_pointer
                         )
                         SELECT req.idx,
+                               COALESCE(candidate_count.candidate_role_count, 0) AS candidate_role_count,
                                CASE WHEN rbac.idx IS NULL THEN 0 ELSE 1 END AS rbac_allowed,
                                CASE
                                    WHEN rbac.idx IS NULL THEN 0
@@ -297,18 +406,35 @@ impl Database {
                                    WHEN trusted.idx IS NOT NULL OR consent.idx IS NOT NULL THEN 1
                                    ELSE 0
                                END AS allowed,
-                               CASE WHEN trusted.idx IS NULL THEN 0 ELSE 1 END AS trusted_application
+                               CASE WHEN trusted.idx IS NULL THEN 0 ELSE 1 END AS trusted_application,
+                               field_result.field_idx,
+                               field_result.field_pointer,
+                               field_result.view_mode
                         FROM requested req
+                        LEFT JOIN candidate_role_counts candidate_count ON candidate_count.idx = req.idx
                         LEFT JOIN rbac_allowed rbac ON rbac.idx = req.idx
                         LEFT JOIN trusted_application_allowed trusted ON trusted.idx = req.idx
                         LEFT JOIN explicit_consent_allowed consent ON consent.idx = req.idx
-                        ORDER BY req.idx ASC
+                        LEFT JOIN field_results field_result ON field_result.idx = req.idx
+                        ORDER BY req.idx ASC, field_result.field_idx ASC
                         "#
                     ),
                     query_params,
                     "bulk user organization actions",
                 )
                 .await?;
+            if let Some(row) = rows.iter().find(|row| {
+                row.field_idx.is_some()
+                    && row.candidate_role_count > MAX_CANDIDATE_ROLES_PER_CHECK as i64
+            }) {
+                return Err(anyhow::Error::new(CandidateRoleLimitExceeded {
+                    check_index: usize::try_from(row.idx)
+                        .context("authorization query returned a negative result index")?,
+                    candidate_roles: usize::try_from(row.candidate_role_count)
+                        .context("authorization query returned a negative candidate role count")?,
+                    limit: MAX_CANDIDATE_ROLES_PER_CHECK,
+                }));
+            }
             for row in rows {
                 let result_index = usize::try_from(row.idx)
                     .context("authorization query returned a negative result index")?;
@@ -317,20 +443,133 @@ impl Database {
                         "authorization query returned result index {result_index} outside chunk range {chunk_start}..{chunk_end}"
                     ));
                 }
-                let result = results.get_mut(result_index).ok_or_else(|| {
+                let decision_slot = decisions.get_mut(result_index).ok_or_else(|| {
                     anyhow!(
                         "authorization query returned result index {result_index} outside result length {}",
                         checks.len()
                     )
                 })?;
-                *result = UserActionDecision {
+                let decision = UserActionDecision {
                     allowed: row.allowed != 0,
                     rbac_allowed: row.rbac_allowed != 0,
                     trusted_application: row.trusted_application != 0,
                 };
+                if decision_slot.is_some_and(|existing| existing != decision) {
+                    return Err(anyhow!(
+                        "authorization query returned inconsistent decisions for result index {result_index}"
+                    ));
+                }
+                *decision_slot = Some(decision);
+
+                match field_views[result_index] {
+                    None => {
+                        if row.field_idx.is_some()
+                            || row.field_pointer.is_some()
+                            || row.view_mode.is_some()
+                        {
+                            return Err(anyhow!(
+                                "authorization query returned unexpected field result for binary check {result_index}"
+                            ));
+                        }
+                    }
+                    Some(field_view) => {
+                        let field_index = usize::try_from(row.field_idx.ok_or_else(|| {
+                            anyhow!(
+                                "authorization query omitted field index for check {result_index}"
+                            )
+                        })?)
+                        .context("authorization query returned a negative field index")?;
+                        let expected_pointer = field_view.fields.get(field_index).ok_or_else(|| {
+                            anyhow!(
+                                "authorization query returned field index {field_index} outside check {result_index} field length {}",
+                                field_view.fields.len()
+                            )
+                        })?;
+                        let actual_pointer = row.field_pointer.ok_or_else(|| {
+                            anyhow!(
+                                "authorization query omitted field pointer for check {result_index} field {field_index}"
+                            )
+                        })?;
+                        if actual_pointer != *expected_pointer {
+                            return Err(anyhow!(
+                                "authorization query field pointer mismatch for check {result_index} field {field_index}"
+                            ));
+                        }
+                        let slots = merged_modes[result_index].as_mut().ok_or_else(|| {
+                            anyhow!(
+                                "authorization query returned field result for binary check {result_index}"
+                            )
+                        })?;
+                        let (seen, merged) = slots.get_mut(field_index).ok_or_else(|| {
+                            anyhow!(
+                                "authorization query returned field index {field_index} outside merge result"
+                            )
+                        })?;
+                        *seen = true;
+                        if let Some(raw_mode) = row.view_mode {
+                            let mode = domain::FieldViewMode::from_db_str(&raw_mode)
+                                .map_err(anyhow::Error::msg)?;
+                            *merged =
+                                Some(merged.map_or(mode, |existing: domain::FieldViewMode| {
+                                    existing.max(mode)
+                                }));
+                        }
+                    }
+                }
             }
         }
-        Ok(results)
+
+        decisions
+            .into_iter()
+            .zip(field_views)
+            .zip(merged_modes)
+            .enumerate()
+            .map(|(index, ((decision, field_view), modes))| {
+                let decision = decision.ok_or_else(|| {
+                    anyhow!("authorization query omitted decision for check {index}")
+                })?;
+                let field_views = match (field_view, modes) {
+                    (None, None) => None,
+                    (Some(field_view), Some(modes)) => {
+                        if modes.len() != field_view.fields.len() {
+                            return Err(anyhow!(
+                                "authorization field result length mismatch for check {index}"
+                            ));
+                        }
+                        let mut result = BTreeMap::new();
+                        for (field_index, (pointer, (seen, mode))) in
+                            field_view.fields.iter().zip(modes).enumerate()
+                        {
+                            if !seen {
+                                return Err(anyhow!(
+                                    "authorization query omitted check {index} field {field_index}"
+                                ));
+                            }
+                            let mode = if decision.allowed {
+                                mode.unwrap_or(domain::FieldViewMode::None)
+                            } else {
+                                domain::FieldViewMode::None
+                            };
+                            if result.insert(pointer.clone(), mode).is_some() {
+                                return Err(anyhow!(
+                                    "authorization query produced duplicate pointer for check {index}"
+                                ));
+                            }
+                        }
+                        Some(result)
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "authorization field result shape mismatch for check {index}"
+                        ));
+                    }
+                };
+                Ok(UserActionEvaluation {
+                    decision,
+                    field_views,
+                })
+            })
+            .collect()
     }
 
     pub async fn has_user_action(&self, check: UserActionCheck<'_>) -> Result<bool> {

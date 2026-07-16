@@ -134,12 +134,40 @@ impl Database {
                 return Err(anyhow!("action {missing} does not exist"));
             }
         }
-        let mut queries = Vec::with_capacity(1 + deduped.len());
-        queries.push((
-            Cow::Borrowed("DELETE FROM role_actions WHERE role_id = $1"),
-            params!(role_id.to_owned()),
-        ));
-        for action_id in deduped {
+        let mut queries = Vec::with_capacity(2 + deduped.len());
+        if deduped.is_empty() {
+            queries.push((
+                Cow::Borrowed("DELETE FROM role_action_field_views WHERE role_id = $1"),
+                params!(role_id.to_owned()),
+            ));
+            queries.push((
+                Cow::Borrowed("DELETE FROM role_actions WHERE role_id = $1"),
+                params!(role_id.to_owned()),
+            ));
+        } else {
+            let placeholders = (2..(2 + deduped.len()))
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let delete_params = std::iter::once(hiqlite::Param::from(role_id.to_owned()))
+                .chain(deduped.iter().cloned().map(hiqlite::Param::from))
+                .collect::<Vec<_>>();
+            queries.push((
+                Cow::Owned(format!(
+                    "DELETE FROM role_action_field_views
+                     WHERE role_id = $1 AND action_id NOT IN ({placeholders})"
+                )),
+                delete_params.clone(),
+            ));
+            queries.push((
+                Cow::Owned(format!(
+                    "DELETE FROM role_actions
+                     WHERE role_id = $1 AND action_id NOT IN ({placeholders})"
+                )),
+                delete_params,
+            ));
+        }
+        for action_id in &deduped {
             queries.push((
                 Cow::Borrowed(
                     "INSERT INTO role_actions (role_id, action_id)
