@@ -217,9 +217,13 @@ pub(super) struct ActionLookupRow {
 #[derive(Debug, Clone)]
 pub(super) struct UserActionDecisionRow {
     pub(super) idx: i64,
+    pub(super) candidate_role_count: i64,
     pub(super) rbac_allowed: i64,
     pub(super) allowed: i64,
     pub(super) trusted_application: i64,
+    pub(super) field_idx: Option<i64>,
+    pub(super) field_pointer: Option<String>,
+    pub(super) view_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -451,9 +455,13 @@ impl From<&mut Row<'_>> for UserActionDecisionRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             idx: row.get("idx"),
+            candidate_role_count: row.get("candidate_role_count"),
             rbac_allowed: row.get("rbac_allowed"),
             allowed: row.get("allowed"),
             trusted_application: row.get("trusted_application"),
+            field_idx: row.get("field_idx"),
+            field_pointer: row.get("field_pointer"),
+            view_mode: row.get("view_mode"),
         }
     }
 }

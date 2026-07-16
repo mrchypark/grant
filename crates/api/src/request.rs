@@ -134,6 +134,10 @@ fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
         .ok_or_else(|| ApiError::bad_request(anyhow!("missing {key} header")))
 }
 
+pub(crate) fn required_header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
+    header_value(headers, key)
+}
+
 pub(crate) fn optional_header_value(
     headers: &HeaderMap,
     key: &'static str,

@@ -35,6 +35,13 @@ fn application_check_input(body: ApplicationAuthzCheckRequest) -> ApplicationAut
             provider_id: body.resource.provider,
             resource_type: body.resource.resource_type,
             id: body.resource.id,
+            view: body
+                .resource
+                .view
+                .map(|view| infra::service::AuthorizationResourceView {
+                    schema_key: view.schema_key,
+                    fields: view.fields,
+                }),
         },
     }
 }
@@ -98,7 +105,12 @@ pub(crate) async fn application_authz_batch_check(
         .map_err(ApiError::from_auth)?
         .into_iter()
         .map(authz_check_response)
-        .collect();
+        .collect::<Vec<_>>();
+    if results.len() != checks.len() {
+        return Err(ApiError::internal(
+            "application authorization batch result length mismatch",
+        ));
+    }
     Ok(Json(AuthzBatchCheckResponse { results }))
 }
 
@@ -113,6 +125,7 @@ pub(crate) async fn application_authz_filter(
             "resources must contain at most {MAX_AUTHZ_FILTER_RESOURCES} items"
         )));
     }
+    reject_filter_views(&body.resources)?;
     let mut ids = Vec::with_capacity(body.resources.len());
     let mut checks = Vec::with_capacity(body.resources.len());
     for resource in body.resources {
@@ -170,7 +183,12 @@ pub(crate) async fn authz_batch_check(
         .map_err(ApiError::from_domain)?
         .into_iter()
         .map(authz_check_response)
-        .collect();
+        .collect::<Vec<_>>();
+    if results.len() != checks.len() {
+        return Err(ApiError::internal(
+            "authorization batch result length mismatch",
+        ));
+    }
     Ok(Json(AuthzBatchCheckResponse { results }))
 }
 
@@ -186,6 +204,7 @@ pub(crate) async fn authz_filter(
             "resources must contain at most {MAX_AUTHZ_FILTER_RESOURCES} items"
         )));
     }
+    reject_filter_views(&body.resources)?;
     let read_consistency = read_consistency_override(&query)?;
     let (requested_resource_ids, checks) = authz_filter_inputs(body);
     let decisions = service
@@ -204,6 +223,15 @@ pub(crate) async fn authz_filter(
         })
         .collect();
     Ok(Json(AuthzFilterResponse { resource_ids }))
+}
+
+fn reject_filter_views(resources: &[crate::dto::AuthzResourceRequest]) -> ApiResult<()> {
+    if resources.iter().any(|resource| resource.view.is_some()) {
+        return Err(ApiError::bad_request(anyhow!(
+            "resource.view is not supported by authorization filters"
+        )));
+    }
+    Ok(())
 }
 
 async fn run_authz_check(

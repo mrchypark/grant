@@ -242,6 +242,72 @@ impl ActionRiskLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldViewMode {
+    None,
+    Anonymized,
+    Real,
+}
+
+impl FieldViewMode {
+    pub fn as_positive_db_str(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Anonymized => Some("anonymized"),
+            Self::Real => Some("real"),
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Result<Self, String> {
+        match value {
+            "anonymized" => Ok(Self::Anonymized),
+            "real" => Ok(Self::Real),
+            other => Err(format!("invalid field view mode {other}")),
+        }
+    }
+}
+
+pub const MAX_FIELD_VIEW_RESOURCE_TYPE_BYTES: usize = 128;
+pub const MAX_FIELD_VIEW_SCHEMA_KEY_BYTES: usize = 128;
+pub const MAX_FIELD_VIEW_POINTER_BYTES: usize = 512;
+
+pub fn normalize_field_view_pointer(pointer: &str) -> Result<String, String> {
+    if pointer.is_empty() || !pointer.starts_with('/') {
+        return Err("field view pointer must be a non-root RFC 6901 JSON Pointer".to_owned());
+    }
+
+    let mut canonical = String::with_capacity(pointer.len());
+    for encoded_token in pointer.split('/').skip(1) {
+        let mut decoded = String::with_capacity(encoded_token.len());
+        let mut characters = encoded_token.chars();
+        while let Some(character) = characters.next() {
+            if character != '~' {
+                decoded.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('0') => decoded.push('~'),
+                Some('1') => decoded.push('/'),
+                _ => {
+                    return Err(format!(
+                        "field view pointer contains an invalid RFC 6901 escape: {pointer}"
+                    ));
+                }
+            }
+        }
+        canonical.push('/');
+        for character in decoded.chars() {
+            match character {
+                '~' => canonical.push_str("~0"),
+                '/' => canonical.push_str("~1"),
+                _ => canonical.push(character),
+            }
+        }
+    }
+    Ok(canonical)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Application {

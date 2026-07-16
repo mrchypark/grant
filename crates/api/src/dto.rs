@@ -1,8 +1,12 @@
 use domain::{
     Action, ActionRiskLevel, AgreementStatus, AgreementType, ApplicationAppType, ApplicationGrant,
-    ApplicationType, Organization, RoleBindingState, RoleBindingSubjectType, User,
+    ApplicationType, FieldViewMode, Organization, RoleBindingState, RoleBindingSubjectType, User,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::MapAccess, de::Visitor};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +129,59 @@ pub(crate) struct CreateRoleBindingRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FieldViewPolicyQuery {
+    pub(crate) resource_type: String,
+    pub(crate) schema_key: String,
+    pub(crate) consistency: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReplaceFieldViewPolicyRequest {
+    pub(crate) resource_type: String,
+    pub(crate) schema_key: String,
+    #[serde(deserialize_with = "deserialize_field_view_entries")]
+    pub(crate) field_views: Vec<(String, FieldViewMode)>,
+}
+
+fn deserialize_field_view_entries<'de, D>(
+    deserializer: D,
+) -> Result<Vec<(String, FieldViewMode)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct FieldViewEntriesVisitor;
+
+    impl<'de> Visitor<'de> for FieldViewEntriesVisitor {
+        type Value = Vec<(String, FieldViewMode)>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map of JSON Pointer keys to field view modes")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+            let mut seen = HashSet::new();
+            while let Some(pointer) = map.next_key::<String>()? {
+                if !seen.insert(pointer.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "fieldViews contains duplicate pointer {pointer}"
+                    )));
+                }
+                entries.push((pointer, map.next_value()?));
+            }
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_map(FieldViewEntriesVisitor)
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AuthzSubjectRequest {
     #[serde(rename = "type")]
     pub(crate) subject_type: String,
@@ -139,6 +196,15 @@ pub(crate) struct AuthzResourceRequest {
     #[serde(rename = "type")]
     pub(crate) resource_type: String,
     pub(crate) id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) view: Option<AuthzResourceViewRequest>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthzResourceViewRequest {
+    pub(crate) schema_key: String,
+    pub(crate) fields: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +230,8 @@ pub(crate) struct AuthzFilterRequest {
 pub(crate) struct AuthzCheckResponse {
     pub(crate) allowed: bool,
     pub(crate) reason: String,
+    #[serde(rename = "fieldViews", skip_serializing_if = "Option::is_none")]
+    pub(crate) field_views: Option<BTreeMap<String, FieldViewMode>>,
 }
 
 #[derive(Debug, Serialize)]

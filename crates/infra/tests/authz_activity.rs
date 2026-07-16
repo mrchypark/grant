@@ -2,16 +2,19 @@ mod support;
 
 use chrono::{Duration, Utc};
 use domain::{
-    ApplicationProvisioningStatus, RoleBinding, RoleBindingState, RoleBindingSubjectType,
-    ServiceProvider,
+    Action, ActionRiskLevel, ApplicationProvisioningStatus, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType, ServiceProvider,
 };
 use infra::{
     config::ReadConsistency,
     database::{BindIdentityInput, CachedExternalIdentity, Database, UserActionCheck},
+    runtime::HiqliteRuntime,
 };
 
 const USER_ID: &str = "activity-user";
 const ORGANIZATION_ID: &str = "activity-org";
+const FIELD_VIEW_RESOURCE_TYPE: &str = "compos.object";
+const FIELD_VIEW_SCHEMA_KEY: &str = "019f-object-type-customer";
 
 async fn activity_database() -> (Database, infra::runtime::HiqliteRuntime, tempfile::TempDir) {
     let (runtime, dir) = support::test_runtime().await;
@@ -47,6 +50,119 @@ async fn activity_database() -> (Database, infra::runtime::HiqliteRuntime, tempf
     .await
     .expect("seed binding");
     (db, runtime, dir)
+}
+
+fn test_action(action_id: &str) -> Action {
+    Action {
+        id: action_id.to_owned(),
+        provider_id: "compos".to_owned(),
+        code: action_id.to_owned(),
+        name: action_id.to_owned(),
+        description: None,
+        risk_level: ActionRiskLevel::Low,
+        visibility_granting: false,
+        grantable_to_applications: false,
+        consent_label: None,
+        consent_description: None,
+    }
+}
+
+async fn seed_field_view_lifecycle(
+    db: &Database,
+    runtime: &HiqliteRuntime,
+    role_id: &str,
+    retained_action_id: &str,
+    removed_action_id: &str,
+    retained_pointer: &str,
+    removed_pointer: &str,
+) {
+    let timestamp = "2026-07-15T00:00:00Z";
+    runtime
+        .execute(
+            "INSERT INTO roles (id, organization_id, code, name, created_at, updated_at)
+             VALUES ($1, $2, $1, $1, $3, $3)",
+            vec![
+                hiqlite::Param::from(role_id.to_owned()),
+                hiqlite::Param::from(ORGANIZATION_ID.to_owned()),
+                hiqlite::Param::from(timestamp.to_owned()),
+            ],
+        )
+        .await
+        .expect("seed role");
+    runtime
+        .execute(
+            "INSERT INTO service_providers (id, name, active, created_at, updated_at)
+             VALUES ('compos', 'compos Provider', 1, $1, $1)",
+            vec![hiqlite::Param::from(timestamp.to_owned())],
+        )
+        .await
+        .expect("seed provider");
+    for action_id in [retained_action_id, removed_action_id] {
+        db.upsert_action(&test_action(action_id))
+            .await
+            .expect("seed action");
+        db.upsert_role_action(role_id, action_id)
+            .await
+            .expect("seed role action");
+    }
+    runtime
+        .execute(
+            "INSERT INTO role_action_field_views (
+                role_id, action_id, resource_type, schema_key, field_pointer, view_mode, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, 'real', $6, $6), ($1, $7, $3, $4, $8, 'anonymized', $6, $6)",
+            vec![
+                hiqlite::Param::from(role_id.to_owned()),
+                hiqlite::Param::from(retained_action_id.to_owned()),
+                hiqlite::Param::from(FIELD_VIEW_RESOURCE_TYPE.to_owned()),
+                hiqlite::Param::from(FIELD_VIEW_SCHEMA_KEY.to_owned()),
+                hiqlite::Param::from(retained_pointer.to_owned()),
+                hiqlite::Param::from(timestamp.to_owned()),
+                hiqlite::Param::from(removed_action_id.to_owned()),
+                hiqlite::Param::from(removed_pointer.to_owned()),
+            ],
+        )
+        .await
+        .expect("seed field view policies");
+}
+
+async fn assert_field_view_lifecycle(
+    runtime: &HiqliteRuntime,
+    role_id: &str,
+    retained_action_id: &str,
+    removed_action_id: &str,
+    retained_pointer: &str,
+    removed_pointer: &str,
+) {
+    let actual: Vec<support::NameRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT CAST(COUNT(*) AS TEXT) AS name FROM role_action_field_views
+             WHERE role_id = $1 AND action_id = $2 AND field_pointer = $3
+             UNION ALL
+             SELECT CAST(COUNT(*) AS TEXT) FROM role_action_field_views
+             WHERE role_id = $1 AND action_id = $4 AND field_pointer = $5
+             UNION ALL
+             SELECT CAST(COUNT(*) AS TEXT) FROM role_actions WHERE role_id = $1 AND action_id = $2
+             UNION ALL
+             SELECT CAST(COUNT(*) AS TEXT) FROM role_actions WHERE role_id = $1 AND action_id = $4
+             UNION ALL
+             SELECT CAST(COUNT(*) AS TEXT) FROM role_action_field_views rafv
+             LEFT JOIN role_actions ra ON ra.role_id = rafv.role_id AND ra.action_id = rafv.action_id
+             WHERE ra.role_id IS NULL",
+            vec![
+                hiqlite::Param::from(role_id.to_owned()),
+                hiqlite::Param::from(retained_action_id.to_owned()),
+                hiqlite::Param::from(retained_pointer.to_owned()),
+                hiqlite::Param::from(removed_action_id.to_owned()),
+                hiqlite::Param::from(removed_pointer.to_owned()),
+            ],
+        )
+        .await
+        .expect("query field view lifecycle");
+    assert_eq!(
+        actual.into_iter().map(|row| row.name).collect::<Vec<_>>(),
+        ["1", "0", "1", "0", "0"].map(str::to_owned)
+    );
 }
 
 #[tokio::test]
@@ -313,4 +429,80 @@ async fn shared_identity_cache_round_trips_verified_client_id() {
         .expect("read cache")
         .expect("cached identity");
     assert_eq!(cached.client_id, "oauth-client");
+}
+
+#[tokio::test]
+async fn replace_role_actions_preserves_retained_field_policies_and_removes_deleted_ones() {
+    let (db, runtime, _dir) = activity_database().await;
+    let role_id = "activity-field-role";
+    let kept_action_id = "compos.object.read.retained";
+    let removed_action_id = "compos.object.read.removed";
+    let kept_pointer = "/values/email";
+    let removed_pointer = "/values/internal_note";
+
+    seed_field_view_lifecycle(
+        &db,
+        &runtime,
+        role_id,
+        kept_action_id,
+        removed_action_id,
+        kept_pointer,
+        removed_pointer,
+    )
+    .await;
+
+    let updated = db
+        .replace_role_actions(role_id, &[kept_action_id.to_owned()])
+        .await
+        .expect("replace role actions");
+
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].id, kept_action_id);
+    assert_field_view_lifecycle(
+        &runtime,
+        role_id,
+        kept_action_id,
+        removed_action_id,
+        kept_pointer,
+        removed_pointer,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn replace_provider_actions_removes_stale_field_policies_before_role_actions_and_actions() {
+    let (db, runtime, _dir) = activity_database().await;
+    let role_id = "activity-provider-field-role";
+    let kept_action_id = "compos.object.read.retained";
+    let stale_action_id = "compos.object.read.stale";
+    let kept_pointer = "/values/name";
+    let stale_pointer = "/values/legacy_note";
+
+    seed_field_view_lifecycle(
+        &db,
+        &runtime,
+        role_id,
+        kept_action_id,
+        stale_action_id,
+        kept_pointer,
+        stale_pointer,
+    )
+    .await;
+
+    let updated = db
+        .replace_provider_actions("compos", &[test_action(kept_action_id)])
+        .await
+        .expect("replace provider actions");
+
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].id, kept_action_id);
+    assert_field_view_lifecycle(
+        &runtime,
+        role_id,
+        kept_action_id,
+        stale_action_id,
+        kept_pointer,
+        stale_pointer,
+    )
+    .await;
 }

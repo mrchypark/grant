@@ -21,6 +21,23 @@ bash ./scripts/vind-cluster.sh ensure-context
 bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
 ```
 
+provider-neutral field-view authorization 변경을 확인할 때는 전체 workspace test 전에 아래 focused test를 실행한다.
+schema/readiness와 cleanup뿐 아니라 evaluator, request boundary, check/batch wire, admin GET/PUT을 검증한다.
+
+```bash
+cargo test -p domain --test field_view_mode
+cargo test -p infra --test database_schema
+cargo test -p infra --test authz_activity
+cargo test -p infra --test field_view_evaluator
+cargo test -p api --test field_view_admin
+cargo test -p api --test field_view_authz
+```
+
+현재 local 구현은 schema/readiness와 cleanup, field-aware evaluator, trusted/application authz check/batch,
+field-view admin GET/PUT을 포함한다. focused test는 복수 provider, action id와 code가 다른 catalog,
+opaque resource/schema scope도 포함한다. 아직 local smoke가 없는 항목은 각 consumer runtime enforcement와
+policy backfill이며, 이는 Grant evaluator와 API 구현 이후의 rollout 작업이다.
+
 `vind-bootstrap.sh`는 기본적으로 `deploy/overlays/ephemeral`을 사용한다. 이 overlay는 Grant와
 Rauthy를 각각 3 voter, `emptyDir`로 실행하므로 PVC를 만들지 않는다. 한 Rauthy Pod 교체는 남은
 quorum에서 재가입하며 identity/JWKS를 초기화하지 않는다. 세 Pod를 동시에 잃으면 로컬 `fresh`
