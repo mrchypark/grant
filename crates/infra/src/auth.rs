@@ -1,12 +1,16 @@
 use crate::{
-    config::AuthConfig,
     config::ReadConsistency,
-    database::{CachedExternalIdentity, Database},
+    config::{AuthConfig, AuthProviderMode, PatchDataAuthConfig},
+    database::{CachedExternalIdentity, Database, ExternalIdentityMaterialization},
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use futures_util::StreamExt;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    de::{self, MapAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -14,9 +18,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-const AUTH_PROVIDER: &str = "rauthy";
+const RAUTHY_AUTH_PROVIDER: &str = "rauthy";
+const PATCH_DATA_AUTH_PROVIDER: &str = "patch-data";
+const PATCH_DATA_AUTH_REFRESH_PATH: &str = "/api/collections/users/auth-refresh";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PATCH_DATA_AUTH_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPrincipal {
@@ -32,11 +39,111 @@ pub struct ExternalIdentity {
     pub email: Option<String>,
     pub display_name: String,
     pub active: bool,
+    pub organization_id: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct AuthResolver {
     rauthy: RauthyResolver,
+    patch_data: Option<PatchDataResolver>,
+    provider_mode: AuthProviderMode,
+}
+
+#[derive(Clone)]
+struct PatchDataResolver {
+    base_url: String,
+    exposure_application_id: String,
+    client: Client,
+}
+
+#[derive(Debug, Clone)]
+struct PatchDataIdentity {
+    external_user_id: String,
+    email: String,
+    display_name: String,
+    organization_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchDataAuthRefreshResponse {
+    #[serde(rename = "token")]
+    _token: String,
+    record: PatchDataAuthRefreshRecord,
+}
+
+#[derive(Debug)]
+struct PatchDataAuthRefreshRecord {
+    id: String,
+    email: String,
+    verified: bool,
+    display_name: Option<String>,
+    organization_id: String,
+}
+
+impl<'de> Deserialize<'de> for PatchDataAuthRefreshRecord {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RecordVisitor;
+
+        impl<'de> Visitor<'de> for RecordVisitor {
+            type Value = PatchDataAuthRefreshRecord;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a Patch Data auth refresh record")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut id = None;
+                let mut email = None;
+                let mut verified = None;
+                let mut display_name = None;
+                let mut organization_id = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "id" => set_once(&mut id, map.next_value()?, "id")?,
+                        "email" => set_once(&mut email, map.next_value()?, "email")?,
+                        "verified" => set_once(&mut verified, map.next_value()?, "verified")?,
+                        "displayName" | "name" => {
+                            set_once(&mut display_name, map.next_value()?, "displayName")?
+                        }
+                        "organizationId" => {
+                            set_once(&mut organization_id, map.next_value()?, "organizationId")?
+                        }
+                        _ => {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                Ok(PatchDataAuthRefreshRecord {
+                    id: id.ok_or_else(|| de::Error::missing_field("id"))?,
+                    email: email.ok_or_else(|| de::Error::missing_field("email"))?,
+                    verified: verified.ok_or_else(|| de::Error::missing_field("verified"))?,
+                    display_name,
+                    organization_id: organization_id
+                        .ok_or_else(|| de::Error::missing_field("organizationId"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RecordVisitor)
+    }
+}
+
+fn set_once<T, E: de::Error>(
+    slot: &mut Option<T>,
+    value: T,
+    field: &'static str,
+) -> std::result::Result<(), E> {
+    if slot.replace(value).is_some() {
+        return Err(E::duplicate_field(field));
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -86,6 +193,15 @@ struct RauthyUserinfoResponse {
 
 impl AuthResolver {
     pub fn new(cfg: &AuthConfig) -> Self {
+        Self::new_with_patch_data_request_timeout(cfg, HTTP_REQUEST_TIMEOUT)
+    }
+
+    /// Test seam: production always uses `HTTP_REQUEST_TIMEOUT`; callers that
+    /// construct an isolated resolver can bound a deliberately stalled peer.
+    pub fn new_with_patch_data_request_timeout(
+        cfg: &AuthConfig,
+        patch_data_request_timeout: Duration,
+    ) -> Self {
         Self {
             rauthy: RauthyResolver {
                 base_url: cfg.rauthy.base_url.trim_end_matches('/').to_owned(),
@@ -97,10 +213,16 @@ impl AuthResolver {
                 client: Client::builder()
                     .connect_timeout(HTTP_CONNECT_TIMEOUT)
                     .timeout(HTTP_REQUEST_TIMEOUT)
+                    .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .expect("build Rauthy auth client"),
                 cache: Arc::new(Mutex::new(HashMap::new())),
             },
+            patch_data: cfg
+                .patch_data
+                .as_ref()
+                .map(|config| PatchDataResolver::new(config, patch_data_request_timeout)),
+            provider_mode: cfg.provider_mode.clone(),
         }
     }
 
@@ -125,27 +247,38 @@ impl AuthResolver {
         let effective_read_consistency_override = Some(effective_read_consistency.clone());
         let should_sync = should_sync_identity(Some(&effective_read_consistency));
         let identity = self
-            .rauthy
-            .introspect(
+            .resolve_identity(
                 db,
                 token,
+                Some(organization_id),
                 effective_read_consistency_override.clone(),
                 should_sync,
             )
             .await?;
         let user = if should_sync {
-            db.resolve_or_create_user_identity_with_consistency(
-                AUTH_PROVIDER,
-                &identity.external_user_id,
-                identity.email.as_deref(),
-                &identity.display_name,
-                effective_read_consistency_override.clone(),
-            )
-            .await
-            .map_err(map_strong_identity_sync_error)?
+            if matches!(self.provider_mode, AuthProviderMode::PatchData) {
+                db.materialize_external_identity(ExternalIdentityMaterialization {
+                    provider: &identity.provider,
+                    external_user_id: &identity.external_user_id,
+                    email: identity.email.as_deref(),
+                    display_name: &identity.display_name,
+                })
+                .await
+                .map_err(map_strong_identity_sync_error)?
+            } else {
+                db.resolve_or_create_user_identity_with_consistency(
+                    &identity.provider,
+                    &identity.external_user_id,
+                    identity.email.as_deref(),
+                    &identity.display_name,
+                    effective_read_consistency_override.clone(),
+                )
+                .await
+                .map_err(map_strong_identity_sync_error)?
+            }
         } else {
             db.resolve_existing_user_identity_with_consistency(
-                AUTH_PROVIDER,
+                &identity.provider,
                 &identity.external_user_id,
                 effective_read_consistency_override.clone(),
             )
@@ -186,6 +319,17 @@ impl AuthResolver {
         bearer_token: Option<&str>,
         read_consistency: Option<ReadConsistency>,
     ) -> Result<ExternalIdentity> {
+        self.resolve_external_identity_for_organization(db, bearer_token, None, read_consistency)
+            .await
+    }
+
+    pub async fn resolve_external_identity_for_organization(
+        &self,
+        db: Option<&Database>,
+        bearer_token: Option<&str>,
+        organization_id: Option<&str>,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<ExternalIdentity> {
         let token = bearer_token
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -193,24 +337,195 @@ impl AuthResolver {
         let identity = if let Some(db) = db {
             let effective_read_consistency =
                 db.default_read_consistency_with_override(read_consistency.clone());
-            self.rauthy
-                .introspect(
-                    db,
-                    token,
-                    Some(effective_read_consistency.clone()),
-                    should_sync_identity(Some(&effective_read_consistency)),
-                )
-                .await?
+            self.resolve_identity(
+                db,
+                token,
+                organization_id,
+                Some(effective_read_consistency.clone()),
+                should_sync_identity(Some(&effective_read_consistency)),
+            )
+            .await?
         } else {
-            self.rauthy.introspect_without_db(token).await?
+            self.resolve_identity_without_db(token, organization_id)
+                .await?
         };
+        Ok(identity)
+    }
+
+    async fn resolve_identity(
+        &self,
+        db: &Database,
+        token: &str,
+        organization_id: Option<&str>,
+        read_consistency: Option<ReadConsistency>,
+        persist_shared_cache: bool,
+    ) -> Result<ExternalIdentity> {
+        match self.provider_mode {
+            AuthProviderMode::Rauthy => {
+                let token = bearer_value(token)?;
+                let identity = self
+                    .rauthy
+                    .introspect(db, token, read_consistency, persist_shared_cache)
+                    .await?;
+                Ok(ExternalIdentity {
+                    provider: RAUTHY_AUTH_PROVIDER.to_owned(),
+                    external_user_id: identity.external_user_id,
+                    client_id: identity.client_id,
+                    email: identity.email,
+                    display_name: identity.display_name,
+                    active: identity.active,
+                    organization_id: None,
+                })
+            }
+            AuthProviderMode::PatchData => {
+                self.patch_data
+                    .as_ref()
+                    .expect("Patch Data config validated")
+                    .resolve(token, organization_id)
+                    .await
+            }
+        }
+    }
+
+    async fn resolve_identity_without_db(
+        &self,
+        token: &str,
+        organization_id: Option<&str>,
+    ) -> Result<ExternalIdentity> {
+        match self.provider_mode {
+            AuthProviderMode::Rauthy => {
+                let token = bearer_value(token)?;
+                let identity = self.rauthy.introspect_without_db(token).await?;
+                Ok(ExternalIdentity {
+                    provider: RAUTHY_AUTH_PROVIDER.to_owned(),
+                    external_user_id: identity.external_user_id,
+                    client_id: identity.client_id,
+                    email: identity.email,
+                    display_name: identity.display_name,
+                    active: identity.active,
+                    organization_id: None,
+                })
+            }
+            AuthProviderMode::PatchData => {
+                self.patch_data
+                    .as_ref()
+                    .expect("Patch Data config validated")
+                    .resolve(token, organization_id)
+                    .await
+            }
+        }
+    }
+}
+
+impl PatchDataResolver {
+    fn new(cfg: &PatchDataAuthConfig, request_timeout: Duration) -> Self {
+        Self {
+            base_url: cfg.base_url.trim_end_matches('/').to_owned(),
+            exposure_application_id: cfg.exposure_application_id.clone(),
+            client: Client::builder()
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .timeout(request_timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("build Patch Data auth client"),
+        }
+    }
+
+    async fn resolve(
+        &self,
+        authorization_value: &str,
+        expected_organization_id: Option<&str>,
+    ) -> Result<ExternalIdentity> {
+        let response = self
+            .client
+            .post(format!("{}{}", self.base_url, PATCH_DATA_AUTH_REFRESH_PATH))
+            // Patch Data validates the credential. Grant deliberately does not decode or trust JWT claims.
+            .header(reqwest::header::AUTHORIZATION, authorization_value)
+            .send()
+            .await
+            .map_err(map_patch_data_request_error)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            || response.status() == reqwest::StatusCode::FORBIDDEN
+        {
+            anyhow::bail!("unauthorized: Patch Data token rejected");
+        }
+        if !response.status().is_success() {
+            // Patch Data is the authority for credentials only.  Every other
+            // upstream response is an availability failure; do not expose its
+            // status, body, or transport detail to Grant callers.
+            anyhow::bail!("unavailable: Patch Data auth refresh is unavailable");
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PATCH_DATA_AUTH_RESPONSE_BYTES as u64)
+        {
+            anyhow::bail!("unavailable: Patch Data auth refresh response is too large");
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or_default()
+                .min(MAX_PATCH_DATA_AUTH_RESPONSE_BYTES as u64) as usize,
+        );
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_patch_data_request_error)?;
+            let remaining = MAX_PATCH_DATA_AUTH_RESPONSE_BYTES.saturating_sub(bytes.len());
+            if chunk.len() > remaining {
+                // Dropping the response stream aborts the connection immediately;
+                // no chunked or dishonest Content-Length response can exceed this
+                // in-memory bound.
+                anyhow::bail!("unavailable: Patch Data auth refresh response is too large");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let payload: PatchDataAuthRefreshResponse = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow!("unavailable: Patch Data auth refresh response was invalid"))?;
+        if payload._token.trim().is_empty() {
+            anyhow::bail!("unavailable: Patch Data auth refresh response was invalid");
+        }
+        if !payload.record.verified {
+            anyhow::bail!("forbidden: Patch Data email is not verified");
+        }
+        let identity = PatchDataIdentity {
+            external_user_id: normalized_required("Patch Data user id", &payload.record.id)?,
+            email: normalized_email(&payload.record.email)?,
+            display_name: payload
+                .record
+                .display_name
+                .as_deref()
+                .and_then(normalized_optional)
+                .unwrap_or_else(|| "Patch Data User".to_owned()),
+            organization_id: normalized_required(
+                "Patch Data organization id",
+                &payload.record.organization_id,
+            )?,
+        };
+        // A refresh token is opaque to Grant. Do not cache it: the provider is
+        // authoritative for expiry and revocation, so this cannot outlive it.
+        self.external_identity(identity, expected_organization_id)
+    }
+
+    fn external_identity(
+        &self,
+        identity: PatchDataIdentity,
+        expected_organization_id: Option<&str>,
+    ) -> Result<ExternalIdentity> {
+        if let Some(expected) = expected_organization_id
+            && identity.organization_id != expected
+        {
+            anyhow::bail!(
+                "forbidden: Patch Data user is not a member of the requested organization"
+            );
+        }
         Ok(ExternalIdentity {
-            provider: AUTH_PROVIDER.to_owned(),
+            provider: PATCH_DATA_AUTH_PROVIDER.to_owned(),
             external_user_id: identity.external_user_id,
-            client_id: identity.client_id,
-            email: identity.email,
+            client_id: self.exposure_application_id.clone(),
+            email: Some(identity.email),
             display_name: identity.display_name,
-            active: identity.active,
+            active: true,
+            organization_id: Some(identity.organization_id),
         })
     }
 }
@@ -223,7 +538,7 @@ impl RauthyResolver {
         read_consistency: Option<ReadConsistency>,
         persist_shared_cache: bool,
     ) -> Result<RauthyIdentity> {
-        let cache_key = token_cache_key(token);
+        let cache_key = token_cache_key(RAUTHY_AUTH_PROVIDER, token);
         if let Some(identity) = self.read_cache(&cache_key).await {
             return Ok(identity);
         }
@@ -270,7 +585,7 @@ impl RauthyResolver {
     }
 
     async fn introspect_without_db(&self, token: &str) -> Result<RauthyIdentity> {
-        let cache_key = token_cache_key(token);
+        let cache_key = token_cache_key(RAUTHY_AUTH_PROVIDER, token);
         if let Some(identity) = self.read_cache(&cache_key).await {
             return Ok(identity);
         }
@@ -406,7 +721,7 @@ impl RauthyResolver {
         if cached.expires_at <= wall_now {
             return Ok(None);
         }
-        if cached.provider != AUTH_PROVIDER {
+        if cached.provider != RAUTHY_AUTH_PROVIDER {
             return Ok(None);
         }
         let identity = RauthyIdentity {
@@ -433,11 +748,11 @@ impl RauthyResolver {
         identity: &RauthyIdentity,
         expires_at: DateTime<Utc>,
     ) -> Result<()> {
-        let token_hash = token_cache_key(token);
+        let token_hash = token_cache_key(RAUTHY_AUTH_PROVIDER, token);
         db.put_cached_external_identity(
             &token_hash,
             &CachedExternalIdentity {
-                provider: AUTH_PROVIDER.to_owned(),
+                provider: RAUTHY_AUTH_PROVIDER.to_owned(),
                 external_user_id: identity.external_user_id.clone(),
                 client_id: identity.client_id.clone(),
                 email: identity.email.clone(),
@@ -596,18 +911,55 @@ pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Erro
     }
 }
 
-fn token_cache_key(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    hex::encode(digest)
+fn token_cache_key(provider: &str, token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(provider.as_bytes());
+    digest.update([0]);
+    digest.update(token.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn normalized_optional(value: &str) -> Option<String> {
+    let normalized = value.trim();
+    (!normalized.is_empty()).then(|| normalized.to_owned())
+}
+
+fn bearer_value(value: &str) -> Result<&str> {
+    value
+        .trim()
+        .strip_prefix("Bearer ")
+        .or_else(|| value.trim().strip_prefix("bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))
+}
+
+fn normalized_required(field: &str, value: &str) -> Result<String> {
+    normalized_optional(value).ok_or_else(|| anyhow!("unauthorized: {field} is missing"))
+}
+
+fn normalized_email(value: &str) -> Result<String> {
+    let email = normalized_required("Patch Data email", value)?.to_ascii_lowercase();
+    if !email.contains('@') {
+        anyhow::bail!("unauthorized: Patch Data email is invalid");
+    }
+    Ok(email)
+}
+
+fn map_patch_data_request_error(_error: reqwest::Error) -> anyhow::Error {
+    // The response and all transport details belong to an internal upstream;
+    // returning them would turn an auth boundary into an information oracle.
+    anyhow!("unavailable: Patch Data auth refresh request failed")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CachedRauthyIdentity, RauthyIdentity, cache_deadlines, map_strong_identity_sync_error,
-        should_sync_identity, verified_email,
+        normalized_email, normalized_required, should_sync_identity, token_cache_key,
+        verified_email,
     };
-    use crate::config::{AuthConfig, RauthyAuthConfig, ReadConsistency};
+    use crate::config::{AuthConfig, AuthProviderMode, RauthyAuthConfig, ReadConsistency};
     use anyhow::anyhow;
     use chrono::{TimeZone, Utc};
     use std::time::{Duration, Instant};
@@ -644,6 +996,28 @@ mod tests {
         assert_eq!(
             verified_email(Some("user@example.com".to_owned()), Some(false)),
             None
+        );
+    }
+
+    #[test]
+    fn patch_data_identity_values_are_normalized_and_required() {
+        assert_eq!(
+            normalized_required("id", "  user-1  ").expect("id"),
+            "user-1"
+        );
+        assert_eq!(
+            normalized_email("  USER@example.test ").expect("email"),
+            "user@example.test"
+        );
+        assert!(normalized_required("id", " \t ").is_err());
+        assert!(normalized_email("not-an-email").is_err());
+    }
+
+    #[test]
+    fn auth_cache_keys_are_provider_namespaced() {
+        assert_ne!(
+            token_cache_key("rauthy", "same-token"),
+            token_cache_key("patch-data", "same-token")
         );
     }
 
@@ -690,6 +1064,7 @@ mod tests {
     #[tokio::test]
     async fn cached_identity_is_rejected_at_its_anchored_expiry_without_sleeping() {
         let resolver = super::AuthResolver::new(&AuthConfig {
+            provider_mode: AuthProviderMode::Rauthy,
             rauthy: RauthyAuthConfig {
                 base_url: "http://localhost".to_owned(),
                 introspect_path: "/introspect".to_owned(),
@@ -699,6 +1074,7 @@ mod tests {
                 client_read_api_key: "client-read".to_owned(),
                 cache_ttl_seconds: 30,
             },
+            patch_data: None,
         })
         .rauthy;
         let identity = RauthyIdentity {
@@ -733,6 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn cache_write_sweeps_unqueried_expired_entries() {
         let resolver = super::AuthResolver::new(&AuthConfig {
+            provider_mode: AuthProviderMode::Rauthy,
             rauthy: RauthyAuthConfig {
                 base_url: "http://localhost".to_owned(),
                 introspect_path: "/introspect".to_owned(),
@@ -742,6 +1119,7 @@ mod tests {
                 client_read_api_key: "client-read".to_owned(),
                 cache_ttl_seconds: 30,
             },
+            patch_data: None,
         })
         .rauthy;
         let identity = RauthyIdentity {

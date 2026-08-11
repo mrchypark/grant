@@ -1,4 +1,4 @@
-use infra::config::{AppConfig, LocalNodeRole, ReadConsistency, RuntimeMode};
+use infra::config::{AppConfig, AuthProviderMode, LocalNodeRole, ReadConsistency, RuntimeMode};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn env_lock() -> &'static Mutex<()> {
@@ -23,11 +23,44 @@ fn clear_grant_env() {
         "GRANT_RAUTHY_CLIENT_SECRET",
         "GRANT_RAUTHY_CLIENT_READ_API_KEY",
         "GRANT_RAUTHY_CACHE_TTL_SECONDS",
+        "GRANT_AUTH_PROVIDER",
+        "GRANT_PATCH_DATA_BASE_URL",
+        "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
         "GRANT_MASTER_KEY",
         "GRANT_APP_AUTH_KEY",
     ] {
         unsafe { std::env::remove_var(key) };
     }
+}
+
+#[test]
+fn patch_data_mode_requires_only_its_internal_auth_configuration() {
+    let env = EnvGuard::new();
+    env.set("GRANT_AUTH_PROVIDER", "patch-data");
+    env.set(
+        "GRANT_PATCH_DATA_BASE_URL",
+        "http://patch-data.internal:8090",
+    );
+    env.set(
+        "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
+        "patch-data-exposure",
+    );
+    let cfg = AppConfig::from_env().expect("Patch Data config");
+    assert_eq!(cfg.auth.provider_mode, AuthProviderMode::PatchData);
+    let patch_data = cfg.auth.patch_data.expect("Patch Data settings");
+    assert_eq!(patch_data.exposure_application_id, "patch-data-exposure");
+}
+
+#[test]
+fn patch_data_mode_rejects_non_http_or_non_origin_base_url() {
+    let env = EnvGuard::new();
+    env.set("GRANT_AUTH_PROVIDER", "patch-data");
+    env.set("GRANT_PATCH_DATA_BASE_URL", "file:///tmp/patch-data");
+    env.set(
+        "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
+        "patch-data-exposure",
+    );
+    assert!(AppConfig::from_env().is_err());
 }
 
 struct EnvGuard {

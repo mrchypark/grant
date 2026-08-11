@@ -26,8 +26,24 @@ pub struct RauthyAuthConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchDataAuthConfig {
+    /// Internal Patch Data origin. The resolver always uses the fixed refresh route.
+    pub base_url: String,
+    /// The only Grant application accepted for Patch Data application authorization.
+    pub exposure_application_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthProviderMode {
+    Rauthy,
+    PatchData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
+    pub provider_mode: AuthProviderMode,
     pub rauthy: RauthyAuthConfig,
+    pub patch_data: Option<PatchDataAuthConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,20 +127,68 @@ fn hiqlite_config() -> Result<HiqliteConfig> {
 }
 
 fn auth_config() -> Result<AuthConfig> {
+    let provider_mode = match enum_env_value("GRANT_AUTH_PROVIDER", "rauthy")?.as_str() {
+        "rauthy" => AuthProviderMode::Rauthy,
+        "patch-data" => AuthProviderMode::PatchData,
+        other => {
+            anyhow::bail!("GRANT_AUTH_PROVIDER must be one of rauthy, patch-data; got {other}")
+        }
+    };
+    let patch_data = matches!(provider_mode, AuthProviderMode::PatchData)
+        .then(|| {
+            let base_url = required_env("GRANT_PATCH_DATA_BASE_URL")?;
+            validate_internal_http_base_url("GRANT_PATCH_DATA_BASE_URL", &base_url)?;
+            Ok::<PatchDataAuthConfig, anyhow::Error>(PatchDataAuthConfig {
+                base_url,
+                exposure_application_id: required_env("GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID")?,
+            })
+        })
+        .transpose()?;
     Ok(AuthConfig {
+        provider_mode: provider_mode.clone(),
         rauthy: RauthyAuthConfig {
             base_url: env_or("GRANT_RAUTHY_BASE_URL", "http://127.0.0.1:8080"),
             introspect_path: env_or("GRANT_RAUTHY_INTROSPECT_PATH", "/auth/v1/oidc/introspect"),
             userinfo_path: env_or("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo"),
-            client_id: required_env("GRANT_RAUTHY_CLIENT_ID")?,
-            client_secret: required_env("GRANT_RAUTHY_CLIENT_SECRET")?,
-            client_read_api_key: required_env("GRANT_RAUTHY_CLIENT_READ_API_KEY")?,
+            client_id: required_for_rauthy(&provider_mode, "GRANT_RAUTHY_CLIENT_ID")?,
+            client_secret: required_for_rauthy(&provider_mode, "GRANT_RAUTHY_CLIENT_SECRET")?,
+            client_read_api_key: required_for_rauthy(
+                &provider_mode,
+                "GRANT_RAUTHY_CLIENT_READ_API_KEY",
+            )?,
             cache_ttl_seconds: env::var("GRANT_RAUTHY_CACHE_TTL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(30),
         },
+        patch_data,
     })
+}
+
+fn required_for_rauthy(provider_mode: &AuthProviderMode, key: &str) -> Result<String> {
+    if matches!(provider_mode, AuthProviderMode::Rauthy) {
+        required_env(key)
+    } else {
+        Ok(env::var(key).unwrap_or_default())
+    }
+}
+
+fn validate_internal_http_base_url(key: &str, value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)
+        .with_context(|| format!("{key} must be an absolute http(s) URL"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!(
+            "{key} must be an absolute http(s) origin without path, userinfo, query, or fragment"
+        );
+    }
+    Ok(())
 }
 
 fn env_or(key: &str, default: &str) -> String {

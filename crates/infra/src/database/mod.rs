@@ -120,6 +120,74 @@ impl fmt::Display for OrganizationMembershipWriteError {
 impl StdError for OrganizationMembershipWriteError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalOwnerBootstrapError {
+    ExposureApplicationNotReady,
+    ExistingMemberRole,
+    ExistingAdminRole,
+    ExistingOwner { user_id: String },
+    PreconditionsChanged,
+}
+
+impl fmt::Display for ExternalOwnerBootstrapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExposureApplicationNotReady => {
+                f.write_str("configured Patch Data exposure application is not ready")
+            }
+            Self::ExistingMemberRole => {
+                f.write_str("external owner bootstrap cannot promote an existing member")
+            }
+            Self::ExistingAdminRole => {
+                f.write_str("external owner bootstrap cannot promote an existing admin")
+            }
+            Self::ExistingOwner { user_id } => {
+                write!(
+                    f,
+                    "external owner bootstrap organization already has owner {user_id}"
+                )
+            }
+            Self::PreconditionsChanged => {
+                f.write_str("external owner bootstrap preconditions changed")
+            }
+        }
+    }
+}
+
+impl StdError for ExternalOwnerBootstrapError {}
+
+/// The only data needed to materialize an externally verified identity.  Keep
+/// this deliberately small: callers must never select a local user by email
+/// or by the provider's bare subject.
+#[derive(Debug, Clone)]
+pub struct ExternalIdentityMaterialization<'a> {
+    pub provider: &'a str,
+    pub external_user_id: &'a str,
+    pub email: Option<&'a str>,
+    pub display_name: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalOwnerBootstrapCommand<'a> {
+    pub identity: ExternalIdentityMaterialization<'a>,
+    pub organization_id: &'a str,
+    pub application_id: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalOwnerBootstrapResult {
+    pub user_id: String,
+    pub organization_id: String,
+}
+
+/// A narrow seam for services and deterministic tests.  It intentionally does
+/// not expose arbitrary identity updates or lookup-by-email operations.
+pub trait ExternalIdentityStore {
+    fn external_identity_store_marker(&self) {}
+}
+
+impl ExternalIdentityStore for Database {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationSecurityMutationError {
     ApplicationNotFound { application_id: String },
     TrustedApplication { application_id: String },

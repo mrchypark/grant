@@ -178,7 +178,10 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> ApiResult<Option<String>> {
             "authorization bearer token must not be empty"
         )));
     }
-    Ok(Some(token.to_owned()))
+    // Preserve the original credential value for providers (Patch Data) that
+    // require an exact Authorization forward. Validation above still limits it
+    // to the Bearer scheme.
+    Ok(Some(trimmed.to_owned()))
 }
 
 #[cfg(test)]

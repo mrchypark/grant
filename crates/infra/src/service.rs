@@ -2,11 +2,12 @@ use crate::{
     auth::{
         AuthResolver, AuthenticatedPrincipal, ExternalIdentity, map_strong_identity_sync_error,
     },
-    config::{AppConfig, ReadConsistency},
+    config::{AppConfig, AuthProviderMode, ReadConsistency},
     database::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
         ApplicationTrustMutationError, BackupEntry, BindIdentityInput, Database,
-        OrganizationMembershipWriteError, UserActionCheck,
+        ExternalIdentityMaterialization, ExternalOwnerBootstrapCommand,
+        ExternalOwnerBootstrapError, OrganizationMembershipWriteError, UserActionCheck,
     },
 };
 use anyhow::Result;
@@ -14,9 +15,9 @@ use chrono::Utc;
 use domain::{
     Action, Agreement, AgreementStatus, AgreementType, Application, ApplicationAppType,
     ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus,
-    ApplicationProvisioningStatus, ApplicationType, Group, GroupMember, HealthStatus, Organization,
-    OrganizationMembership, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
-    ServiceProvider, User,
+    ApplicationProvisioningStatus, ApplicationType, Group, GroupMember, HealthStatus,
+    MembershipStatus, Organization, OrganizationMembership, Role, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType, ServiceProvider, User,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -322,6 +323,13 @@ pub struct CurrentUserView {
     pub active_organization_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedUserView {
+    pub user_id: String,
+    pub organization_id: String,
+    pub membership_status: String,
+}
+
 impl AppService {
     pub fn new(cfg: AppConfig, db: Database) -> Self {
         let auth = AuthResolver::new(&cfg.auth);
@@ -417,6 +425,10 @@ impl AppService {
         &self.cfg.auth.rauthy.base_url
     }
 
+    pub fn auth_provider_mode(&self) -> &AuthProviderMode {
+        &self.cfg.auth.provider_mode
+    }
+
     pub fn rauthy_proxy_client(&self) -> &reqwest::Client {
         &self.proxy_client
     }
@@ -439,6 +451,50 @@ impl AppService {
         read_consistency: Option<ReadConsistency>,
     ) -> Result<AuthenticatedPrincipal> {
         let target_organization_id = require_non_empty("organizationId", target_organization_id)?;
+        if matches!(self.cfg.auth.provider_mode, AuthProviderMode::PatchData) {
+            // Validate external organization membership even when the local
+            // organization is inactive and cannot be selected as current.
+            let identity = self
+                .auth
+                .resolve_external_identity_for_organization(
+                    Some(&self.db),
+                    bearer_token,
+                    Some(&target_organization_id),
+                    read_consistency.clone(),
+                )
+                .await?;
+            let user = self
+                .db
+                .materialize_external_identity(ExternalIdentityMaterialization {
+                    provider: &identity.provider,
+                    external_user_id: &identity.external_user_id,
+                    email: identity.email.as_deref(),
+                    display_name: &identity.display_name,
+                })
+                .await
+                .map_err(map_strong_identity_sync_error)?;
+            if !user.active {
+                return Err(forbidden_error("forbidden: local user is inactive"));
+            }
+            if !self
+                .db
+                .has_organization_membership_with_consistency(
+                    &user.id,
+                    &target_organization_id,
+                    read_consistency,
+                )
+                .await?
+            {
+                return Err(forbidden_error(format!(
+                    "forbidden: user {} is not an active member of organization {}",
+                    user.id, target_organization_id
+                )));
+            }
+            return Ok(AuthenticatedPrincipal {
+                user_id: user.id,
+                organization_id: target_organization_id,
+            });
+        }
         let current = self
             .current_user(bearer_token, None, read_consistency.clone())
             .await?;
@@ -466,6 +522,11 @@ impl AppService {
         &self,
         bearer_token: Option<&str>,
     ) -> Result<AuthenticatedPrincipal> {
+        if !matches!(self.cfg.auth.provider_mode, AuthProviderMode::Rauthy) {
+            return Err(forbidden_error(
+                "forbidden: Rauthy owner bootstrap is unavailable for the configured auth provider",
+            ));
+        }
         let identity = self
             .auth
             .resolve_external_identity(None, bearer_token, None)
@@ -491,6 +552,132 @@ impl AppService {
         })
     }
 
+    /// Establishes the first externally-authenticated owner without assuming an
+    /// Rauthy client. This is intentionally master-key protected and idempotent.
+    pub async fn bootstrap_external_owner(
+        &self,
+        bearer_token: Option<&str>,
+    ) -> Result<AuthenticatedPrincipal> {
+        let identity = self
+            .auth
+            .resolve_external_identity(None, bearer_token, None)
+            .await?;
+        let organization_id = identity.organization_id.clone().ok_or_else(|| {
+            forbidden_error("forbidden: configured auth provider did not verify an organization")
+        })?;
+        if !identity.active {
+            return Err(forbidden_error("forbidden: external user is inactive"));
+        }
+        let application_id = match self.cfg.auth.provider_mode {
+            AuthProviderMode::PatchData => {
+                &self
+                    .cfg
+                    .auth
+                    .patch_data
+                    .as_ref()
+                    .expect("Patch Data config validated")
+                    .exposure_application_id
+            }
+            // This route is for externally-scoped providers. Do not allow a
+            // Rauthy caller to bypass its dedicated bootstrap route.
+            AuthProviderMode::Rauthy => {
+                return Err(forbidden_error(
+                    "forbidden: external owner bootstrap is unavailable for Rauthy",
+                ));
+            }
+        };
+        let bootstrapped = self
+            .db
+            .bootstrap_external_owner_atomic(ExternalOwnerBootstrapCommand {
+                identity: ExternalIdentityMaterialization {
+                    provider: &identity.provider,
+                    external_user_id: &identity.external_user_id,
+                    email: identity.email.as_deref(),
+                    display_name: &identity.display_name,
+                },
+                organization_id: &organization_id,
+                application_id,
+            })
+            .await
+            .map_err(|error| {
+                // Diagnostics are intentionally generic: neither owner ids nor
+                // local identity relationships are an externally visible oracle.
+                if error
+                    .downcast_ref::<ExternalOwnerBootstrapError>()
+                    .is_some()
+                {
+                    service_error(
+                        ServiceErrorKind::Conflict,
+                        "external owner bootstrap conflict",
+                    )
+                } else {
+                    error
+                }
+            })?;
+        Ok(AuthenticatedPrincipal {
+            user_id: bootstrapped.user_id,
+            organization_id: bootstrapped.organization_id,
+        })
+    }
+
+    /// Creates only the local user/identity pair for a verified external
+    /// principal. Enrollment remains a separate owner-authorized operation.
+    pub async fn materialize_current_user(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: Option<&str>,
+    ) -> Result<MaterializedUserView> {
+        let organization_id = organization_id
+            .ok_or_else(|| forbidden_error("forbidden: organization is required"))?;
+        let identity = self
+            .auth
+            .resolve_external_identity_for_organization(
+                Some(&self.db),
+                bearer_token,
+                Some(organization_id),
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if identity.organization_id.as_deref() != Some(organization_id) {
+            return Err(forbidden_error("forbidden: organization is not verified"));
+        }
+        if !identity.active {
+            return Err(forbidden_error("forbidden: external user is inactive"));
+        }
+        let user = self
+            .db
+            .materialize_external_identity(ExternalIdentityMaterialization {
+                provider: &identity.provider,
+                external_user_id: &identity.external_user_id,
+                email: identity.email.as_deref(),
+                display_name: &identity.display_name,
+            })
+            .await
+            .map_err(|_| forbidden_error("forbidden: identity materialization failed"))?;
+        if !user.active {
+            return Err(forbidden_error("forbidden: local user is inactive"));
+        }
+        let membership_status = match self
+            .db
+            .organization_membership_status_with_consistency(
+                &user.id,
+                organization_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?
+        {
+            None => "none",
+            Some(MembershipStatus::Active) => "active",
+            Some(MembershipStatus::Disabled) => "disabled",
+        }
+        .to_owned();
+        Ok(MaterializedUserView {
+            user_id: user.id,
+            organization_id: organization_id.to_owned(),
+            membership_status,
+        })
+    }
+
     pub async fn current_user(
         &self,
         bearer_token: Option<&str>,
@@ -503,9 +690,10 @@ impl AppService {
         let effective_read_consistency_override = Some(effective_read_consistency.clone());
         let identity = self
             .auth
-            .resolve_external_identity(
+            .resolve_external_identity_for_organization(
                 Some(&self.db),
                 bearer_token,
+                active_organization_id,
                 effective_read_consistency_override.clone(),
             )
             .await?;
@@ -513,16 +701,28 @@ impl AppService {
             effective_read_consistency,
             ReadConsistency::Strong | ReadConsistency::PreferStrong
         ) {
-            self.db
-                .resolve_or_create_user_identity_with_consistency(
-                    &identity.provider,
-                    &identity.external_user_id,
-                    identity.email.as_deref(),
-                    &identity.display_name,
-                    effective_read_consistency_override.clone(),
-                )
-                .await
-                .map_err(map_strong_identity_sync_error)?
+            if matches!(self.cfg.auth.provider_mode, AuthProviderMode::PatchData) {
+                self.db
+                    .materialize_external_identity(ExternalIdentityMaterialization {
+                        provider: &identity.provider,
+                        external_user_id: &identity.external_user_id,
+                        email: identity.email.as_deref(),
+                        display_name: &identity.display_name,
+                    })
+                    .await
+                    .map_err(map_strong_identity_sync_error)?
+            } else {
+                self.db
+                    .resolve_or_create_user_identity_with_consistency(
+                        &identity.provider,
+                        &identity.external_user_id,
+                        identity.email.as_deref(),
+                        &identity.display_name,
+                        effective_read_consistency_override.clone(),
+                    )
+                    .await
+                    .map_err(map_strong_identity_sync_error)?
+            }
         } else {
             self.db
                 .resolve_existing_user_identity_with_consistency(
@@ -542,15 +742,27 @@ impl AppService {
         if !user.active {
             return Err(forbidden_error("forbidden: local user is inactive"));
         }
-        let organizations = self
+        let mut organizations = self
             .db
             .list_active_organizations_for_user_with_consistency(
                 &user.id,
                 effective_read_consistency_override,
             )
             .await?;
+        if let Some(external_organization_id) = identity.organization_id.as_deref() {
+            organizations.retain(|organization| organization.id == external_organization_id);
+            if organizations.is_empty() {
+                return Err(forbidden_error(
+                    "forbidden: Patch Data user has no active local membership for the verified organization",
+                ));
+            }
+        }
         let active_organization_id =
-            normalize_active_organization(active_organization_id, &identity, &organizations)?;
+            if identity.organization_id.is_some() && active_organization_id.is_none() {
+                identity.organization_id.clone()
+            } else {
+                normalize_active_organization(active_organization_id, &identity, &organizations)?
+            };
         Ok(CurrentUserView {
             provider: identity.provider,
             external_user_id: identity.external_user_id,
@@ -1996,35 +2208,65 @@ impl AppService {
         let organization_id = require_non_empty("organizationId", organization_id)?;
         let identity = self
             .auth
-            .resolve_external_identity(Some(&self.db), bearer_token, Some(ReadConsistency::Strong))
-            .await?;
-        let user = self
-            .db
-            .resolve_or_create_user_identity_with_consistency(
-                &identity.provider,
-                &identity.external_user_id,
-                identity.email.as_deref(),
-                &identity.display_name,
+            .resolve_external_identity_for_organization(
+                Some(&self.db),
+                bearer_token,
+                Some(&organization_id),
                 Some(ReadConsistency::Strong),
             )
-            .await
-            .map_err(map_strong_identity_sync_error)?;
+            .await?;
+        let user = match self.cfg.auth.provider_mode {
+            // Patch Data identities are provider-qualified.  In particular,
+            // never reconcile a verified Patch Data principal by email or a
+            // bare local id: that would inherit another principal's access.
+            AuthProviderMode::PatchData => self
+                .db
+                .materialize_external_identity(ExternalIdentityMaterialization {
+                    provider: &identity.provider,
+                    external_user_id: &identity.external_user_id,
+                    email: identity.email.as_deref(),
+                    display_name: &identity.display_name,
+                })
+                .await
+                .map_err(map_strong_identity_sync_error)?,
+            // Rauthy retains its established legacy reconciliation behavior.
+            AuthProviderMode::Rauthy => self
+                .db
+                .resolve_or_create_user_identity_with_consistency(
+                    &identity.provider,
+                    &identity.external_user_id,
+                    identity.email.as_deref(),
+                    &identity.display_name,
+                    Some(ReadConsistency::Strong),
+                )
+                .await
+                .map_err(map_strong_identity_sync_error)?,
+        };
         if !user.active {
             return Err(forbidden_error("forbidden: local user is inactive"));
         }
-        let application = self
-            .db
-            .find_active_application_by_client_for_organization(
-                &identity.client_id,
-                &organization_id,
-            )
-            .await?
-            .ok_or_else(|| {
-                forbidden_error(format!(
+        let application = match self.cfg.auth.provider_mode {
+            AuthProviderMode::Rauthy => self
+                .db
+                .find_active_application_by_client_for_organization(&identity.client_id, &organization_id)
+                .await?
+                .ok_or_else(|| forbidden_error(format!(
                     "forbidden: token client {} is not an active application in organization {}",
                     identity.client_id, organization_id
-                ))
-            })?;
+                )))?,
+            AuthProviderMode::PatchData => {
+                let configured_id = &self.cfg.auth.patch_data.as_ref().expect("Patch Data config validated").exposure_application_id;
+                let application = self.db.get_application_with_consistency(configured_id, Some(ReadConsistency::Strong)).await
+                    .map_err(|_| forbidden_error("forbidden: configured Patch Data exposure application is not ready"))?;
+                if application.organization_id != organization_id
+                    || !application.active
+                    || application.provisioning_status != ApplicationProvisioningStatus::Ready
+                {
+                    return Err(forbidden_error("forbidden: configured Patch Data exposure application is not active for this organization"));
+                }
+                application
+            }
+        };
         Ok(ApplicationAuthorizationContext {
             user_id: user.id,
             organization_id,

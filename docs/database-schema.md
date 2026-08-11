@@ -34,11 +34,11 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. 현재 런타임 provider 값은 Rauthy 연동의 `rauthy`이며, `(provider, external_user_id)`는 unique index로 관리한다.
+외부 인증 공급자와 내부 사용자 매핑. 런타임 provider는 `rauthy` 또는 `patch-data`이며, `(provider, external_user_id)`는 unique index로 관리한다. Patch Data materialization은 이 provider-qualified key로만 새 local user를 만들며 email이나 bare external id로 기존 user를 연결하지 않는다.
 
 ### `auth_identity_cache`
 
-외부 토큰 introspection 캐시. 현재 Rauthy bearer token 확인 결과와 `client_id`를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다. 과거처럼 client 정보가 없는 cache row는 application authz에 사용하지 않는다.
+외부 토큰 introspection 캐시. Rauthy bearer token 확인 결과와 `client_id`를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다. Patch Data는 이 cache를 사용하지 않고 매 요청 auth-refresh한다. 과거처럼 client 정보가 없는 cache row는 application authz에 사용하지 않는다.
 
 ### `parties`
 

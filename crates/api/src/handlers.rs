@@ -14,7 +14,7 @@ use crate::{
     dto::{
         ApplicationConsentResponse, ApplicationResponse, BootstrapOwnerResponse,
         CreateApplicationRequest, CreateGroupRequest, CreateRoleBindingRequest, CreateRoleRequest,
-        CurrentUserResponse, ReadConsistencyQuery, ReplaceActionsRequest,
+        CurrentUserResponse, MaterializeUserResponse, ReadConsistencyQuery, ReplaceActionsRequest,
         ReplaceApplicationActionsRequest, ReplaceApplicationConsentRequest,
         ReplaceProviderActionsRequest, SetApplicationTrustRequest, SetUserActiveRequest,
         UpdateGroupRequest, UpsertAgreementRequest,
@@ -69,6 +69,23 @@ pub(crate) async fn get_current_user(
         user: current.user,
         organizations: current.organizations,
         active_organization_id: current.active_organization_id,
+    }))
+}
+
+pub(crate) async fn materialize_current_user(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<MaterializeUserResponse>> {
+    let bearer_token = bearer_token(&headers)?;
+    let organization_id = optional_header_value(&headers, "x-organization-id")?;
+    let current = service
+        .materialize_current_user(bearer_token.as_deref(), organization_id.as_deref())
+        .await
+        .map_err(ApiError::from_auth)?;
+    Ok(Json(MaterializeUserResponse {
+        user_id: current.user_id,
+        organization_id: current.organization_id,
+        membership_status: current.membership_status,
     }))
 }
 
@@ -690,6 +707,25 @@ pub(crate) async fn bootstrap_rauthy_owner(
     let bearer_token = bearer_token(&headers)?;
     let principal = service
         .bootstrap_rauthy_owner(bearer_token.as_deref())
+        .await
+        .map_err(ApiError::from_auth)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(BootstrapOwnerResponse {
+            user_id: principal.user_id,
+            organization_id: principal.organization_id,
+        }),
+    ))
+}
+
+pub(crate) async fn bootstrap_external_owner(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+) -> ApiResult<(StatusCode, Json<BootstrapOwnerResponse>)> {
+    require_master_key(service.as_ref(), &headers)?;
+    let bearer_token = bearer_token(&headers)?;
+    let principal = service
+        .bootstrap_external_owner(bearer_token.as_deref())
         .await
         .map_err(ApiError::from_auth)?;
     Ok((

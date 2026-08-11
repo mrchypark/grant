@@ -20,21 +20,22 @@ use authz::{
 };
 use backups::{list_backups_local, list_backups_s3, trigger_backup};
 use handlers::{
-    add_group_member, bootstrap_rauthy_owner, create_agreement, create_application, create_group,
-    create_role, create_role_binding, deactivate_organization, delete_group, delete_role_binding,
-    enroll_organization_member, get_agreement, get_application, get_application_consent,
-    get_current_user, get_group, healthz, list_agreements, list_application_actions,
-    list_application_grants, list_applications, list_group_members, list_groups, list_providers,
-    list_role_bindings, list_roles, reactivate_organization, readyz, remove_group_member,
-    replace_application_actions, replace_application_consent, replace_provider_actions,
-    replace_role_actions, requires_voter_node, revoke_application_consent, set_application_trust,
-    set_user_active, update_agreement, update_group, upsert_provider,
-    verify_application_provisioning,
+    add_group_member, bootstrap_external_owner, bootstrap_rauthy_owner, create_agreement,
+    create_application, create_group, create_role, create_role_binding, deactivate_organization,
+    delete_group, delete_role_binding, enroll_organization_member, get_agreement, get_application,
+    get_application_consent, get_current_user, get_group, healthz, list_agreements,
+    list_application_actions, list_application_grants, list_applications, list_group_members,
+    list_groups, list_providers, list_role_bindings, list_roles, materialize_current_user,
+    reactivate_organization, readyz, remove_group_member, replace_application_actions,
+    replace_application_consent, replace_provider_actions, replace_role_actions,
+    requires_voter_node, revoke_application_consent, set_application_trust, set_user_active,
+    update_agreement, update_group, upsert_provider, verify_application_provisioning,
 };
 use rauthy_proxy::{auth_root, proxy_rauthy_passthrough, proxy_rauthy_root};
 
 pub fn build_router(service: Arc<AppService>) -> Router {
     build_shared_router()
+        .route("/api/v1/me/materialize", post(materialize_current_user))
         .route("/api/v1/admin/providers", post(upsert_provider))
         .route(
             "/api/v1/admin/providers/{providerId}/actions",
@@ -111,6 +112,10 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/admin/bootstrap/rauthy-owner",
             post(bootstrap_rauthy_owner),
+        )
+        .route(
+            "/api/v1/admin/bootstrap/external-owner",
+            post(bootstrap_external_owner),
         )
         .with_state(service)
 }
@@ -196,8 +201,13 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
         )
         .route("/api/v1/admin/backups", any(requires_voter_node))
         .route("/api/v1/admin/backups/s3", any(requires_voter_node))
+        .route("/api/v1/me/materialize", post(requires_voter_node))
         .route(
             "/api/v1/admin/bootstrap/rauthy-owner",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/admin/bootstrap/external-owner",
             any(requires_voter_node),
         )
         .with_state(service)

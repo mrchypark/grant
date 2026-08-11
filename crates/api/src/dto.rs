@@ -241,6 +241,14 @@ pub(crate) struct BootstrapOwnerResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct MaterializeUserResponse {
+    pub(crate) user_id: String,
+    pub(crate) organization_id: String,
+    pub(crate) membership_status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CurrentUserResponse {
     pub(crate) provider: String,
     pub(crate) external_user_id: String,

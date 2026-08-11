@@ -4,8 +4,30 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
+use hiqlite::Row;
+use infra::config::ReadConsistency;
 use serde_json::json;
 use tower::ServiceExt;
+
+struct CountRow(i64);
+
+impl From<&mut Row<'_>> for CountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("count"))
+    }
+}
+
+async fn local_identity_row_count(runtime: &infra::runtime::HiqliteRuntime) -> i64 {
+    let rows: Vec<CountRow> = runtime
+        .query_rows(
+            ReadConsistency::Strong,
+            "SELECT (SELECT COUNT(*) FROM users) + (SELECT COUNT(*) FROM user_identities) AS count",
+            vec![],
+        )
+        .await
+        .expect("local identity row count");
+    rows[0].0
+}
 
 #[tokio::test]
 async fn master_user_active_is_the_local_kill_switch_and_can_reenable() {
@@ -117,4 +139,21 @@ async fn learner_rejects_user_active_mutation() {
         .await
         .expect("learner response");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn learner_materialize_route_builds_and_rejects_without_writes() {
+    let test = support::TestApi::learner().await;
+    let before = local_identity_row_count(&test.runtime).await;
+    let response = test
+        .app
+        .oneshot(support::auth_empty_request(
+            Method::POST,
+            "/api/v1/me/materialize",
+            "bootstrap-user",
+        ))
+        .await
+        .expect("learner materialize response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(local_identity_row_count(&test.runtime).await, before);
 }

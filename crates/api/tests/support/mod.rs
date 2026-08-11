@@ -15,8 +15,8 @@ use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
 use infra::{
     config::{
-        AppConfig, AuthConfig, HiqliteConfig, LocalNodeRole, RauthyAuthConfig, ReadConsistency,
-        RuntimeMode, SecurityConfig, ServerConfig,
+        AppConfig, AuthConfig, AuthProviderMode, HiqliteConfig, LocalNodeRole, RauthyAuthConfig,
+        ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
     },
     database::Database,
     runtime::HiqliteRuntime,
@@ -109,6 +109,7 @@ struct MockClientSecretResponse {
 
 pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
     AuthConfig {
+        provider_mode: AuthProviderMode::Rauthy,
         rauthy: RauthyAuthConfig {
             base_url,
             introspect_path: "/auth/v1/oidc/introspect".to_owned(),
@@ -118,6 +119,7 @@ pub fn rauthy_auth_config(base_url: String) -> AuthConfig {
             client_read_api_key: "grant-rauthy-api-key".to_owned(),
             cache_ttl_seconds: 30,
         },
+        patch_data: None,
     }
 }
 

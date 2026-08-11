@@ -227,6 +227,7 @@ async fn current_user_returns_local_user_and_active_organizations() {
     assert_eq!(json["provider"], "rauthy");
     assert_eq!(json["externalUserId"], "me-user");
     assert_eq!(json["user"]["id"], Value::String(user.id.clone()));
+    assert_eq!(json["user"]["email"], "me-user@rauthy.test");
     assert_eq!(json["activeOrganizationId"], "alpha-org");
     let organizations = json["organizations"].as_array().expect("organizations");
     assert!(organizations.iter().any(|org| org["id"] == "alpha-org"));

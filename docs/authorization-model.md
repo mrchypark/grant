@@ -165,6 +165,18 @@ POST /api/v1/application-authz/filter
 
 이 경로는 전용 `x-grant-app-auth-key`, Bearer token, `x-organization-id`를 모두 요구하고 strong consistency만 사용한다. `GRANT_APP_AUTH_KEY`는 필수이며 `GRANT_MASTER_KEY`와 다른 값이어야 한다. master key는 application-authz 인증에 사용할 수 없고 app-auth key도 admin 인증에 사용할 수 없다. subject와 application id는 body에서 받지 않는다. 서버가 검증된 토큰 `sub`와 `client_id`를 사용해 exact 사용자와 동일 조직의 active application을 결정한다. client mismatch, 모호한 매핑, 검증 정보가 없는 cache 또는 identity provider 장애에서 안전한 cache가 없으면 fail closed한다. 기존 `/api/v1/authz/*` master API는 `x-grant-master-key`로 명시한 subject를 검사하는 trusted-provider 계약으로 유지한다.
 
+## Patch Data authentication mode
+
+`GRANT_AUTH_PROVIDER=patch-data`를 선택하면 Rauthy introspection/userinfo 경로 대신 Grant가 설정된 내부 origin `GRANT_PATCH_DATA_BASE_URL`의 고정된 `POST /api/collections/users/auth-refresh`만 호출한다. URL에는 query/fragment를 둘 수 없으며 redirect/사용자 제공 URL은 사용하지 않는다. 들어온 Bearer credential은 Patch Data가 검증하도록 전달하고 Grant는 JWT를 decode하거나 claim을 신뢰하지 않는다.
+
+Patch Data 응답 계약은 PocketBase auth-refresh shape인 `{ "token": "...", "record": { "id", "email", "verified", "organizationId" } }`를 요구한다. `record.verified`는 반드시 `true`여야 한다. `id`와 organization id는 trim 후 비어 있으면 안 되고 email은 trim/lowercase normalization 후 유효한 `@` 주소여야 한다. 요청 `x-organization-id`는 검증된 응답 organization id와 exact match해야 하며, 이후에도 Grant의 active local membership 검사가 적용된다. Grant는 refresh token의 expiry/revocation을 연장하지 않도록 Patch Data identity를 cache하지 않고 매 요청 refresh한다. 응답은 64 KiB를 hard bound로 stream하며 Content-Length가 없거나 거짓이어도 즉시 중단한다. 401/403만 credential failure이고, redirect·다른 4xx/5xx·transport/timeout은 upstream detail을 노출하지 않는 unavailable(503) failure다; Rauthy cache key는 provider name을 SHA-256 input domain에 포함한다.
+
+Patch Data application authorization에는 caller/token client id를 사용하지 않는다. `GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID`가 가리키는 기존 Grant application만 strong read로 찾고, 요청 조직의 active/ready application인지 확인한다. 이 application은 기존 admin/IaC provisioning 경계에서 만들고 ready 상태로 전환한다; Patch Data mode가 provider/action, role, binding, grant를 seed하지 않는다. 기존 `/auth/v1/*` proxy와 `/api/v1/admin/bootstrap/rauthy-owner`는 Rauthy mode에만 남는다.
+
+`POST /api/v1/me/materialize`는 Patch Data가 검증한 `x-organization-id`와 exact match하는 organization에서만 voter node가 처리한다. provider-qualified `(patch-data, record.id)`로만 local user/identity를 materialize하므로 email이나 bare id의 기존 local user를 연결하지 않는다. local `users.active = false`이면 403으로 거부한다. 성공 응답은 `userId`, `organizationId`, `membershipStatus`만 가진 정확히 3-field object이며, 이 호출은 membership, role, role binding을 만들거나 권한을 부여하지 않는다. Patch Data identity는 이 endpoint에서도 cache하지 않고 매 요청 upstream auth-refresh로 재검증한다.
+
+`deploy/overlays/patch-data`는 IED-style Grant-only manifest다. 이 overlay는 `GRANT_AUTH_PROVIDER=patch-data`, 내부 `http://patch-data:8090`, 고정 application id `patch-data-exposure`을 설정하고 Rauthy workload와 Grant의 Rauthy secretKeyRef를 제거한다. `deploy/overlays/ied-patch-data`는 이 정확한 manifest를 compose하는 명시적 IED 선택 이름이다. 기존 `deploy/overlays/ied`는 legacy chaos namespace mode이므로 Patch Data 용도로 재사용하지 않는다. Grant master/app 및 Hiqlite secret은 별도로 제공해야 한다. base와 production overlay는 Rauthy deployment contract를 그대로 유지한다.
+
 ## 업데이트 규칙
 
 아래가 바뀌면 이 문서와 [database-schema.md](./database-schema.md)를 함께 갱신한다.

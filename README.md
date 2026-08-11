@@ -14,7 +14,7 @@
 - `crates/domain`
   - 도메인 타입과 공용 모델
 - `crates/infra`
-  - 설정, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, 권한 판정 서비스 레이어
+  - 설정, `rauthy | patch-data` identity provider 연동, hiqlite runtime, schema/seed, 권한 판정 서비스 레이어
 - `crates/api`
   - Axum HTTP 라우터와 API 계약
 - `crates/app`
@@ -42,7 +42,7 @@ bash ./scripts/ci-local.sh
 - [데이터베이스 스키마](./docs/database-schema.md)
 - [백업과 복구](./docs/backup-restore.md)
 
-운영 Kubernetes 배포는 `deploy/overlays/production`을 사용한다. Grant와 Rauthy 모두 3-node no-PVC HA로 실행되며, 외부 S3 backup pair와 fail-closed lifecycle state가 필수다. 저장소의 production 파일은 ConfigMap/Secret 형식 예시만 제공하고 실제 credential은 포함하지 않는다.
+운영 Kubernetes 배포는 Rauthy provider의 `deploy/overlays/production` 또는 Patch Data provider의 `deploy/overlays/ied-patch-data`를 명시적으로 선택한다. production의 Grant와 Rauthy는 3-node no-PVC HA로 실행되며, 외부 S3 backup pair와 fail-closed lifecycle state가 필수다. 저장소의 production 파일은 ConfigMap/Secret 형식 예시만 제공하고 실제 credential은 포함하지 않는다.
 
 ## 참고
 

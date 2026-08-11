@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, header},
     response::{Redirect, Response},
 };
-use infra::service::AppService;
+use infra::{config::AuthProviderMode, service::AppService};
 use std::sync::Arc;
 
 use crate::error::{ApiError, ApiResult};
@@ -17,6 +17,12 @@ pub(crate) async fn proxy_rauthy_root(
     State(service): State<Arc<AppService>>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
+    if !matches!(service.auth_provider_mode(), AuthProviderMode::Rauthy) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "not found".to_owned(),
+        });
+    }
     proxy_rauthy_request(service.as_ref(), request, "/auth/v1").await
 }
 
@@ -24,6 +30,12 @@ pub(crate) async fn proxy_rauthy_passthrough(
     State(service): State<Arc<AppService>>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
+    if !matches!(service.auth_provider_mode(), AuthProviderMode::Rauthy) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "not found".to_owned(),
+        });
+    }
     let upstream_path = request.uri().path().to_owned();
     proxy_rauthy_request(service.as_ref(), request, &upstream_path).await
 }

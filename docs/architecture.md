@@ -20,9 +20,9 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 - `crates/domain`
   - grant 도메인 모델을 제공한다: `Organization`, `Party`, `ServiceProvider`, `Action`, `Role`, `RoleBinding`, `Application`, `ApplicationRedirectUri`, `ApplicationGrant`, `Agreement`.
 - `crates/infra`
-  - 설정 로딩, Rauthy OIDC identity 연동, hiqlite runtime, schema/seed, coarse 권한 판정 service layer를 가진다. startup은 active legacy field/mask policy state를 감지하면 fail closed한다.
+  - 설정 로딩, `rauthy | patch-data` identity provider 연동, hiqlite runtime, schema/seed, coarse 권한 판정 service layer를 가진다. startup은 active legacy field/mask policy state를 감지하면 fail closed한다.
 - `crates/api`
-  - `/api/v1/me`, `/api/v1/providers`, `/api/v1/orgs/*`, `/api/v1/authz/*`, `/api/v1/application-authz/*`, 단일 `/api/v1/exposure-authz/read`, backup/admin, Rauthy `/auth/v1/*` proxy 라우트를 제공한다. authorization 응답은 binary-only이며 field-aware 입력은 capability-rejected 된다.
+  - `/api/v1/me`, voter-only `POST /api/v1/me/materialize`, `/api/v1/providers`, `/api/v1/orgs/*`, `/api/v1/authz/*`, `/api/v1/application-authz/*`, 단일 `/api/v1/exposure-authz/read`, backup/admin, Rauthy mode의 `/auth/v1/*` proxy 라우트를 제공한다. authorization 응답은 binary-only이며 field-aware 입력은 capability-rejected 된다.
 - `crates/app`
   - 환경변수로 설정을 읽고 voter/learner 역할에 맞는 Axum router를 띄운다.
 
@@ -55,11 +55,11 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 
 1. `crates/app/src/main.rs`가 설정을 읽고 `AppService`를 초기화한다.
 2. `crates/api/src/lib.rs`가 shared read/authz 라우트와 voter-only write/admin 라우트를 조립한다.
-3. 사용자 요청은 Rauthy bearer token을 OAuth2 introspection과 OIDC userinfo로 확인한 뒤 grant user/org context로 해석한다.
+3. 사용자 요청은 선택된 provider로 검증한 뒤 grant user/org context로 해석한다. Rauthy는 OAuth2 introspection/OIDC userinfo를 사용하고, Patch Data는 매 요청 내부 auth-refresh를 사용한다.
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
 5. service-to-service admin과 기존 trusted-provider `/authz/*` API는 `x-grant-master-key`로 보호하고, 최종 사용자 토큰을 판정하는 `/application-authz/*` API는 별도 `x-grant-app-auth-key`로 보호한다. 두 key는 서로 달라야 하며 교차 사용할 수 없다.
 
-Developer console은 기존 organization/application 경계 안에 둔다. 조직 application 생성은 generated Rauthy client id를 예약할 뿐이며, Rauthy client 생성·수정과 client secret 회전은 별도 운영자/IaC 경계에서 수행한다. Grant backend는 `Clients` 그룹의 `read` 권한만 가진 Rauthy API key로 master provisioning verify의 단일 client 조회만 수행하고, 설정이 local reservation과 일치할 때 application을 `ready`로 전환한다.
+Developer console은 기존 organization/application 경계 안에 둔다. Rauthy mode의 조직 application 생성은 generated Rauthy client id를 예약할 뿐이며, client 생성·수정과 secret 회전은 별도 운영자/IaC 경계에서 수행한다. Grant backend는 `Clients` 그룹의 `read` 권한만 가진 Rauthy API key로 master provisioning verify의 단일 client 조회만 수행하고, 설정이 local reservation과 일치할 때 application을 `ready`로 전환한다. Patch Data mode는 설정된 기존 exposure application만 사용한다.
 
 ## Coarse Authorization Deployment Boundary
 

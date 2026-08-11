@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Explicit selection contract for an IED deployment backed by Patch Data.
+# Do not use `../ied`: that overlay remains the legacy chaos namespace mode.
+resources:
+  - ../patch-data

@@ -778,6 +778,8 @@ verify_static() {
   kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/base.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ephemeral" >"${TMP_DIR}/ephemeral.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied" >"${TMP_DIR}/ied.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/patch-data" >"${TMP_DIR}/patch-data.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied-patch-data" >"${TMP_DIR}/ied-patch-data.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/production" >"${TMP_DIR}/production.yaml"
 
   assert_repository_rauthy_launcher_pin "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" \
@@ -882,6 +884,17 @@ verify_static() {
   assert_ha_contract "${TMP_DIR}/base.yaml" base
   assert_ha_contract "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_ha_contract "${TMP_DIR}/ied.yaml" ied
+  if ! grep -q 'GRANT_AUTH_PROVIDER: patch-data' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_PATCH_DATA_BASE_URL: http://patch-data:8090' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay configuration is incomplete"
+  fi
+  if grep -Eq '^  name: rauthy$|name: GRANT_RAUTHY_CLIENT_(ID|SECRET)$' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay retains a Rauthy workload or Grant credential reference"
+  fi
+  if ! cmp -s "${TMP_DIR}/patch-data.yaml" "${TMP_DIR}/ied-patch-data.yaml"; then
+    fail "ied-patch-data must compose the exact Patch Data Grant-only contract"
+  fi
   assert_ha_contract "${TMP_DIR}/production.yaml" production
 
   [ "$(grep -c 'whenUnsatisfiable: DoNotSchedule' "${TMP_DIR}/production.yaml" || true)" -eq 2 ] \
