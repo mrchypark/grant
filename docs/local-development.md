@@ -21,22 +21,32 @@ bash ./scripts/vind-cluster.sh ensure-context
 bash ./scripts/vind-exec.sh bash ./scripts/vind-bootstrap.sh
 ```
 
-provider-neutral field-view authorization 변경을 확인할 때는 전체 workspace test 전에 아래 focused test를 실행한다.
-schema/readiness와 cleanup뿐 아니라 evaluator, request boundary, check/batch wire, admin GET/PUT을 검증한다.
+coarse authorization deploy boundary를 확인할 때는 전체 workspace test 전에 아래 focused test를 실행한다.
+binary allow/deny, agreement expiry, 모든 endpoint의 field-aware rejection, field policy route 부재,
+`visibilityGranting=true`의 no-mutation rejection을 검증한다.
 
 ```bash
-cargo test -p domain --test field_view_mode
 cargo test -p infra --test database_schema
 cargo test -p infra --test authz_activity
-cargo test -p infra --test field_view_evaluator
 cargo test -p api --test field_view_admin
 cargo test -p api --test field_view_authz
+cargo test -p api --test organization_authorization authz_check_and_filter_use_role_binding
+cargo test -p api --test organization_authorization expired_agreement_binding_denies_coarse_authorization
 ```
 
-현재 local 구현은 schema/readiness와 cleanup, field-aware evaluator, trusted/application authz check/batch,
-field-view admin GET/PUT을 포함한다. focused test는 복수 provider, action id와 code가 다른 catalog,
-opaque resource/schema scope도 포함한다. 아직 local smoke가 없는 항목은 각 consumer runtime enforcement와
-policy backfill이며, 이는 Grant evaluator와 API 구현 이후의 rollout 작업이다.
+현재 local 구현은 coarse evaluator와 binary trusted/application authz check/batch/filter를 포함한다.
+`resource.view` 값은 schema/pointer로 해석하지 않고 key 존재만으로 거부한다. legacy field-view table은
+삭제하지 않지만 empty table은 runtime/readiness dependency가 아니며 active migrated state는 startup에서
+fail closed한다. Exposure V1은 `exposureId`, 양의 `exposureVersion`, 정확한
+`sha256:<64 lowercase hex>` `artifactDigest`, `resourceId`, opaque `requestBinding`의 exact tuple을
+decision replay binding으로 사용한다. policy key는 version/digest와 분리되며, Grant는 accepted digest를
+byte-for-byte echo한다. Exposure는 business data read 전에 echo field와 request binding, 5초 freshness
+envelope의 `expiresAt`을 원 요청과 비교해야 하며 다른 tuple/resource에 decision을 재사용할 수 없다.
+
+```bash
+cargo test -p api --test exposure_authz
+cargo test -p api --test organization_members
+```
 
 `vind-bootstrap.sh`는 기본적으로 `deploy/overlays/ephemeral`을 사용한다. 이 overlay는 Grant와
 Rauthy를 각각 3 voter, `emptyDir`로 실행하므로 PVC를 만들지 않는다. 한 Rauthy Pod 교체는 남은
@@ -177,13 +187,16 @@ curl -sS -X PUT "${BASE_URL}/api/v1/admin/providers/compos/actions" \
       "name": "Read Compos Object",
       "description": null,
       "riskLevel": "low",
-      "visibilityGranting": true,
+      "visibilityGranting": false,
       "grantableToApplications": true,
       "consentLabel": "Read Compos Object",
       "consentDescription": null
     }]
   }' | jq
 ```
+
+이 action은 field/view 권한을 부여하지 않는 coarse authorization용이다. `visibilityGranting=true`는
+mutation 전에 거부되므로 catalog provisioning에 사용할 수 없다.
 
 `PUT`은 manifest replace다. 요청에서 빠진 provider action은 role/application grant 참조와 함께 제거된다.
 

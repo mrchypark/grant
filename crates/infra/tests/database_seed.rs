@@ -207,7 +207,7 @@ async fn ensure_schema_seeds_bootstrap_organization_and_grant_actions() {
         .iter()
         .find(|action| action.code == "organization.profile.read")
         .expect("organization.profile.read action");
-    assert_eq!(profile_read.visibility_granting, 1);
+    assert_eq!(profile_read.visibility_granting, 0);
     assert_eq!(profile_read.grantable_to_applications, 1);
     assert!(
         actions
@@ -564,6 +564,43 @@ async fn agreement_backed_organization_binding_grants_cross_org_action() {
         .await
         .expect("action lookup");
     assert!(allowed);
+
+    let mismatched_resource = db
+        .has_user_organization_action_with_consistency(
+            "bootstrap-user",
+            "grantee-org",
+            "unknown-org",
+            "organization.profile.read",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("mismatched resource lookup");
+    assert!(!mismatched_resource);
+
+    db.upsert_agreement(&Agreement {
+        id: "agreement-grantor-grantee".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "grantor-org".to_owned(),
+        grantee_organization_id: "grantee-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "Expired Grantor to Grantee".to_owned(),
+        reference_no: None,
+        starts_at: Some("2020-01-01T00:00:00Z".to_owned()),
+        ends_at: Some("2020-12-31T23:59:59Z".to_owned()),
+    })
+    .await
+    .expect("expire agreement");
+    let expired = db
+        .has_user_organization_action_with_consistency(
+            "bootstrap-user",
+            "grantee-org",
+            "grantor-org",
+            "organization.profile.read",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("expired agreement lookup");
+    assert!(!expired);
 }
 
 #[tokio::test]

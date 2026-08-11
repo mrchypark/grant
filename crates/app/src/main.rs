@@ -1,6 +1,6 @@
 use anyhow::Context;
 use infra::{
-    config::{AppConfig, LocalNodeRole, RuntimeMode},
+    config::{AppConfig, LocalNodeRole, ReadConsistency, RuntimeMode},
     database::Database,
     runtime::HiqliteRuntime,
     service::AppService,
@@ -30,6 +30,10 @@ async fn main() -> anyhow::Result<()> {
             local_node_role = local_node_role_str(&config.hiqlite.local_node_role),
             "skipping schema migration on learner"
         );
+        service
+            .verify_coarse_deployment_compatibility(ReadConsistency::Strong)
+            .await
+            .context("verify learner coarse deployment compatibility")?;
     }
     if should_initialize_service(&config) {
         service.bootstrap().await.context("bootstrap service")?;

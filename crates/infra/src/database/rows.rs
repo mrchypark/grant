@@ -7,7 +7,8 @@ use super::codec::{
 use anyhow::Result;
 use domain::{
     Action, Agreement, Application, ApplicationGrant, ApplicationRedirectUri, Group, GroupMember,
-    Organization, Party, Role, RoleBinding, ServiceProvider,
+    MembershipRole, MembershipStatus, Organization, OrganizationMembership, Party, Role,
+    RoleBinding, ServiceProvider,
 };
 use hiqlite::Row;
 
@@ -136,6 +137,15 @@ pub(super) struct GroupMemberRow {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct OrganizationMembershipRow {
+    pub(super) id: String,
+    pub(super) organization_id: String,
+    pub(super) user_id: String,
+    pub(super) membership_role: String,
+    pub(super) status: String,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct PartyRow {
     pub(super) id: String,
     pub(super) business_no: String,
@@ -217,13 +227,9 @@ pub(super) struct ActionLookupRow {
 #[derive(Debug, Clone)]
 pub(super) struct UserActionDecisionRow {
     pub(super) idx: i64,
-    pub(super) candidate_role_count: i64,
     pub(super) rbac_allowed: i64,
     pub(super) allowed: i64,
     pub(super) trusted_application: i64,
-    pub(super) field_idx: Option<i64>,
-    pub(super) field_pointer: Option<String>,
-    pub(super) view_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +358,18 @@ impl From<&mut Row<'_>> for GroupMemberRow {
     }
 }
 
+impl From<&mut Row<'_>> for OrganizationMembershipRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            organization_id: row.get("organization_id"),
+            user_id: row.get("user_id"),
+            membership_role: row.get("membership_role"),
+            status: row.get("status"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for PartyRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -455,13 +473,9 @@ impl From<&mut Row<'_>> for UserActionDecisionRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             idx: row.get("idx"),
-            candidate_role_count: row.get("candidate_role_count"),
             rbac_allowed: row.get("rbac_allowed"),
             allowed: row.get("allowed"),
             trusted_application: row.get("trusted_application"),
-            field_idx: row.get("field_idx"),
-            field_pointer: row.get("field_pointer"),
-            view_mode: row.get("view_mode"),
         }
     }
 }
@@ -589,6 +603,39 @@ impl From<GroupMemberRow> for GroupMember {
             organization_membership_id: value.organization_membership_id,
             user_id: value.user_id,
         }
+    }
+}
+
+impl TryFrom<OrganizationMembershipRow> for OrganizationMembership {
+    type Error = anyhow::Error;
+
+    fn try_from(value: OrganizationMembershipRow) -> Result<Self> {
+        let membership_role = match value.membership_role.as_str() {
+            "owner" => MembershipRole::Owner,
+            "admin" => MembershipRole::Admin,
+            "member" => MembershipRole::Member,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "invalid organization membership role {other}"
+                ));
+            }
+        };
+        let status = match value.status.as_str() {
+            "active" => MembershipStatus::Active,
+            "disabled" => MembershipStatus::Disabled,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "invalid organization membership status {other}"
+                ));
+            }
+        };
+        Ok(Self {
+            id: value.id,
+            organization_id: value.organization_id,
+            user_id: value.user_id,
+            membership_role,
+            status,
+        })
     }
 }
 

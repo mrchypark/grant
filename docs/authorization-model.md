@@ -11,7 +11,7 @@
 - `actions`: provider별 action catalog다.
 - `roles`: 조직 안에서 action 묶음을 이름 붙인 것이다.
 - `role_bindings`: subject가 어떤 provider/resource scope에 어떤 role을 가지는지 저장하는 권한 원본이다.
-- `role_action_field_views`: role-action별 provider-neutral 필드 열람의 positive policy row다.
+- `role_action_field_views`: 보존된 field authorization history를 위한 legacy table이다. coarse deploy runtime은 읽거나 평가하지 않는다.
 - `agreements`: 조직 간 권한 부여의 근거다.
 - `applications`: 조직 내부 또는 first-party application이다.
 - `application_grants`: 사용자가 application에 동의한 action subset이다.
@@ -46,42 +46,27 @@ group/user binding은 반드시 `subject_organization_id` 안에서만 유효하
 
 그룹 관리 API는 `organization.group.manage`로 보호한다. list/get은 learner에서도 읽을 수 있지만 create/update/delete와 member 변경은 voter에서만 수행한다. member 추가는 같은 조직의 active 사용자 membership에 한정되고, group binding이 남아 있으면 group 삭제는 `409 Conflict`다.
 
-## Field View Authorization
+## Coarse Deploy Baseline And Preserved Field Work
 
-`role_action_field_views`는 `(role_id, action_id, resource_type, schema_key, field_pointer)`별로
-`real` 또는 `anonymized`만 저장한다. row가 없으면 해당 field의 결과는 `none`이다. matching role의
-positive row는 `none < anonymized < real` 순서로 병합하며 가장 높은 mode가 적용된다. absence는 deny가
-아니며, 한 role의 absence 또는 더 낮은 mode가 다른 role의 `real`을 취소하지 않는다.
+현재 deploy baseline의 Grant 판정은 subject, action, provider/resource scope에 대한 binary allow/deny다.
+`check`와 `batch-check` 응답은 `allowed`와 `reason`만 반환하며 field set, field mode, mask를 반환하지
+않는다. `filter`는 coarse 판정을 통과한 resource id만 반환한다.
 
-field grant는 exact normalized RFC 6901 pointer만 사용한다. wildcard, prefix, glob, schema-wide
-sentinel 같은 별도 policy 문법은 지원하지 않는다. RFC 6901 token 안의 `*`는 일반 문자이며 pointer
-전체가 exact string으로 비교된다. `/id`도 Grant 코어에서는 일반 pointer다. provider/consumer의 fixed
-envelope field를 제외하는 규칙은 Grant 전역 정책이 아니라 해당 consumer adapter가 소유한다. 새 pointer는
-명시적 positive row가 생기기 전까지 `none`이다.
+여섯 trusted/application `check`, `batch-check`, `filter` endpoint에서 resource에 `view` key가 존재하면
+그 값의 shape, `schemaKey`, pointer를 해석하지 않고 모두 `400 Bad Request`로 거부한다. `view: null`도
+field-aware capability 요청으로 간주한다. field-aware 요청을 viewless 요청 또는 모든 field 허용으로
+해석하는 fallback은 없다.
 
-현재 구현은 schema/readiness, child-first lifecycle cleanup, field-aware evaluator와 trusted/application
-check 및 batch-check wire, exact role-action scope의 admin GET 및 voter-only full-replace PUT을 제공한다.
-PUT은 `Idempotency-Key`와 transaction audit outbox를 사용한다.
+field policy `GET|PUT .../field-views` route는 voter와 learner 모두 등록하지 않는다. action catalog
+mutation에서 `visibilityGranting=true`도 write 전에 거부한다. 보존된 legacy field-view table과
+migration은 이 phase에서 삭제하지 않지만 coarse evaluator/readiness는 그 table에 의존하지 않는다.
+반대로 active/nonempty field policy/audit row, 알려진 mask/activation state 또는 `visibility_granting` action이 있는
+database는 startup에서 fail closed하며 별도 forward/restore 계획이 필요하다. 빈 legacy table만 있는
+fresh/untouched state는 blocker가 아니다.
 
-field-view capability는 특정 provider/action/resource type 목록이 아니라 action catalog의
-`visibility_granting = true`로 선언한다. admin policy는 조직이 소유한 exact role-action에만 연결되고,
-runtime view 요청은 active provider의 동일 action id와 exact RBAC binding tuple로 평가한다.
-`actions.id`와 `actions.code`는 서로 다른 식별자일 수 있으므로 field-view 판정은 action id를 code와
-같다고 가정하지 않는다. `resource_type`, `resource_id`, `schema_key`는 opaque exact identifier다.
-Grant는 object와 schema의 대응 관계를 알거나 검증하지 않으며 그 무결성은 요청 consumer가 책임진다.
-
-field-aware check 하나는 field pointer를 1개 이상 256개 이하로 요청할 수 있다. field-aware
-`provider`, `action`, `resourceType`, resource `id`, `schemaKey`는 exact identifier라서 앞뒤 공백을
-trim하지 않고 거부한다. field-aware `resourceType`과 `schemaKey`만 각각 128 bytes 이하이고, legacy
-viewless binary check에는 이 신규 길이 제한을 적용하지 않는다. 각 pointer는 RFC 6901 normalization 후
-512 bytes 이하여야 한다. evaluator는 check별 distinct candidate role을 최대 256개까지 확장한다. 이
-내부 cap을 넘으면 일부 role만 평가하거나 truncate하지 않고 요청 전체를 `503 Service Unavailable`로
-실패시킨다. admin PUT의 idempotency hash는 이 검증을 통과한 exact scope와 canonical pointer map을
-사용하므로 서로 다른 유효 request body는 replay로 취급되지 않는다.
-
-남은 rollout 작업은 Grant 밖의 각 consumer runtime에서 판정 결과를 실제 응답 필드에 적용하는
-enforcement와 기존 policy backfill이다. Compos는 그 consumer 중 하나다. evaluator, wire contract,
-admin policy API 자체는 provider-neutral 계약으로 구현된 상태다.
+과거 field/column authorization 설계와 구현 기록은
+[field-view-authorization-development.md](./field-view-authorization-development.md)에 보존한다. 이 문서는
+현재 deploy contract가 아니라 향후 verified requirement가 생길 때 다시 평가할 historical design이다.
 
 ## Agreements
 
@@ -100,7 +85,7 @@ application은 조직이 만든 실행 주체다. 조직 owner/관리자는 appl
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
-현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 조직의 application 생성은 generated Rauthy client id를 가진 `unprovisioned` local reservation만 만들고, 별도 운영자/IaC가 Rauthy client를 생성한다. 그 뒤 master provisioning verify가 `Clients` 그룹의 `read` 권한만 가진 API key로 `GET /auth/v1/clients/{client_id}`를 호출해 id, 이름, 활성·confidential 상태, 빈 redirect URI와 flow 설정을 검증해야 application이 `ready`가 된다. Grant는 Rauthy client를 생성·수정하거나 client secret을 회전하지 않으며, 운영자/IaC의 write credential도 보유하지 않는다.
+현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 조직의 application 생성은 generated Rauthy client id를 가진 `unprovisioned` local reservation을 만들며, 선택적 scalar `redirectUri`를 application과 같은 transaction에서 manifest에 저장할 수 있다. 생략하면 manifest는 빈 배열이다. 값은 canonical absolute HTTPS 또는 explicit-port literal loopback-IP HTTP여야 하며 userinfo, query, fragment, wildcard, localhost, custom scheme은 거부된다. create와 single-application GET만 optional `redirectUri`를 readback하고 목록 API의 shape은 바꾸지 않는다. 별도 운영자/IaC가 Rauthy client를 생성한 뒤 master provisioning verify는 `Clients` 그룹의 `read` 권한만 가진 API key로 `GET /auth/v1/clients/{client_id}`를 호출해 id, 이름, 활성·confidential 상태, local manifest와 byte-for-byte 같은 redirect URI 배열, flow 설정을 검증해야 application이 `ready`가 된다. public application은 Rauthy challenges의 exact set이 `{S256}`이어야 한다. Grant는 Rauthy client를 생성·수정하거나 client secret을 회전하지 않으며, 운영자/IaC의 write credential도 보유하지 않는다.
 
 trusted auto-approve는 `first_party = true`와 `consent_policy = auto_approve`가 모두 성립할 때만 적용한다. 조직 application API는 두 신뢰 필드를 입력받지 않으며 master trust API만 승격/해제한다. trusted application은 조직 경로에서 보안 설정을 바꿀 수 없다.
 
@@ -119,6 +104,56 @@ POST /api/v1/authz/filter
 `check`는 단일 resource 판정, `batch-check`는 여러 판정, `filter`는 서비스가 넘긴 후보 resource 중 허용된 id만 반환한다.
 
 grant는 외부 provider의 전체 resource 목록을 모른다. 따라서 unbounded list API는 제공하지 않는다.
+
+Exposure read V1은 한 개의 application-authenticated endpoint만 추가한다.
+
+```text
+POST /api/v1/exposure-authz/read
+```
+
+이 endpoint는 기존 application-authz와 같은 `Authorization: Bearer ...`, `x-organization-id`,
+`x-grant-app-auth-key`를 요구하고 strong consistency coarse evaluator를 사용한다. body는 닫힌 object이며
+`exposureId`, 0보다 큰 정수 `exposureVersion`, 정확히 71 ASCII byte인
+`sha256:<64 lowercase hex>` literal `artifactDigest`,
+`resourceId`, opaque `requestBinding`만 허용한다. action은 caller가 선택하지 않고 `exposure.read`로
+고정된다. Compos schema, pointer, field/view/mask, filter, transform, resource version은 받거나 반환하지
+않는다.
+
+V1 policy key는 아래처럼 version/digest와 분리한다.
+
+```text
+provider_id = exposure
+action_id = exposure.read
+resource_type = exposureId
+resource_id = resourceId
+```
+
+따라서 같은 `exposureId`에 대한 기존 permission은 Exposure가 publish한 새 immutable version에도
+의도적으로 이어진다. `exposureVersion`과 `artifactDigest`는 policy row가 아니라 decision replay
+binding이다. prefix가 없는 digest, uppercase, 다른 prefix, whitespace는 거부하며 accepted
+`artifactDigest`를 normalize하거나 prefix를 추가하지 않고 byte-for-byte echo한다. allow와 policy deny 모두
+exact exposure tuple, `resourceId`, `requestBinding`, 검증된 내부
+user/org/application에서 만든 domain-separated `principalDigest`, `issuedAt`, `expiresAt`을 반환한다.
+5초 `expiresAt`은 Grant decision freshness envelope이지 bearer token 만료 시각에 대한 주장이 아니다.
+Exposure는 business data를 읽기 전에 모든 echo field와 `requestBinding`, 아직 지나지 않은 `expiresAt`을
+원 요청과 비교해야 하며 다른 tuple/resource에 decision을 재사용하면 안 된다. per-version grant는 V1
+non-goal이다. Grant는 Compos를 조회하지 않고 authoritative source가 없으므로 `resourceVersion` 또는
+`expectedResourceVersion`을 만들지 않는다.
+
+fresh database는 의도적으로 Grant 자체 provider/action만 seed하므로 Exposure read는 사전 provisioning
+전까지 fail-closed deny다. 배포/IaC는 기존 surface를 사용해 다음 상태를 명시적으로 만들어야 한다.
+
+1. master `POST /api/v1/admin/providers`로 active provider `exposure`를 등록한다.
+2. master `PUT /api/v1/admin/providers/exposure/actions`로 `exposure.read`를
+   `visibilityGranting=false`, `grantableToApplications=true`로 등록한다.
+3. 조직 role을 만들고 `PUT .../roles/{roleId}/actions`로 `exposure.read`를 연결한 뒤,
+   `POST .../bindings`로 exact `resourceType=exposureId`, `resourceId=resourceId` scope를 부여한다.
+4. Exposure application reservation과 Rauthy client를 기존 provisioning/verify 절차로 ready 상태로 만들고
+   current application action에 `exposure.read`를 포함한다. 그 뒤 master trust를 명시적으로 부여하거나
+   exact 사용자의 active consent에 이 action을 포함한다.
+
+이 절차는 provider/action catalog나 application capability를 준비할 뿐 grant, binding, trust, consent를
+자동 생성하지 않는다. 어느 단계든 빠지거나 inactive/expired이면 decision은 deny다.
 
 애플리케이션이 최종 사용자 토큰으로 판정을 요청할 때는 별도 API를 사용한다.
 
@@ -139,4 +174,4 @@ POST /api/v1/application-authz/filter
 - application grant action subset 규칙
 - developer console application 설정 권한 규칙
 - authz check/filter 응답 계약
-- field-view policy 및 consumer rollout 상태
+- coarse/field capability 경계와 preserved field-work 상태

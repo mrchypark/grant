@@ -5,25 +5,24 @@ use crate::{
     config::{AppConfig, ReadConsistency},
     database::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
-        ApplicationTrustMutationError, BackupEntry, BindIdentityInput, CandidateRoleLimitExceeded,
-        Database, ReplaceRoleActionFieldViewPolicy, ReplaceRoleActionFieldViewPolicyOutcome,
-        RoleActionFieldViewPolicy, UserActionCheck, UserActionFieldViewCheck,
+        ApplicationTrustMutationError, BackupEntry, BindIdentityInput, Database,
+        OrganizationMembershipWriteError, UserActionCheck,
     },
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use domain::{
     Action, Agreement, AgreementStatus, AgreementType, Application, ApplicationAppType,
     ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus,
-    ApplicationProvisioningStatus, ApplicationType, FieldViewMode, Group, GroupMember,
-    HealthStatus, MAX_FIELD_VIEW_POINTER_BYTES, MAX_FIELD_VIEW_RESOURCE_TYPE_BYTES,
-    MAX_FIELD_VIEW_SCHEMA_KEY_BYTES, Organization, Role, RoleBinding, RoleBindingState,
-    RoleBindingSubjectType, ServiceProvider, User, normalize_field_view_pointer,
+    ApplicationProvisioningStatus, ApplicationType, Group, GroupMember, HealthStatus, Organization,
+    OrganizationMembership, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType,
+    ServiceProvider, User,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::net::IpAddr;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     error::Error as StdError,
     fmt,
     future::Future,
@@ -39,11 +38,13 @@ const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const APPLICATION_SECURITY_MUTATION_LEASE_MINUTES: i64 = 10;
 const MAX_RAUTHY_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_RAUTHY_ERROR_FIELD_CHARS: usize = 256;
-const MAX_AUTHZ_FIELDS_PER_VIEW: usize = 256;
-const MAX_ADMIN_FIELD_VIEW_ENTRIES: usize = 512;
 // Schema shape changes only through controlled migrations. Keep this short so an
 // out-of-band schema loss is still detected without issuing a Raft query per probe.
 const SCHEMA_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
+const EXPOSURE_READ_PROVIDER_ID: &str = "exposure";
+const EXPOSURE_READ_ACTION_ID: &str = "exposure.read";
+const EXPOSURE_DECISION_TTL_SECONDS: i64 = 5;
+const EXPOSURE_PRINCIPAL_DIGEST_DOMAIN: &[u8] = b"grant.exposure-read.principal.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -187,6 +188,13 @@ pub struct CreateApplicationInput {
     pub application_type: ApplicationType,
     pub app_type: ApplicationAppType,
     pub active: bool,
+    pub redirect_uri: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplicationRead {
+    pub application: Application,
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +233,7 @@ struct RauthyClientResponse {
     confidential: bool,
     redirect_uris: Vec<String>,
     flows_enabled: Vec<String>,
+    challenges: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,43 +259,6 @@ pub struct CreateRoleBindingInput {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReplaceFieldViewPolicyInput {
-    pub resource_type: String,
-    pub schema_key: String,
-    pub field_views: Vec<(String, FieldViewMode)>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FieldViewPolicyScope {
-    pub resource_type: String,
-    pub schema_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct FieldViewPolicy {
-    pub role_id: String,
-    pub action_id: String,
-    pub resource_type: String,
-    pub schema_key: String,
-    pub field_views: BTreeMap<String, FieldViewMode>,
-    pub updated_at: Option<String>,
-}
-
-impl From<RoleActionFieldViewPolicy> for FieldViewPolicy {
-    fn from(value: RoleActionFieldViewPolicy) -> Self {
-        Self {
-            role_id: value.role_id,
-            action_id: value.action_id,
-            resource_type: value.resource_type,
-            schema_key: value.schema_key,
-            field_views: value.field_views,
-            updated_at: value.updated_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct AuthorizationSubject {
     pub subject_type: String,
     pub id: String,
@@ -298,13 +270,6 @@ pub struct AuthorizationResource {
     pub provider_id: String,
     pub resource_type: String,
     pub id: String,
-    pub view: Option<AuthorizationResourceView>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AuthorizationResourceView {
-    pub schema_key: String,
-    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,7 +289,21 @@ pub struct ApplicationAuthorizationCheck {
 pub struct AuthorizationDecision {
     pub allowed: bool,
     pub reason: String,
-    pub field_views: Option<BTreeMap<String, FieldViewMode>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExposureReadAuthorizationDecision {
+    pub allowed: bool,
+    pub reason: String,
+    pub principal_digest: String,
+    pub issued_at: String,
+    pub expires_at: String,
+}
+
+struct ApplicationAuthorizationContext {
+    user_id: String,
+    organization_id: String,
+    application_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -368,19 +347,43 @@ impl AppService {
     }
 
     pub async fn migrate_schema(&self) -> Result<()> {
+        self.db
+            .verify_coarse_deployment_compatible(ReadConsistency::Strong)
+            .await?;
         self.schema_readiness
             .while_invalidated(|| self.db.ensure_schema_only())
+            .await?;
+        self.db
+            .verify_coarse_deployment_compatible(ReadConsistency::Strong)
             .await
     }
 
     pub async fn initialize(&self) -> Result<()> {
+        self.db
+            .verify_coarse_deployment_compatible(ReadConsistency::Strong)
+            .await?;
         self.schema_readiness
             .while_invalidated(|| self.db.ensure_schema())
+            .await?;
+        self.db
+            .verify_coarse_deployment_compatible(ReadConsistency::Strong)
             .await
     }
 
     pub async fn bootstrap(&self) -> Result<()> {
+        self.db
+            .verify_coarse_deployment_compatible(ReadConsistency::Strong)
+            .await?;
         self.db.ensure_bootstrap_data().await
+    }
+
+    pub async fn verify_coarse_deployment_compatibility(
+        &self,
+        consistency: ReadConsistency,
+    ) -> Result<()> {
+        self.db
+            .verify_coarse_deployment_compatible(consistency)
+            .await
     }
 
     pub async fn health_status(&self) -> HealthStatus {
@@ -620,6 +623,11 @@ impl AppService {
         let mut ids = HashSet::new();
         let mut codes = HashSet::new();
         for action in actions {
+            if action.visibility_granting {
+                return Err(bad_request_error(
+                    "action.visibilityGranting=true is unavailable in the coarse deployment baseline",
+                ));
+            }
             let code = require_non_empty("action.code", &action.code)?;
             let id = normalize_action_id(&provider_id, &code, &action.id)?;
             if action.provider_id != provider_id {
@@ -684,12 +692,36 @@ impl AppService {
         Ok(application)
     }
 
+    pub async fn get_application_detail_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        application_id: &str,
+        read_consistency: Option<ReadConsistency>,
+    ) -> Result<ApplicationRead> {
+        let application = self
+            .get_application_authorized(
+                user_id,
+                organization_id,
+                application_id,
+                read_consistency.clone(),
+            )
+            .await?;
+        let redirect_uri = self
+            .application_redirect_uri_for_read(application_id, read_consistency)
+            .await?;
+        Ok(ApplicationRead {
+            application,
+            redirect_uri,
+        })
+    }
+
     pub async fn create_application(
         &self,
         user_id: &str,
         organization_id: &str,
         input: CreateApplicationInput,
-    ) -> Result<Application> {
+    ) -> Result<ApplicationRead> {
         self.authorize_organization_action(
             user_id,
             organization_id,
@@ -715,8 +747,18 @@ impl AppService {
             rauthy_client_id: Some(format!("grant-{}", uuid::Uuid::new_v4().simple())),
             created_by_user_id: user_id.to_owned(),
         };
-        self.db.insert_application(&application).await?;
-        Ok(application)
+        let redirect_uri = input
+            .redirect_uri
+            .as_deref()
+            .map(canonical_redirect_uri)
+            .transpose()?;
+        self.db
+            .insert_application_with_optional_redirect_uri(&application, redirect_uri.as_deref())
+            .await?;
+        Ok(ApplicationRead {
+            application,
+            redirect_uri,
+        })
     }
 
     async fn acquire_application_security_mutation(
@@ -799,6 +841,35 @@ impl AppService {
             vec!["authorization_code", "refresh_token"]
         };
         let expected_flows = expected_flows.into_iter().collect::<HashSet<_>>();
+        let redirect_uris = self
+            .db
+            .list_application_redirect_uris_with_consistency(
+                application_id,
+                Some(ReadConsistency::Strong),
+            )
+            .await?;
+        if redirect_uris.len() > 1 {
+            return Err(service_error(
+                ServiceErrorKind::Conflict,
+                "local application redirect URI manifest has more than one entry",
+            ));
+        }
+        let expected_redirect_uris = redirect_uris
+            .into_iter()
+            .map(|redirect_uri| {
+                let canonical = canonical_redirect_uri(&redirect_uri.redirect_uri)?;
+                if canonical != redirect_uri.redirect_uri {
+                    return Err(bad_request_error("stored redirect URI is not canonical"));
+                }
+                Ok(redirect_uri.redirect_uri)
+            })
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| {
+                service_error(
+                    ServiceErrorKind::Conflict,
+                    "local application redirect URI manifest is invalid",
+                )
+            })?;
         let actual_flows = client
             .flows_enabled
             .iter()
@@ -808,8 +879,10 @@ impl AppService {
             || client.name.as_deref() != Some(application.name.as_str())
             || client.confidential != expected_confidential
             || client.enabled != application.active
-            || !client.redirect_uris.is_empty()
+            || client.redirect_uris != expected_redirect_uris
             || actual_flows != expected_flows
+            || (matches!(application.application_type, ApplicationType::Public)
+                && client.challenges.as_deref() != Some(&["S256".to_owned()]))
         {
             return Err(service_error(
                 ServiceErrorKind::Conflict,
@@ -819,6 +892,25 @@ impl AppService {
         self.db
             .mark_application_provisioning_ready(application_id, organization_id)
             .await
+    }
+
+    async fn application_redirect_uri_for_read(
+        &self,
+        application_id: &str,
+        consistency: Option<ReadConsistency>,
+    ) -> Result<Option<String>> {
+        let redirect_uris = self
+            .db
+            .list_application_redirect_uris_with_consistency(application_id, consistency)
+            .await?;
+        match redirect_uris.as_slice() {
+            [] => Ok(None),
+            [redirect_uri] => Ok(Some(redirect_uri.redirect_uri.clone())),
+            _ => Err(service_error(
+                ServiceErrorKind::Conflict,
+                "local application redirect URI manifest has more than one entry",
+            )),
+        }
     }
 
     async fn fetch_rauthy_application_client(&self, url: &str) -> Result<reqwest::Response> {
@@ -1369,6 +1461,51 @@ impl AppService {
             .await
     }
 
+    pub async fn enroll_organization_member_authorized(
+        &self,
+        user_id: &str,
+        organization_id: &str,
+        target_user_id: &str,
+    ) -> Result<OrganizationMembership> {
+        self.authorize_organization_action(
+            user_id,
+            organization_id,
+            organization_id,
+            "organization.member.manage",
+            "manage organization members",
+            Some(ReadConsistency::Strong),
+        )
+        .await?;
+        let target_user_id = require_non_empty("userId", target_user_id)?;
+        self.db
+            .enroll_active_member(organization_id, &target_user_id)
+            .await
+            .map_err(|error| {
+                match error.downcast_ref::<OrganizationMembershipWriteError>() {
+                    Some(OrganizationMembershipWriteError::TargetUserNotFound) => {
+                        not_found_error(format!("user not found: {target_user_id}"))
+                    }
+                    Some(OrganizationMembershipWriteError::TargetUserInactive) => {
+                        forbidden_error(format!("forbidden: user {target_user_id} is inactive"))
+                    }
+                    Some(OrganizationMembershipWriteError::OrganizationInactive) => {
+                        forbidden_error(format!("forbidden: organization {organization_id} is inactive"))
+                    }
+                    Some(OrganizationMembershipWriteError::ExistingNonMemberRole) => service_error(
+                        ServiceErrorKind::Conflict,
+                        format!(
+                            "organization membership for user {target_user_id} cannot be changed to member"
+                        ),
+                    ),
+                    Some(OrganizationMembershipWriteError::PreconditionsChanged) => service_error(
+                        ServiceErrorKind::Conflict,
+                        "organization membership enrollment preconditions changed",
+                    ),
+                    None => error,
+                }
+            })
+    }
+
     pub async fn list_agreements_authorized(
         &self,
         user_id: &str,
@@ -1602,168 +1739,6 @@ impl AppService {
         self.db.replace_role_actions(role_id, action_ids).await
     }
 
-    pub async fn get_field_view_policy_authorized(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        role_id: &str,
-        action_id: &str,
-        scope: &FieldViewPolicyScope,
-        read_consistency: Option<ReadConsistency>,
-    ) -> Result<FieldViewPolicy> {
-        self.authorize_organization_action(
-            user_id,
-            organization_id,
-            organization_id,
-            "organization.permission.manage",
-            "manage organization field view policies",
-            read_consistency.clone(),
-        )
-        .await?;
-        let (resource_type, schema_key) =
-            normalize_field_view_scope(&scope.resource_type, &scope.schema_key)?;
-        self.ensure_owned_role_action(
-            organization_id,
-            role_id,
-            action_id,
-            read_consistency.clone(),
-        )
-        .await?;
-        self.db
-            .list_role_action_field_views_with_consistency(
-                role_id,
-                action_id,
-                &resource_type,
-                &schema_key,
-                read_consistency,
-            )
-            .await
-            .map(Into::into)
-    }
-
-    pub async fn replace_field_view_policy_authorized(
-        &self,
-        user_id: &str,
-        organization_id: &str,
-        role_id: &str,
-        action_id: &str,
-        idempotency_key: &str,
-        input: ReplaceFieldViewPolicyInput,
-    ) -> Result<FieldViewPolicy> {
-        self.authorize_organization_action(
-            user_id,
-            organization_id,
-            organization_id,
-            "organization.permission.manage",
-            "manage organization field view policies",
-            Some(ReadConsistency::Strong),
-        )
-        .await?;
-        let idempotency_key = require_non_empty("Idempotency-Key", idempotency_key)?;
-        let (resource_type, schema_key) =
-            normalize_field_view_scope(&input.resource_type, &input.schema_key)?;
-        let normalized_field_views = normalize_admin_field_views(input.field_views)?;
-        let request_hash = field_view_policy_request_hash(
-            organization_id,
-            role_id,
-            action_id,
-            &resource_type,
-            &schema_key,
-            &normalized_field_views,
-        )?;
-        if let Some(outcome) = self
-            .db
-            .field_view_idempotency_outcome(&idempotency_key, &request_hash)
-            .await?
-        {
-            return Ok(match outcome {
-                ReplaceRoleActionFieldViewPolicyOutcome::Stored(policy) => policy.into(),
-                ReplaceRoleActionFieldViewPolicyOutcome::IdempotencyConflict => {
-                    return Err(service_error(
-                        ServiceErrorKind::Conflict,
-                        "Idempotency-Key was already used for a different field view policy request",
-                    ));
-                }
-            });
-        }
-        self.ensure_owned_role_action(
-            organization_id,
-            role_id,
-            action_id,
-            Some(ReadConsistency::Strong),
-        )
-        .await?;
-        let positive_field_views = normalized_field_views
-            .into_iter()
-            .filter(|(_, mode)| mode.as_positive_db_str().is_some())
-            .collect();
-        match self
-            .db
-            .replace_role_action_field_views(ReplaceRoleActionFieldViewPolicy {
-                organization_id: organization_id.to_owned(),
-                actor_user_id: user_id.to_owned(),
-                role_id: role_id.to_owned(),
-                action_id: action_id.to_owned(),
-                resource_type,
-                schema_key,
-                field_views: positive_field_views,
-                idempotency_key,
-                request_hash,
-            })
-            .await?
-        {
-            ReplaceRoleActionFieldViewPolicyOutcome::Stored(policy) => Ok(policy.into()),
-            ReplaceRoleActionFieldViewPolicyOutcome::IdempotencyConflict => Err(service_error(
-                ServiceErrorKind::Conflict,
-                "Idempotency-Key was already used for a different field view policy request",
-            )),
-        }
-    }
-
-    async fn ensure_owned_role_action(
-        &self,
-        organization_id: &str,
-        role_id: &str,
-        action_id: &str,
-        read_consistency: Option<ReadConsistency>,
-    ) -> Result<()> {
-        let role = self
-            .db
-            .get_role_with_consistency(role_id, read_consistency.clone())
-            .await?;
-        if role.organization_id.as_deref() != Some(organization_id) {
-            return Err(not_found_error(format!(
-                "role not found: {} in organization {}",
-                role_id, organization_id
-            )));
-        }
-        let actions = self
-            .db
-            .list_role_actions_with_consistency(role_id, read_consistency.clone())
-            .await?;
-        let Some(action) = actions.iter().find(|action| action.id == action_id) else {
-            return Err(not_found_error(format!(
-                "role action not found: {} for role {}",
-                action_id, role_id
-            )));
-        };
-        if !action.visibility_granting
-            || !self
-                .db
-                .is_field_view_action_with_consistency(
-                    &action.provider_id,
-                    action_id,
-                    read_consistency,
-                )
-                .await?
-        {
-            return Err(bad_request_error(
-                "field view policy action must belong to an active provider and declare visibilityGranting=true",
-            ));
-        }
-        Ok(())
-    }
-
     pub async fn list_role_bindings_authorized(
         &self,
         user_id: &str,
@@ -1893,28 +1868,6 @@ impl AppService {
             .iter()
             .map(normalize_authorization_check)
             .collect::<Result<Vec<_>>>()?;
-        let requested_field_view_actions = normalized
-            .iter()
-            .filter(|check| check.view.is_some())
-            .map(|check| (check.provider_id.clone(), check.action_id.clone()))
-            .collect::<HashSet<_>>();
-        let supported_field_view_actions = self
-            .db
-            .field_view_actions_with_consistency(
-                &requested_field_view_actions,
-                Some(ReadConsistency::Strong),
-            )
-            .await?;
-        if let Some((provider_id, action_id)) = requested_field_view_actions
-            .difference(&supported_field_view_actions)
-            .min()
-        {
-            return Err(bad_request_error(format!(
-                "resource.view requires an active provider action with visibilityGranting=true: {provider_id}/{action_id}"
-            )));
-        }
-        let field_aware = normalized.iter().any(|check| check.view.is_some());
-        let effective_consistency = authorization_read_consistency(field_aware, read_consistency);
         let db_checks = normalized
             .iter()
             .map(|check| UserActionCheck {
@@ -1925,37 +1878,14 @@ impl AppService {
                 resource_id: &check.resource_id,
                 action_id: &check.action_id,
                 application_id,
-                consistency: effective_consistency.clone(),
+                consistency: read_consistency.clone(),
             })
             .collect::<Vec<_>>();
-        let field_views = normalized
-            .iter()
-            .map(|check| {
-                check.view.as_ref().map(|view| UserActionFieldViewCheck {
-                    schema_key: &view.schema_key,
-                    fields: &view.fields,
-                })
-            })
-            .collect::<Vec<_>>();
-        let evaluations = self
-            .db
-            .evaluate_user_actions_with_field_views(&db_checks, &field_views)
-            .await
-            .map_err(map_authorization_evaluator_error)?;
-        if evaluations.len() != checks.len() {
-            return Err(service_error(
-                ServiceErrorKind::Unavailable,
-                format!(
-                    "authorization result length {} does not match check length {}",
-                    evaluations.len(),
-                    checks.len()
-                ),
-            ));
-        }
-        evaluations
+        self.db
+            .evaluate_user_actions(&db_checks)
+            .await?
             .into_iter()
-            .map(|evaluation| {
-                let decision = evaluation.decision;
+            .map(|decision| {
                 Ok(AuthorizationDecision {
                     allowed: decision.allowed,
                     reason: if decision.allowed {
@@ -1972,7 +1902,6 @@ impl AppService {
                         "no_matching_binding"
                     }
                     .to_owned(),
-                    field_views: evaluation.field_views,
                 })
             })
             .collect()
@@ -1984,6 +1913,86 @@ impl AppService {
         organization_id: &str,
         checks: &[ApplicationAuthorizationCheck],
     ) -> Result<Vec<AuthorizationDecision>> {
+        let context = self
+            .resolve_application_authorization_context(bearer_token, organization_id)
+            .await?;
+        let exact_checks = checks
+            .iter()
+            .map(|check| AuthorizationCheck {
+                subject: AuthorizationSubject {
+                    subject_type: "user".to_owned(),
+                    id: context.user_id.clone(),
+                    organization_id: context.organization_id.clone(),
+                },
+                action: check.action.clone(),
+                resource: check.resource.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.evaluate_authorizations(
+            &exact_checks,
+            Some(ReadConsistency::Strong),
+            Some(&context.application_id),
+        )
+        .await
+    }
+
+    pub async fn check_exposure_read_authorization(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: &str,
+        exposure_id: &str,
+        resource_id: &str,
+    ) -> Result<ExposureReadAuthorizationDecision> {
+        let context = self
+            .resolve_application_authorization_context(bearer_token, organization_id)
+            .await?;
+        let decision = self
+            .evaluate_authorizations(
+                &[AuthorizationCheck {
+                    subject: AuthorizationSubject {
+                        subject_type: "user".to_owned(),
+                        id: context.user_id.clone(),
+                        organization_id: context.organization_id.clone(),
+                    },
+                    action: EXPOSURE_READ_ACTION_ID.to_owned(),
+                    resource: AuthorizationResource {
+                        provider_id: EXPOSURE_READ_PROVIDER_ID.to_owned(),
+                        resource_type: exposure_id.to_owned(),
+                        id: resource_id.to_owned(),
+                    },
+                }],
+                Some(ReadConsistency::Strong),
+                Some(&context.application_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    "exposure read authorization check failed",
+                )
+            })?;
+        let issued_at = Utc::now();
+        let expires_at = issued_at + chrono::Duration::seconds(EXPOSURE_DECISION_TTL_SECONDS);
+        Ok(ExposureReadAuthorizationDecision {
+            allowed: decision.allowed,
+            reason: decision.reason,
+            principal_digest: exposure_principal_digest(
+                &context.user_id,
+                &context.organization_id,
+                &context.application_id,
+            ),
+            issued_at: issued_at.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+        })
+    }
+
+    async fn resolve_application_authorization_context(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: &str,
+    ) -> Result<ApplicationAuthorizationContext> {
         let organization_id = require_non_empty("organizationId", organization_id)?;
         let identity = self
             .auth
@@ -2016,24 +2025,11 @@ impl AppService {
                     identity.client_id, organization_id
                 ))
             })?;
-        let exact_checks = checks
-            .iter()
-            .map(|check| AuthorizationCheck {
-                subject: AuthorizationSubject {
-                    subject_type: "user".to_owned(),
-                    id: user.id.clone(),
-                    organization_id: organization_id.clone(),
-                },
-                action: check.action.clone(),
-                resource: check.resource.clone(),
-            })
-            .collect::<Vec<_>>();
-        self.evaluate_authorizations(
-            &exact_checks,
-            Some(ReadConsistency::Strong),
-            Some(&application.id),
-        )
-        .await
+        Ok(ApplicationAuthorizationContext {
+            user_id: user.id,
+            organization_id,
+            application_id: application.id,
+        })
     }
 
     pub async fn deactivate_organization(
@@ -2159,73 +2155,6 @@ fn map_backups(items: Vec<BackupEntry>) -> Result<Vec<BackupInfo>> {
         .collect())
 }
 
-fn normalize_field_view_scope(resource_type: &str, schema_key: &str) -> Result<(String, String)> {
-    let resource_type = require_limited_exact_non_empty(
-        "resourceType",
-        resource_type,
-        MAX_FIELD_VIEW_RESOURCE_TYPE_BYTES,
-    )?;
-    let schema_key =
-        require_limited_exact_non_empty("schemaKey", schema_key, MAX_FIELD_VIEW_SCHEMA_KEY_BYTES)?;
-    Ok((resource_type, schema_key))
-}
-
-fn normalize_admin_field_views(
-    entries: Vec<(String, FieldViewMode)>,
-) -> Result<BTreeMap<String, FieldViewMode>> {
-    if entries.len() > MAX_ADMIN_FIELD_VIEW_ENTRIES {
-        return Err(bad_request_error(format!(
-            "fieldViews must contain at most {MAX_ADMIN_FIELD_VIEW_ENTRIES} entries"
-        )));
-    }
-    let mut normalized = BTreeMap::new();
-    for (pointer, mode) in entries {
-        let pointer = normalize_limited_json_pointer("fieldViews pointer", &pointer)?;
-        if normalized.insert(pointer.clone(), mode).is_some() {
-            return Err(bad_request_error(format!(
-                "fieldViews contains duplicate pointer {pointer}"
-            )));
-        }
-    }
-    Ok(normalized)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CanonicalFieldViewPolicyRequest<'a> {
-    method: &'static str,
-    path_template: &'static str,
-    organization_id: &'a str,
-    role_id: &'a str,
-    action_id: &'a str,
-    resource_type: &'a str,
-    schema_key: &'a str,
-    field_views: &'a BTreeMap<String, FieldViewMode>,
-}
-
-fn field_view_policy_request_hash(
-    organization_id: &str,
-    role_id: &str,
-    action_id: &str,
-    resource_type: &str,
-    schema_key: &str,
-    field_views: &BTreeMap<String, FieldViewMode>,
-) -> Result<String> {
-    let canonical = serde_json::to_vec(&CanonicalFieldViewPolicyRequest {
-        method: "PUT",
-        path_template:
-            "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}/field-views",
-        organization_id,
-        role_id,
-        action_id,
-        resource_type,
-        schema_key,
-        field_views,
-    })
-    .context("serialize canonical field view policy request")?;
-    Ok(hex::encode(Sha256::digest(canonical)))
-}
-
 struct NormalizedAuthorizationCheck {
     subject_id: String,
     organization_id: String,
@@ -2233,7 +2162,6 @@ struct NormalizedAuthorizationCheck {
     resource_type: String,
     resource_id: String,
     action_id: String,
-    view: Option<AuthorizationResourceView>,
 }
 
 fn normalize_authorization_check(
@@ -2242,102 +2170,14 @@ fn normalize_authorization_check(
     if check.subject.subject_type != "user" {
         return Err(bad_request_error("only user authz subjects are supported"));
     }
-    let (provider_id, resource_type, resource_id, action_id) = if check.resource.view.is_some() {
-        (
-            require_exact_non_empty("resource.provider", &check.resource.provider_id)?,
-            require_limited_exact_non_empty(
-                "resource.type",
-                &check.resource.resource_type,
-                MAX_FIELD_VIEW_RESOURCE_TYPE_BYTES,
-            )?,
-            require_exact_non_empty("resource.id", &check.resource.id)?,
-            require_exact_non_empty("action", &check.action)?,
-        )
-    } else {
-        (
-            require_non_empty("resource.provider", &check.resource.provider_id)?,
-            require_non_empty("resource.type", &check.resource.resource_type)?,
-            require_non_empty("resource.id", &check.resource.id)?,
-            require_non_empty("action", &check.action)?,
-        )
-    };
-    let view = check
-        .resource
-        .view
-        .as_ref()
-        .map(normalize_authorization_view)
-        .transpose()?;
     Ok(NormalizedAuthorizationCheck {
         subject_id: require_non_empty("subject.id", &check.subject.id)?,
         organization_id: require_non_empty("subject.orgId", &check.subject.organization_id)?,
-        provider_id,
-        resource_type,
-        resource_id,
-        action_id,
-        view,
+        provider_id: require_non_empty("resource.provider", &check.resource.provider_id)?,
+        resource_type: require_non_empty("resource.type", &check.resource.resource_type)?,
+        resource_id: require_non_empty("resource.id", &check.resource.id)?,
+        action_id: require_non_empty("action", &check.action)?,
     })
-}
-
-fn authorization_read_consistency(
-    field_aware: bool,
-    requested: Option<ReadConsistency>,
-) -> Option<ReadConsistency> {
-    if field_aware {
-        Some(ReadConsistency::Strong)
-    } else {
-        requested
-    }
-}
-
-fn normalize_authorization_view(
-    view: &AuthorizationResourceView,
-) -> Result<AuthorizationResourceView> {
-    let schema_key = require_limited_exact_non_empty(
-        "resource.view.schemaKey",
-        &view.schema_key,
-        MAX_FIELD_VIEW_SCHEMA_KEY_BYTES,
-    )?;
-    if view.fields.is_empty() || view.fields.len() > MAX_AUTHZ_FIELDS_PER_VIEW {
-        return Err(bad_request_error(format!(
-            "resource.view.fields must contain between 1 and {MAX_AUTHZ_FIELDS_PER_VIEW} items"
-        )));
-    }
-    let mut fields = Vec::with_capacity(view.fields.len());
-    let mut seen = HashSet::with_capacity(view.fields.len());
-    for pointer in &view.fields {
-        let pointer = normalize_limited_json_pointer("resource.view.fields entry", pointer)?;
-        if !seen.insert(pointer.clone()) {
-            return Err(bad_request_error(format!(
-                "resource.view.fields contains duplicate pointer {pointer}"
-            )));
-        }
-        fields.push(pointer);
-    }
-    Ok(AuthorizationResourceView { schema_key, fields })
-}
-
-fn normalize_json_pointer(pointer: &str) -> Result<String> {
-    normalize_field_view_pointer(pointer).map_err(bad_request_error)
-}
-
-fn normalize_limited_json_pointer(field_name: &str, pointer: &str) -> Result<String> {
-    let pointer = normalize_json_pointer(pointer)?;
-    if pointer.len() > MAX_FIELD_VIEW_POINTER_BYTES {
-        return Err(bad_request_error(format!(
-            "{field_name} must be at most {MAX_FIELD_VIEW_POINTER_BYTES} bytes"
-        )));
-    }
-    Ok(pointer)
-}
-
-fn map_authorization_evaluator_error(error: anyhow::Error) -> anyhow::Error {
-    if error
-        .chain()
-        .any(|cause| cause.downcast_ref::<CandidateRoleLimitExceeded>().is_some())
-    {
-        return service_error(ServiceErrorKind::Unavailable, error.to_string());
-    }
-    error
 }
 
 fn normalize_active_organization(
@@ -2368,30 +2208,14 @@ fn require_non_empty(field_name: &str, value: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
-fn require_exact_non_empty(field_name: &str, value: &str) -> Result<String> {
-    if value.is_empty() {
-        return Err(bad_request_error(format!("{field_name} must not be empty")));
+fn exposure_principal_digest(user_id: &str, organization_id: &str, application_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(EXPOSURE_PRINCIPAL_DIGEST_DOMAIN);
+    for value in [user_id, organization_id, application_id] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
     }
-    if value.trim() != value {
-        return Err(bad_request_error(format!(
-            "{field_name} must not contain leading or trailing whitespace"
-        )));
-    }
-    Ok(value.to_owned())
-}
-
-fn require_limited_exact_non_empty(
-    field_name: &str,
-    value: &str,
-    max_bytes: usize,
-) -> Result<String> {
-    let value = require_exact_non_empty(field_name, value)?;
-    if value.len() > max_bytes {
-        return Err(bad_request_error(format!(
-            "{field_name} must be at most {max_bytes} bytes"
-        )));
-    }
-    Ok(value)
+    hex::encode(digest.finalize())
 }
 
 fn normalize_action_id(provider_id: &str, code: &str, provided_id: &str) -> Result<String> {
@@ -2645,6 +2469,58 @@ fn bad_request_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::BadRequest, message)
 }
 
+fn canonical_redirect_uri(value: &str) -> Result<String> {
+    if value.trim().is_empty() || value.len() > 2_048 || value.contains('*') {
+        return Err(bad_request_error(
+            "redirectUri must be a non-empty URL of at most 2048 bytes",
+        ));
+    }
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| bad_request_error("redirectUri must be an absolute URL"))?;
+    let authority = value
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    if authority.contains('@')
+        || url.fragment().is_some()
+        || url.query().is_some()
+        || url.host_str().is_none()
+    {
+        return Err(bad_request_error(
+            "redirectUri has unsupported authority, fragment, query, or host",
+        ));
+    }
+    match url.scheme() {
+        "https" => {}
+        "http" => {
+            let Some(host) = url.host_str() else {
+                return Err(bad_request_error(
+                    "redirectUri HTTP host must be a loopback IP",
+                ));
+            };
+            if !matches!(host.trim_matches(['[', ']']).parse::<IpAddr>(), Ok(ip) if ip.is_loopback())
+                || url.port().is_none()
+            {
+                return Err(bad_request_error(
+                    "redirectUri HTTP must use a loopback IP with an explicit port",
+                ));
+            }
+        }
+        _ => {
+            return Err(bad_request_error(
+                "redirectUri scheme must be https or loopback http",
+            ));
+        }
+    }
+    let canonical: String = url.into();
+    if canonical.len() > 2_048 || canonical.contains('*') {
+        return Err(bad_request_error(
+            "redirectUri must be a non-empty URL of at most 2048 bytes",
+        ));
+    }
+    Ok(canonical)
+}
+
 fn not_found_error(message: impl Into<String>) -> anyhow::Error {
     service_error(ServiceErrorKind::NotFound, message)
 }
@@ -2667,15 +2543,11 @@ fn ensure_organization_application_mutable(application: &Application) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FIELD_VIEW_POINTER_BYTES, MAX_FIELD_VIEW_RESOURCE_TYPE_BYTES,
-        MAX_FIELD_VIEW_SCHEMA_KEY_BYTES, SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache,
-        SchemaReadinessRoute, SchemaReadinessState, ServiceError, ServiceErrorKind,
-        authorization_read_consistency, map_application_consent_write_error,
-        map_application_security_mutation_error, map_application_trust_mutation_error,
-        normalize_limited_json_pointer, require_limited_exact_non_empty,
-        sanitize_rauthy_error_field,
+        SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
+        SchemaReadinessState, ServiceError, ServiceErrorKind, exposure_principal_digest,
+        map_application_consent_write_error, map_application_security_mutation_error,
+        map_application_trust_mutation_error, sanitize_rauthy_error_field,
     };
-    use crate::config::ReadConsistency;
     use crate::database::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
         ApplicationTrustMutationError,
@@ -2689,60 +2561,21 @@ mod tests {
     };
 
     #[test]
-    fn field_aware_authorization_always_uses_strong_consistency() {
-        assert_eq!(
-            authorization_read_consistency(true, None),
-            Some(ReadConsistency::Strong)
+    fn exposure_principal_digest_is_stable_and_length_framed() {
+        let digest = exposure_principal_digest("user", "organization", "application");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
         assert_eq!(
-            authorization_read_consistency(true, Some(ReadConsistency::Local)),
-            Some(ReadConsistency::Strong)
+            digest,
+            exposure_principal_digest("user", "organization", "application")
         );
-        assert_eq!(
-            authorization_read_consistency(false, Some(ReadConsistency::PreferStrong)),
-            Some(ReadConsistency::PreferStrong)
-        );
-        assert_eq!(authorization_read_consistency(false, None), None);
-    }
-
-    #[test]
-    fn field_view_byte_limits_accept_boundary_and_reject_overflow() {
-        for (name, limit) in [
-            ("resource.type", MAX_FIELD_VIEW_RESOURCE_TYPE_BYTES),
-            ("resource.view.schemaKey", MAX_FIELD_VIEW_SCHEMA_KEY_BYTES),
-        ] {
-            let boundary = "x".repeat(limit);
-            assert_eq!(
-                require_limited_exact_non_empty(name, &boundary, limit)
-                    .expect("boundary must be accepted"),
-                boundary
-            );
-            let error = require_limited_exact_non_empty(name, &"x".repeat(limit + 1), limit)
-                .expect_err("overflow must be rejected");
-            assert_eq!(
-                error
-                    .downcast_ref::<ServiceError>()
-                    .expect("limit error must be structured")
-                    .kind(),
-                ServiceErrorKind::BadRequest
-            );
-        }
-
-        let boundary = format!("/{}", "x".repeat(MAX_FIELD_VIEW_POINTER_BYTES - 1));
-        assert_eq!(
-            normalize_limited_json_pointer("pointer", &boundary)
-                .expect("pointer boundary must normalize"),
-            boundary
-        );
-        let overflow = format!("/{}", "x".repeat(MAX_FIELD_VIEW_POINTER_BYTES));
-        let error = normalize_limited_json_pointer("pointer", &overflow)
-            .expect_err("pointer overflow must be rejected after normalization");
-        assert_eq!(
-            error
-                .downcast_ref::<ServiceError>()
-                .expect("pointer limit error must be structured")
-                .kind(),
-            ServiceErrorKind::BadRequest
+        assert_ne!(
+            exposure_principal_digest("ab", "c", "d"),
+            exposure_principal_digest("a", "bc", "d")
         );
     }
 

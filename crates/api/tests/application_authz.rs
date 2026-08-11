@@ -186,6 +186,7 @@ async fn application_authz_derives_client_and_subject_and_requires_consent_or_tr
     assert_eq!(allowed.status(), StatusCode::OK);
     let allowed = support::response_json(allowed).await;
     assert_eq!(allowed["allowed"], true, "response: {allowed}");
+    assert!(allowed.get("fieldViews").is_none());
 
     let large_batch = test
         .app

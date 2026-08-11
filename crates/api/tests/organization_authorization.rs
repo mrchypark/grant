@@ -4,7 +4,10 @@ use axum::{
     Router,
     http::{Method, StatusCode},
 };
-use domain::Role;
+use domain::{
+    Agreement, AgreementStatus, AgreementType, Role, RoleBinding, RoleBindingState,
+    RoleBindingSubjectType,
+};
 use infra::{config::ReadConsistency, database::Database};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -86,7 +89,7 @@ async fn compos_reader_fixture() -> support::TestApi {
                     "name": "Read Compos Object",
                     "description": null,
                     "riskLevel": "low",
-                    "visibilityGranting": true,
+                    "visibilityGranting": false,
                     "grantableToApplications": true,
                     "consentLabel": "Read Compos Object",
                     "consentDescription": null
@@ -426,8 +429,20 @@ async fn authz_check_and_filter_use_role_binding() {
         "obj_1",
     )
     .await;
-    assert_eq!(checked["allowed"], true);
-    assert_eq!(checked["reason"], "role_binding");
+    assert_eq!(checked, json!({"allowed": true, "reason": "role_binding"}));
+
+    let unknown = authz_check(
+        &app,
+        "compos.object.read",
+        "compos",
+        "object_instance",
+        "obj_unknown",
+    )
+    .await;
+    assert_eq!(
+        unknown,
+        json!({"allowed": false, "reason": "no_matching_binding"})
+    );
 
     let filter = app
         .clone()
@@ -472,8 +487,73 @@ async fn authz_check_and_filter_use_role_binding() {
         .expect("batch response");
     assert_eq!(batch.status(), StatusCode::OK);
     let batched = support::response_json(batch).await;
-    assert_eq!(batched["results"][0]["allowed"], true);
-    assert_eq!(batched["results"][1]["allowed"], false);
+    assert_eq!(
+        batched,
+        json!({
+            "results": [
+                {"allowed": true, "reason": "role_binding"},
+                {"allowed": false, "reason": "no_matching_binding"}
+            ]
+        })
+    );
+}
+
+#[tokio::test]
+async fn expired_agreement_binding_denies_coarse_authorization() {
+    let api = compos_reader_fixture().await;
+    let agreement = Agreement {
+        id: "agreement-expired-authz".to_owned(),
+        agreement_type: AgreementType::Delegation,
+        grantor_organization_id: "owner-org".to_owned(),
+        grantee_organization_id: "creator-org".to_owned(),
+        status: AgreementStatus::Active,
+        title: "Temporary access".to_owned(),
+        reference_no: None,
+        starts_at: None,
+        ends_at: Some("2999-01-01T00:00:00Z".to_owned()),
+    };
+    api.db
+        .upsert_agreement(&agreement)
+        .await
+        .expect("active agreement");
+    api.db
+        .save_role_binding(&RoleBinding {
+            id: "binding-expired-authz".to_owned(),
+            subject_type: RoleBindingSubjectType::Organization,
+            subject_id: "creator-org".to_owned(),
+            subject_organization_id: "creator-org".to_owned(),
+            provider_id: "compos".to_owned(),
+            resource_type: "object_instance".to_owned(),
+            resource_id: "obj_expired".to_owned(),
+            role_id: "role-compos-reader".to_owned(),
+            agreement_id: Some(agreement.id.clone()),
+            state: RoleBindingState::Active,
+            created_by_user_id: support::BOOTSTRAP_USER_ID.to_owned(),
+            created_at: support::FIXED_TEST_TIME.to_owned(),
+            updated_at: support::FIXED_TEST_TIME.to_owned(),
+        })
+        .await
+        .expect("agreement-backed binding");
+    api.db
+        .upsert_agreement(&Agreement {
+            status: AgreementStatus::Expired,
+            ..agreement
+        })
+        .await
+        .expect("expire agreement");
+
+    let denied = authz_check(
+        &api.app,
+        "compos.object.read",
+        "compos",
+        "object_instance",
+        "obj_expired",
+    )
+    .await;
+    assert_eq!(
+        denied,
+        json!({"allowed": false, "reason": "no_matching_binding"})
+    );
 }
 
 #[tokio::test]

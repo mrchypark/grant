@@ -6,7 +6,8 @@ use axum::{
 };
 use domain::{
     Action, ActionRiskLevel, Application, ApplicationAppType, ApplicationConsentPolicy,
-    ApplicationType, Role, RoleBinding, RoleBindingState, RoleBindingSubjectType, ServiceProvider,
+    ApplicationProvisioningStatus, ApplicationRedirectUri, ApplicationType, Role, RoleBinding,
+    RoleBindingState, RoleBindingSubjectType, ServiceProvider,
 };
 use hiqlite::{Node, NodeConfig, s3::EncKeys};
 use http_body_util::BodyExt;
@@ -236,6 +237,433 @@ async fn application_create_reserves_generated_client_until_master_verifies_exte
     let body = verify.into_body().collect().await.expect("body").to_bytes();
     let verified: Value = serde_json::from_slice(&body).expect("verified JSON");
     assert_eq!(verified["provisioningStatus"], "ready");
+}
+
+#[tokio::test]
+async fn application_redirect_uri_create_get_and_validation_contract() {
+    let (service, db, _dir) = test_service().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+
+    for (id, redirect_uri) in [
+        (
+            "application-redirect-https",
+            "https://example.test/callback",
+        ),
+        (
+            "application-redirect-ipv4",
+            "http://127.0.0.1:8787/callback",
+        ),
+        ("application-redirect-ipv6", "http://[::1]:8787/callback"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/orgs/creator-org/apps",
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({
+                    "id": id,
+                    "slug": id,
+                    "name": id,
+                    "applicationType": "public",
+                    "appType": "web",
+                    "active": true,
+                    "redirectUri": redirect_uri,
+                })),
+            ))
+            .await
+            .expect("create redirect URI application");
+        let status = response.status();
+        let payload = support::response_json(response).await;
+        assert_eq!(status, StatusCode::CREATED, "{payload}");
+        assert_eq!(payload["redirectUri"], redirect_uri);
+    }
+
+    let get = app
+        .clone()
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-redirect-https",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("get redirect URI application");
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(
+        support::response_json(get).await["redirectUri"],
+        "https://example.test/callback"
+    );
+
+    let list = app
+        .clone()
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list applications");
+    assert!(
+        support::response_json(list)
+            .await
+            .as_array()
+            .is_some_and(|items| { items.iter().all(|item| item.get("redirectUri").is_none()) })
+    );
+
+    for redirect_uri in [
+        "relative/callback",
+        "custom://example.test/callback",
+        "http://192.0.2.1:8080/callback",
+        "http://localhost:8080/callback",
+        "https://user@example.test/callback",
+        "https://@example.test/callback",
+        "https://example.test/callback#fragment",
+        "https://example.test/callback?query=value",
+        "https://*.example.test/callback",
+        "https://example.test/call*back",
+        "http://127.0.0.1/callback",
+        "   ",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/orgs/creator-org/apps",
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({
+                    "id": "application-invalid-redirect",
+                    "slug": "invalid-redirect",
+                    "name": "Invalid redirect",
+                    "applicationType": "confidential",
+                    "appType": "web",
+                    "active": true,
+                    "redirectUri": redirect_uri,
+                })),
+            ))
+            .await
+            .expect("invalid redirect URI response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{redirect_uri}");
+    }
+
+    let overlong = format!("https://example.test/{}", "a".repeat(2_048));
+    let response = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "application-invalid-redirect",
+                "slug": "invalid-redirect",
+                "name": "Invalid redirect",
+                "applicationType": "confidential",
+                "appType": "web",
+                "active": true,
+                "redirectUri": overlong,
+            })),
+        ))
+        .await
+        .expect("overlong redirect URI response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        db.find_application_by_id_with_consistency(
+            "application-invalid-redirect",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("invalid application lookup")
+        .is_none()
+    );
+    assert!(
+        db.list_application_redirect_uris_with_consistency(
+            "application-invalid-redirect",
+            Some(ReadConsistency::Strong),
+        )
+        .await
+        .expect("invalid redirect manifest lookup")
+        .is_empty()
+    );
+
+    let canonicalized = app
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "application-canonical-redirect",
+                "slug": "canonical-redirect",
+                "name": "Canonical Redirect",
+                "applicationType": "confidential",
+                "appType": "web",
+                "active": true,
+                "redirectUri": "HTTPS://EXAMPLE.TEST/callback",
+            })),
+        ))
+        .await
+        .expect("canonical redirect URI response");
+    assert_eq!(canonicalized.status(), StatusCode::CREATED);
+    assert_eq!(
+        support::response_json(canonicalized).await["redirectUri"],
+        "https://example.test/callback"
+    );
+}
+
+#[tokio::test]
+async fn public_application_provisioning_accepts_exact_singleton_redirect_uri_with_s256() {
+    let (service, db, _dir, rauthy_base_url) = test_service_with_rauthy_url().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let create = app
+        .clone()
+        .oneshot(app_request(
+            Method::POST,
+            "/api/v1/orgs/creator-org/apps",
+            "bootstrap-user",
+            "creator-org",
+            Some(json!({
+                "id": "application-public-redirect",
+                "slug": "public-redirect",
+                "name": "Public Redirect",
+                "applicationType": "public",
+                "appType": "web",
+                "active": true,
+                "redirectUri": "https://public.example.test/callback",
+            })),
+        ))
+        .await
+        .expect("create public redirect application");
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let created = support::response_json(create).await;
+    let client_id = created["rauthyClientId"].as_str().expect("client id");
+
+    let provision = reqwest::Client::new()
+        .post(format!("{rauthy_base_url}/auth/v1/clients"))
+        .header("authorization", "API-Key grant-rauthy-api-key")
+        .json(&json!({
+            "id": client_id,
+            "name": "Public Redirect",
+            "confidential": false,
+            "redirect_uris": ["https://public.example.test/callback"],
+        }))
+        .send()
+        .await
+        .expect("provision public Rauthy client");
+    assert!(provision.status().is_success());
+
+    let verify = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/admin/orgs/creator-org/apps/application-public-redirect/provisioning/verify")
+                .header("x-grant-master-key", "dev-only-master-key")
+                .body(Body::empty())
+                .expect("verify request"),
+        )
+        .await
+        .expect("verify response");
+    assert_eq!(verify.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn provisioning_rejects_redirect_and_public_challenge_mismatches() {
+    let (service, db, _dir, rauthy_base_url) = test_service_with_rauthy_url().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    let expected_redirect = "https://public.example.test/callback";
+    for (id, actual_redirects, challenges) in [
+        ("redirect-missing", json!([]), json!(["S256"])),
+        (
+            "redirect-extra",
+            json!([expected_redirect, "https://public.example.test/extra"]),
+            json!(["S256"]),
+        ),
+        (
+            "redirect-value",
+            json!(["https://public.example.test/other"]),
+            json!(["S256"]),
+        ),
+        ("challenge-missing", json!([expected_redirect]), json!([])),
+        (
+            "challenge-extra",
+            json!([expected_redirect]),
+            json!(["S256", "plain"]),
+        ),
+        (
+            "challenge-plain",
+            json!([expected_redirect]),
+            json!(["plain"]),
+        ),
+    ] {
+        let application_id = format!("application-{id}");
+        let name = format!("Application {id}");
+        let create = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/orgs/creator-org/apps",
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({
+                    "id": application_id,
+                    "slug": id,
+                    "name": name,
+                    "applicationType": "public",
+                    "appType": "web",
+                    "active": true,
+                    "redirectUri": expected_redirect,
+                })),
+            ))
+            .await
+            .expect("create mismatch application");
+        assert_eq!(create.status(), StatusCode::CREATED, "{id}");
+        let created = support::response_json(create).await;
+        let client_id = created["rauthyClientId"].as_str().expect("client id");
+        let provision = reqwest::Client::new()
+            .post(format!("{rauthy_base_url}/auth/v1/clients"))
+            .header("authorization", "API-Key grant-rauthy-api-key")
+            .json(&json!({
+                "id": client_id,
+                "name": name,
+                "confidential": false,
+                "redirect_uris": actual_redirects,
+                "challenges": challenges,
+            }))
+            .send()
+            .await
+            .expect("provision mismatch client");
+        assert!(provision.status().is_success(), "{id}");
+        let verify = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/v1/admin/orgs/creator-org/apps/{application_id}/provisioning/verify"
+                    ))
+                    .header("x-grant-master-key", "dev-only-master-key")
+                    .body(Body::empty())
+                    .expect("verify request"),
+            )
+            .await
+            .expect("verify mismatch response");
+        assert_eq!(verify.status(), StatusCode::CONFLICT, "{id}");
+        assert_eq!(
+            db.get_application_with_consistency(&application_id, Some(ReadConsistency::Strong))
+                .await
+                .expect("mismatch application")
+                .provisioning_status,
+            ApplicationProvisioningStatus::Unprovisioned,
+            "{id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn provisioning_rejects_noncanonical_or_multiple_local_redirect_rows_without_breaking_actions()
+ {
+    let (service, db, _dir, rauthy_base_url) = test_service_with_rauthy_url().await;
+    seed_application_manager(&db, "creator-org").await;
+    let app = api::build_router(service);
+    for (id, redirects) in [
+        (
+            "application-noncanonical-redirect",
+            vec!["https://EXAMPLE.test/callback"],
+        ),
+        (
+            "application-multiple-redirects",
+            vec![
+                "https://one.example.test/callback",
+                "https://two.example.test/callback",
+            ],
+        ),
+    ] {
+        let create = app
+            .clone()
+            .oneshot(app_request(
+                Method::POST,
+                "/api/v1/orgs/creator-org/apps",
+                "bootstrap-user",
+                "creator-org",
+                Some(json!({
+                    "id": id,
+                    "slug": id,
+                    "name": id,
+                    "applicationType": "confidential",
+                    "appType": "web",
+                    "active": true,
+                })),
+            ))
+            .await
+            .expect("create local manifest application");
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = support::response_json(create).await;
+        let client_id = created["rauthyClientId"].as_str().expect("client id");
+        for redirect_uri in &redirects {
+            db.insert_application_redirect_uri(&ApplicationRedirectUri {
+                application_id: id.to_owned(),
+                redirect_uri: (*redirect_uri).to_owned(),
+                created_at: "2026-04-03T00:00:00Z".to_owned(),
+            })
+            .await
+            .expect("insert legacy redirect URI");
+        }
+        let provision = reqwest::Client::new()
+            .post(format!("{rauthy_base_url}/auth/v1/clients"))
+            .header("authorization", "API-Key grant-rauthy-api-key")
+            .json(&json!({
+                "id": client_id,
+                "name": id,
+                "confidential": true,
+                "redirect_uris": redirects,
+            }))
+            .send()
+            .await
+            .expect("provision local manifest client");
+        assert!(provision.status().is_success());
+        let verify = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/v1/admin/orgs/creator-org/apps/{id}/provisioning/verify"
+                    ))
+                    .header("x-grant-master-key", "dev-only-master-key")
+                    .body(Body::empty())
+                    .expect("verify request"),
+            )
+            .await
+            .expect("verify local manifest response");
+        assert_eq!(verify.status(), StatusCode::CONFLICT, "{id}");
+        assert_eq!(
+            db.get_application_with_consistency(id, Some(ReadConsistency::Strong))
+                .await
+                .expect("local manifest application")
+                .provisioning_status,
+            ApplicationProvisioningStatus::Unprovisioned
+        );
+    }
+
+    let actions = app
+        .oneshot(app_request(
+            Method::GET,
+            "/api/v1/orgs/creator-org/apps/application-multiple-redirects/actions",
+            "bootstrap-user",
+            "creator-org",
+            None,
+        ))
+        .await
+        .expect("list actions with legacy redirects");
+    assert_eq!(actions.status(), StatusCode::OK);
 }
 
 #[tokio::test]

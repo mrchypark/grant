@@ -1,21 +1,6 @@
 use super::core::now_string;
 use super::*;
 
-#[derive(Debug)]
-struct FieldViewActionCapabilityRow {
-    provider_id: String,
-    action_id: String,
-}
-
-impl From<&mut Row<'_>> for FieldViewActionCapabilityRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            provider_id: row.get("provider_id"),
-            action_id: row.get("action_id"),
-        }
-    }
-}
-
 impl Database {
     pub async fn upsert_service_provider(&self, provider: &ServiceProvider) -> Result<()> {
         let now = now_string();
@@ -60,6 +45,11 @@ impl Database {
     }
 
     pub async fn upsert_action(&self, action: &Action) -> Result<()> {
+        if action.visibility_granting {
+            return Err(anyhow!(
+                "visibility_granting=true is unavailable in the coarse deployment baseline"
+            ));
+        }
         if !self
             .exists_row_with(
                 ReadConsistency::Strong,
@@ -132,6 +122,11 @@ impl Database {
             return Err(anyhow!("service provider {provider_id} does not exist"));
         }
         validate_provider_action_manifest(provider_id, actions)?;
+        if actions.iter().any(|action| action.visibility_granting) {
+            return Err(anyhow!(
+                "visibility_granting=true is unavailable in the coarse deployment baseline"
+            ));
+        }
         let keep_ids = actions
             .iter()
             .map(|action| action.id.clone())
@@ -151,10 +146,6 @@ impl Database {
                     ),
                     (
                         Cow::Borrowed("DELETE FROM application_actions WHERE action_id = $1"),
-                        params!(existing.id.clone()),
-                    ),
-                    (
-                        Cow::Borrowed("DELETE FROM role_action_field_views WHERE action_id = $1"),
                         params!(existing.id.clone()),
                     ),
                     (
@@ -194,70 +185,5 @@ impl Database {
             )
             .await?;
         rows.into_iter().map(TryInto::try_into).collect()
-    }
-
-    pub async fn is_field_view_action_with_consistency(
-        &self,
-        provider_id: &str,
-        action_id: &str,
-        consistency: Option<ReadConsistency>,
-    ) -> Result<bool> {
-        self.exists_row_with(
-            self.validation_read_consistency_with_override(consistency),
-            "SELECT COUNT(*) AS count
-             FROM actions AS a
-             JOIN service_providers AS sp ON sp.id = a.provider_id
-             WHERE a.id = $1
-               AND a.provider_id = $2
-               AND a.visibility_granting = 1
-               AND sp.active = 1",
-            params!(action_id.to_owned(), provider_id.to_owned()),
-            "field view action capability",
-        )
-        .await
-    }
-
-    pub async fn field_view_actions_with_consistency(
-        &self,
-        actions: &HashSet<(String, String)>,
-        consistency: Option<ReadConsistency>,
-    ) -> Result<HashSet<(String, String)>> {
-        let consistency = self.validation_read_consistency_with_override(consistency);
-        let actions = actions.iter().collect::<Vec<_>>();
-        let mut supported = HashSet::with_capacity(actions.len());
-        // Each tuple binds two parameters. Keep comfortably below SQLite's conservative
-        // 999-variable limit while allowing the public batch maximum.
-        for chunk in actions.chunks(400) {
-            let mut params = Vec::with_capacity(chunk.len() * 2);
-            let mut values = Vec::with_capacity(chunk.len());
-            for (index, (provider_id, action_id)) in chunk.iter().enumerate() {
-                let base = index * 2 + 1;
-                values.push(format!("(${base}, ${})", base + 1));
-                params.push(hiqlite::Param::from((*provider_id).clone()));
-                params.push(hiqlite::Param::from((*action_id).clone()));
-            }
-            let rows: Vec<FieldViewActionCapabilityRow> = self
-                .query_rows_with(
-                    consistency.clone(),
-                    format!(
-                        "WITH requested(provider_id, action_id) AS (VALUES {})
-                         SELECT a.provider_id, a.id AS action_id
-                         FROM requested AS req
-                         JOIN actions AS a
-                           ON a.provider_id = req.provider_id
-                          AND a.id = req.action_id
-                          AND a.visibility_granting = 1
-                         JOIN service_providers AS sp
-                           ON sp.id = a.provider_id
-                          AND sp.active = 1",
-                        values.join(", ")
-                    ),
-                    params,
-                    "field view action capabilities",
-                )
-                .await?;
-            supported.extend(rows.into_iter().map(|row| (row.provider_id, row.action_id)));
-        }
-        Ok(supported)
     }
 }

@@ -4,7 +4,7 @@ use crate::{
     database::{CachedExternalIdentity, Database},
 };
 use anyhow::{Context, Result, anyhow};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -258,11 +258,13 @@ impl RauthyResolver {
                 return Err(error).context("Rauthy introspect returned error status");
             }
         };
-        let (identity, ttl) = self.identity_from_introspection(token, response).await?;
-        self.write_cache_until(cache_key, identity.clone(), Instant::now() + ttl)
+        let (identity, local_expires_at, shared_expires_at) =
+            self.identity_from_introspection(token, response).await?;
+        self.write_cache_until(cache_key, identity.clone(), local_expires_at)
             .await;
         if persist_shared_cache {
-            self.write_shared_cache(db, token, &identity, ttl).await?;
+            self.write_shared_cache(db, token, &identity, shared_expires_at)
+                .await?;
         }
         Ok(identity)
     }
@@ -280,8 +282,9 @@ impl RauthyResolver {
         let response = response
             .error_for_status()
             .context("Rauthy introspect returned error status")?;
-        let (identity, ttl) = self.identity_from_introspection(token, response).await?;
-        self.write_cache_until(cache_key, identity.clone(), Instant::now() + ttl)
+        let (identity, local_expires_at, _) =
+            self.identity_from_introspection(token, response).await?;
+        self.write_cache_until(cache_key, identity.clone(), local_expires_at)
             .await;
         Ok(identity)
     }
@@ -300,13 +303,16 @@ impl RauthyResolver {
         &self,
         token: &str,
         response: reqwest::Response,
-    ) -> Result<(RauthyIdentity, Duration)> {
+    ) -> Result<(RauthyIdentity, Instant, DateTime<Utc>)> {
         let token_info = parse_introspection_response(response).await?;
-        let ttl = cache_ttl_for_exp(self.cache_ttl, token_info.exp, Utc::now().timestamp())?;
         let identity = self
             .fetch_userinfo(token, &token_info.sub, &token_info.client_id)
             .await?;
-        Ok((identity, ttl))
+        let monotonic_now = Instant::now();
+        let wall_now = Utc::now();
+        let (local_expires_at, shared_expires_at) =
+            cache_deadlines(self.cache_ttl, token_info.exp, wall_now, monotonic_now)?;
+        Ok((identity, local_expires_at, shared_expires_at))
     }
 
     async fn fetch_userinfo(
@@ -356,9 +362,13 @@ impl RauthyResolver {
     }
 
     async fn read_cache(&self, key: &str) -> Option<RauthyIdentity> {
+        self.read_cache_at(key, Instant::now()).await
+    }
+
+    async fn read_cache_at(&self, key: &str, now: Instant) -> Option<RauthyIdentity> {
         let mut cache = self.cache.lock().expect("Rauthy auth cache poisoned");
         let cached = cache.get(key)?;
-        if cached.expires_at <= Instant::now() {
+        if cached.expires_at <= now {
             cache.remove(key);
             return None;
         }
@@ -384,13 +394,18 @@ impl RauthyResolver {
         token_hash: &str,
         read_consistency: Option<ReadConsistency>,
     ) -> Result<Option<RauthyIdentity>> {
-        let now = Utc::now();
+        let query_now = Utc::now();
         let cached = db
-            .get_cached_external_identity(token_hash, now, read_consistency)
+            .get_cached_external_identity(token_hash, query_now, read_consistency)
             .await?;
         let Some(cached) = cached else {
             return Ok(None);
         };
+        let monotonic_now = Instant::now();
+        let wall_now = Utc::now();
+        if cached.expires_at <= wall_now {
+            return Ok(None);
+        }
         if cached.provider != AUTH_PROVIDER {
             return Ok(None);
         }
@@ -403,15 +418,11 @@ impl RauthyResolver {
         };
         let ttl = cached
             .expires_at
-            .signed_duration_since(now)
+            .signed_duration_since(wall_now)
             .to_std()
             .unwrap_or_else(|_| Duration::from_secs(0));
-        self.write_cache_until(
-            token_hash.to_owned(),
-            identity.clone(),
-            Instant::now() + ttl,
-        )
-        .await;
+        self.write_cache_until(token_hash.to_owned(), identity.clone(), monotonic_now + ttl)
+            .await;
         Ok(Some(identity))
     }
 
@@ -420,10 +431,9 @@ impl RauthyResolver {
         db: &Database,
         token: &str,
         identity: &RauthyIdentity,
-        ttl: Duration,
+        expires_at: DateTime<Utc>,
     ) -> Result<()> {
         let token_hash = token_cache_key(token);
-        let expires_at = Utc::now() + ChronoDuration::seconds(ttl.as_secs() as i64);
         db.put_cached_external_identity(
             &token_hash,
             &CachedExternalIdentity {
@@ -543,17 +553,36 @@ fn verified_email(email: Option<String>, verified: Option<bool>) -> Option<Strin
         .filter(|value| !value.trim().is_empty())
 }
 
-fn cache_ttl_for_exp(configured: Duration, exp: Option<i64>, now: i64) -> Result<Duration> {
-    let Some(exp) = exp else {
-        return Ok(configured);
+fn cache_deadlines(
+    configured: Duration,
+    exp: Option<i64>,
+    wall_now: DateTime<Utc>,
+    monotonic_now: Instant,
+) -> Result<(Instant, DateTime<Utc>)> {
+    let configured_expiry = wall_now
+        .checked_add_signed(
+            ChronoDuration::from_std(configured)
+                .map_err(|_| anyhow!("unauthorized: invalid auth cache duration"))?,
+        )
+        .ok_or_else(|| anyhow!("unauthorized: invalid auth cache expiration"))?;
+    let wall_expires_at = if let Some(exp) = exp {
+        let token_expires_at = DateTime::<Utc>::from_timestamp(exp, 0)
+            .ok_or_else(|| anyhow!("unauthorized: invalid token expiration"))?;
+        if token_expires_at <= wall_now {
+            anyhow::bail!("unauthorized: rauthy token is expired");
+        }
+        configured_expiry.min(token_expires_at)
+    } else {
+        configured_expiry
     };
-    let remaining = exp
-        .checked_sub(now)
-        .ok_or_else(|| anyhow!("unauthorized: invalid token expiration"))?;
-    if remaining <= 0 {
-        return Ok(Duration::ZERO);
-    }
-    Ok(configured.min(Duration::from_secs(remaining as u64)))
+    let remaining = wall_expires_at
+        .signed_duration_since(wall_now)
+        .to_std()
+        .map_err(|_| anyhow!("unauthorized: rauthy token is expired"))?;
+    let monotonic_expires_at = monotonic_now
+        .checked_add(remaining)
+        .ok_or_else(|| anyhow!("unauthorized: invalid auth cache expiration"))?;
+    Ok((monotonic_expires_at, wall_expires_at))
 }
 
 pub(crate) fn map_strong_identity_sync_error(err: anyhow::Error) -> anyhow::Error {
@@ -575,11 +604,12 @@ fn token_cache_key(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedRauthyIdentity, RauthyIdentity, cache_ttl_for_exp, map_strong_identity_sync_error,
+        CachedRauthyIdentity, RauthyIdentity, cache_deadlines, map_strong_identity_sync_error,
         should_sync_identity, verified_email,
     };
     use crate::config::{AuthConfig, RauthyAuthConfig, ReadConsistency};
     use anyhow::anyhow;
+    use chrono::{TimeZone, Utc};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -618,16 +648,86 @@ mod tests {
     }
 
     #[test]
-    fn token_expiry_caps_cache_ttl() {
+    fn token_expiry_anchors_the_cache_deadline_without_subsecond_overrun() {
+        let monotonic_now = Instant::now();
+        let wall_now = Utc
+            .timestamp_opt(100, 500_000_000)
+            .single()
+            .expect("wall clock");
+        let (monotonic_expires_at, wall_expires_at) =
+            cache_deadlines(Duration::from_secs(30), Some(101), wall_now, monotonic_now)
+                .expect("deadlines");
         assert_eq!(
-            cache_ttl_for_exp(Duration::from_secs(30), Some(110), 100).expect("ttl"),
-            Duration::from_secs(10)
+            monotonic_expires_at.duration_since(monotonic_now),
+            Duration::from_millis(500)
         );
         assert_eq!(
-            cache_ttl_for_exp(Duration::from_secs(30), Some(100), 100).expect("ttl"),
-            Duration::ZERO
+            wall_expires_at,
+            Utc.timestamp_opt(101, 0).single().expect("token expiry")
         );
-        assert!(cache_ttl_for_exp(Duration::from_secs(30), Some(i64::MAX), i64::MIN).is_err());
+        assert!(
+            cache_deadlines(
+                Duration::from_secs(30),
+                Some(100),
+                Utc.timestamp_opt(100, 0).single().expect("wall clock"),
+                monotonic_now,
+            )
+            .expect_err("expired token")
+            .to_string()
+            .contains("token is expired")
+        );
+        assert!(
+            cache_deadlines(
+                Duration::from_secs(30),
+                Some(i64::MAX),
+                wall_now,
+                monotonic_now,
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_identity_is_rejected_at_its_anchored_expiry_without_sleeping() {
+        let resolver = super::AuthResolver::new(&AuthConfig {
+            rauthy: RauthyAuthConfig {
+                base_url: "http://localhost".to_owned(),
+                introspect_path: "/introspect".to_owned(),
+                userinfo_path: "/userinfo".to_owned(),
+                client_id: "client".to_owned(),
+                client_secret: "secret".to_owned(),
+                client_read_api_key: "client-read".to_owned(),
+                cache_ttl_seconds: 30,
+            },
+        })
+        .rauthy;
+        let identity = RauthyIdentity {
+            external_user_id: "user".to_owned(),
+            client_id: "client".to_owned(),
+            email: None,
+            display_name: "User".to_owned(),
+            active: true,
+        };
+        let monotonic_now = Instant::now();
+        let wall_now = Utc
+            .timestamp_opt(100, 500_000_000)
+            .single()
+            .expect("wall clock");
+        let (expires_at, _) =
+            cache_deadlines(Duration::from_secs(30), Some(101), wall_now, monotonic_now)
+                .expect("anchored token deadline");
+        resolver
+            .write_cache_until("token".to_owned(), identity.clone(), expires_at)
+            .await;
+
+        let cached = resolver
+            .read_cache_at("token", expires_at - Duration::from_nanos(1))
+            .await
+            .expect("identity before expiry");
+        assert_eq!(cached.external_user_id, identity.external_user_id);
+        assert_eq!(cached.client_id, identity.client_id);
+        assert!(resolver.read_cache_at("token", expires_at).await.is_none());
+        assert!(resolver.read_cache_at("token", expires_at).await.is_none());
     }
 
     #[tokio::test]

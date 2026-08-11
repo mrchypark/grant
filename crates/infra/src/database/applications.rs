@@ -148,6 +148,59 @@ impl Database {
         Ok(())
     }
 
+    pub async fn insert_application_with_optional_redirect_uri(
+        &self,
+        application: &Application,
+        redirect_uri: Option<&str>,
+    ) -> Result<()> {
+        self.validate_application_references(application).await?;
+        let now = now_string();
+        let mut queries = vec![(
+            Cow::Borrowed(
+                "INSERT INTO applications (
+                    id, organization_id, slug, name, description, application_type, app_type,
+                    first_party, consent_policy, active, provisioning_status, rauthy_client_id,
+                    created_by_user_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+            ),
+            params!(
+                application.id.clone(),
+                application.organization_id.clone(),
+                application.slug.clone(),
+                application.name.clone(),
+                application.description.clone(),
+                application_type_str(&application.application_type),
+                application_app_type_str(&application.app_type),
+                if application.first_party {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                application_consent_policy_str(&application.consent_policy),
+                if application.active { 1_i64 } else { 0_i64 },
+                application_provisioning_status_str(&application.provisioning_status),
+                application.rauthy_client_id.clone(),
+                application.created_by_user_id.clone(),
+                now.clone(),
+                now.clone()
+            ),
+        )];
+        if let Some(redirect_uri) = redirect_uri {
+            queries.push((
+                Cow::Borrowed(
+                    "INSERT INTO application_redirect_uris (application_id, redirect_uri, created_at)
+                     VALUES ($1, $2, $3)",
+                ),
+                params!(application.id.clone(), redirect_uri.to_owned(), now),
+            ));
+        }
+        self.runtime
+            .transaction(queries)
+            .await
+            .context("insert application redirect URI manifest transaction")?;
+        Ok(())
+    }
+
     pub async fn update_application_with_security_lease(
         &self,
         application: &Application,

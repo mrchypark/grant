@@ -58,6 +58,7 @@ struct MockClient {
     confidential: bool,
     redirect_uris: Vec<String>,
     flows_enabled: Vec<String>,
+    challenges: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +72,7 @@ struct MockClientRequest {
     name: Option<String>,
     confidential: bool,
     redirect_uris: Vec<String>,
+    challenges: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -503,6 +505,7 @@ pub async fn start_mock_rauthy() -> String {
             confidential: body.confidential,
             redirect_uris: body.redirect_uris,
             flows_enabled,
+            challenges: body.challenges.unwrap_or_else(|| vec!["S256".to_owned()]),
         };
         let mut clients = state.clients.lock().expect("clients");
         if clients.contains_key(&body.id) {
@@ -612,6 +615,7 @@ pub async fn start_mock_rauthy() -> String {
         client.confidential = body.confidential;
         client.redirect_uris = body.redirect_uris;
         client.flows_enabled = body.flows_enabled;
+        client.challenges = body.challenges.unwrap_or_default();
         Json(MockClientResponse {
             id: client.id.clone(),
             name: client.name.clone(),
@@ -639,6 +643,7 @@ pub async fn start_mock_rauthy() -> String {
                     confidential: true,
                     redirect_uris: vec!["https://concurrent.example/callback".to_owned()],
                     flows_enabled: vec!["authorization_code".to_owned()],
+                    challenges: vec!["S256".to_owned()],
                 },
             );
             return (
@@ -669,7 +674,7 @@ pub async fn start_mock_rauthy() -> String {
             "access_token_lifetime": 7200,
             "scopes": ["openid", "profile", "email"],
             "default_scopes": ["openid", "profile", "email"],
-            "challenges": ["S256"],
+            "challenges": client.challenges,
             "force_mfa": false,
             "client_uri": "https://admin.example/client",
             "contacts": null,
@@ -734,12 +739,17 @@ pub async fn start_mock_rauthy() -> String {
             .strip_prefix("app-token/")
             .and_then(|value| value.split_once('/'))
             .unwrap_or(("grant", form.token.as_str()));
+        let expires_at = if form.token == "expired-token" {
+            1_i64
+        } else {
+            4_102_444_800_i64
+        };
         Json(json!({
             "active": true,
             "sub": sub,
             "scope": "openid email profile",
             "client_id": client_id,
-            "exp": 4_102_444_800i64
+            "exp": expires_at
         }))
     }
 

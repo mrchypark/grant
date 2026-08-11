@@ -437,6 +437,102 @@ impl Database {
         }))
     }
 
+    pub async fn enroll_active_member(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+    ) -> Result<OrganizationMembership> {
+        let now = now_string();
+        let affected = self
+            .runtime
+            .execute(
+                "INSERT INTO organization_memberships (id, organization_id, user_id, membership_role, status, created_at, updated_at)
+                 SELECT $1, $2, $3, 'member', 'active', $4, $5
+                 WHERE EXISTS (
+                    SELECT 1
+                    FROM users u
+                    JOIN organizations o ON o.id = $2
+                    WHERE u.id = $3
+                      AND u.active = 1
+                      AND o.inactivated_at IS NULL
+                 )
+                 ON CONFLICT(organization_id, user_id) DO UPDATE SET
+                    status = 'active',
+                    updated_at = excluded.updated_at
+                 WHERE organization_memberships.membership_role = 'member'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM users u
+                     JOIN organizations o ON o.id = excluded.organization_id
+                     WHERE u.id = excluded.user_id
+                       AND u.active = 1
+                       AND o.inactivated_at IS NULL
+                   )",
+                params!(
+                    Uuid::new_v4().simple().to_string(),
+                    organization_id.to_owned(),
+                    user_id.to_owned(),
+                    now.clone(),
+                    now,
+                ),
+            )
+            .await
+            .context("enroll active organization member")?;
+        if affected == 0 {
+            let target = self
+                .find_user_by_id(user_id, Some(ReadConsistency::Strong))
+                .await?;
+            match target {
+                None => return Err(OrganizationMembershipWriteError::TargetUserNotFound.into()),
+                Some(target) if !target.active => {
+                    return Err(OrganizationMembershipWriteError::TargetUserInactive.into());
+                }
+                Some(_) => {}
+            }
+            let organization_active: CountRow = self
+                .runtime
+                .query_rows(
+                    ReadConsistency::Strong,
+                    "SELECT COUNT(*) as count
+                     FROM organizations
+                     WHERE id = $1 AND inactivated_at IS NULL",
+                    params!(organization_id.to_owned()),
+                )
+                .await
+                .context("check enrollment organization state")?
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow!("organization state query returned no row"))?;
+            if organization_active.count == 0 {
+                return Err(OrganizationMembershipWriteError::OrganizationInactive.into());
+            }
+        }
+        let rows: Vec<OrganizationMembershipRow> = self
+            .runtime
+            .query_rows(
+                ReadConsistency::Strong,
+                "SELECT id, organization_id, user_id, membership_role, status
+                 FROM organization_memberships
+                 WHERE organization_id = $1 AND user_id = $2
+                 LIMIT 1",
+                params!(organization_id.to_owned(), user_id.to_owned()),
+            )
+            .await
+            .context("read enrolled organization member")?;
+        let membership = match rows.into_iter().next() {
+            Some(membership) => membership,
+            None => return Err(OrganizationMembershipWriteError::PreconditionsChanged.into()),
+        };
+        let membership = OrganizationMembership::try_from(membership)?;
+        if membership.membership_role != MembershipRole::Member {
+            return Err(OrganizationMembershipWriteError::ExistingNonMemberRole.into());
+        }
+        if membership.status != MembershipStatus::Active {
+            return Err(OrganizationMembershipWriteError::PreconditionsChanged.into());
+        }
+        Ok(membership)
+    }
+
     async fn find_user_by_identity_or_email(
         &self,
         provider: &str,

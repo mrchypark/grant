@@ -2,6 +2,27 @@ name: e2e-local
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_grant_image:
+        description: Publish the pinned simple-deploy Grant runtime image
+        required: true
+        default: false
+        type: boolean
+      publish_rauthy_launcher_gar:
+        description: Publish the feature Rauthy launcher image to GAR
+        required: false
+        default: false
+        type: boolean
+      launcher_source_sha:
+        description: Exact 40-character feature-branch launcher commit to publish
+        required: false
+        default: ''
+        type: string
+      launcher_confirmation:
+        description: Type publish-grant-rauthy-launcher-gar
+        required: false
+        default: ''
+        type: string
   pull_request:
     paths:
       - ".github/workflows/e2e-local.yml"
@@ -15,11 +36,15 @@ on:
       - "scripts/**"
 
 concurrency:
-  group: e2e-local-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: >-
+    ${{ inputs.publish_rauthy_launcher_gar &&
+      format('rauthy-launcher-gar-{0}', github.ref) ||
+      format('e2e-local-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ !inputs.publish_rauthy_launcher_gar }}
 
 jobs:
   rust-verification:
+    if: ${{ !inputs.publish_grant_image && !inputs.publish_rauthy_launcher_gar }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -38,6 +63,7 @@ jobs:
         run: cargo test --workspace --all-targets
 
   local-bootstrap:
+    if: ${{ !inputs.publish_grant_image && !inputs.publish_rauthy_launcher_gar }}
     runs-on: ubuntu-latest
     needs: rust-verification
     timeout-minutes: 60
@@ -187,3 +213,299 @@ jobs:
           RESET_CLUSTER: "1"
           KEEP_CLUSTER: "0"
         run: bash scripts/ci-local.sh
+
+  publish-feature-image:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.publish_grant_image &&
+        !inputs.publish_rauthy_launcher_gar &&
+        github.repository == 'Conalog/grant' &&
+        github.ref == 'refs/heads/feature/grant-simple-deploy-v1'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUNTIME_SHA: c8d29a62be0ee2c49d615eb7474321976b395eaf
+      RUNTIME_TREE: e379c8558eb12ea1b5f8cfbe986bce9219af700f
+      IMAGE_TAG: 20260802-c8d29a6
+      IMAGE_SOURCE: https://github.com/Conalog/grant
+      DOCKERFILE_SHA256: 25138a251cf577885c5208fac58f88315b3c792148418140893d7cedfb92357b
+      CARGO_LOCK_SHA256: eed4244fadd55250019deaa96d3c3d80d9b20deb9b22a967f3df4ad2c532f1fe
+    steps:
+      - name: Check out the pinned runtime source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ env.RUNTIME_SHA }}
+          path: runtime
+          fetch-depth: 1
+
+      - name: Verify exact runtime source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "Conalog/grant"
+          test "${GITHUB_REF}" = "refs/heads/feature/grant-simple-deploy-v1"
+          test "$(git -C runtime rev-parse HEAD)" = "${RUNTIME_SHA}"
+          test "$(git -C runtime rev-parse 'HEAD^{tree}')" = "${RUNTIME_TREE}"
+          test -z "$(git -C runtime status --porcelain=v1)"
+          test "$(sha256sum runtime/Dockerfile | cut -d' ' -f1)" = "${DOCKERFILE_SHA256}"
+          test "$(sha256sum runtime/Cargo.lock | cut -d' ' -f1)" = "${CARGO_LOCK_SHA256}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Guard registry destination
+        id: image
+        shell: bash
+        env:
+          GCP_REGISTRY_HOST: ${{ secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{ secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          image_ref="${GCP_REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_REPOSITORY}/grant"
+          echo "ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          echo "tagged=${image_ref}:${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ secrets.GCP_REGISTRY_HOST }}
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Guard unused tag
+        shell: bash
+        env:
+          TAGGED_IMAGE: ${{ steps.image.outputs.tagged }}
+        run: |
+          set -euo pipefail
+          inspect_error=""
+          if inspect_error="$(docker buildx imagetools inspect "${TAGGED_IMAGE}" 2>&1)"; then
+            echo "::error::refusing to overwrite existing image tag ${TAGGED_IMAGE}"
+            exit 1
+          fi
+          case "${inspect_error}" in
+            *"not found"*|*"Not Found"*|*"manifest unknown"*) ;;
+            *)
+              echo "::error::could not prove image tag absence"
+              exit 1
+              ;;
+          esac
+
+      - name: Build and push the pinned linux/amd64 image
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: ./runtime
+          file: ./runtime/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.tagged }}
+          labels: |
+            org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
+            org.opencontainers.image.revision=${{ env.RUNTIME_SHA }}
+          provenance: mode=max
+
+      - name: Verify immutable image and revision
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          TAGGED_IMAGE: ${{ steps.image.outputs.tagged }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::invalid image digest ${IMAGE_DIGEST}"
+            exit 1
+          fi
+          immutable_image="${IMAGE_REF}@${IMAGE_DIGEST}"
+          docker buildx imagetools inspect "${immutable_image}"
+          tag_digest="$(docker buildx imagetools inspect "${TAGGED_IMAGE}" | awk '/^Digest:/ {print $2; exit}')"
+          test "${tag_digest}" = "${IMAGE_DIGEST}"
+          docker pull --platform linux/amd64 "${immutable_image}"
+          platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${immutable_image}")"
+          config_digest="$(docker image inspect --format '{{.Id}}' "${immutable_image}")"
+          revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${immutable_image}")"
+          source="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${immutable_image}")"
+          test "${platform}" = "linux/amd64"
+          [[ "${config_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "${revision}" = "${RUNTIME_SHA}"
+          test "${source}" = "${IMAGE_SOURCE}"
+          {
+            echo "## Grant simple-deploy image"
+            echo
+            echo "- workflow commit: ${GITHUB_SHA}"
+            echo "- runtime commit: ${RUNTIME_SHA}"
+            echo "- runtime tree: ${RUNTIME_TREE}"
+            echo "- tag: ${TAGGED_IMAGE}"
+            echo "- immutable digest: ${IMAGE_DIGEST}"
+            echo "- platform: ${platform}"
+            echo "- config digest: ${config_digest}"
+            echo "- OCI source: ${source}"
+            echo "- OCI revision: ${revision}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  launcher-source-guard:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.publish_rauthy_launcher_gar &&
+        github.repository == 'Conalog/grant' &&
+        github.ref == 'refs/heads/feature/grant-simple-deploy-v1'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Verify exact launcher source
+        env:
+          PUBLISH_GRANT_IMAGE: ${{
+            inputs.publish_grant_image }}
+          SOURCE_SHA: ${{
+            inputs.launcher_source_sha }}
+          CONFIRMATION: ${{
+            inputs.launcher_confirmation }}
+        run: |
+          set -euo pipefail
+          test "${PUBLISH_GRANT_IMAGE}" = false
+          test "${CONFIRMATION}" = publish-grant-rauthy-launcher-gar
+          printf '%s\n' "${SOURCE_SHA}" | grep -Eq '^[0-9a-f]{40}$'
+          test "${SOURCE_SHA}" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test -z "$(git status --porcelain=v1)"
+          grep -Fx 'ARG RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d' \
+            deploy/rauthy-launcher/Dockerfile
+
+  launcher-tag-preflight:
+    needs: launcher-source-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{
+        steps.tag.outputs.tag }}
+    steps:
+      - name: Compute the reusable workflow tag
+        id: tag
+        env:
+          GCP_REGISTRY_HOST: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{
+            secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{
+            secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tag="$(TZ=Asia/Seoul date +%Y%m%d)-${GITHUB_SHA::7}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          username: _json_key
+          password: ${{
+            secrets.GCP_SA_KEY }}
+
+      - name: Refuse an existing tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GCP_REGISTRY_HOST: ${{ secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{ secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tagged_image="${GCP_REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_REPOSITORY}/grant-rauthy-launcher:${TAG}"
+          inspect_error=""
+          if inspect_error="$(docker buildx imagetools inspect "${tagged_image}" 2>&1)"; then
+            echo "::error::refusing to overwrite existing image tag ${tagged_image}"
+            exit 1
+          fi
+          case "${inspect_error}" in
+            *"not found"*|*"Not Found"*|*"manifest unknown"*) ;;
+            *)
+              echo "::error::could not prove image tag absence"
+              exit 1
+              ;;
+          esac
+
+  launcher-tag-recheck:
+    needs: launcher-tag-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Refuse a KST date rollover before publication
+        env:
+          EXPECTED_TAG: ${{ needs.launcher-tag-preflight.outputs.tag }}
+          GCP_REGISTRY_HOST: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{
+            secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{
+            secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tag="$(TZ=Asia/Seoul date +%Y%m%d)-${GITHUB_SHA::7}"
+          test "${tag}" = "${EXPECTED_TAG}"
+
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          username: _json_key
+          password: ${{
+            secrets.GCP_SA_KEY }}
+
+      - name: Recheck that the tag is absent
+        env:
+          TAG: ${{ needs.launcher-tag-preflight.outputs.tag }}
+          GCP_REGISTRY_HOST: ${{ secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{ secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tagged_image="${GCP_REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_REPOSITORY}/grant-rauthy-launcher:${TAG}"
+          inspect_error=""
+          if inspect_error="$(docker buildx imagetools inspect "${tagged_image}" 2>&1)"; then
+            echo "::error::refusing to overwrite existing image tag ${tagged_image}"
+            exit 1
+          fi
+          case "${inspect_error}" in
+            *"not found"*|*"Not Found"*|*"manifest unknown"*) ;;
+            *)
+              echo "::error::could not prove image tag absence"
+              exit 1
+              ;;
+          esac
+
+  publish-rauthy-launcher-gar:
+    needs: launcher-tag-recheck
+    uses: Conalog/deploy/.github/workflows/buildandpush.yaml@31c7223cf051a67fda35347089ad8a0799082e5a
+    secrets: inherit
+    with:
+      application-name: grant-rauthy-launcher
+      context: ./deploy/rauthy-launcher
+      dockerfile: ./deploy/rauthy-launcher/Dockerfile
+      arch: linux/amd64
+      go-build-cache: true

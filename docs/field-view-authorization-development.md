@@ -1,5 +1,11 @@
 # Grant 범용 필드 열람 권한 개발 지침
 
+> Historical preservation notice (2026-07-30): 이 문서는 기존 field/column authorization 설계와
+> 구현 이력을 보존한다. 현재 simple three-service deploy baseline에는 포함되지 않는다. 현재 Grant는
+> binary coarse authorization만 제공하며 `resource.view`와 `visibilityGranting=true`를 fail closed하고,
+> 아래 field policy management route와 `fieldViews` response contract를 등록하지 않는다. 이 설계를 다시
+> 활성화하려면 verified requirement, migrated-state 계획, consumer enforcement, 별도 배포 승인이 필요하다.
+
 상태: V1 구현 지침
 
 대상: Grant 개발자, 외부 소비자 연동 개발자, 권한 정책 운영자

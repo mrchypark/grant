@@ -8,6 +8,7 @@ use infra::{
     config::ReadConsistency,
     service::{AppService, ApplicationAuthorizationCheck, AuthorizationResource},
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
@@ -27,6 +28,35 @@ use crate::{
 
 const MAX_AUTHZ_BATCH_CHECKS: usize = 1000;
 const MAX_AUTHZ_FILTER_RESOURCES: usize = 1000;
+const FIELD_VIEW_UNSUPPORTED: &str =
+    "resource.view is not supported by the coarse authorization API";
+const EXPOSURE_ARTIFACT_DIGEST_PREFIX: &str = "sha256:";
+const EXPOSURE_ARTIFACT_DIGEST_HEX_LENGTH: usize = 64;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExposureReadAuthorizationRequest {
+    exposure_id: String,
+    exposure_version: u64,
+    artifact_digest: String,
+    resource_id: String,
+    request_binding: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExposureReadAuthorizationResponse {
+    allowed: bool,
+    reason: String,
+    exposure_id: String,
+    exposure_version: u64,
+    artifact_digest: String,
+    resource_id: String,
+    request_binding: String,
+    principal_digest: String,
+    issued_at: String,
+    expires_at: String,
+}
 
 fn application_check_input(body: ApplicationAuthzCheckRequest) -> ApplicationAuthorizationCheck {
     ApplicationAuthorizationCheck {
@@ -35,13 +65,6 @@ fn application_check_input(body: ApplicationAuthzCheckRequest) -> ApplicationAut
             provider_id: body.resource.provider,
             resource_type: body.resource.resource_type,
             id: body.resource.id,
-            view: body
-                .resource
-                .view
-                .map(|view| infra::service::AuthorizationResourceView {
-                    schema_key: view.schema_key,
-                    fields: view.fields,
-                }),
         },
     }
 }
@@ -69,6 +92,7 @@ pub(crate) async fn application_authz_check(
     Json(body): Json<ApplicationAuthzCheckRequest>,
 ) -> ApiResult<Json<AuthzCheckResponse>> {
     let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    reject_resource_views(std::iter::once(&body.resource))?;
     let decision = service
         .check_application_authorizations(
             Some(&token),
@@ -83,12 +107,80 @@ pub(crate) async fn application_authz_check(
     Ok(Json(authz_check_response(decision)))
 }
 
+pub(crate) async fn exposure_read_authorization(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<ExposureReadAuthorizationRequest>,
+) -> ApiResult<Json<ExposureReadAuthorizationResponse>> {
+    let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    validate_exposure_read_request(&body)?;
+    let decision = service
+        .check_exposure_read_authorization(
+            Some(&token),
+            &organization_id,
+            &body.exposure_id,
+            &body.resource_id,
+        )
+        .await
+        .map_err(ApiError::from_auth)?;
+    Ok(Json(ExposureReadAuthorizationResponse {
+        allowed: decision.allowed,
+        reason: decision.reason,
+        exposure_id: body.exposure_id,
+        exposure_version: body.exposure_version,
+        artifact_digest: body.artifact_digest,
+        resource_id: body.resource_id,
+        request_binding: body.request_binding,
+        principal_digest: decision.principal_digest,
+        issued_at: decision.issued_at,
+        expires_at: decision.expires_at,
+    }))
+}
+
+fn validate_exposure_read_request(body: &ExposureReadAuthorizationRequest) -> ApiResult<()> {
+    require_exact_non_empty("exposureId", &body.exposure_id)?;
+    if body.exposure_version == 0 {
+        return Err(ApiError::bad_request(anyhow!(
+            "exposureVersion must be greater than zero"
+        )));
+    }
+    let digest_hex = body
+        .artifact_digest
+        .strip_prefix(EXPOSURE_ARTIFACT_DIGEST_PREFIX);
+    if body.artifact_digest.len()
+        != EXPOSURE_ARTIFACT_DIGEST_PREFIX.len() + EXPOSURE_ARTIFACT_DIGEST_HEX_LENGTH
+        || digest_hex.is_none_or(|digest_hex| {
+            digest_hex.len() != EXPOSURE_ARTIFACT_DIGEST_HEX_LENGTH
+                || !digest_hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(ApiError::bad_request(anyhow!(
+            "artifactDigest must be the literal sha256: followed by exactly 64 lowercase hexadecimal characters"
+        )));
+    }
+    require_exact_non_empty("resourceId", &body.resource_id)?;
+    require_exact_non_empty("requestBinding", &body.request_binding)?;
+    Ok(())
+}
+
+fn require_exact_non_empty(field: &str, value: &str) -> ApiResult<()> {
+    if value.is_empty() || value.trim() != value {
+        return Err(ApiError::bad_request(anyhow!(
+            "{field} must be non-empty and must not have surrounding whitespace"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn application_authz_batch_check(
     State(service): State<Arc<AppService>>,
     headers: HeaderMap,
     Json(body): Json<ApplicationAuthzBatchCheckRequest>,
 ) -> ApiResult<Json<AuthzBatchCheckResponse>> {
     let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    reject_resource_views(body.checks.iter().map(|check| &check.resource))?;
     if body.checks.len() > MAX_AUTHZ_BATCH_CHECKS {
         return Err(ApiError::bad_request(anyhow!(
             "checks must contain at most {MAX_AUTHZ_BATCH_CHECKS} items"
@@ -120,12 +212,12 @@ pub(crate) async fn application_authz_filter(
     Json(body): Json<ApplicationAuthzFilterRequest>,
 ) -> ApiResult<Json<AuthzFilterResponse>> {
     let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    reject_resource_views(&body.resources)?;
     if body.resources.len() > MAX_AUTHZ_FILTER_RESOURCES {
         return Err(ApiError::bad_request(anyhow!(
             "resources must contain at most {MAX_AUTHZ_FILTER_RESOURCES} items"
         )));
     }
-    reject_filter_views(&body.resources)?;
     let mut ids = Vec::with_capacity(body.resources.len());
     let mut checks = Vec::with_capacity(body.resources.len());
     for resource in body.resources {
@@ -154,6 +246,7 @@ pub(crate) async fn authz_check(
     Json(body): Json<AuthzCheckRequest>,
 ) -> ApiResult<Json<AuthzCheckResponse>> {
     require_master_key(service.as_ref(), &headers)?;
+    reject_resource_views(std::iter::once(&body.resource))?;
     let response =
         run_authz_check(service.as_ref(), body, read_consistency_override(&query)?).await?;
     Ok(Json(response))
@@ -166,6 +259,7 @@ pub(crate) async fn authz_batch_check(
     Json(body): Json<AuthzBatchCheckRequest>,
 ) -> ApiResult<Json<AuthzBatchCheckResponse>> {
     require_master_key(service.as_ref(), &headers)?;
+    reject_resource_views(body.checks.iter().map(|check| &check.resource))?;
     if body.checks.len() > MAX_AUTHZ_BATCH_CHECKS {
         return Err(ApiError::bad_request(anyhow!(
             "checks must contain at most {MAX_AUTHZ_BATCH_CHECKS} items"
@@ -199,12 +293,12 @@ pub(crate) async fn authz_filter(
     Json(body): Json<AuthzFilterRequest>,
 ) -> ApiResult<Json<AuthzFilterResponse>> {
     require_master_key(service.as_ref(), &headers)?;
+    reject_resource_views(&body.resources)?;
     if body.resources.len() > MAX_AUTHZ_FILTER_RESOURCES {
         return Err(ApiError::bad_request(anyhow!(
             "resources must contain at most {MAX_AUTHZ_FILTER_RESOURCES} items"
         )));
     }
-    reject_filter_views(&body.resources)?;
     let read_consistency = read_consistency_override(&query)?;
     let (requested_resource_ids, checks) = authz_filter_inputs(body);
     let decisions = service
@@ -225,11 +319,14 @@ pub(crate) async fn authz_filter(
     Ok(Json(AuthzFilterResponse { resource_ids }))
 }
 
-fn reject_filter_views(resources: &[crate::dto::AuthzResourceRequest]) -> ApiResult<()> {
-    if resources.iter().any(|resource| resource.view.is_some()) {
-        return Err(ApiError::bad_request(anyhow!(
-            "resource.view is not supported by authorization filters"
-        )));
+fn reject_resource_views<'a>(
+    resources: impl IntoIterator<Item = &'a crate::dto::AuthzResourceRequest>,
+) -> ApiResult<()> {
+    if resources
+        .into_iter()
+        .any(|resource| resource.field_view_present)
+    {
+        return Err(ApiError::bad_request(anyhow!(FIELD_VIEW_UNSUPPORTED)));
     }
     Ok(())
 }

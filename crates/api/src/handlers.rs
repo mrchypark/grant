@@ -1,37 +1,33 @@
 use axum::{
     Json,
-    extract::{Path, Query, State, rejection::JsonRejection},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
 use domain::{
     Action, Agreement, Application, ApplicationGrant, Group, GroupMember, HealthStatus,
-    Organization, Role, RoleBinding, ServiceProvider,
+    Organization, OrganizationMembership, Role, RoleBinding, ServiceProvider,
 };
-use infra::{
-    config::ReadConsistency,
-    service::{AppService, FieldViewPolicy, FieldViewPolicyScope},
-};
+use infra::{config::ReadConsistency, service::AppService};
 use std::sync::Arc;
 
 use crate::{
     dto::{
-        ApplicationConsentResponse, BootstrapOwnerResponse, CreateApplicationRequest,
-        CreateGroupRequest, CreateRoleBindingRequest, CreateRoleRequest, CurrentUserResponse,
-        FieldViewPolicyQuery, ReadConsistencyQuery, ReplaceActionsRequest,
+        ApplicationConsentResponse, ApplicationResponse, BootstrapOwnerResponse,
+        CreateApplicationRequest, CreateGroupRequest, CreateRoleBindingRequest, CreateRoleRequest,
+        CurrentUserResponse, ReadConsistencyQuery, ReplaceActionsRequest,
         ReplaceApplicationActionsRequest, ReplaceApplicationConsentRequest,
-        ReplaceFieldViewPolicyRequest, ReplaceProviderActionsRequest, SetApplicationTrustRequest,
-        SetUserActiveRequest, UpdateGroupRequest, UpsertAgreementRequest,
+        ReplaceProviderActionsRequest, SetApplicationTrustRequest, SetUserActiveRequest,
+        UpdateGroupRequest, UpsertAgreementRequest,
     },
     error::{ApiError, ApiResult},
     mappers::{
         agreement_input, create_application_input, create_group_input, create_role_binding_input,
-        create_role_input, provider_action_input, replace_field_view_policy_input,
-        update_group_input,
+        create_role_input, provider_action_input, update_group_input,
     },
     request::{
         bearer_token, ensure_active_organization_path_matches, ensure_request_context_organization,
         optional_header_value, read_consistency_override, request_context,
-        request_context_for_inactive_organization, require_master_key, required_header_value,
+        request_context_for_inactive_organization, require_master_key,
     },
 };
 
@@ -108,6 +104,11 @@ pub(crate) async fn replace_provider_actions(
     Json(body): Json<ReplaceProviderActionsRequest>,
 ) -> ApiResult<Json<Vec<Action>>> {
     require_master_key(service.as_ref(), &headers)?;
+    if body.actions.iter().any(|action| action.visibility_granting) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "visibilityGranting=true is not supported by the coarse authorization API"
+        )));
+    }
     let actions = body
         .actions
         .into_iter()
@@ -141,7 +142,7 @@ pub(crate) async fn create_application(
     Path(organization_id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<CreateApplicationRequest>,
-) -> ApiResult<(StatusCode, Json<Application>)> {
+) -> ApiResult<(StatusCode, Json<ApplicationResponse>)> {
     let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
     let application = service
@@ -152,7 +153,13 @@ pub(crate) async fn create_application(
         )
         .await
         .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::CREATED, Json(application)))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApplicationResponse {
+            application: application.application,
+            redirect_uri: application.redirect_uri,
+        }),
+    ))
 }
 
 pub(crate) async fn get_application(
@@ -160,12 +167,12 @@ pub(crate) async fn get_application(
     Path((organization_id, application_id)): Path<(String, String)>,
     Query(query): Query<ReadConsistencyQuery>,
     headers: HeaderMap,
-) -> ApiResult<Json<Application>> {
+) -> ApiResult<Json<ApplicationResponse>> {
     let read_consistency = read_consistency_override(&query)?;
     let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
     ensure_request_context_organization(&organization_id, &ctx)?;
     let application = service
-        .get_application_authorized(
+        .get_application_detail_authorized(
             &ctx.user_id,
             &ctx.organization_id,
             &application_id,
@@ -173,7 +180,10 @@ pub(crate) async fn get_application(
         )
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(application))
+    Ok(Json(ApplicationResponse {
+        application: application.application,
+        redirect_uri: application.redirect_uri,
+    }))
 }
 
 pub(crate) async fn list_application_actions(
@@ -453,6 +463,20 @@ pub(crate) async fn remove_group_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(crate) async fn enroll_organization_member(
+    State(service): State<Arc<AppService>>,
+    Path((organization_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<OrganizationMembership>> {
+    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
+    ensure_request_context_organization(&organization_id, &ctx)?;
+    let membership = service
+        .enroll_organization_member_authorized(&ctx.user_id, &ctx.organization_id, &user_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(membership))
+}
+
 pub(crate) async fn list_agreements(
     State(service): State<Arc<AppService>>,
     Path(organization_id): Path<String>,
@@ -574,59 +598,6 @@ pub(crate) async fn replace_role_actions(
         .await
         .map_err(ApiError::from_domain)?;
     Ok(Json(actions))
-}
-
-pub(crate) async fn get_field_view_policy(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, role_id, action_id)): Path<(String, String, String)>,
-    Query(query): Query<FieldViewPolicyQuery>,
-    headers: HeaderMap,
-) -> ApiResult<Json<FieldViewPolicy>> {
-    let read_consistency = read_consistency_override(&ReadConsistencyQuery {
-        consistency: query.consistency,
-    })?;
-    let ctx = request_context(service.as_ref(), &headers, read_consistency.clone()).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    let policy = service
-        .get_field_view_policy_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &role_id,
-            &action_id,
-            &FieldViewPolicyScope {
-                resource_type: query.resource_type,
-                schema_key: query.schema_key,
-            },
-            read_consistency,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(policy))
-}
-
-pub(crate) async fn replace_field_view_policy(
-    State(service): State<Arc<AppService>>,
-    Path((organization_id, role_id, action_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    body: Result<Json<ReplaceFieldViewPolicyRequest>, JsonRejection>,
-) -> ApiResult<Json<FieldViewPolicy>> {
-    let Json(body) =
-        body.map_err(|error| ApiError::bad_request(anyhow::anyhow!(error.body_text())))?;
-    let idempotency_key = required_header_value(&headers, "idempotency-key")?;
-    let ctx = request_context(service.as_ref(), &headers, Some(ReadConsistency::Strong)).await?;
-    ensure_request_context_organization(&organization_id, &ctx)?;
-    let policy = service
-        .replace_field_view_policy_authorized(
-            &ctx.user_id,
-            &ctx.organization_id,
-            &role_id,
-            &action_id,
-            &idempotency_key,
-            replace_field_view_policy_input(body),
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(policy))
 }
 
 pub(crate) async fn list_role_bindings(

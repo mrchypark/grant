@@ -18,6 +18,14 @@
 - `service_providers`가 compos 같은 외부 서비스와 grant 자체의 action catalog 경계를 선언한다.
 - SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.
 
+### 1차 단순 배포 기준
+
+현재 배포 바이너리는 coarse authorization만 수행한다. 판정 key는 검증된 사용자/조직, application context, action, `provider_id`, `resource_type`, `resource_id`의 exact tuple이며 Grant는 schema key, JSON pointer, field set, mask를 입력받거나 반환하지 않는다. Exposure read V1은 이 기존 key를 `provider_id=exposure`, `action_id=exposure.read`, `resource_type=exposureId`, `resource_id=resourceId`로 사용한다. `artifactDigest`는 exact 71 ASCII byte `sha256:<64 lowercase hex>` literal만 받고 normalize 없이 byte-for-byte echo한다. `exposureVersion`과 `artifactDigest`는 새 DB key나 policy row가 아니라 short-lived decision에 exact echo하는 replay binding이다. 따라서 permission은 같은 exposure의 published version에 이어지고, Exposure가 business read 전에 tuple/binding/expiry를 검증한다. 외부 resource의 version이나 digest는 Grant DB의 `created_at`/`updated_at`에서 만들 수 없으므로 Grant는 Compos를 조회하거나 `resourceVersion`을 만들지 않는다.
+
+fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `exposure` provider/action, application action/trust 또는 consent, role/action, exact exposure/resource binding은 자동 seed하지 않는다. 운영자가 기존 admin/org API와 application provisioning 절차로 이 state를 명시적으로 만들기 전에는 Exposure read가 deny되는 것이 정상적인 fail-closed 상태다. 이 provisioning은 새 table이나 migration을 요구하지 않는다.
+
+필드 권한용 테이블은 기존 구현과 향후 forward/restore 계획을 위해 물리 스키마에 보존하지만 coarse evaluator와 readiness는 이 테이블을 조회하거나 shape dependency로 사용하지 않는다. 시작 시 migration 전 preflight와 migration 후 검사를 모두 수행한다. `actions.visibility_granting`에 0이 아닌 값이 있거나, `role_action_field_views`, `field_view_policy_audit_outbox` 또는 이미 존재하는 field audit delivery/mask catalog/activation 테이블에 row가 하나라도 있으면 자동 삭제하거나 비활성화하지 않고 시작을 실패한다. 테이블이 없거나 비어 있는 것만 coarse 배포와 호환된다.
+
 ## Grant 테이블
 
 ### `users`
@@ -60,7 +68,9 @@ grant가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. �
 
 권한 엔진의 원본 데이터. `actions.provider_id`는 action을 제공하는 `service_providers.id`를 가리킨다. `actions.code`는 provider 안에서만 unique이며, 같은 code를 서로 다른 provider가 재사용할 수 있다. 실제 참조 key인 `actions.id`는 전역 PK라 grant provider는 기존처럼 code를 id로 쓰고, 외부 provider action은 provider/code 조합에서 정규화한 id를 사용한다.
 
-`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. 외부 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다.
+coarse 배포에서는 모든 action의 `visibility_granting`이 false여야 한다. bootstrap은 `organization.profile.read`를 포함해 모두 0으로 seed하고, provider action 관리 및 DB write boundary는 `visibility_granting = true` 요청을 write 전에 거부한다. `grantable_to_applications`와 application consent 의미는 그대로 유지한다.
+
+`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. 일반 외부 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다. Exposure read V1만 frozen mapping에 따라 `resource_type`에 exact `exposureId`, `resource_id`에 exact `resourceId`를 저장한다. version/digest를 이 두 값에 합성 인코딩하지 않는다.
 
 `agreements`는 별도 테이블로 다시 살아났지만, `role_bindings.agreement_id`는 물리 FK 없이 앱 레벨로 검증한다.
 grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을 만들 수 있다.
@@ -69,11 +79,11 @@ grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을
 
 ### `role_action_field_views`
 
-role-action에 연결된 provider-neutral 필드 열람 정책이다. `(role_id, action_id, resource_type, schema_key, field_pointer)`가 저장 key이며 `view_mode`는 `real` 또는 `anonymized`만 허용한다. 애플리케이션 write/evaluator와 교체 transaction precondition은 active provider catalog에서 `visibility_granting = 1`인 action만 허용하며, `actions.id`와 `actions.code`가 같다고 가정하지 않는다. `resource_type`과 `schema_key`는 provider/consumer가 정의하는 opaque exact identifier이고 Grant는 object-schema 대응 관계를 검증하지 않는다. `field_pointer`는 정규화된 non-root RFC 6901 JSON Pointer여야 한다. Grant 코어는 `/id`를 포함한 모든 유효 pointer를 동일하게 취급한다. consumer가 고정 envelope field를 field-view 대상에서 제외하려면 요청 전후의 adapter 경계에서 자체 규칙으로 처리해야 한다. 별도의 wildcard/prefix/glob/sentinel policy 문법은 지원하지 않지만, RFC 6901 token 안의 `*`는 일반 문자로 허용하고 pointer 전체를 exact string으로 비교한다. 저장 row와 audit replay의 pointer key도 읽을 때 다시 검증하며 손상된 값은 internal error로 fail closed한다. role과 action 및 해당 `role_actions` row를 외래 키로 참조하고, `(role_id, action_id, resource_type, schema_key)` 조회 index를 가진다. positive row가 없으면 정책 결과는 `none`이며, 필드 값이나 provider의 resource/schema catalog 자체를 저장하지 않는다.
+보존된 field-authorization 스키마다. `(role_id, action_id, resource_type, schema_key, field_pointer)`가 저장 key이고 `view_mode`는 `real` 또는 `anonymized`만 허용한다. role과 action 및 해당 `role_actions` row를 외래 키로 참조하고 `(role_id, action_id, resource_type, schema_key)` 조회 index를 유지한다. 현재 coarse 배포에는 이 테이블의 관리 API, evaluator, startup cleanup이 없으며 row가 하나라도 있으면 호환성 검사가 시작을 막는다. 따라서 이 설명은 보존된 row shape과 관계를 문서화할 뿐 현재 활성 정책 계약을 뜻하지 않는다.
 
 ### `field_view_policy_audit_outbox`
 
-필드 열람 정책 교체의 append-only audit event outbox다. `event_id`가 primary key이고 `idempotency_key`는 unique다. 요청 hash, 조직/행위자/role/action 범위, resource/schema key, before/after JSON snapshot과 생성 시각을 같은 DB transaction에 기록할 수 있도록 저장한다.
+보존된 필드 열람 정책 교체 audit outbox 스키마다. `event_id`가 primary key이고 `idempotency_key`는 unique이며 요청 hash, 조직/행위자/role/action 범위, resource/schema key, before/after JSON snapshot과 생성 시각 컬럼을 유지한다. 현재 coarse 배포는 이 outbox에 쓰거나 delivery worker를 시작하지 않으며 row가 하나라도 있으면 시작을 실패한다.
 
 ### `applications`, `application_redirect_uris`, `application_actions`, `application_grants`, `application_grant_actions`
 
@@ -87,7 +97,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 
 `application_grants`는 `(user_id, application_id, organization_id)`의 active row를 하나만 허용한다. 사용자 self-consent PUT은 body의 action 목록만 받아 exact 로그인 사용자에 대해 active grant를 natural-key upsert하고 grant/action 전체 교체를 원자적으로 수행한다. 같은 사용자의 첫 PUT이 동시에 실행되어도 partial unique key의 conflict update로 하나의 active grant에 수렴한다. application이 same-org active explicit non-trusted 상태이고 사용자가 active member이며 action이 현재 `application_actions`의 exact subset인지는 같은 트랜잭션에서 재검증한다. 최대 999개 action은 250개씩 multi-row insert해 Raft transaction statement 수를 제한한다. `application_consent_assertions`는 consent와 application security/trust 트랜잭션의 CHECK 기반 내부 assertion용 임시 row만 담고 성공 시 즉시 비워지며, 실제 action id를 sentinel로 사용하지 않는다. application action을 축소하면 stale grant action도 같은 트랜잭션에서 제거되며, 권한 판정도 항상 현재 `application_actions`와 다시 join한다. revoke는 active grant를 idempotent하게 revoked 상태로 바꾼다.
 
-`application_redirect_uris`는 향후 검증 가능한 provisioning manifest를 위한 application별 redirect URI 목록이며 key는 `(application_id, redirect_uri)`다. 현재 release는 조직 redirect mutation을 노출하지 않으므로 reservation은 빈 목록을 의도 설정으로 사용하고 verify도 Rauthy의 빈 redirect 목록을 요구한다.
+`application_redirect_uris`는 provisioning manifest를 위한 application별 redirect URI 목록이며 key는 `(application_id, redirect_uri)`다. 조직 `POST /apps`는 선택적 단일 `redirectUri`만 받고 application row와 같은 transaction에서 0 또는 1개 row를 저장한다. 생략하면 legacy와 동일한 빈 manifest다. URI는 canonical absolute HTTPS 또는 explicit-port loopback-IP HTTP만 허용하며, 조직 redirect mutation API는 없다. verify는 strong read로 local row가 정확히 0 또는 1개인지와 유효성을 확인하고 Rauthy의 redirect URI 배열이 빈 배열 또는 canonical 저장값 하나와 byte-for-byte 일치할 때만 ready로 전환한다.
 
 ## 제거된 테이블
 
@@ -160,3 +170,5 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 
 - `cert-data` 저장/실행 모델은 별도 프로젝트에서 다시 정한다.
 - `role_bindings.resource_type`은 `provider_id`와 함께 해석한다. `grant/organization`만 grant가 직접 존재 검증하고, 외부 provider resource는 해당 서비스가 후보 목록을 넘긴 뒤 `/api/v1/authz/filter`로 걸러야 한다.
+- coarse readiness는 core authorization schema만 확인한다. 보존 field table의 존재, 누락, shape는 readiness 조건이 아니고 활성 row 여부는 별도 startup compatibility 검사에서 fail closed한다.
+- field 정책이 활성화됐던 migrated DB는 coarse 바이너리가 자동 정리하지 않는다. 배포 전에 별도의 forward migration 또는 검증된 restore 계획이 필요하다.
