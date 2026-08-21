@@ -44,6 +44,8 @@ bash ./scripts/ci-local.sh
 
 운영 Kubernetes 배포는 Rauthy provider의 `deploy/overlays/production` 또는 Patch Data provider의 `deploy/overlays/ied-patch-data`를 명시적으로 선택한다. production의 Grant와 Rauthy는 3-node no-PVC HA로 실행되며, 외부 S3 backup pair와 fail-closed lifecycle state가 필수다. 저장소의 production 파일은 ConfigMap/Secret 형식 예시만 제공하고 실제 credential은 포함하지 않는다.
 
+Patch Data mode는 PocketBase 로그인/token verification만 위임한다. 정상 조직 소속, hierarchy, plant permission과 API authorization은 Grant local strong state가 권위이며 Patch Data `organizations` 변경으로 접근을 부여하거나 회수하지 않는다. relation은 master-authorized 최초 bootstrap과 deterministic rule-ledger import 호환성에서만 제한적으로 사용한다.
+
 ## 참고
 
 - `crates/app/src/main.rs`는 시작 시 스키마 마이그레이션을 수행하고, voter/learner 역할에 따라 라우터를 선택한다.

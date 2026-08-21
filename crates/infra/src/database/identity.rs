@@ -7,11 +7,26 @@ use std::{collections::VecDeque, sync::Mutex};
 #[cfg(test)]
 static MATERIALIZATION_CANDIDATE_IDS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 
+#[cfg(test)]
+static BOOTSTRAP_CANDIDATE_IDS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
 fn materialization_candidate_id() -> String {
     #[cfg(test)]
     if let Some(candidate) = MATERIALIZATION_CANDIDATE_IDS
         .lock()
         .expect("materialization candidate override lock")
+        .pop_front()
+    {
+        return candidate;
+    }
+    Uuid::new_v4().simple().to_string()
+}
+
+fn bootstrap_candidate_id() -> String {
+    #[cfg(test)]
+    if let Some(candidate) = BOOTSTRAP_CANDIDATE_IDS
+        .lock()
+        .expect("bootstrap candidate override lock")
         .pop_front()
     {
         return candidate;
@@ -96,16 +111,18 @@ impl Database {
         {
             return Err(ExternalOwnerBootstrapError::PreconditionsChanged.into());
         }
-        let user_id = mapped
-            .map(|u| u.id)
-            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-        let identity_id = Uuid::new_v4().simple().to_string();
-        let membership_id = Uuid::new_v4().simple().to_string();
-        let binding_id = Uuid::new_v4().simple().to_string();
+        let user_id = mapped.map(|u| u.id).unwrap_or_else(bootstrap_candidate_id);
+        let identity_id = bootstrap_candidate_id();
+        let membership_id = bootstrap_candidate_id();
+        let binding_id = bootstrap_candidate_id();
         let now = now_string();
         // This expression is repeated for each write. Existing successful
         // state is admitted, while every incompatible state is a no-op.
-        let admitted = "EXISTS (SELECT 1 FROM applications a WHERE a.id = $APP AND a.organization_id = $ORG AND a.active = 1 AND a.provisioning_status = 'ready') AND (NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = $ORG) OR EXISTS (SELECT 1 FROM organizations o WHERE o.id = $ORG AND o.inactivated_at IS NULL)) AND EXISTS (SELECT 1 FROM service_providers WHERE id = 'grant' AND active = 1) AND EXISTS (SELECT 1 FROM roles WHERE id = 'role-system-bootstrap-owner') AND NOT EXISTS (SELECT 1 FROM user_identities ui WHERE ui.provider = $PROVIDER AND ui.external_user_id = $EXTERNAL AND ui.user_id <> $USER) AND (NOT EXISTS (SELECT 1 FROM users u WHERE u.id = $USER) OR EXISTS (SELECT 1 FROM users u WHERE u.id = $USER AND u.active = 1)) AND NOT EXISTS (SELECT 1 FROM organization_memberships m WHERE m.organization_id = $ORG AND m.user_id = $USER AND (m.membership_role <> 'owner' OR m.status <> 'active')) AND NOT EXISTS (SELECT 1 FROM organization_memberships m WHERE m.organization_id = $ORG AND m.user_id <> $USER AND m.membership_role = 'owner') AND NOT EXISTS (SELECT 1 FROM role_bindings b WHERE b.subject_type = 'user' AND b.subject_id = $USER AND b.subject_organization_id = $ORG AND b.provider_id = 'grant' AND b.resource_type = 'organization' AND b.resource_id = $ORG AND b.role_id = 'role-system-bootstrap-owner' AND b.state <> 'active')";
+        // Application trust/consent is deliberately not part of the immutable
+        // bootstrap identity. The initial application is trusted, but a later
+        // administrator trust mutation must not make an identical bootstrap
+        // retry conflict.
+        let admitted = "(NOT EXISTS (SELECT 1 FROM applications a WHERE a.id = $APP OR a.slug = $APP) OR EXISTS (SELECT 1 FROM applications a WHERE a.id = $APP AND a.organization_id = $ORG AND a.slug = $APP AND a.name = 'Patch Data Exposure' AND a.description IS NULL AND a.application_type = 'confidential' AND a.app_type = 'server' AND a.rauthy_client_id IS NULL AND a.created_by_user_id = $USER)) AND (NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = $ORG) OR EXISTS (SELECT 1 FROM organizations o WHERE o.id = $ORG AND o.inactivated_at IS NULL)) AND EXISTS (SELECT 1 FROM service_providers WHERE id = 'grant' AND active = 1) AND EXISTS (SELECT 1 FROM roles WHERE id = 'role-system-bootstrap-owner') AND NOT EXISTS (SELECT 1 FROM user_identities ui WHERE ui.provider = $PROVIDER AND ui.external_user_id = $EXTERNAL AND ui.user_id <> $USER) AND (NOT EXISTS (SELECT 1 FROM users u WHERE u.id = $USER) OR EXISTS (SELECT 1 FROM users u WHERE u.id = $USER AND u.active = 1)) AND NOT EXISTS (SELECT 1 FROM organization_memberships m WHERE m.organization_id = $ORG AND m.user_id = $USER AND (m.membership_role <> 'owner' OR m.status <> 'active')) AND NOT EXISTS (SELECT 1 FROM organization_memberships m WHERE m.organization_id = $ORG AND m.user_id <> $USER AND m.membership_role = 'owner') AND NOT EXISTS (SELECT 1 FROM role_bindings b WHERE b.subject_type = 'user' AND b.subject_id = $USER AND b.subject_organization_id = $ORG AND b.provider_id = 'grant' AND b.resource_type = 'organization' AND b.resource_id = $ORG AND b.role_id = 'role-system-bootstrap-owner' AND b.state <> 'active')";
         let predicate_for =
             |app: usize, org: usize, provider: usize, external: usize, user: usize| {
                 admitted
@@ -122,30 +139,27 @@ impl Database {
             predicate_for(5, 6, 7, 8, 9)
         );
         let q_identity = format!(
-            "INSERT INTO user_identities (id,user_id,provider,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) SELECT $1,$2,$3,$4,$5,$6,$7,$7,$7 WHERE {} AND NOT EXISTS (SELECT 1 FROM user_identities WHERE provider=$3 AND external_user_id=$4)",
+            "INSERT INTO user_identities (id,user_id,provider,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) SELECT $1,$2,$3,$4,$5,$6,$7,$7,$7 WHERE {} AND EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.email IS $5 AND u.display_name=$6 AND u.active=1 AND u.created_at=$7) AND NOT EXISTS (SELECT 1 FROM user_identities WHERE provider=$3 AND external_user_id=$4)",
             predicate_for(8, 9, 10, 11, 12)
         );
-        let identity_linked = "EXISTS (SELECT 1 FROM user_identities WHERE provider=$5 AND external_user_id=$6 AND user_id=$7)";
         let q_org = format!(
-            "INSERT INTO organizations (id,business_no,name,inactivated_at,created_at,updated_at) SELECT $1,NULL,$1,NULL,$2,$2 WHERE {} AND {} AND NOT EXISTS (SELECT 1 FROM organizations WHERE id=$1)",
-            predicate_for(3, 4, 5, 6, 7),
-            identity_linked
+            "INSERT INTO organizations (id,business_no,name,inactivated_at,created_at,updated_at) SELECT $1,NULL,$1,NULL,$2,$2 WHERE {} AND NOT EXISTS (SELECT 1 FROM organizations WHERE id=$1)",
+            predicate_for(3, 4, 5, 6, 7)
         );
-        let q_member = format!(
-            "INSERT INTO organization_memberships (id,organization_id,user_id,membership_role,status,created_at,updated_at) SELECT $1,$2,$3,'owner','active',$4,$4 WHERE {} AND EXISTS (SELECT 1 FROM user_identities WHERE provider=$7 AND external_user_id=$8 AND user_id=$9) AND NOT EXISTS (SELECT 1 FROM organization_memberships WHERE organization_id=$2 AND user_id=$3)",
-            predicate_for(5, 6, 7, 8, 9)
+        let q_application = format!(
+            "INSERT INTO applications (id,organization_id,slug,name,description,application_type,app_type,first_party,consent_policy,active,provisioning_status,rauthy_client_id,created_by_user_id,created_at,updated_at) SELECT $1,$2,$1,'Patch Data Exposure',NULL,'confidential','server',1,'auto_approve',1,'ready',NULL,$3,$4,$4 WHERE {} AND EXISTS (SELECT 1 FROM user_identities WHERE provider=$5 AND external_user_id=$6 AND user_id=$3) AND EXISTS (SELECT 1 FROM organizations WHERE id=$2 AND inactivated_at IS NULL) AND NOT EXISTS (SELECT 1 FROM applications WHERE id=$1 OR slug=$1)",
+            predicate_for(1, 2, 5, 6, 3)
         );
-        let q_binding = format!(
-            "INSERT INTO role_bindings (id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at) SELECT $1,'user',$2,$3,'grant','organization',$3,'role-system-bootstrap-owner',NULL,'active',$2,$4,$4 WHERE {} AND EXISTS (SELECT 1 FROM user_identities WHERE provider=$7 AND external_user_id=$8 AND user_id=$9) AND NOT EXISTS (SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=$2 AND subject_organization_id=$3 AND provider_id='grant' AND resource_type='organization' AND resource_id=$3 AND role_id='role-system-bootstrap-owner')",
-            predicate_for(5, 6, 7, 8, 9)
-        );
+        let q_member = "INSERT INTO organization_memberships (id,organization_id,user_id,membership_role,status,created_at,updated_at) SELECT $1,$2,$3,'owner','active',$4,$4 WHERE EXISTS (SELECT 1 FROM applications WHERE id=$5 AND organization_id=$2 AND slug=$5 AND name='Patch Data Exposure' AND description IS NULL AND application_type='confidential' AND app_type='server' AND active=1 AND provisioning_status='ready' AND rauthy_client_id IS NULL AND created_by_user_id=$3) AND EXISTS (SELECT 1 FROM organizations WHERE id=$2 AND inactivated_at IS NULL) AND EXISTS (SELECT 1 FROM service_providers WHERE id='grant' AND active=1) AND EXISTS (SELECT 1 FROM roles WHERE id='role-system-bootstrap-owner') AND EXISTS (SELECT 1 FROM users WHERE id=$3 AND active=1) AND EXISTS (SELECT 1 FROM user_identities WHERE provider=$6 AND external_user_id=$7 AND user_id=$3) AND NOT EXISTS (SELECT 1 FROM organization_memberships WHERE organization_id=$2 AND user_id=$3) AND NOT EXISTS (SELECT 1 FROM organization_memberships WHERE organization_id=$2 AND user_id<>$3 AND membership_role='owner')";
+        let q_binding = "INSERT INTO role_bindings (id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at) SELECT $1,'user',$2,$3,'grant','organization',$3,'role-system-bootstrap-owner',NULL,'active',$2,$4,$4 WHERE EXISTS (SELECT 1 FROM applications WHERE id=$5 AND organization_id=$3 AND created_by_user_id=$2 AND active=1 AND provisioning_status='ready') AND EXISTS (SELECT 1 FROM organization_memberships WHERE organization_id=$3 AND user_id=$2 AND membership_role='owner' AND status='active') AND NOT EXISTS (SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=$2 AND subject_organization_id=$3 AND provider_id='grant' AND resource_type='organization' AND resource_id=$3 AND role_id='role-system-bootstrap-owner')";
         // A trigger or an unexpected storage condition can turn the binding
         // insert into a no-op after the membership write.  Make that state a
         // transaction error so Hiqlite rolls back every preceding statement.
         // The duplicate primary-key insert is deliberately unreachable once
         // the required active binding exists.
-        let q_binding_guard = "INSERT INTO users (id,email,display_name,active,created_at) SELECT id,email,display_name,active,created_at FROM users WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=$2 AND subject_organization_id=$3 AND provider_id='grant' AND resource_type='organization' AND resource_id=$3 AND role_id='role-system-bootstrap-owner' AND state='active')";
-        if self
+        let q_binding_guard = "INSERT INTO users (id,email,display_name,active,created_at) SELECT id,email,display_name,active,created_at FROM users WHERE id=(SELECT id FROM users WHERE id IN ($1,$2) ORDER BY CASE WHEN id=$2 THEN 0 ELSE 1 END LIMIT 1) AND NOT EXISTS (SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=$2 AND subject_organization_id=$3 AND provider_id='grant' AND resource_type='organization' AND resource_id=$3 AND role_id='role-system-bootstrap-owner' AND state='active')";
+        let q_application_guard = "INSERT INTO users (id,email,display_name,active,created_at) SELECT id,email,display_name,active,created_at FROM users WHERE id=(SELECT id FROM users WHERE id IN ($1,$2) ORDER BY CASE WHEN id=$2 THEN 0 ELSE 1 END LIMIT 1) AND NOT EXISTS (SELECT 1 FROM applications WHERE id=$3 AND organization_id=$4 AND slug=$3 AND name='Patch Data Exposure' AND description IS NULL AND application_type='confidential' AND app_type='server' AND active=1 AND provisioning_status='ready' AND rauthy_client_id IS NULL AND created_by_user_id=$5)";
+        let transaction_result = self
             .runtime
             .transaction([
                 (
@@ -192,30 +206,45 @@ impl Database {
                     ),
                 ),
                 (
-                    Cow::Owned(q_member),
+                    Cow::Owned(q_application),
+                    params!(
+                        command.application_id.to_owned(),
+                        command.organization_id.to_owned(),
+                        user_id.clone(),
+                        now.clone(),
+                        identity.provider.to_owned(),
+                        identity.external_user_id.to_owned()
+                    ),
+                ),
+                (
+                    Cow::Borrowed(q_member),
                     params!(
                         membership_id,
                         command.organization_id.to_owned(),
                         user_id.clone(),
                         now.clone(),
                         command.application_id.to_owned(),
-                        command.organization_id.to_owned(),
                         identity.provider.to_owned(),
                         identity.external_user_id.to_owned(),
-                        user_id.clone()
                     ),
                 ),
                 (
-                    Cow::Owned(q_binding),
+                    Cow::Borrowed(q_binding),
                     params!(
                         binding_id,
                         user_id.clone(),
                         command.organization_id.to_owned(),
                         now,
                         command.application_id.to_owned(),
+                    ),
+                ),
+                (
+                    Cow::Borrowed(q_application_guard),
+                    params!(
+                        self.bootstrap_user_id.clone(),
+                        user_id.clone(),
+                        command.application_id.to_owned(),
                         command.organization_id.to_owned(),
-                        identity.provider.to_owned(),
-                        identity.external_user_id.to_owned(),
                         user_id.clone()
                     ),
                 ),
@@ -228,12 +257,21 @@ impl Database {
                     ),
                 ),
             ])
-            .await
-            .is_err()
-        {
-            // All admission races and postcondition-guard failures are an
-            // externally indistinguishable bootstrap conflict.
-            return Err(ExternalOwnerBootstrapError::PreconditionsChanged.into());
+            .await;
+        if let Err(error) = transaction_result {
+            if error.chain().any(|cause| {
+                matches!(
+                    cause.downcast_ref::<hiqlite::Error>(),
+                    Some(hiqlite::Error::ConstraintViolation(_))
+                ) || matches!(
+                    cause.downcast_ref::<hiqlite::Error>(),
+                    Some(hiqlite::Error::Transaction(message))
+                        if message.contains("UNIQUE constraint failed: users.id")
+                )
+            }) {
+                return Err(ExternalOwnerBootstrapError::PreconditionsChanged.into());
+            }
+            return Err(error).context("external owner bootstrap transaction");
         }
         // The transaction is the admission point.  Do not re-check mutable
         // application, membership, or binding state after it commits: an
@@ -1212,7 +1250,10 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, ExternalIdentityMaterialization, MATERIALIZATION_CANDIDATE_IDS};
+    use super::{
+        BOOTSTRAP_CANDIDATE_IDS, Database, ExternalIdentityMaterialization,
+        ExternalOwnerBootstrapCommand, MATERIALIZATION_CANDIDATE_IDS,
+    };
     use crate::{config::ReadConsistency, runtime::HiqliteRuntime};
     use hiqlite::{Node, NodeConfig, Row, s3::EncKeys};
     use std::{collections::VecDeque, net::TcpListener};
@@ -1299,5 +1340,54 @@ mod tests {
             identities[0].0, 0,
             "identity must not attach to the collided user id"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_candidate_user_id_collision_rolls_back_every_bootstrap_row() {
+        let (runtime, database, _directory) = test_database().await;
+        database
+            .ensure_bootstrap_principals()
+            .await
+            .expect("bootstrap principals");
+        runtime.execute(
+            "INSERT INTO users (id,email,display_name,active,created_at) VALUES ('candidate-user','existing@example.test','Existing',1,'2026-01-01T00:00:00Z')",
+            vec![],
+        ).await.expect("seed exact candidate collision");
+        *BOOTSTRAP_CANDIDATE_IDS
+            .lock()
+            .expect("bootstrap candidate override lock") = VecDeque::from([
+            "candidate-user".to_owned(),
+            "candidate-identity".to_owned(),
+            "candidate-membership".to_owned(),
+            "candidate-binding".to_owned(),
+        ]);
+
+        let error = database
+            .bootstrap_external_owner_atomic(ExternalOwnerBootstrapCommand {
+                identity: ExternalIdentityMaterialization {
+                    provider: "patch-data",
+                    external_user_id: "new-bootstrap-subject",
+                    email: Some("new@example.test"),
+                    display_name: "New Bootstrap Owner",
+                },
+                organization_id: "new-bootstrap-org",
+                application_id: "patch-data-exposure",
+            })
+            .await
+            .expect_err("candidate collision must reject");
+        assert_eq!(
+            error.downcast_ref::<super::ExternalOwnerBootstrapError>(),
+            Some(&super::ExternalOwnerBootstrapError::PreconditionsChanged)
+        );
+        let rows: Vec<CountRow> = runtime.query_rows(
+            ReadConsistency::Strong,
+            "SELECT COUNT(*) AS count FROM user_identities WHERE provider='patch-data' AND external_user_id='new-bootstrap-subject'
+             UNION ALL SELECT COUNT(*) AS count FROM organizations WHERE id='new-bootstrap-org'
+             UNION ALL SELECT COUNT(*) AS count FROM applications WHERE id='patch-data-exposure'
+             UNION ALL SELECT COUNT(*) AS count FROM organization_memberships WHERE organization_id='new-bootstrap-org'
+             UNION ALL SELECT COUNT(*) AS count FROM role_bindings WHERE subject_organization_id='new-bootstrap-org'",
+            vec![],
+        ).await.expect("bootstrap row counts");
+        assert!(rows.iter().all(|row| row.0 == 0));
     }
 }

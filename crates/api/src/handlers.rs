@@ -26,7 +26,7 @@ use crate::{
     },
     request::{
         bearer_token, ensure_active_organization_path_matches, ensure_request_context_organization,
-        optional_header_value, read_consistency_override, request_context,
+        header_value, optional_header_value, read_consistency_override, request_context,
         request_context_for_inactive_organization, require_master_key,
     },
 };
@@ -723,9 +723,10 @@ pub(crate) async fn bootstrap_external_owner(
     headers: HeaderMap,
 ) -> ApiResult<(StatusCode, Json<BootstrapOwnerResponse>)> {
     require_master_key(service.as_ref(), &headers)?;
+    let organization_id = header_value(&headers, "x-organization-id")?;
     let bearer_token = bearer_token(&headers)?;
     let principal = service
-        .bootstrap_external_owner(bearer_token.as_deref())
+        .bootstrap_external_owner(bearer_token.as_deref(), Some(&organization_id))
         .await
         .map_err(ApiError::from_auth)?;
     Ok((

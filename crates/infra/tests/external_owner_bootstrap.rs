@@ -1,5 +1,8 @@
 mod support;
 
+use domain::{
+    ApplicationAppType, ApplicationConsentPolicy, ApplicationProvisioningStatus, ApplicationType,
+};
 use infra::{
     config::{
         AppConfig, AuthConfig, AuthProviderMode, HiqliteConfig, LocalNodeRole, PatchDataAuthConfig,
@@ -28,7 +31,7 @@ async fn patch_data_identity_server() -> String {
             .read(&mut request)
             .await
             .expect("read Patch Data request");
-        let body = r#"{"token":"opaque","record":{"id":"external-owner","email":"owner@example.test","verified":true,"displayName":"External Owner","organizationId":"external-organization"}}"#;
+        let body = r#"{"token":"opaque","record":{"id":"external-owner","email":"owner@example.test","verified":true,"displayName":"External Owner","organizations":["external-organization"]}}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             body.len(),
@@ -148,6 +151,7 @@ async fn atomic_fingerprint(runtime: &HiqliteRuntime, organization_id: &str) -> 
             "SELECT 'user|' || id || '|' || COALESCE(email, '') || '|' || display_name || '|' || active || '|' || created_at AS name FROM users
              UNION ALL SELECT 'identity|' || id || '|' || user_id || '|' || provider || '|' || external_user_id || '|' || COALESCE(email_snapshot, '') || '|' || COALESCE(display_name_snapshot, '') || '|' || COALESCE(last_seen_at, '') || '|' || created_at || '|' || updated_at FROM user_identities
              UNION ALL SELECT 'org|' || id || '|' || COALESCE(business_no, '') || '|' || name || '|' || COALESCE(inactivated_at, '') || '|' || created_at || '|' || updated_at FROM organizations WHERE id = $1
+             UNION ALL SELECT 'application|' || id || '|' || organization_id || '|' || slug || '|' || name || '|' || application_type || '|' || app_type || '|' || first_party || '|' || consent_policy || '|' || active || '|' || provisioning_status || '|' || COALESCE(rauthy_client_id, '') || '|' || created_by_user_id || '|' || created_at || '|' || updated_at FROM applications WHERE organization_id = $1
              UNION ALL SELECT 'membership|' || id || '|' || organization_id || '|' || user_id || '|' || membership_role || '|' || status || '|' || created_at || '|' || updated_at FROM organization_memberships WHERE organization_id = $1
              UNION ALL SELECT 'binding|' || id || '|' || subject_type || '|' || subject_id || '|' || subject_organization_id || '|' || provider_id || '|' || resource_type || '|' || resource_id || '|' || role_id || '|' || state || '|' || created_at || '|' || updated_at FROM role_bindings WHERE subject_organization_id = $1
              ORDER BY name",
@@ -159,15 +163,20 @@ async fn atomic_fingerprint(runtime: &HiqliteRuntime, organization_id: &str) -> 
 }
 
 async fn prepare_ready_atomic_command(db: &Database, organization_id: &str) {
+    let user = db
+        .resolve_or_create_user_identity(
+            "patch-data",
+            "atomic-subject",
+            Some("atomic@example.test"),
+            "Atomic Owner",
+        )
+        .await
+        .expect("atomic identity");
     db.upsert_organization_identity(organization_id, None, organization_id)
         .await
         .expect("organization");
     let mut application = support::test_application("atomic-exposure", organization_id);
-    application.created_by_user_id = db
-        .ensure_bootstrap_principals()
-        .await
-        .expect("bootstrap principal")
-        .id;
+    application.created_by_user_id = user.id;
     db.upsert_application(&application)
         .await
         .expect("ready application");
@@ -199,18 +208,6 @@ async fn bootstrap_external_owner_creates_owner_and_binding_idempotently() {
 async fn atomic_external_owner_bootstrap_creates_only_canonical_identity_and_is_idempotent() {
     let (runtime, db, _dir) = support::ensured_database().await;
     let organization_id = "atomic-external-org";
-    db.upsert_organization_identity(organization_id, None, organization_id)
-        .await
-        .expect("external organization");
-    let mut application = support::test_application("atomic-exposure", organization_id);
-    application.created_by_user_id = db
-        .ensure_bootstrap_principals()
-        .await
-        .expect("bootstrap principal")
-        .id;
-    db.upsert_application(&application)
-        .await
-        .expect("ready exposure application");
     let command = || ExternalOwnerBootstrapCommand {
         identity: ExternalIdentityMaterialization {
             provider: "patch-data",
@@ -239,6 +236,104 @@ async fn atomic_external_owner_bootstrap_creates_only_canonical_identity_and_is_
         role_binding_count(&runtime, organization_id, &first.user_id).await,
         1
     );
+    let application = db
+        .get_application_with_consistency("atomic-exposure", Some(ReadConsistency::Strong))
+        .await
+        .expect("fixed application");
+    assert_eq!(application.organization_id, organization_id);
+    assert_eq!(application.created_by_user_id, first.user_id);
+    assert_eq!(application.name, "Patch Data Exposure");
+    assert_eq!(application.application_type, ApplicationType::Confidential);
+    assert_eq!(application.app_type, ApplicationAppType::Server);
+    assert!(application.first_party);
+    assert_eq!(
+        application.consent_policy,
+        ApplicationConsentPolicy::AutoApprove
+    );
+    assert_eq!(
+        application.provisioning_status,
+        ApplicationProvisioningStatus::Ready
+    );
+    assert_eq!(application.rauthy_client_id, None);
+}
+
+#[tokio::test]
+async fn fixed_application_bootstrap_retry_ignores_later_trust_mutation() {
+    let (runtime, db, _dir) = support::ensured_database().await;
+    let organization_id = "trust-mutation-org";
+    let command = || ExternalOwnerBootstrapCommand {
+        identity: ExternalIdentityMaterialization {
+            provider: "patch-data",
+            external_user_id: "trust-mutation-owner",
+            email: Some("trust-mutation@example.test"),
+            display_name: "Trust Mutation Owner",
+        },
+        organization_id,
+        application_id: "atomic-exposure",
+    };
+    let first = db
+        .bootstrap_external_owner_atomic(command())
+        .await
+        .expect("first bootstrap");
+    let untrusted = db
+        .set_application_trust(organization_id, "atomic-exposure", false)
+        .await
+        .expect("explicitly remove application trust");
+    assert!(!untrusted.first_party);
+    assert_eq!(untrusted.consent_policy, ApplicationConsentPolicy::Explicit);
+    let before_retry = atomic_fingerprint(&runtime, organization_id).await;
+    let second = db
+        .bootstrap_external_owner_atomic(command())
+        .await
+        .expect("trust-independent bootstrap retry");
+    assert_eq!(second, first);
+    assert_eq!(
+        atomic_fingerprint(&runtime, organization_id).await,
+        before_retry
+    );
+    let after = db
+        .get_application_with_consistency("atomic-exposure", Some(ReadConsistency::Strong))
+        .await
+        .expect("application after retry");
+    assert!(!after.first_party);
+    assert_eq!(after.consent_policy, ApplicationConsentPolicy::Explicit);
+}
+
+#[tokio::test]
+async fn fixed_application_cannot_be_rehomed_by_a_different_organization_bootstrap() {
+    let (runtime, db, _dir) = support::ensured_database().await;
+    let command = |organization_id| ExternalOwnerBootstrapCommand {
+        identity: ExternalIdentityMaterialization {
+            provider: "patch-data",
+            external_user_id: "multi-org-owner",
+            email: Some("multi-org@example.test"),
+            display_name: "Multi Org Owner",
+        },
+        organization_id,
+        application_id: "atomic-exposure",
+    };
+    db.bootstrap_external_owner_atomic(command("first-org"))
+        .await
+        .expect("first organization bootstrap");
+    let first_before = atomic_fingerprint(&runtime, "first-org").await;
+    let second_before = atomic_fingerprint(&runtime, "second-org").await;
+
+    let error = db
+        .bootstrap_external_owner_atomic(command("second-org"))
+        .await
+        .expect_err("fixed application cannot move organizations");
+    assert_eq!(
+        error.downcast_ref::<ExternalOwnerBootstrapError>(),
+        Some(&ExternalOwnerBootstrapError::PreconditionsChanged)
+    );
+    assert_eq!(
+        atomic_fingerprint(&runtime, "first-org").await,
+        first_before
+    );
+    assert_eq!(
+        atomic_fingerprint(&runtime, "second-org").await,
+        second_before
+    );
 }
 
 async fn assert_atomic_rejection_preserves_every_table_and_timestamp(case: &str) {
@@ -246,15 +341,6 @@ async fn assert_atomic_rejection_preserves_every_table_and_timestamp(case: &str)
     let organization_id = "atomic-rejection-org";
     prepare_ready_atomic_command(&db, organization_id).await;
     match case {
-        "missing-app" => {
-            runtime
-                .execute(
-                    "DELETE FROM applications WHERE id='atomic-exposure'",
-                    vec![],
-                )
-                .await
-                .expect("remove app");
-        }
         "inactive-app" => {
             runtime
                 .execute(
@@ -392,7 +478,6 @@ macro_rules! atomic_rejection_test {
     };
 }
 
-atomic_rejection_test!(atomic_bootstrap_rejects_missing_application, "missing-app");
 atomic_rejection_test!(
     atomic_bootstrap_rejects_inactive_application,
     "inactive-app"
@@ -507,7 +592,7 @@ async fn atomic_bootstrap_rolls_back_membership_when_binding_insert_is_ignored()
 }
 
 #[tokio::test]
-async fn atomic_bootstrap_succeeds_when_a_postcommit_observer_would_see_changed_app_state() {
+async fn atomic_bootstrap_rolls_back_when_the_application_changes_inside_the_transaction() {
     let (runtime, db, _dir) = support::ensured_database().await;
     let organization_id = "postcommit-app-change-org";
     prepare_ready_atomic_command(&db, organization_id).await;
@@ -523,39 +608,28 @@ async fn atomic_bootstrap_succeeds_when_a_postcommit_observer_would_see_changed_
         .await
         .expect("install postcommit-observer trigger");
 
-    let result = db
+    let before = atomic_fingerprint(&runtime, organization_id).await;
+    let error = db
         .bootstrap_external_owner_atomic(ExternalOwnerBootstrapCommand {
             identity: ExternalIdentityMaterialization {
                 provider: "patch-data",
-                external_user_id: "postcommit-subject",
-                email: Some("postcommit@example.test"),
-                display_name: "Postcommit Owner",
+                external_user_id: "atomic-subject",
+                email: Some("atomic@example.test"),
+                display_name: "Atomic Owner",
             },
             organization_id,
             application_id: "atomic-exposure",
         })
         .await
-        .expect("committed bootstrap must not become a false failure");
-    assert_eq!(
-        membership_role(&runtime, organization_id, &result.user_id).await,
-        "owner"
-    );
-    let app_active: Vec<support::NameRow> = runtime
-        .query_rows(
-            ReadConsistency::Strong,
-            "SELECT CAST(active AS TEXT) AS name FROM applications WHERE id='atomic-exposure'",
-            vec![],
-        )
-        .await
-        .expect("application state after commit");
-    assert_eq!(app_active[0].name, "0");
+        .expect_err("application corruption must roll back the whole bootstrap");
+    assert!(error.to_string().contains("preconditions changed"));
+    assert_eq!(atomic_fingerprint(&runtime, organization_id).await, before);
 }
 
 #[tokio::test]
 async fn concurrent_distinct_first_owner_commands_admit_exactly_one_owner() {
     let (runtime, db, _dir) = support::ensured_database().await;
     let organization_id = "concurrent-owner-org";
-    prepare_ready_atomic_command(&db, organization_id).await;
     let barrier = Arc::new(Barrier::new(2));
     let first_db = db.clone();
     let first_barrier = barrier.clone();
@@ -615,7 +689,6 @@ async fn concurrent_distinct_first_owner_commands_admit_exactly_one_owner() {
 async fn atomic_external_owner_bootstrap_identical_retry_preserves_complete_fingerprint() {
     let (runtime, db, _dir) = support::ensured_database().await;
     let organization_id = "atomic-retry-org";
-    prepare_ready_atomic_command(&db, organization_id).await;
     let command = || ExternalOwnerBootstrapCommand {
         identity: ExternalIdentityMaterialization {
             provider: "patch-data",
@@ -758,41 +831,22 @@ async fn bootstrap_external_owner_rejects_existing_member_admin_and_other_owner(
 }
 
 #[tokio::test]
-async fn bootstrap_external_owner_with_unready_exposure_application_makes_no_local_writes() {
-    let (service, _db, runtime, _dir) = patch_data_service().await;
-    let before: Vec<support::NameRow> = runtime
-        .query_rows(
-            ReadConsistency::Strong,
-            "SELECT id AS name FROM users WHERE id = 'patch-data:external-owner'
-             UNION ALL SELECT id AS name FROM organizations WHERE id = 'external-organization'
-             UNION ALL SELECT id AS name FROM organization_memberships WHERE organization_id = 'external-organization'
-             UNION ALL SELECT id AS name FROM role_bindings WHERE subject_organization_id = 'external-organization'",
-            vec![],
+async fn bootstrap_external_owner_creates_the_fixed_application_on_fresh_state() {
+    let (service, db, _runtime, _dir) = patch_data_service().await;
+    let principal = service
+        .bootstrap_external_owner(Some("Bearer external-token"), Some("external-organization"))
+        .await
+        .expect("fresh bootstrap");
+    let application = db
+        .get_application_with_consistency(
+            "missing-exposure-application",
+            Some(ReadConsistency::Strong),
         )
         .await
-        .expect("pre-bootstrap local rows");
-
-    let error = service
-        .bootstrap_external_owner(Some("Bearer external-token"))
-        .await
-        .expect_err("unready exposure application must reject bootstrap");
-    assert_eq!(error.to_string(), "external owner bootstrap conflict");
-    assert!(!error.to_string().contains("application"));
-
-    let after: Vec<support::NameRow> = runtime
-        .query_rows(
-            ReadConsistency::Strong,
-            "SELECT id AS name FROM users WHERE id = 'patch-data:external-owner'
-             UNION ALL SELECT id AS name FROM organizations WHERE id = 'external-organization'
-             UNION ALL SELECT id AS name FROM organization_memberships WHERE organization_id = 'external-organization'
-             UNION ALL SELECT id AS name FROM role_bindings WHERE subject_organization_id = 'external-organization'",
-            vec![],
-        )
-        .await
-        .expect("post-bootstrap local rows");
-    assert_eq!(
-        after.len(),
-        before.len(),
-        "invalid readiness must write nothing"
-    );
+        .expect("fixed application");
+    assert_eq!(application.organization_id, "external-organization");
+    assert_eq!(application.created_by_user_id, principal.user_id);
+    assert_eq!(application.name, "Patch Data Exposure");
+    assert!(application.active);
+    assert_eq!(application.rauthy_client_id, None);
 }

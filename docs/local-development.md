@@ -64,10 +64,15 @@ sh ./scripts/verify-ephemeral-k8s.sh static
 
 Patch Data-only IED deployment manifest is `deploy/overlays/ied-patch-data` (it composes
 `deploy/overlays/patch-data`; the old `deploy/overlays/ied` is a legacy chaos mode). It uses the
-internal `http://patch-data:8090` origin and the fixed `patch-data-exposure` Grant
+internal `http://patch-data.patch.svc.cluster.local:8090` origin and the fixed `patch-data-exposure` Grant
 application, and it does not require any Rauthy workload or Rauthy credential reference.
 Render it with `kubectl kustomize deploy/overlays/ied-patch-data`; supply only the normal
-Grant/Hiqlite secrets plus the previously provisioned active/ready application.
+Grant/Hiqlite secrets. The master-authorized external-owner bootstrap creates the fixed
+active/ready trusted application atomically on fresh state; do not pre-seed it. Patch Data
+`organizations` is bootstrap/import compatibility data only. Normal tests must seed or import
+Grant `organization_memberships` and role bindings explicitly; changing the upstream relation must
+not change access. Rule-ledger foundation imports require an exact generation, canonical 64-hex
+ledger digest, and sorted unique acyclic hierarchy edges.
 
 단일 엔트리포인트로 이미지 빌드와 `vind` bootstrap까지 실행하려면:
 

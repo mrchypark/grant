@@ -17,7 +17,7 @@ patches:
         name: grant-config
       data:
         GRANT_AUTH_PROVIDER: patch-data
-        GRANT_PATCH_DATA_BASE_URL: http://patch-data:8090
+        GRANT_PATCH_DATA_BASE_URL: http://patch-data.patch.svc.cluster.local:8090
         GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure
   - target:
       kind: StatefulSet

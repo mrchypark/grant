@@ -34,7 +34,7 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. 런타임 provider는 `rauthy` 또는 `patch-data`이며, `(provider, external_user_id)`는 unique index로 관리한다. Patch Data materialization은 이 provider-qualified key로만 새 local user를 만들며 email이나 bare external id로 기존 user를 연결하지 않는다.
+외부 인증 공급자와 내부 사용자 매핑. 런타임 provider는 `rauthy` 또는 `patch-data`이며, `(provider, external_user_id)`는 unique index로 관리한다. Patch Data materialization은 이 provider-qualified key로만 새 local user를 만들며 email이나 bare external id로 기존 user를 연결하지 않는다. 최초 master-authorized external-owner bootstrap만 Patch Data `organizations` relation에서 선택 조직 하나를 검증해 같은 트랜잭션에서 owner membership/binding과 서버 설정 고정 exposure application을 만든다. 정상 요청의 membership과 권한은 Grant local row만 권위다.
 
 ### `auth_identity_cache`
 
@@ -55,6 +55,12 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 ### `organization_memberships`
 
 사용자와 조직의 소속 관계. `(organization_id, user_id)`는 unique다.
+
+### `patch_data_authority_imports`, `organization_hierarchy_edges`
+
+Patch Data API rule 이동의 deterministic import receipt와 조직 parent-child snapshot이다. receipt는 provider별 exact `generation`, canonical ledger SHA-256 digest, length-framed hierarchy foundation digest, 적용 시각을 저장한다. 같은 ledger receipt 아래 다른 hierarchy input도 conflict다. hierarchy는 source provider 안에서 child당 parent 하나만 허용하며 importer가 sorted/unique/acyclic input을 검증한 뒤 generation 전체를 원자 교체한다. 이 edge는 아직 coarse evaluator 입력이 아니며 membership/plant binding의 parallel authority도 아니다. `authority_import_assertions`는 CAS와 catalog collision을 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
+
+최초 foundation import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 함께 설치한다. 사용자/조직 membership과 plant resource binding은 승인된 rule-ledger mapper가 기존 canonical `organization_memberships`와 `role_bindings`에 써야 하며 정상 요청 시 Patch Data relation을 dual-read/dual-write하지 않는다.
 
 ### `groups`, `group_memberships`
 

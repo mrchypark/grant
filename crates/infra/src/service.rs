@@ -452,8 +452,8 @@ impl AppService {
     ) -> Result<AuthenticatedPrincipal> {
         let target_organization_id = require_non_empty("organizationId", target_organization_id)?;
         if matches!(self.cfg.auth.provider_mode, AuthProviderMode::PatchData) {
-            // Validate external organization membership even when the local
-            // organization is inactive and cannot be selected as current.
+            // Patch Data verifies the bearer here; Grant's local membership
+            // remains authoritative even while the organization is inactive.
             let identity = self
                 .auth
                 .resolve_external_identity_for_organization(
@@ -557,10 +557,11 @@ impl AppService {
     pub async fn bootstrap_external_owner(
         &self,
         bearer_token: Option<&str>,
+        organization_id: Option<&str>,
     ) -> Result<AuthenticatedPrincipal> {
         let identity = self
             .auth
-            .resolve_external_identity(None, bearer_token, None)
+            .resolve_external_identity_for_bootstrap_organization(bearer_token, organization_id)
             .await?;
         let organization_id = identity.organization_id.clone().ok_or_else(|| {
             forbidden_error("forbidden: configured auth provider did not verify an organization")
@@ -599,21 +600,7 @@ impl AppService {
                 application_id,
             })
             .await
-            .map_err(|error| {
-                // Diagnostics are intentionally generic: neither owner ids nor
-                // local identity relationships are an externally visible oracle.
-                if error
-                    .downcast_ref::<ExternalOwnerBootstrapError>()
-                    .is_some()
-                {
-                    service_error(
-                        ServiceErrorKind::Conflict,
-                        "external owner bootstrap conflict",
-                    )
-                } else {
-                    error
-                }
-            })?;
+            .map_err(map_external_owner_bootstrap_error)?;
         Ok(AuthenticatedPrincipal {
             user_id: bootstrapped.user_id,
             organization_id: bootstrapped.organization_id,
@@ -638,9 +625,6 @@ impl AppService {
                 Some(ReadConsistency::Strong),
             )
             .await?;
-        if identity.organization_id.as_deref() != Some(organization_id) {
-            return Err(forbidden_error("forbidden: organization is not verified"));
-        }
         if !identity.active {
             return Err(forbidden_error("forbidden: external user is inactive"));
         }
@@ -753,7 +737,7 @@ impl AppService {
             organizations.retain(|organization| organization.id == external_organization_id);
             if organizations.is_empty() {
                 return Err(forbidden_error(
-                    "forbidden: Patch Data user has no active local membership for the verified organization",
+                    "forbidden: Patch Data user has no active local membership for the requested organization",
                 ));
             }
         }
@@ -2527,6 +2511,23 @@ fn service_error(kind: ServiceErrorKind, message: impl Into<String>) -> anyhow::
     anyhow::Error::new(ServiceError::new(kind, message))
 }
 
+fn map_external_owner_bootstrap_error(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .downcast_ref::<ExternalOwnerBootstrapError>()
+        .is_some()
+    {
+        service_error(
+            ServiceErrorKind::Conflict,
+            "external owner bootstrap conflict",
+        )
+    } else {
+        service_error(
+            ServiceErrorKind::Unavailable,
+            "external owner bootstrap unavailable",
+        )
+    }
+}
+
 fn map_application_consent_write_error(err: anyhow::Error) -> anyhow::Error {
     if err.downcast_ref::<ApplicationConsentWriteError>()
         == Some(&ApplicationConsentWriteError::PreconditionsChanged)
@@ -2788,11 +2789,12 @@ mod tests {
         SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
         SchemaReadinessState, ServiceError, ServiceErrorKind, exposure_principal_digest,
         map_application_consent_write_error, map_application_security_mutation_error,
-        map_application_trust_mutation_error, sanitize_rauthy_error_field,
+        map_application_trust_mutation_error, map_external_owner_bootstrap_error,
+        sanitize_rauthy_error_field,
     };
     use crate::database::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
-        ApplicationTrustMutationError,
+        ApplicationTrustMutationError, ExternalOwnerBootstrapError,
     };
     use std::{
         sync::{
@@ -2853,6 +2855,26 @@ mod tests {
 
     #[test]
     fn maps_only_typed_database_mutation_errors_to_service_errors() {
+        let conflict = map_external_owner_bootstrap_error(anyhow::Error::new(
+            ExternalOwnerBootstrapError::PreconditionsChanged,
+        ));
+        assert_eq!(
+            conflict
+                .downcast_ref::<ServiceError>()
+                .expect("typed bootstrap conflict")
+                .kind(),
+            ServiceErrorKind::Conflict
+        );
+        let unavailable =
+            map_external_owner_bootstrap_error(anyhow::anyhow!("raft quorum unavailable"));
+        assert_eq!(
+            unavailable
+                .downcast_ref::<ServiceError>()
+                .expect("bootstrap availability error")
+                .kind(),
+            ServiceErrorKind::Unavailable
+        );
+
         let consent_error = anyhow::Error::new(ApplicationConsentWriteError::PreconditionsChanged)
             .context("replace active application consent transaction");
         let consent_error = map_application_consent_write_error(consent_error);

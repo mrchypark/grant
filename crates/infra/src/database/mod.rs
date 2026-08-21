@@ -24,6 +24,7 @@ mod core;
 mod agreements;
 mod application_grants;
 mod applications;
+mod authority_imports;
 mod authz;
 mod backups;
 mod catalog;
@@ -177,6 +178,31 @@ pub struct ExternalOwnerBootstrapCommand<'a> {
 pub struct ExternalOwnerBootstrapResult {
     pub user_id: String,
     pub organization_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchDataHierarchyEdge {
+    pub parent_organization_id: String,
+    pub child_organization_id: String,
+}
+
+/// Deterministic, fail-closed receipt for the Patch Data rule-ledger import.
+/// This first foundation owns only the provider/action catalog and hierarchy
+/// snapshot. User membership and plant bindings remain canonical Grant rows
+/// and require a separately reviewed ledger-to-row mapper.
+#[derive(Debug, Clone)]
+pub struct PatchDataAuthorityImport {
+    pub generation: String,
+    pub ledger_digest: String,
+    pub expected_previous_generation: Option<String>,
+    pub hierarchy_edges: Vec<PatchDataHierarchyEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchDataAuthorityImportResult {
+    pub applied: bool,
+    pub generation: String,
+    pub ledger_digest: String,
 }
 
 /// A narrow seam for services and deterministic tests.  It intentionally does

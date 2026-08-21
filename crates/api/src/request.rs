@@ -1,6 +1,9 @@
 use anyhow::anyhow;
 use axum::http::{HeaderMap, StatusCode, header};
-use infra::{config::ReadConsistency, service::AppService};
+use infra::{
+    config::{AuthProviderMode, ReadConsistency},
+    service::AppService,
+};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -42,6 +45,16 @@ pub(crate) async fn request_context_for_inactive_organization(
     target_organization_id: &str,
     read_consistency: Option<ReadConsistency>,
 ) -> ApiResult<RequestContext> {
+    if matches!(service.auth_provider_mode(), AuthProviderMode::PatchData) {
+        let selected = header_value(headers, "x-organization-id")?;
+        if selected != target_organization_id {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: "forbidden: organization path does not match selected organization"
+                    .to_owned(),
+            });
+        }
+    }
     let bearer_token = bearer_token(headers)?;
     let principal = service
         .authenticate_request_for_inactive_organization(
@@ -129,7 +142,7 @@ fn credential_header(headers: &HeaderMap, key: &'static str) -> ApiResult<String
     })
 }
 
-fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
+pub(crate) fn header_value(headers: &HeaderMap, key: &'static str) -> ApiResult<String> {
     optional_header_value(headers, key)?
         .ok_or_else(|| ApiError::bad_request(anyhow!("missing {key} header")))
 }

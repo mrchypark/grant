@@ -231,7 +231,7 @@ fn valid_response(id: &str, organization_id: &str) -> String {
             "email": "USER@PatchData.test",
             "verified": true,
             "name": "  Patch Data User  ",
-            "organizationId": organization_id,
+            "organizations": [organization_id],
         }
     })
     .to_string()
@@ -245,7 +245,7 @@ fn valid_response_with_email(id: &str, email: &str, organization_id: &str) -> St
             "email": email,
             "verified": true,
             "name": "Patch Data User",
-            "organizationId": organization_id,
+            "organizations": [organization_id],
         }
     })
     .to_string()
@@ -266,6 +266,16 @@ async fn resolve(
 ) -> anyhow::Result<infra::auth::ExternalIdentity> {
     resolver
         .resolve_external_identity_for_organization(None, authorization, organization_id, None)
+        .await
+}
+
+async fn resolve_bootstrap(
+    resolver: &AuthResolver,
+    authorization: Option<&str>,
+    organization_id: Option<&str>,
+) -> anyhow::Result<infra::auth::ExternalIdentity> {
+    resolver
+        .resolve_external_identity_for_bootstrap_organization(authorization, organization_id)
         .await
 }
 
@@ -492,7 +502,7 @@ fn materialize_request(
 }
 
 #[tokio::test]
-async fn patch_data_me_returns_only_the_verified_active_organization() {
+async fn patch_data_me_returns_grant_authoritative_active_memberships() {
     let mut patch_data =
         LocalPatchData::start(vec![ok(valid_response("patch-user", "patch-org"))]).await;
     let (app, db, runtime, _db_dir) = patch_data_api(patch_data.base_url.clone()).await;
@@ -536,8 +546,12 @@ async fn patch_data_me_returns_only_the_verified_active_organization() {
     assert_eq!(json["externalUserId"], "patch-user");
     assert_eq!(json["user"]["email"], "user@patchdata.test");
     assert_eq!(json["activeOrganizationId"], "patch-org");
-    assert_eq!(json["organizations"].as_array().map(Vec::len), Some(1));
-    assert_eq!(json["organizations"][0]["id"], "patch-org");
+    let organizations = json["organizations"]
+        .as_array()
+        .expect("Grant organizations");
+    assert_eq!(organizations.len(), 2);
+    assert!(organizations.iter().any(|item| item["id"] == "patch-org"));
+    assert!(organizations.iter().any(|item| item["id"] == "other-org"));
     assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
 }
 
@@ -609,7 +623,56 @@ async fn patch_data_materialize_forwards_refresh_and_returns_private_minimal_vie
 }
 
 #[tokio::test]
-async fn patch_data_materialize_fails_closed_for_missing_or_unverified_request_context() {
+async fn patch_data_owner_bootstrap_requires_and_materializes_only_the_selected_organization() {
+    let mut patch_data = LocalPatchData::start(vec![
+        ok(valid_response("bootstrap-owner", "owned-org")),
+        ok(valid_response("bootstrap-owner", "owned-org")),
+    ])
+    .await;
+    let (app, db, _runtime, _db_dir) = patch_data_api(patch_data.base_url.clone()).await;
+    let request = |organization_id: Option<&str>| {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/admin/bootstrap/external-owner")
+            .header("authorization", AUTHORIZATION)
+            .header("x-grant-master-key", support::MASTER_KEY);
+        if let Some(organization_id) = organization_id {
+            request = request.header("x-organization-id", organization_id);
+        }
+        request.body(Body::empty()).expect("bootstrap request")
+    };
+
+    let missing = app
+        .clone()
+        .oneshot(request(None))
+        .await
+        .expect("missing organization response");
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    let wrong = app
+        .clone()
+        .oneshot(request(Some("other-org")))
+        .await
+        .expect("wrong organization response");
+    assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+    let selected = app
+        .oneshot(request(Some("owned-org")))
+        .await
+        .expect("selected organization response");
+    assert_eq!(selected.status(), StatusCode::CREATED);
+    let application = db
+        .get_application_with_consistency("grant-exposure", Some(ReadConsistency::Strong))
+        .await
+        .expect("fixed Patch Data application");
+    assert_eq!(application.organization_id, "owned-org");
+    assert_eq!(application.name, "Patch Data Exposure");
+    assert!(application.active);
+    assert_eq!(application.rauthy_client_id, None);
+    assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+}
+
+#[tokio::test]
+async fn patch_data_materialize_requires_local_scope_but_not_patch_data_membership() {
     let mut patch_data =
         LocalPatchData::start(vec![ok(valid_response("materialize-user", "other-org"))]).await;
     let (app, _db, _runtime, _db_dir) = patch_data_api(patch_data.base_url.clone()).await;
@@ -626,15 +689,70 @@ async fn patch_data_materialize_fails_closed_for_missing_or_unverified_request_c
         .await
         .expect("missing org response");
     assert_eq!(missing_organization.status(), StatusCode::FORBIDDEN);
-    let wrong_organization = app
+    let locally_scoped = app
         .oneshot(materialize_request(
             Some(AUTHORIZATION),
             Some("materialize-org"),
         ))
         .await
-        .expect("wrong org response");
-    assert_eq!(wrong_organization.status(), StatusCode::FORBIDDEN);
+        .expect("locally scoped response");
+    assert_eq!(locally_scoped.status(), StatusCode::OK);
     assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+}
+
+#[tokio::test]
+async fn patch_data_organization_relation_changes_cannot_grant_or_revoke_local_access() {
+    let mut patch_data = LocalPatchData::start(vec![
+        ok(valid_response("patch-user", "provider-other-org")),
+        ok(valid_response("patch-user", "patch-org")),
+        ok(valid_response("patch-user", "provider-other-org")),
+    ])
+    .await;
+    let (app, db, runtime, _db_dir) = patch_data_api(patch_data.base_url.clone()).await;
+    seed_patch_data_membership(&db, &runtime, "patch-org").await;
+    let request = || {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/me")
+            .header("authorization", AUTHORIZATION)
+            .header("x-organization-id", "patch-org")
+            .body(Body::empty())
+            .expect("request")
+    };
+
+    let locally_allowed = app
+        .clone()
+        .oneshot(request())
+        .await
+        .expect("local membership response");
+    assert_eq!(locally_allowed.status(), StatusCode::OK);
+
+    runtime
+        .execute(
+            "UPDATE organization_memberships SET status='disabled' WHERE organization_id='patch-org'",
+            vec![],
+        )
+        .await
+        .expect("disable local membership");
+    let provider_cannot_grant = app
+        .clone()
+        .oneshot(request())
+        .await
+        .expect("disabled response");
+    assert_eq!(provider_cannot_grant.status(), StatusCode::FORBIDDEN);
+
+    runtime
+        .execute(
+            "UPDATE organization_memberships SET status='active' WHERE organization_id='patch-org'",
+            vec![],
+        )
+        .await
+        .expect("restore local membership");
+    let provider_cannot_revoke = app.oneshot(request()).await.expect("restored response");
+    assert_eq!(provider_cannot_revoke.status(), StatusCode::OK);
+    for _ in 0..3 {
+        assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    }
 }
 
 #[tokio::test]
@@ -782,7 +900,7 @@ async fn patch_data_uses_fixed_refresh_path_and_forwards_authorization_verbatim(
     assert_eq!(identity.external_user_id, "user-1");
     assert_eq!(identity.email.as_deref(), Some("user@patchdata.test"));
     assert_eq!(identity.display_name, "Patch Data User");
-    assert_eq!(identity.organization_id.as_deref(), Some("org-1"));
+    assert_eq!(identity.organization_id, None);
     let request = patch_data.next_request().await;
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, REFRESH_PATH);
@@ -994,38 +1112,41 @@ async fn patch_data_rejects_missing_empty_or_invalid_identity_fields() {
 }
 
 #[tokio::test]
-async fn patch_data_requires_verified_email_and_exactly_one_matching_organization() {
+async fn patch_data_bootstrap_requires_verified_email_and_explicit_matching_organization() {
     let missing_organization = json!({
         "token": "token",
         "record": {"id": "user-1", "email": "user@example.test", "verified": true}
     })
     .to_string();
-    let duplicate_organization = r#"{"token":"token","record":{"id":"user-1","email":"user@example.test","verified":true,"organizationId":"org-1","organizationId":"org-1"}}"#.to_owned();
     let mut patch_data = LocalPatchData::start(vec![
         ok(json!({
             "token": "token",
-            "record": {"id": "user-1", "email": "user@example.test", "verified": false, "organizationId": "org-1"}
+            "record": {"id": "user-1", "email": "user@example.test", "verified": false, "organizations": ["org-1"]}
         }).to_string()),
         ok(json!({
             "token": "token",
-            "record": {"id": "user-1", "email": "user@example.test", "organizationId": "org-1"}
+            "record": {"id": "user-1", "email": "user@example.test", "organizations": ["org-1"]}
         }).to_string()),
         ok(missing_organization),
         ok(valid_response("user-1", "other-org")),
-        ok(duplicate_organization),
+        ok(json!({
+            "token": "token",
+            "record": {"id": "user-1", "email": "user@example.test", "verified": true, "organizations": ["org-2", "org-1", "org-1"]}
+        }).to_string()),
+        ok(valid_response("user-1", "org-1")),
     ])
     .await;
     let resolver = resolver(patch_data.base_url.clone());
 
     for _ in 0..3 {
         assert!(
-            resolve(&resolver, Some(AUTHORIZATION), Some("org-1"))
+            resolve_bootstrap(&resolver, Some(AUTHORIZATION), Some("org-1"))
                 .await
                 .is_err()
         );
         assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
     }
-    let wrong_organization = resolve(&resolver, Some(AUTHORIZATION), Some("org-1"))
+    let wrong_organization = resolve_bootstrap(&resolver, Some(AUTHORIZATION), Some("org-1"))
         .await
         .expect_err("wrong organization must be forbidden");
     assert_eq!(
@@ -1033,13 +1154,120 @@ async fn patch_data_requires_verified_email_and_exactly_one_matching_organizatio
         "forbidden: Patch Data user is not a member of the requested organization"
     );
     assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
-    assert!(
-        resolve(&resolver, Some(AUTHORIZATION), Some("org-1"))
-            .await
-            .is_err(),
-        "duplicate organizationId must be rejected"
+    let selected = resolve_bootstrap(&resolver, Some(AUTHORIZATION), Some("org-1"))
+        .await
+        .expect("deduplicated multi-organization membership");
+    assert_eq!(selected.organization_id.as_deref(), Some("org-1"));
+    assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    let missing_selection = resolve_bootstrap(&resolver, Some(AUTHORIZATION), None)
+        .await
+        .expect_err("Patch Data must never select the first organization implicitly");
+    assert_eq!(
+        missing_selection.to_string(),
+        "forbidden: Patch Data organization selection is required"
     );
     assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+}
+
+#[tokio::test]
+async fn patch_data_rejects_unbounded_or_malformed_organization_relations() {
+    let record = |organizations: Value| {
+        ok(json!({
+            "token": "token",
+            "record": {
+                "id": "user-1",
+                "email": "user@example.test",
+                "verified": true,
+                "organizations": organizations
+            }
+        })
+        .to_string())
+    };
+    let mut patch_data = LocalPatchData::start(vec![
+        record(json!(
+            (0..101)
+                .map(|index| format!("org-{index}"))
+                .collect::<Vec<_>>()
+        )),
+        record(json!(["x".repeat(256)])),
+        record(json!([" org-1"])),
+        record(json!(["org-1\u{0}"])),
+        ok(r#"{"token":"token","record":{"id":"user-1","email":"user@example.test","verified":true,"organizations":[],"organizations":["org-1"]}}"#.to_owned()),
+    ])
+    .await;
+    let resolver = resolver(patch_data.base_url.clone());
+    for _ in 0..5 {
+        let error = resolve_bootstrap(&resolver, Some(AUTHORIZATION), Some("org-1"))
+            .await
+            .expect_err("malformed organizations relation must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "unavailable: Patch Data auth refresh response was invalid"
+        );
+        assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    }
+}
+
+#[tokio::test]
+async fn patch_data_authentication_accepts_missing_or_empty_organization_relations() {
+    let mut patch_data = LocalPatchData::start(vec![
+        ok(json!({
+            "token": "token",
+            "record": {"id": "user-1", "email": "user@example.test", "verified": true}
+        })
+        .to_string()),
+        ok(json!({
+            "token": "token",
+            "record": {"id": "user-1", "email": "user@example.test", "verified": true, "organizations": []}
+        })
+        .to_string()),
+    ])
+    .await;
+    let resolver = resolver(patch_data.base_url.clone());
+    for _ in 0..2 {
+        let identity = resolve(&resolver, Some(AUTHORIZATION), Some("local-org"))
+            .await
+            .expect("authn must not depend on the Patch Data relation");
+        assert_eq!(identity.external_user_id, "user-1");
+        assert_eq!(identity.organization_id, None);
+        assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    }
+}
+
+#[tokio::test]
+async fn patch_data_authentication_ignores_malformed_or_unbounded_organization_relations() {
+    let record = |organizations: Value| {
+        ok(json!({
+            "token": "token",
+            "record": {
+                "id": "user-1",
+                "email": "user@example.test",
+                "verified": true,
+                "organizations": organizations
+            }
+        })
+        .to_string())
+    };
+    let mut patch_data = LocalPatchData::start(vec![
+        record(json!(
+            (0..101)
+                .map(|index| format!("org-{index}"))
+                .collect::<Vec<_>>()
+        )),
+        record(json!([" org-1"])),
+        record(json!({"unexpected": "shape"})),
+        ok(r#"{"token":"token","record":{"id":"user-1","email":"user@example.test","verified":true,"organizations":[],"organizations":["org-1"]}}"#.to_owned()),
+    ])
+    .await;
+    let resolver = resolver(patch_data.base_url.clone());
+    for _ in 0..4 {
+        let identity = resolve(&resolver, Some(AUTHORIZATION), Some("local-org"))
+            .await
+            .expect("relation-only changes cannot revoke Grant-local access");
+        assert_eq!(identity.external_user_id, "user-1");
+        assert_eq!(identity.organization_id, None);
+        assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    }
 }
 
 #[tokio::test]
@@ -1047,7 +1275,7 @@ async fn patch_data_requires_a_nonempty_provider_token_and_revalidates_every_req
     let mut patch_data = LocalPatchData::start(vec![
         ok(json!({
             "token": "",
-            "record": {"id": "user-1", "email": "user@example.test", "verified": true, "organizationId": "org-1"}
+            "record": {"id": "user-1", "email": "user@example.test", "verified": true, "organizations": ["org-1"]}
         }).to_string()),
         ok(valid_response("user-1", "org-1")),
         ok(valid_response("user-2", "org-1")),
@@ -1079,7 +1307,7 @@ async fn patch_data_requires_a_nonempty_provider_token_and_revalidates_every_req
 }
 
 #[tokio::test]
-async fn patch_data_owner_can_reactivate_the_only_verified_inactive_organization() {
+async fn patch_data_owner_can_reactivate_the_requested_local_inactive_organization() {
     let mut patch_data =
         LocalPatchData::start(vec![ok(valid_response("patch-user", "patch-org"))]).await;
     let (runtime, _dir) = support::test_runtime(ReadConsistency::Local).await;
@@ -1248,6 +1476,7 @@ async fn patch_data_inactive_org_recovery_never_inherits_email_or_bare_id_member
                     .method(Method::POST)
                     .uri("/api/v1/orgs/patch-org/reactivate")
                     .header("authorization", AUTHORIZATION)
+                    .header("x-organization-id", "patch-org")
                     .body(Body::empty())
                     .expect("reactivate request"),
             )

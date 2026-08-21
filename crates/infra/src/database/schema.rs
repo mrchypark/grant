@@ -47,6 +47,9 @@ impl Database {
                             ag.status AS application_grant_status,
                             aga.action_id AS consent_action_id,
                             aca.valid AS consent_assertion_valid
+                            , pai.generation AS patch_data_import_generation
+                            , pai.foundation_digest AS patch_data_foundation_digest
+                            , ohe.source_generation AS hierarchy_source_generation
                      FROM users u
                      LEFT JOIN user_identities ui ON 1 = 0
                      LEFT JOIN parties p ON 1 = 0
@@ -68,6 +71,8 @@ impl Database {
                      LEFT JOIN application_grants ag ON 1 = 0
                      LEFT JOIN application_grant_actions aga ON 1 = 0
                      LEFT JOIN application_consent_assertions aca ON 1 = 0
+                     LEFT JOIN patch_data_authority_imports pai ON 1 = 0
+                     LEFT JOIN organization_hierarchy_edges ohe ON 1 = 0
                      LIMIT 0
                  ) required_schema",
                 params!(),
@@ -378,6 +383,27 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     valid INTEGER NOT NULL
                         CONSTRAINT application_consent_assertion_valid CHECK (valid = 1)
+                );
+                CREATE TABLE IF NOT EXISTS patch_data_authority_imports (
+                    provider_id TEXT PRIMARY KEY,
+                    generation TEXT NOT NULL,
+                    ledger_digest TEXT NOT NULL,
+                    foundation_digest TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS organization_hierarchy_edges (
+                    source_provider TEXT NOT NULL,
+                    parent_organization_id TEXT NOT NULL,
+                    child_organization_id TEXT NOT NULL,
+                    source_generation TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (source_provider, parent_organization_id, child_organization_id),
+                    UNIQUE (source_provider, child_organization_id)
+                );
+                CREATE TABLE IF NOT EXISTS authority_import_assertions (
+                    id TEXT PRIMARY KEY,
+                    valid INTEGER NOT NULL
+                        CONSTRAINT authority_import_assertion_valid CHECK (valid = 1)
                 );
                 "#
                 .to_owned(),

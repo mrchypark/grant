@@ -13,7 +13,7 @@ use serde::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -24,6 +24,7 @@ const PATCH_DATA_AUTH_REFRESH_PATH: &str = "/api/collections/users/auth-refresh"
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PATCH_DATA_AUTH_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_PATCH_DATA_ORGANIZATIONS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPrincipal {
@@ -61,7 +62,7 @@ struct PatchDataIdentity {
     external_user_id: String,
     email: String,
     display_name: String,
-    organization_id: String,
+    organization_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,7 +79,7 @@ struct PatchDataAuthRefreshRecord {
     email: String,
     verified: bool,
     display_name: Option<String>,
-    organization_id: String,
+    organizations: Vec<serde_json::Value>,
 }
 
 impl<'de> Deserialize<'de> for PatchDataAuthRefreshRecord {
@@ -103,7 +104,7 @@ impl<'de> Deserialize<'de> for PatchDataAuthRefreshRecord {
                 let mut email = None;
                 let mut verified = None;
                 let mut display_name = None;
-                let mut organization_id = None;
+                let mut organizations = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "id" => set_once(&mut id, map.next_value()?, "id")?,
@@ -112,8 +113,8 @@ impl<'de> Deserialize<'de> for PatchDataAuthRefreshRecord {
                         "displayName" | "name" => {
                             set_once(&mut display_name, map.next_value()?, "displayName")?
                         }
-                        "organizationId" => {
-                            set_once(&mut organization_id, map.next_value()?, "organizationId")?
+                        "organizations" => {
+                            organizations.push(map.next_value()?);
                         }
                         _ => {
                             let _: de::IgnoredAny = map.next_value()?;
@@ -125,8 +126,10 @@ impl<'de> Deserialize<'de> for PatchDataAuthRefreshRecord {
                     email: email.ok_or_else(|| de::Error::missing_field("email"))?,
                     verified: verified.ok_or_else(|| de::Error::missing_field("verified"))?,
                     display_name,
-                    organization_id: organization_id
-                        .ok_or_else(|| de::Error::missing_field("organizationId"))?,
+                    // Preserve this opaque for normal authentication. Only
+                    // the explicit bootstrap boundary parses and validates
+                    // Patch Data membership compatibility data.
+                    organizations,
                 })
             }
         }
@@ -352,11 +355,37 @@ impl AuthResolver {
         Ok(identity)
     }
 
+    /// Bootstrap/import-only compatibility seam. Patch Data's relation is
+    /// allowed to select the one initial organization only here; normal
+    /// request authorization is exclusively based on Grant's local state.
+    pub async fn resolve_external_identity_for_bootstrap_organization(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: Option<&str>,
+    ) -> Result<ExternalIdentity> {
+        let token = bearer_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("unauthorized: missing bearer token"))?;
+        match self.provider_mode {
+            AuthProviderMode::PatchData => {
+                self.patch_data
+                    .as_ref()
+                    .expect("Patch Data config validated")
+                    .resolve_for_bootstrap(token, organization_id)
+                    .await
+            }
+            AuthProviderMode::Rauthy => {
+                anyhow::bail!("forbidden: external owner bootstrap is unavailable for Rauthy")
+            }
+        }
+    }
+
     async fn resolve_identity(
         &self,
         db: &Database,
         token: &str,
-        organization_id: Option<&str>,
+        _organization_id: Option<&str>,
         read_consistency: Option<ReadConsistency>,
         persist_shared_cache: bool,
     ) -> Result<ExternalIdentity> {
@@ -381,7 +410,7 @@ impl AuthResolver {
                 self.patch_data
                     .as_ref()
                     .expect("Patch Data config validated")
-                    .resolve(token, organization_id)
+                    .resolve(token)
                     .await
             }
         }
@@ -390,7 +419,7 @@ impl AuthResolver {
     async fn resolve_identity_without_db(
         &self,
         token: &str,
-        organization_id: Option<&str>,
+        _organization_id: Option<&str>,
     ) -> Result<ExternalIdentity> {
         match self.provider_mode {
             AuthProviderMode::Rauthy => {
@@ -410,7 +439,7 @@ impl AuthResolver {
                 self.patch_data
                     .as_ref()
                     .expect("Patch Data config validated")
-                    .resolve(token, organization_id)
+                    .resolve(token)
                     .await
             }
         }
@@ -431,10 +460,24 @@ impl PatchDataResolver {
         }
     }
 
-    async fn resolve(
+    async fn resolve(&self, authorization_value: &str) -> Result<ExternalIdentity> {
+        self.resolve_inner(authorization_value, None, false).await
+    }
+
+    async fn resolve_for_bootstrap(
         &self,
         authorization_value: &str,
         expected_organization_id: Option<&str>,
+    ) -> Result<ExternalIdentity> {
+        self.resolve_inner(authorization_value, expected_organization_id, true)
+            .await
+    }
+
+    async fn resolve_inner(
+        &self,
+        authorization_value: &str,
+        expected_organization_id: Option<&str>,
+        require_patch_data_membership: bool,
     ) -> Result<ExternalIdentity> {
         let response = self
             .client
@@ -496,28 +539,47 @@ impl PatchDataResolver {
                 .as_deref()
                 .and_then(normalized_optional)
                 .unwrap_or_else(|| "Patch Data User".to_owned()),
-            organization_id: normalized_required(
-                "Patch Data organization id",
-                &payload.record.organization_id,
-            )?,
+            organization_ids: if require_patch_data_membership {
+                normalized_patch_data_organizations(payload.record.organizations)?
+            } else {
+                Vec::new()
+            },
         };
         // A refresh token is opaque to Grant. Do not cache it: the provider is
         // authoritative for expiry and revocation, so this cannot outlive it.
-        self.external_identity(identity, expected_organization_id)
+        self.external_identity(
+            identity,
+            expected_organization_id,
+            require_patch_data_membership,
+        )
     }
 
     fn external_identity(
         &self,
         identity: PatchDataIdentity,
         expected_organization_id: Option<&str>,
+        require_patch_data_membership: bool,
     ) -> Result<ExternalIdentity> {
-        if let Some(expected) = expected_organization_id
-            && identity.organization_id != expected
-        {
-            anyhow::bail!(
-                "forbidden: Patch Data user is not a member of the requested organization"
-            );
-        }
+        let selected_organization_id = if require_patch_data_membership {
+            let expected = expected_organization_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("forbidden: Patch Data organization selection is required")
+                })?;
+            if !identity
+                .organization_ids
+                .iter()
+                .any(|value| value == expected)
+            {
+                anyhow::bail!(
+                    "forbidden: Patch Data user is not a member of the requested organization"
+                );
+            }
+            Some(expected.to_owned())
+        } else {
+            None
+        };
         Ok(ExternalIdentity {
             provider: PATCH_DATA_AUTH_PROVIDER.to_owned(),
             external_user_id: identity.external_user_id,
@@ -525,9 +587,32 @@ impl PatchDataResolver {
             email: Some(identity.email),
             display_name: identity.display_name,
             active: true,
-            organization_id: Some(identity.organization_id),
+            organization_id: selected_organization_id,
         })
     }
+}
+
+fn normalized_patch_data_organizations(mut values: Vec<serde_json::Value>) -> Result<Vec<String>> {
+    if values.len() != 1 {
+        anyhow::bail!("unavailable: Patch Data auth refresh response was invalid");
+    }
+    let values = serde_json::from_value::<Vec<String>>(values.pop().expect("length checked"))
+        .map_err(|_| anyhow!("unavailable: Patch Data auth refresh response was invalid"))?;
+    if values.len() > MAX_PATCH_DATA_ORGANIZATIONS {
+        anyhow::bail!("unavailable: Patch Data auth refresh response was invalid");
+    }
+    let mut normalized = BTreeSet::new();
+    for value in values {
+        if value.is_empty()
+            || value.len() > 255
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+        {
+            anyhow::bail!("unavailable: Patch Data auth refresh response was invalid");
+        }
+        normalized.insert(value);
+    }
+    Ok(normalized.into_iter().collect())
 }
 
 impl RauthyResolver {

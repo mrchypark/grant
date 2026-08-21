@@ -59,7 +59,7 @@ cert-data 수집/저장, 발전소 데이터, 인증서 gateway, plant/document 
 4. org-scoped mutation은 `organization.application.manage` 또는 `organization.permission.manage` action으로 보호한다.
 5. service-to-service admin과 기존 trusted-provider `/authz/*` API는 `x-grant-master-key`로 보호하고, 최종 사용자 토큰을 판정하는 `/application-authz/*` API는 별도 `x-grant-app-auth-key`로 보호한다. 두 key는 서로 달라야 하며 교차 사용할 수 없다.
 
-Developer console은 기존 organization/application 경계 안에 둔다. Rauthy mode의 조직 application 생성은 generated Rauthy client id를 예약할 뿐이며, client 생성·수정과 secret 회전은 별도 운영자/IaC 경계에서 수행한다. Grant backend는 `Clients` 그룹의 `read` 권한만 가진 Rauthy API key로 master provisioning verify의 단일 client 조회만 수행하고, 설정이 local reservation과 일치할 때 application을 `ready`로 전환한다. Patch Data mode는 설정된 기존 exposure application만 사용한다.
+Developer console은 기존 organization/application 경계 안에 둔다. Rauthy mode의 조직 application 생성은 generated Rauthy client id를 예약할 뿐이며, client 생성·수정과 secret 회전은 별도 운영자/IaC 경계에서 수행한다. Grant backend는 `Clients` 그룹의 `read` 권한만 가진 Rauthy API key로 master provisioning verify의 단일 client 조회만 수행하고, 설정이 local reservation과 일치할 때 application을 `ready`로 전환한다. Patch Data mode의 master-authorized 최초 owner bootstrap은 설정된 고정 exposure application을 같은 트랜잭션에서 생성하며 Rauthy provisioning을 사용하지 않는다.
 
 ## Coarse Authorization Deployment Boundary
 
@@ -91,6 +91,13 @@ deploy contract에는 포함되지 않는다.
 fresh DB는 Exposure catalog나 grant를 seed하지 않는다. 배포/IaC가 기존 provider/action admin API,
 organization role/binding API, application provisioning/action/trust 또는 consent surface로 필요한 state를
 명시적으로 만든 뒤에만 allow가 가능하며, 그 전에는 deny가 정상 동작이다.
+
+Patch Data mode에서 외부 경계는 인증에 한정된다. Grant는 매 요청 고정 auth-refresh endpoint로 bearer와
+verified identity를 확인하지만 Patch Data `organizations` relation은 최초 master bootstrap/import에서만
+선택 조직 검증에 쓴다. 정상 조직 scope, hierarchy, membership, plant permission과 API authorization은
+strong local Grant state가 권위다. 서버 설정의 Exposure application과 action/backend mapping만 사용하며
+caller가 application, action, provider 또는 backend를 고를 수 없다. Rauthy mode의 기존 client mapping은
+그대로 유지된다.
 
 ## Voter And Learner
 
