@@ -19,6 +19,20 @@ patches:
         GRANT_AUTH_PROVIDER: patch-data
         GRANT_PATCH_DATA_BASE_URL: http://patch-data.patch.svc.cluster.local:8090
         GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure
+        GRANT_RAUTHY_BASE_URL: null
+        GRANT_RAUTHY_INTROSPECT_PATH: null
+        GRANT_RAUTHY_USERINFO_PATH: null
+        GRANT_RAUTHY_CACHE_TTL_SECONDS: null
+  - target:
+      kind: ConfigMap
+      name: grant-lifecycle-state
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grant-lifecycle-state
+      data:
+        rauthy-mode: null
   - target:
       kind: StatefulSet
       name: grant-voter
@@ -32,11 +46,53 @@ patches:
           spec:
             containers:
               - name: grant
+                envFrom:
+                  - configMapRef:
+                      name: grant-config
                 env:
                   - name: GRANT_RAUTHY_CLIENT_ID
                     $patch: delete
                   - name: GRANT_RAUTHY_CLIENT_SECRET
                     $patch: delete
+                  - name: GRANT_MASTER_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: GRANT_MASTER_KEY
+                  - name: GRANT_APP_AUTH_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: GRANT_APP_AUTH_KEY
+                  - name: HQL_SECRET_RAFT
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: HQL_SECRET_RAFT
+                  - name: HQL_SECRET_API
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: HQL_SECRET_API
+                  - name: ENC_KEYS
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: ENC_KEYS
+                  - name: ENC_KEY_ACTIVE
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: ENC_KEY_ACTIVE
+  - target:
+      kind: ConfigMap
+      name: rauthy-bootstrap-renderer
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: rauthy-bootstrap-renderer
   - target:
       kind: StatefulSet
       name: rauthy

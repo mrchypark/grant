@@ -22,7 +22,7 @@ use infra::{
 };
 use serde_json::{Value, json};
 use std::time::Duration;
-use std::{collections::HashMap, future::pending, sync::Arc};
+use std::{collections::HashMap, future::pending, process::Command, sync::Arc};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -907,6 +907,79 @@ async fn patch_data_uses_fixed_refresh_path_and_forwards_authorization_verbatim(
     assert_eq!(
         request.headers.get("authorization").map(String::as_str),
         Some(AUTHORIZATION),
+    );
+}
+
+#[test]
+fn patch_data_proxy_child() {
+    let Ok(base_url) = std::env::var("GRANT_TEST_PATCH_DATA_PROXY_CHILD_BASE_URL") else {
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("child runtime");
+    runtime.block_on(async move {
+        let identity = resolve(&resolver(base_url), Some(AUTHORIZATION), Some("org-1"))
+            .await
+            .expect("Patch Data identity must bypass environment proxies");
+        assert_eq!(identity.external_user_id, "proxy-direct-user");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn patch_data_bearer_bypasses_http_proxy_and_all_proxy() {
+    let mut intended =
+        LocalPatchData::start(vec![ok(valid_response("proxy-direct-user", "org-1"))]).await;
+    let mut trap = LocalPatchData::start(vec![Reply::Response {
+        status: "401 Unauthorized",
+        headers: vec![],
+        body: String::new(),
+    }])
+    .await;
+
+    let current_exe = std::env::current_exe().expect("current integration-test executable");
+    let intended_base_url = intended.base_url.clone();
+    let trap_base_url = trap.base_url.clone();
+    let child = tokio::task::spawn_blocking(move || {
+        Command::new(current_exe)
+            .arg("--exact")
+            .arg("patch_data_proxy_child")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(
+                "GRANT_TEST_PATCH_DATA_PROXY_CHILD_BASE_URL",
+                intended_base_url,
+            )
+            .env("HTTP_PROXY", &trap_base_url)
+            .env("http_proxy", &trap_base_url)
+            .env("ALL_PROXY", &trap_base_url)
+            .env("all_proxy", &trap_base_url)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .expect("run isolated proxy child")
+    })
+    .await
+    .expect("proxy child join");
+
+    assert!(
+        child.status.success(),
+        "proxy child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let request = intended.next_request().await;
+    assert_eq!(request.path, REFRESH_PATH);
+    assert_eq!(
+        request.headers.get("authorization").map(String::as_str),
+        Some(AUTHORIZATION)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), trap.requests.recv())
+            .await
+            .is_err(),
+        "Patch Data bearer must never reach an environment proxy"
     );
 }
 

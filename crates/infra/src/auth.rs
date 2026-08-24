@@ -455,6 +455,9 @@ impl PatchDataResolver {
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
                 .timeout(request_timeout)
                 .redirect(reqwest::redirect::Policy::none())
+                // Patch Data is a fixed local trust boundary. Never forward its
+                // bearer through process- or node-level proxy configuration.
+                .no_proxy()
                 .build()
                 .expect("build Patch Data auth client"),
         }

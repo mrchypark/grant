@@ -889,9 +889,18 @@ verify_static() {
     || ! grep -q 'GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
     fail "Patch Data overlay configuration is incomplete"
   fi
-  if grep -Eq '^  name: rauthy$|name: GRANT_RAUTHY_CLIENT_(ID|SECRET)$' "${TMP_DIR}/patch-data.yaml"; then
-    fail "Patch Data overlay retains a Rauthy workload or Grant credential reference"
+  if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay retains a Rauthy resource, configuration, or credential reference"
   fi
+  if grep -Eq '^[[:space:]]+- secretRef:' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay broadly imports a Secret"
+  fi
+  for required_key in GRANT_MASTER_KEY GRANT_APP_AUTH_KEY HQL_SECRET_RAFT HQL_SECRET_API ENC_KEYS ENC_KEY_ACTIVE; do
+    if [ "$(grep -c "name: ${required_key}$" "${TMP_DIR}/patch-data.yaml" || true)" -ne 1 ] \
+      || [ "$(grep -c "key: ${required_key}$" "${TMP_DIR}/patch-data.yaml" || true)" -ne 1 ]; then
+      fail "Patch Data overlay does not bind exactly one required ${required_key} key"
+    fi
+  done
   if ! cmp -s "${TMP_DIR}/patch-data.yaml" "${TMP_DIR}/ied-patch-data.yaml"; then
     fail "ied-patch-data must compose the exact Patch Data Grant-only contract"
   fi

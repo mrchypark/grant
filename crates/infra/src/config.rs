@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use std::env::{self, VarError};
+use std::{
+    env::{self, VarError},
+    net::IpAddr,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -137,7 +140,7 @@ fn auth_config() -> Result<AuthConfig> {
     let patch_data = matches!(provider_mode, AuthProviderMode::PatchData)
         .then(|| {
             let base_url = required_env("GRANT_PATCH_DATA_BASE_URL")?;
-            validate_internal_http_base_url("GRANT_PATCH_DATA_BASE_URL", &base_url)?;
+            validate_patch_data_base_url("GRANT_PATCH_DATA_BASE_URL", &base_url)?;
             Ok::<PatchDataAuthConfig, anyhow::Error>(PatchDataAuthConfig {
                 base_url,
                 exposure_application_id: required_env("GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID")?,
@@ -173,22 +176,62 @@ fn required_for_rauthy(provider_mode: &AuthProviderMode, key: &str) -> Result<St
     }
 }
 
-fn validate_internal_http_base_url(key: &str, value: &str) -> Result<()> {
+fn validate_patch_data_base_url(key: &str, value: &str) -> Result<()> {
+    if value.trim() != value {
+        anyhow::bail!("{key} must be a canonical internal Patch Data origin");
+    }
     let url = reqwest::Url::parse(value)
-        .with_context(|| format!("{key} must be an absolute http(s) URL"))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
+        .with_context(|| format!("{key} must be a canonical internal Patch Data origin"))?;
+    if url.scheme() != "http"
+        || url.cannot_be_a_base()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.path() != "/"
         || url.query().is_some()
         || url.fragment().is_some()
+        || url.port() != Some(8090)
     {
-        anyhow::bail!(
-            "{key} must be an absolute http(s) origin without path, userinfo, query, or fragment"
-        );
+        anyhow::bail!("{key} must be a canonical internal Patch Data origin");
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("{key} must be a canonical internal Patch Data origin"))?;
+    let ip_host = host.trim_start_matches('[').trim_end_matches(']');
+    let canonical_host = match ip_host.parse::<IpAddr>() {
+        Ok(address) if address.is_loopback() => match address {
+            IpAddr::V4(address) => address.to_string(),
+            IpAddr::V6(address) => format!("[{address}]"),
+        },
+        Ok(_) => anyhow::bail!("{key} must be a canonical internal Patch Data origin"),
+        Err(_) if is_patch_data_cluster_service_host(host) => host.to_owned(),
+        Err(_) => anyhow::bail!("{key} must be a canonical internal Patch Data origin"),
+    };
+
+    // Comparing the raw setting to the one accepted serialization also rejects
+    // uppercase DNS/scheme spellings, a trailing slash, and equivalent but
+    // noncanonical IP representations before the bearer can leave Grant.
+    if value != format!("http://{canonical_host}:8090") {
+        anyhow::bail!("{key} must be a canonical internal Patch Data origin");
     }
     Ok(())
+}
+
+fn is_patch_data_cluster_service_host(host: &str) -> bool {
+    let Some(namespace) = host
+        .strip_prefix("patch-data.")
+        .and_then(|value| value.strip_suffix(".svc.cluster.local"))
+    else {
+        return false;
+    };
+    let bytes = namespace.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 fn env_or(key: &str, default: &str) -> String {

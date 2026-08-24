@@ -39,7 +39,7 @@ fn patch_data_mode_requires_only_its_internal_auth_configuration() {
     env.set("GRANT_AUTH_PROVIDER", "patch-data");
     env.set(
         "GRANT_PATCH_DATA_BASE_URL",
-        "http://patch-data.internal:8090",
+        "http://patch-data.patch.svc.cluster.local:8090",
     );
     env.set(
         "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
@@ -52,15 +52,75 @@ fn patch_data_mode_requires_only_its_internal_auth_configuration() {
 }
 
 #[test]
-fn patch_data_mode_rejects_non_http_or_non_origin_base_url() {
-    let env = EnvGuard::new();
-    env.set("GRANT_AUTH_PROVIDER", "patch-data");
-    env.set("GRANT_PATCH_DATA_BASE_URL", "file:///tmp/patch-data");
-    env.set(
-        "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
-        "patch-data-exposure",
-    );
-    assert!(AppConfig::from_env().is_err());
+fn patch_data_mode_accepts_only_exact_cluster_service_or_loopback_origins() {
+    for base_url in [
+        "http://patch-data.patch.svc.cluster.local:8090",
+        "http://patch-data.grant-compos-exposure-v1.svc.cluster.local:8090",
+        "http://127.0.0.1:8090",
+        "http://[::1]:8090",
+    ] {
+        let env = EnvGuard::new();
+        env.set("GRANT_AUTH_PROVIDER", "patch-data");
+        env.set("GRANT_PATCH_DATA_BASE_URL", base_url);
+        env.set(
+            "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
+            "patch-data-exposure",
+        );
+        AppConfig::from_env().unwrap_or_else(|error| panic!("{base_url}: {error}"));
+    }
+}
+
+#[test]
+fn patch_data_mode_rejects_every_other_origin_shape() {
+    for base_url in [
+        "file:///tmp/patch-data",
+        "https://patch-data.patch.svc.cluster.local:8090",
+        "http://patch-data.patch.svc.cluster.local",
+        "http://patch-data.patch.svc.cluster.local:80",
+        "http://patch-data.patch.svc.cluster.local:8090/",
+        "http://patch-data.patch.svc.cluster.local:8090/api",
+        "http://patch-data.patch.svc.cluster.local:8090/%2f",
+        "http://patch-data.patch.svc.cluster.local:8090?query=1",
+        "http://patch-data.patch.svc.cluster.local:8090#fragment",
+        "http://user@patch-data.patch.svc.cluster.local:8090",
+        "http://user:password@patch-data.patch.svc.cluster.local:8090",
+        "http://Patch-Data.patch.svc.cluster.local:8090",
+        "http://patch-data.PATCH.svc.cluster.local:8090",
+        "HTTP://patch-data.patch.svc.cluster.local:8090",
+        "http://patch-data.svc.cluster.local:8090",
+        "http://patch-data.patch.svc:8090",
+        "http://other.patch.svc.cluster.local:8090",
+        "http://patch-data.patch.other.cluster.local:8090",
+        "http://patch-data.a.b.svc.cluster.local:8090",
+        "http://patch-data.-patch.svc.cluster.local:8090",
+        "http://patch-data.patch-.svc.cluster.local:8090",
+        "http://patch-data.patch_.svc.cluster.local:8090",
+        "http://patch-data.*.svc.cluster.local:8090",
+        "http://localhost:8090",
+        "http://10.0.0.1:8090",
+        "http://169.254.169.254:8090",
+        "http://[fd00::1]:8090",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+        " http://patch-data.patch.svc.cluster.local:8090",
+        "http://patch-data.patch.svc.cluster.local:8090 ",
+    ] {
+        let env = EnvGuard::new();
+        env.set("GRANT_AUTH_PROVIDER", "patch-data");
+        env.set("GRANT_PATCH_DATA_BASE_URL", base_url);
+        env.set(
+            "GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID",
+            "patch-data-exposure",
+        );
+        let error = match AppConfig::from_env() {
+            Ok(_) => panic!("unexpectedly accepted {base_url}"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("GRANT_PATCH_DATA_BASE_URL"),
+            "{base_url}: {error}"
+        );
+    }
 }
 
 struct EnvGuard {

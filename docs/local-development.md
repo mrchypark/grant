@@ -67,7 +67,10 @@ Patch Data-only IED deployment manifest is `deploy/overlays/ied-patch-data` (it 
 internal `http://patch-data.patch.svc.cluster.local:8090` origin and the fixed `patch-data-exposure` Grant
 application, and it does not require any Rauthy workload or Rauthy credential reference.
 Render it with `kubectl kustomize deploy/overlays/ied-patch-data`; supply only the normal
-Grant/Hiqlite secrets. The master-authorized external-owner bootstrap creates the fixed
+Grant/Hiqlite keys `GRANT_MASTER_KEY`, `GRANT_APP_AUTH_KEY`, `HQL_SECRET_RAFT`,
+`HQL_SECRET_API`, `ENC_KEYS`, and `ENC_KEY_ACTIVE`. The overlay binds these six keys
+individually instead of importing the whole Secret, so even a shared Secret object cannot inject
+Rauthy credentials into the Patch Data-mode Pod. The master-authorized external-owner bootstrap creates the fixed
 active/ready trusted application atomically on fresh state; do not pre-seed it. Patch Data
 `organizations` is bootstrap/import compatibility data only. Normal tests must seed or import
 Grant `organization_memberships` and role bindings explicitly; changing the upstream relation must
