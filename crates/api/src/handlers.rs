@@ -7,7 +7,11 @@ use domain::{
     Action, Agreement, Application, ApplicationGrant, Group, GroupMember, HealthStatus,
     Organization, OrganizationMembership, Role, RoleBinding, ServiceProvider,
 };
-use infra::{config::ReadConsistency, service::AppService};
+use infra::{
+    config::ReadConsistency,
+    database::{PatchDataAuthorityImport, PatchDataAuthorityImportResult},
+    service::AppService,
+};
 use std::sync::Arc;
 
 use crate::{
@@ -736,6 +740,55 @@ pub(crate) async fn bootstrap_external_owner(
             organization_id: principal.organization_id,
         }),
     ))
+}
+
+pub(crate) async fn import_patch_data_authority(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(command): Json<PatchDataAuthorityImport>,
+) -> ApiResult<Json<PatchDataAuthorityImportResult>> {
+    require_master_key(service.as_ref(), &headers)?;
+    let receipt = service
+        .import_patch_data_authority(command)
+        .await
+        .map_err(map_patch_data_import_error)?;
+    Ok(Json(receipt))
+}
+
+fn map_patch_data_import_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    let chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+    if message.contains("generation conflict") || chain.contains("authority_import_assertion_valid")
+    {
+        return ApiError {
+            status: StatusCode::CONFLICT,
+            message,
+        };
+    }
+    if [
+        "manifest",
+        "unsupported manifestVersion",
+        "unknown user",
+        "unknown organization",
+        "must be sorted",
+        "hierarchy",
+        "requires an active",
+        "not supported",
+        "entity limit",
+        "must be 64",
+        "is invalid",
+        "new generation",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        return ApiError::bad_request(anyhow::anyhow!(message));
+    }
+    ApiError::internal(error)
 }
 
 pub(crate) async fn requires_voter_node() -> ApiResult<StatusCode> {

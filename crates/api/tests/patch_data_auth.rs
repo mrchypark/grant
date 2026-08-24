@@ -17,10 +17,15 @@ use infra::{
         AppConfig, AuthConfig, AuthProviderMode, HiqliteConfig, LocalNodeRole, PatchDataAuthConfig,
         RauthyAuthConfig, ReadConsistency, RuntimeMode, SecurityConfig, ServerConfig,
     },
-    database::Database,
+    database::{
+        Database, PatchDataAuthorityImport, PatchDataImportedApplicationAssignment,
+        PatchDataImportedMembership, PatchDataImportedOrganization, PatchDataImportedPlantBinding,
+        PatchDataImportedUser, patch_data_manifest_digest,
+    },
     service::AppService,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use std::{collections::HashMap, future::pending, process::Command, sync::Arc};
 use tempfile::TempDir;
@@ -34,6 +39,8 @@ use tower::ServiceExt;
 
 const AUTHORIZATION: &str = "Bearer exact.original+credential/with=padding";
 const REFRESH_PATH: &str = "/api/collections/users/auth-refresh";
+const PLANT_READ_CONTRACT_SHA256: &str =
+    "1da9293bbac25c94acfd154083ea057d0dd3aa321703aa0b6d15545bcad2bb2b";
 
 struct CountRow {
     count: i64,
@@ -886,6 +893,174 @@ async fn patch_data_application_auth_key_uses_configured_exposure_application_no
         .expect("configured application response");
     assert_eq!(allowed.status(), StatusCode::OK);
     assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+}
+
+fn authority_manifest(
+    generation: &str,
+    previous: Option<&str>,
+    assign_application: bool,
+) -> PatchDataAuthorityImport {
+    let mut manifest = PatchDataAuthorityImport {
+        manifest_version: "grant.patch-data-authority.v1".to_owned(),
+        generation: generation.to_owned(),
+        ledger_digest: if previous.is_some() { "b" } else { "a" }.repeat(64),
+        manifest_digest: "0".repeat(64),
+        expected_previous_generation: previous.map(ToOwned::to_owned),
+        users: vec![PatchDataImportedUser {
+            user_id: "imported-user".to_owned(),
+            external_user_id: "imported-external".to_owned(),
+            email: Some("user@patchdata.test".to_owned()),
+            display_name: "Imported User".to_owned(),
+            active: true,
+        }],
+        organizations: vec![PatchDataImportedOrganization {
+            organization_id: "imported-org".to_owned(),
+            name: "Imported Org".to_owned(),
+            active: true,
+        }],
+        memberships: vec![PatchDataImportedMembership {
+            membership_id: "imported-membership".to_owned(),
+            organization_id: "imported-org".to_owned(),
+            user_id: "imported-user".to_owned(),
+            role: domain::MembershipRole::Owner,
+            status: domain::MembershipStatus::Active,
+        }],
+        hierarchy_edges: vec![],
+        plant_bindings: vec![PatchDataImportedPlantBinding {
+            binding_id: "imported-plant-binding".to_owned(),
+            subject_type: RoleBindingSubjectType::User,
+            subject_id: "imported-user".to_owned(),
+            subject_organization_id: "imported-org".to_owned(),
+            plant_id: "plant-a".to_owned(),
+            state: RoleBindingState::Active,
+        }],
+        application_assignments: assign_application
+            .then(|| PatchDataImportedApplicationAssignment {
+                application_id: "grant-exposure".to_owned(),
+                organization_id: "imported-org".to_owned(),
+            })
+            .into_iter()
+            .collect(),
+    };
+    manifest.manifest_digest = patch_data_manifest_digest(&manifest);
+    manifest
+}
+
+fn import_request(manifest: &PatchDataAuthorityImport) -> Request<Body> {
+    support::master_json_request(
+        Method::POST,
+        "/api/v1/admin/imports/patch-data-authority",
+        serde_json::to_value(manifest).expect("manifest json"),
+    )
+}
+
+fn imported_plant_request() -> Request<Body> {
+    let fixture = plant_read_contract_fixture();
+    Request::builder()
+        .method(Method::POST)
+        .uri(fixture["path"].as_str().expect("fixture path"))
+        .header("content-type", "application/json")
+        .header("authorization", AUTHORIZATION)
+        .header("x-organization-id", "imported-org")
+        .header("x-grant-app-auth-key", support::APP_AUTH_KEY)
+        .body(Body::from(fixture["request"].to_string()))
+        .expect("plant request")
+}
+
+fn plant_read_contract_fixture() -> Value {
+    let bytes = include_bytes!("fixtures/plant_read_contract.json");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        PLANT_READ_CONTRACT_SHA256,
+        "Grant and Exposure must deliberately update the shared wire fixture together"
+    );
+    serde_json::from_slice(bytes).expect("shared plant-read contract fixture")
+}
+
+#[tokio::test]
+async fn public_import_assignment_enables_plant_read_and_omission_revokes_it() {
+    let mut patch_data = LocalPatchData::start(vec![
+        ok(valid_response("imported-external", "imported-org")),
+        ok(valid_response("imported-external", "imported-org")),
+        ok(valid_response("imported-external", "imported-org")),
+    ])
+    .await;
+    let (app, _db, _runtime, _db_dir) = patch_data_api(patch_data.base_url.clone()).await;
+
+    let first = authority_manifest("generation-a", None, false);
+    let imported = app
+        .clone()
+        .oneshot(import_request(&first))
+        .await
+        .expect("first import");
+    assert_eq!(imported.status(), StatusCode::OK);
+
+    let application = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/admin/bootstrap/external-owner")
+                .header("authorization", AUTHORIZATION)
+                .header("x-organization-id", "imported-org")
+                .header("x-grant-master-key", support::MASTER_KEY)
+                .body(Body::empty())
+                .expect("bootstrap request"),
+        )
+        .await
+        .expect("bootstrap application");
+    assert_eq!(application.status(), StatusCode::CREATED);
+
+    let assigned = authority_manifest("generation-b", Some("generation-a"), true);
+    let assigned_response = app
+        .clone()
+        .oneshot(import_request(&assigned))
+        .await
+        .expect("assigned import");
+    assert_eq!(assigned_response.status(), StatusCode::OK);
+
+    let allowed = app
+        .clone()
+        .oneshot(imported_plant_request())
+        .await
+        .expect("allowed plant decision");
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let allowed = support::response_json(allowed).await;
+    assert_eq!(allowed["allowed"], true, "decision: {allowed}");
+    let contract = plant_read_contract_fixture();
+    for key in ["operationId", "providerId", "actionId", "resourceType"] {
+        assert_eq!(
+            allowed[key], contract["expectedResponseSemantics"][key],
+            "semantic mismatch for {key}"
+        );
+    }
+
+    let omitted = authority_manifest("generation-c", Some("generation-b"), false);
+    let omitted_response = app
+        .clone()
+        .oneshot(import_request(&omitted))
+        .await
+        .expect("omitted import");
+    assert_eq!(omitted_response.status(), StatusCode::OK);
+
+    let denied = app
+        .clone()
+        .oneshot(imported_plant_request())
+        .await
+        .expect("denied plant decision");
+    assert_eq!(denied.status(), StatusCode::OK);
+    let denied = support::response_json(denied).await;
+    assert_eq!(denied["allowed"], false, "decision: {denied}");
+    for key in ["operationId", "providerId", "actionId", "resourceType"] {
+        assert_eq!(
+            denied[key], contract["expectedResponseSemantics"][key],
+            "semantic mismatch for {key}"
+        );
+    }
+
+    for _ in 0..3 {
+        assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+    }
 }
 
 #[tokio::test]

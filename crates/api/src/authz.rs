@@ -58,6 +58,36 @@ pub(crate) struct ExposureReadAuthorizationResponse {
     expires_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PlantReadAuthorizationRequest {
+    exposure_id: String,
+    exposure_version: u64,
+    artifact_digest: String,
+    resource_id: String,
+    request_binding: String,
+    operation_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlantReadAuthorizationResponse {
+    allowed: bool,
+    reason: String,
+    exposure_id: String,
+    exposure_version: u64,
+    artifact_digest: String,
+    resource_id: String,
+    request_binding: String,
+    principal_digest: String,
+    issued_at: String,
+    expires_at: String,
+    operation_id: &'static str,
+    provider_id: &'static str,
+    action_id: &'static str,
+    resource_type: &'static str,
+}
+
 fn application_check_input(body: ApplicationAuthzCheckRequest) -> ApplicationAuthorizationCheck {
     ApplicationAuthorizationCheck {
         action: body.action,
@@ -137,17 +167,75 @@ pub(crate) async fn exposure_read_authorization(
     }))
 }
 
+pub(crate) async fn plant_read_authorization(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<PlantReadAuthorizationRequest>,
+) -> ApiResult<Json<PlantReadAuthorizationResponse>> {
+    let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    validate_exposure_read_fields(
+        &body.exposure_id,
+        body.exposure_version,
+        &body.artifact_digest,
+        &body.resource_id,
+        &body.request_binding,
+    )?;
+    if body.operation_id != "plant.get" {
+        return Err(ApiError::bad_request(anyhow!(
+            "operationId must be plant.get"
+        )));
+    }
+    let decision = service
+        .check_patch_data_plant_read_authorization(
+            Some(&token),
+            &organization_id,
+            &body.resource_id,
+        )
+        .await
+        .map_err(ApiError::from_auth)?;
+    Ok(Json(PlantReadAuthorizationResponse {
+        allowed: decision.allowed,
+        reason: decision.reason,
+        exposure_id: body.exposure_id,
+        exposure_version: body.exposure_version,
+        artifact_digest: body.artifact_digest,
+        resource_id: body.resource_id,
+        request_binding: body.request_binding,
+        principal_digest: decision.principal_digest,
+        issued_at: decision.issued_at,
+        expires_at: decision.expires_at,
+        operation_id: "plant.get",
+        provider_id: "patch-data",
+        action_id: "patch-data.plant.read",
+        resource_type: "plant",
+    }))
+}
+
 fn validate_exposure_read_request(body: &ExposureReadAuthorizationRequest) -> ApiResult<()> {
-    require_exact_non_empty("exposureId", &body.exposure_id)?;
-    if body.exposure_version == 0 {
+    validate_exposure_read_fields(
+        &body.exposure_id,
+        body.exposure_version,
+        &body.artifact_digest,
+        &body.resource_id,
+        &body.request_binding,
+    )
+}
+
+fn validate_exposure_read_fields(
+    exposure_id: &str,
+    exposure_version: u64,
+    artifact_digest: &str,
+    resource_id: &str,
+    request_binding: &str,
+) -> ApiResult<()> {
+    require_exact_non_empty("exposureId", exposure_id)?;
+    if exposure_version == 0 {
         return Err(ApiError::bad_request(anyhow!(
             "exposureVersion must be greater than zero"
         )));
     }
-    let digest_hex = body
-        .artifact_digest
-        .strip_prefix(EXPOSURE_ARTIFACT_DIGEST_PREFIX);
-    if body.artifact_digest.len()
+    let digest_hex = artifact_digest.strip_prefix(EXPOSURE_ARTIFACT_DIGEST_PREFIX);
+    if artifact_digest.len()
         != EXPOSURE_ARTIFACT_DIGEST_PREFIX.len() + EXPOSURE_ARTIFACT_DIGEST_HEX_LENGTH
         || digest_hex.is_none_or(|digest_hex| {
             digest_hex.len() != EXPOSURE_ARTIFACT_DIGEST_HEX_LENGTH
@@ -160,8 +248,8 @@ fn validate_exposure_read_request(body: &ExposureReadAuthorizationRequest) -> Ap
             "artifactDigest must be the literal sha256: followed by exactly 64 lowercase hexadecimal characters"
         )));
     }
-    require_exact_non_empty("resourceId", &body.resource_id)?;
-    require_exact_non_empty("requestBinding", &body.request_binding)?;
+    require_exact_non_empty("resourceId", resource_id)?;
+    require_exact_non_empty("requestBinding", request_binding)?;
     Ok(())
 }
 

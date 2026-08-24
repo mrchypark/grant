@@ -7,7 +7,8 @@ use crate::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
         ApplicationTrustMutationError, BackupEntry, BindIdentityInput, Database,
         ExternalIdentityMaterialization, ExternalOwnerBootstrapCommand,
-        ExternalOwnerBootstrapError, OrganizationMembershipWriteError, UserActionCheck,
+        ExternalOwnerBootstrapError, OrganizationMembershipWriteError, PatchDataAuthorityImport,
+        PatchDataAuthorityImportResult, UserActionCheck,
     },
 };
 use anyhow::Result;
@@ -44,6 +45,9 @@ const MAX_RAUTHY_ERROR_FIELD_CHARS: usize = 256;
 const SCHEMA_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
 const EXPOSURE_READ_PROVIDER_ID: &str = "exposure";
 const EXPOSURE_READ_ACTION_ID: &str = "exposure.read";
+const PATCH_DATA_PLANT_READ_PROVIDER_ID: &str = "patch-data";
+const PATCH_DATA_PLANT_READ_ACTION_ID: &str = "patch-data.plant.read";
+const PATCH_DATA_PLANT_RESOURCE_TYPE: &str = "plant";
 const EXPOSURE_DECISION_TTL_SECONDS: i64 = 5;
 const EXPOSURE_PRINCIPAL_DIGEST_DOMAIN: &[u8] = b"grant.exposure-read.principal.v1";
 
@@ -427,6 +431,13 @@ impl AppService {
 
     pub fn auth_provider_mode(&self) -> &AuthProviderMode {
         &self.cfg.auth.provider_mode
+    }
+
+    pub async fn import_patch_data_authority(
+        &self,
+        command: PatchDataAuthorityImport,
+    ) -> Result<PatchDataAuthorityImportResult> {
+        self.db.import_patch_data_authority(command).await
     }
 
     pub fn rauthy_proxy_client(&self) -> &reqwest::Client {
@@ -2167,6 +2178,57 @@ impl AppService {
                 service_error(
                     ServiceErrorKind::Unavailable,
                     "exposure read authorization check failed",
+                )
+            })?;
+        let issued_at = Utc::now();
+        let expires_at = issued_at + chrono::Duration::seconds(EXPOSURE_DECISION_TTL_SECONDS);
+        Ok(ExposureReadAuthorizationDecision {
+            allowed: decision.allowed,
+            reason: decision.reason,
+            principal_digest: exposure_principal_digest(
+                &context.user_id,
+                &context.organization_id,
+                &context.application_id,
+            ),
+            issued_at: issued_at.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+        })
+    }
+
+    pub async fn check_patch_data_plant_read_authorization(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: &str,
+        plant_id: &str,
+    ) -> Result<ExposureReadAuthorizationDecision> {
+        let context = self
+            .resolve_application_authorization_context(bearer_token, organization_id)
+            .await?;
+        let decision = self
+            .evaluate_authorizations(
+                &[AuthorizationCheck {
+                    subject: AuthorizationSubject {
+                        subject_type: "user".to_owned(),
+                        id: context.user_id.clone(),
+                        organization_id: context.organization_id.clone(),
+                    },
+                    action: PATCH_DATA_PLANT_READ_ACTION_ID.to_owned(),
+                    resource: AuthorizationResource {
+                        provider_id: PATCH_DATA_PLANT_READ_PROVIDER_ID.to_owned(),
+                        resource_type: PATCH_DATA_PLANT_RESOURCE_TYPE.to_owned(),
+                        id: plant_id.to_owned(),
+                    },
+                }],
+                Some(ReadConsistency::Strong),
+                Some(&context.application_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    "Patch Data plant read authorization check failed",
                 )
             })?;
         let issued_at = Utc::now();

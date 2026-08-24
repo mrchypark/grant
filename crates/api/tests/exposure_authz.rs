@@ -40,6 +40,21 @@ fn exposure_request_with_token(body: Value, token: &str) -> Request<Body> {
         .expect("exposure read request")
 }
 
+fn plant_request(body: Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/exposure-authz/plant-read")
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            support::auth::bearer_header(&format!("app-token/{APPLICATION_ID}/bootstrap-user")),
+        )
+        .header("x-organization-id", "bootstrap-user")
+        .header("x-grant-app-auth-key", support::APP_AUTH_KEY)
+        .body(Body::from(body.to_string()))
+        .expect("plant read request")
+}
+
 fn exact_body() -> Value {
     json!({
         "exposureId": EXPOSURE_ID,
@@ -217,6 +232,53 @@ async fn exposure_fixture() -> (support::TestApi, String) {
     let (test, subject_id) = unprovisioned_exposure_fixture().await;
     provision_exposure_access(&test, &subject_id).await;
     (test, subject_id)
+}
+
+#[tokio::test]
+async fn plant_read_is_a_closed_server_owned_operation_mapping() {
+    let (test, _) = exposure_fixture().await;
+    test.runtime.batch(
+        "INSERT INTO service_providers (id,name,description,active,created_at,updated_at) VALUES ('patch-data','Patch Data',NULL,1,'2026-01-01','2026-01-01');
+         INSERT INTO actions (id,provider_id,code,name,description,risk_level,visibility_granting,grantable_to_applications,created_at,updated_at) VALUES ('patch-data.plant.read','patch-data','patch-data.plant.read','Plant read',NULL,'low',0,1,'2026-01-01','2026-01-01');
+         INSERT INTO roles (id,organization_id,code,name,description,created_at,updated_at) VALUES ('role-plant-reader',NULL,'role-plant-reader','Plant reader',NULL,'2026-01-01','2026-01-01');
+         INSERT INTO role_actions (role_id,action_id) VALUES ('role-plant-reader','patch-data.plant.read');
+         INSERT INTO role_bindings (id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at) VALUES ('binding-plant-reader','user','bootstrap-user','bootstrap-user','patch-data','plant','customer-123','role-plant-reader',NULL,'active','bootstrap-user','2026-01-01','2026-01-01');
+         INSERT INTO application_actions (application_id,action_id) VALUES ('exposure-app','patch-data.plant.read');"
+    ).await.expect("plant authority fixture");
+    let mut body = exact_body();
+    body["operationId"] = json!("plant.get");
+    let response = test
+        .app
+        .clone()
+        .oneshot(plant_request(body.clone()))
+        .await
+        .expect("plant response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = support::response_json(response).await;
+    assert_eq!(response["allowed"], true);
+    assert_eq!(response["operationId"], "plant.get");
+    assert_eq!(response["providerId"], "patch-data");
+    assert_eq!(response["actionId"], "patch-data.plant.read");
+    assert_eq!(response["resourceType"], "plant");
+    assert!(response_matches_request(&response, &body));
+
+    body["operationId"] = json!("plant.delete");
+    let rejected = test
+        .app
+        .clone()
+        .oneshot(plant_request(body.clone()))
+        .await
+        .expect("operation reject");
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    body["operationId"] = json!("plant.get");
+    body["providerId"] = json!("patch-data");
+    let selector = test
+        .app
+        .clone()
+        .oneshot(plant_request(body))
+        .await
+        .expect("selector reject");
+    assert_eq!(selector.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 fn response_matches_request(response: &Value, request: &Value) -> bool {

@@ -56,11 +56,13 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 사용자와 조직의 소속 관계. `(organization_id, user_id)`는 unique다.
 
-### `patch_data_authority_imports`, `organization_hierarchy_edges`
+### `patch_data_authority_imports`, `patch_data_authority_import_entities`, `organization_hierarchy_edges`
 
-Patch Data API rule 이동의 deterministic import receipt와 조직 parent-child snapshot이다. receipt는 provider별 exact `generation`, canonical ledger SHA-256 digest, length-framed hierarchy foundation digest, 적용 시각을 저장한다. 같은 ledger receipt 아래 다른 hierarchy input도 conflict다. hierarchy는 source provider 안에서 child당 parent 하나만 허용하며 importer가 sorted/unique/acyclic input을 검증한 뒤 generation 전체를 원자 교체한다. 이 edge는 아직 coarse evaluator 입력이 아니며 membership/plant binding의 parallel authority도 아니다. `authority_import_assertions`는 CAS와 catalog collision을 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
+Patch Data API rule 이동의 deterministic import receipt와 소유권 provenance, 조직 parent-child snapshot이다. `grant.patch-data-authority.v1` manifest는 user/external identity, organization, membership, hierarchy edge, plant binding, active/ready application assignment를 정렬된 전체 snapshot으로 전달한다. receipt는 provider별 exact `generation`, 원본 ledger lowercase SHA-256, versioned payload 전체의 length-framed canonical SHA-256, manifest version, 적용 시각을 저장한다. canonical digest는 `manifestDigest` 자신과 `expectedPreviousGeneration`만 제외하므로 CAS 경로와 무관하게 같은 authority payload는 같은 digest를 갖는다.
 
-최초 foundation import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 함께 설치한다. 사용자/조직 membership과 plant resource binding은 승인된 rule-ledger mapper가 기존 canonical `organization_memberships`와 `role_bindings`에 써야 하며 정상 요청 시 Patch Data relation을 dual-read/dual-write하지 않는다.
+`patch_data_authority_import_entities`는 importer가 교체할 수 있는 canonical user, organization, membership, plant binding, application assignment의 `(entity_type, entity_id)`만 추적한다. importer는 absent row를 만들거나 같은 kind/id가 이미 import-owned인 경우만 갱신한다. 우연히 같은 native row는 채택하지 않으며 import replacement나 omission으로 삭제하지도 않는다. 다음 generation은 이전 import-owned membership, binding, `application_actions` assignment만 제거한 뒤 새 snapshot과 provenance를 하나의 Hiqlite transaction으로 기록한다. omitted user/organization/identity는 남을 수 있지만 imported membership/binding이 없어서 권한을 갖지 않는다. application 자체는 importer가 생성·수정·삭제하지 않고 manifest의 `applicationAssignments`가 가리키는 existing active/ready same-org application만 검증한다.
+
+각 import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 canonical catalog에 보장하고, membership을 `organization_memberships`, plant permission을 `role_bindings`, application capability를 `application_actions`에 직접 반영한다. 따라서 strong evaluator와 plant-read decision은 정상 요청에서 Patch Data relation이나 import staging table을 dual-read하지 않는다. hierarchy는 child당 parent 하나, sorted/unique/acyclic/referentially complete를 검증하지만 의미가 확정되지 않아 evaluator에는 연결하지 않는다. `authority_import_assertions`는 generation CAS, catalog/native-row collision, application readiness, partial-write를 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
 
 ### `groups`, `group_memberships`
 

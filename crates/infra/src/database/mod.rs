@@ -12,6 +12,7 @@ use domain::{
     ServiceProvider, User,
 };
 use hiqlite::Row;
+use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashSet, error::Error as StdError, fmt};
 use uuid::Uuid;
 
@@ -25,6 +26,7 @@ mod agreements;
 mod application_grants;
 mod applications;
 mod authority_imports;
+pub use authority_imports::patch_data_manifest_digest;
 mod authz;
 mod backups;
 mod catalog;
@@ -180,29 +182,87 @@ pub struct ExternalOwnerBootstrapResult {
     pub organization_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PatchDataHierarchyEdge {
     pub parent_organization_id: String,
     pub child_organization_id: String,
 }
 
-/// Deterministic, fail-closed receipt for the Patch Data rule-ledger import.
-/// This first foundation owns only the provider/action catalog and hierarchy
-/// snapshot. User membership and plant bindings remain canonical Grant rows
-/// and require a separately reviewed ledger-to-row mapper.
-#[derive(Debug, Clone)]
-pub struct PatchDataAuthorityImport {
-    pub generation: String,
-    pub ledger_digest: String,
-    pub expected_previous_generation: Option<String>,
-    pub hierarchy_edges: Vec<PatchDataHierarchyEdge>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchDataImportedUser {
+    pub user_id: String,
+    pub external_user_id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub active: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PatchDataAuthorityImportResult {
-    pub applied: bool,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchDataImportedOrganization {
+    pub organization_id: String,
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchDataImportedMembership {
+    pub membership_id: String,
+    pub organization_id: String,
+    pub user_id: String,
+    pub role: MembershipRole,
+    pub status: MembershipStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchDataImportedPlantBinding {
+    pub binding_id: String,
+    pub subject_type: RoleBindingSubjectType,
+    pub subject_id: String,
+    pub subject_organization_id: String,
+    pub plant_id: String,
+    pub state: RoleBindingState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchDataImportedApplicationAssignment {
+    pub application_id: String,
+    pub organization_id: String,
+}
+
+/// Complete, deterministic Patch Data authorization snapshot. Imported rows
+/// are materialized into Grant's canonical identity, membership and binding
+/// tables; Patch Data is never consulted by the steady-state evaluator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchDataAuthorityImport {
+    pub manifest_version: String,
     pub generation: String,
     pub ledger_digest: String,
+    pub manifest_digest: String,
+    pub expected_previous_generation: Option<String>,
+    pub users: Vec<PatchDataImportedUser>,
+    pub organizations: Vec<PatchDataImportedOrganization>,
+    pub memberships: Vec<PatchDataImportedMembership>,
+    pub hierarchy_edges: Vec<PatchDataHierarchyEdge>,
+    pub plant_bindings: Vec<PatchDataImportedPlantBinding>,
+    pub application_assignments: Vec<PatchDataImportedApplicationAssignment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchDataAuthorityImportResult {
+    pub applied: bool,
+    pub manifest_version: String,
+    pub generation: String,
+    pub ledger_digest: String,
+    pub manifest_digest: String,
+    pub applied_at: String,
 }
 
 /// A narrow seam for services and deterministic tests.  It intentionally does

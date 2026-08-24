@@ -50,6 +50,7 @@ impl Database {
                             , pai.generation AS patch_data_import_generation
                             , pai.foundation_digest AS patch_data_foundation_digest
                             , ohe.source_generation AS hierarchy_source_generation
+                            , paie.source_generation AS authority_entity_source_generation
                      FROM users u
                      LEFT JOIN user_identities ui ON 1 = 0
                      LEFT JOIN parties p ON 1 = 0
@@ -73,6 +74,7 @@ impl Database {
                      LEFT JOIN application_consent_assertions aca ON 1 = 0
                      LEFT JOIN patch_data_authority_imports pai ON 1 = 0
                      LEFT JOIN organization_hierarchy_edges ohe ON 1 = 0
+                     LEFT JOIN patch_data_authority_import_entities paie ON 1 = 0
                      LIMIT 0
                  ) required_schema",
                 params!(),
@@ -405,6 +407,12 @@ impl Database {
                     valid INTEGER NOT NULL
                         CONSTRAINT authority_import_assertion_valid CHECK (valid = 1)
                 );
+                CREATE TABLE IF NOT EXISTS patch_data_authority_import_entities (
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    source_generation TEXT NOT NULL,
+                    PRIMARY KEY (entity_type, entity_id)
+                );
                 "#
                 .to_owned(),
             )
@@ -432,6 +440,12 @@ impl Database {
             .await?;
         self.add_column_if_missing("applications", "security_mutation_expires_at", "TEXT")
             .await?;
+        self.add_column_if_missing(
+            "patch_data_authority_imports",
+            "manifest_version",
+            "TEXT NOT NULL DEFAULT 'grant.patch-data-authority.v1'",
+        )
+        .await?;
         self.reject_duplicate_rauthy_client_ids().await?;
         self.migrate_actions_provider_scoped_uniqueness().await?;
         self.migrate_legacy_account_organization_authorization()
