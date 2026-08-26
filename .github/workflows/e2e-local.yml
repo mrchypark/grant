@@ -53,6 +53,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Verify runtime tool packaging
+        run: sh scripts/verify-runtime-tools.sh
+
       - name: Check Rust targets
         run: cargo check --workspace --all-targets
 

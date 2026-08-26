@@ -185,6 +185,12 @@ producer는 digest encoding을 재구현하지 않고 repository-native tool을 
 cargo run --quiet -p grant --bin grant-patch-data-manifest-digest < manifest.json
 ```
 
+The published Grant runtime image also contains the reviewed authority snapshot
+exporter at the fixed path
+`/usr/local/bin/grant-patch-data-authority-snapshot`. The server remains the
+image entrypoint at `/usr/local/bin/grant`; packaging the exporter does not run
+it or add runtime wiring.
+
 Exposure의 plant 조회는 closed endpoint `POST /api/v1/exposure-authz/plant-read`를 사용한다. caller는 기존 replay tuple과 `operationId=plant.get`만 제공하고 Grant는 이를 고정적으로 provider `patch-data`, action `patch-data.plant.read`, resource type `plant`에 매핑한다. 응답은 operation/provider/action/resource type을 모두 echo하며 임의 selector는 strict JSON decode 또는 operation validation으로 거부한다.
 
 `deploy/overlays/patch-data`는 IED-style Grant-only manifest다. 이 overlay는 `GRANT_AUTH_PROVIDER=patch-data`, 내부 `http://patch-data.patch.svc.cluster.local:8090`, 고정 application id `patch-data-exposure`을 설정하고 Rauthy workload와 Grant의 Rauthy secretKeyRef를 제거한다. `deploy/overlays/ied-patch-data`는 이 정확한 manifest를 compose하는 명시적 IED 선택 이름이다. 기존 `deploy/overlays/ied`는 legacy chaos namespace mode이므로 Patch Data 용도로 재사용하지 않는다. Grant master/app 및 Hiqlite secret은 별도로 제공해야 한다. base와 production overlay는 Rauthy deployment contract를 그대로 유지한다.

@@ -24,8 +24,14 @@ RUN --mount=type=cache,id=grant-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=cache,id=grant-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=grant-target,target=/workspace/target,sharing=locked \
     cargo build --release --locked -p grant \
-    && strip /workspace/target/release/grant \
-    && cp /workspace/target/release/grant /workspace/grant
+        --bin grant \
+        --bin grant-patch-data-authority-snapshot \
+    && strip \
+        /workspace/target/release/grant \
+        /workspace/target/release/grant-patch-data-authority-snapshot \
+    && cp /workspace/target/release/grant /workspace/grant \
+    && cp /workspace/target/release/grant-patch-data-authority-snapshot \
+        /workspace/grant-patch-data-authority-snapshot
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
@@ -38,6 +44,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --link --from=builder --chown=10001:10001 /workspace/grant /usr/local/bin/grant
+COPY --link --from=builder --chown=10001:10001 /workspace/grant-patch-data-authority-snapshot /usr/local/bin/grant-patch-data-authority-snapshot
 
 USER 10001:10001
 ENV GRANT_BIND_ADDR=0.0.0.0:8080
