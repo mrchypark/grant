@@ -51,6 +51,7 @@ impl Database {
                             , pai.foundation_digest AS patch_data_foundation_digest
                             , ohe.source_generation AS hierarchy_source_generation
                             , paie.source_generation AS authority_entity_source_generation
+                            , as2.snapshot_digest AS authority_snapshot_v2_digest
                      FROM users u
                      LEFT JOIN user_identities ui ON 1 = 0
                      LEFT JOIN parties p ON 1 = 0
@@ -75,6 +76,7 @@ impl Database {
                      LEFT JOIN patch_data_authority_imports pai ON 1 = 0
                      LEFT JOIN organization_hierarchy_edges ohe ON 1 = 0
                      LEFT JOIN patch_data_authority_import_entities paie ON 1 = 0
+                     LEFT JOIN authority_snapshots_v2 as2 ON 1 = 0
                      LIMIT 0
                  ) required_schema",
                 params!(),
@@ -413,6 +415,25 @@ impl Database {
                     source_generation TEXT NOT NULL,
                     PRIMARY KEY (entity_type, entity_id)
                 );
+                CREATE TABLE IF NOT EXISTS authority_snapshots_v2 (
+                    source_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    prior_generation INTEGER,
+                    snapshot_digest TEXT NOT NULL,
+                    canonical_json TEXT NOT NULL,
+                    source_revision TEXT NOT NULL,
+                    source_ledger_digest TEXT NOT NULL,
+                    source_watermark TEXT NOT NULL,
+                    produced_at TEXT NOT NULL,
+                    principal_count INTEGER NOT NULL,
+                    organization_count INTEGER NOT NULL,
+                    membership_count INTEGER NOT NULL,
+                    application_count INTEGER NOT NULL,
+                    effective_binding_count INTEGER NOT NULL,
+                    applied_at TEXT NOT NULL,
+                    PRIMARY KEY (source_id, generation),
+                    UNIQUE (source_id, snapshot_digest)
+                );
                 "#
                 .to_owned(),
             )
@@ -430,6 +451,14 @@ impl Database {
             .await?;
         self.add_column_if_missing("auth_identity_cache", "client_id", "TEXT")
             .await?;
+        self.add_column_if_missing("authority_snapshots_v2", "prior_generation", "INTEGER")
+            .await?;
+        self.add_column_if_missing(
+            "authority_snapshots_v2",
+            "source_watermark",
+            "TEXT NOT NULL DEFAULT 'sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+        )
+        .await?;
         self.add_column_if_missing(
             "applications",
             "provisioning_status",

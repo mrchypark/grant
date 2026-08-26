@@ -20,11 +20,52 @@ use crate::{
     },
     error::{ApiError, ApiResult},
     mappers::{authz_check_input, authz_check_response, authz_filter_inputs},
+    operation_catalog,
     request::{
         bearer_token, optional_header_value, read_consistency_override, require_app_auth_key,
         require_master_key,
     },
 };
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OperationAuthorizationRequestV2 {
+    operation_id: String,
+    operation_version: u64,
+    contract_digest: String,
+    resource: OperationResourceV2,
+    request_binding: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OperationResourceV2 {
+    id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperationAuthorizationResponseV2 {
+    allowed: bool,
+    reason: String,
+    operation_id: &'static str,
+    operation_version: u64,
+    contract_digest: &'static str,
+    provider_id: &'static str,
+    action_id: &'static str,
+    resource: OperationResourceResponseV2,
+    request_binding: String,
+    principal_digest: String,
+    issued_at: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationResourceResponseV2 {
+    #[serde(rename = "type")]
+    resource_type: &'static str,
+    id: String,
+}
 
 const MAX_AUTHZ_BATCH_CHECKS: usize = 1000;
 const MAX_AUTHZ_FILTER_RESOURCES: usize = 1000;
@@ -208,6 +249,53 @@ pub(crate) async fn plant_read_authorization(
         provider_id: "patch-data",
         action_id: "patch-data.plant.read",
         resource_type: "plant",
+    }))
+}
+
+pub(crate) async fn operation_authorization_v2(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(body): Json<OperationAuthorizationRequestV2>,
+) -> ApiResult<Json<OperationAuthorizationResponseV2>> {
+    let (token, organization_id) = application_auth_headers(service.as_ref(), &headers)?;
+    let registered = operation_catalog::lookup(&body.operation_id)
+        .ok_or_else(|| ApiError::bad_request(anyhow!("unknown operationId")))?;
+    let descriptor = registered.descriptor;
+    if body.operation_version != descriptor.version
+        || body.contract_digest != descriptor.contract_digest
+    {
+        return Err(ApiError::bad_request(anyhow!(
+            "operation contract mismatch"
+        )));
+    }
+    require_exact_non_empty("resource.id", &body.resource.id)?;
+    require_exact_non_empty("requestBinding", &body.request_binding)?;
+    let decision = registered
+        .adapter
+        .decide(
+            service.as_ref(),
+            &token,
+            &organization_id,
+            &body.resource.id,
+        )
+        .await
+        .map_err(ApiError::from_auth)?;
+    Ok(Json(OperationAuthorizationResponseV2 {
+        allowed: decision.allowed,
+        reason: decision.reason,
+        operation_id: descriptor.id,
+        operation_version: descriptor.version,
+        contract_digest: descriptor.contract_digest,
+        provider_id: descriptor.provider_id,
+        action_id: descriptor.action_id,
+        resource: OperationResourceResponseV2 {
+            resource_type: descriptor.resource_type,
+            id: body.resource.id,
+        },
+        request_binding: body.request_binding,
+        principal_digest: decision.principal_digest,
+        issued_at: decision.issued_at,
+        expires_at: decision.expires_at,
     }))
 }
 

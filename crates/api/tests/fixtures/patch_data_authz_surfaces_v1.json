@@ -1,0 +1,505 @@
+{
+  "schemaVersion": 1,
+  "baselineCommit": "9a27580e7fd7e4bb0df63c1e2e8876e3a24c717d",
+  "sourceLedgerDigest": "acdf070503f60e556dff3317b3341dfe1c61f6ffd63f542313172b1db2399cd3",
+  "surfaceCount": 99,
+  "surfaceIdDigest": "d87958846ced3ce7071cc5615af92e34d4c7dee27f40d27ea3ae62f02549ca72",
+  "ruleExpressionDigest": "fb0d26165b6dab23895fb6fc3f919cf162c0f957d540f477b48a492f73b27cab",
+  "surfaces": [
+    {
+      "id": "anomaly_occurrence_checkpoints.listRule",
+      "operationId": "patch-data.anomaly_occurrence_checkpoints.list",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "anomaly_occurrence_checkpoints.viewRule",
+      "operationId": "patch-data.anomaly_occurrence_checkpoints.get",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "anomaly_occurrence_checkpoints.createRule",
+      "operationId": "patch-data.anomaly_occurrence_checkpoints.create",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "anomaly_occurrence_checkpoints.updateRule",
+      "operationId": "patch-data.anomaly_occurrence_checkpoints.update",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\" && (cursor_created < @request.body.cursor_created || (cursor_created = @request.body.cursor_created && cursor_id < @request.body.cursor_id))"
+    },
+    {
+      "id": "anomaly_occurrences.listRule",
+      "operationId": "patch-data.anomaly_occurrences.list",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "anomaly_occurrences.viewRule",
+      "operationId": "patch-data.anomaly_occurrences.get",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "anomaly_occurrences.createRule",
+      "operationId": "patch-data.anomaly_occurrences.create",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "anomaly_occurrences.updateRule",
+      "operationId": "patch-data.anomaly_occurrences.update",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\" && event_key < @request.body.event_key"
+    },
+    {
+      "id": "blueprints.listRule",
+      "operationId": "patch-data.blueprints.list",
+      "ruleExpression": "isArchive = false &&\n@request.auth.id != '' &&\nplant.id = @request.query.plantId &&\nplant.refPlant = null &&\n(\n  // 부모 발전소 조직에 접근 가능하면 True\n  plant.organization.id ?= @request.auth.organizations.id ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each &&\n    @collection.org_parent_map.organization ?= plant.organization.id\n  ) ||\n  // 자식 발전소 조직에 접근 가능하면 부모 발전소 후보로 허용\n  plant.inherits.organization.id ?= @request.auth.organizations.id ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each &&\n    @collection.org_parent_map.organization ?= plant.inherits.organization.id\n  )\n) &&\n(\n  // 부모 발전소 자체 권한 체크\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.permission.users.id ?= @request.auth.id ||\n    (\n      @request.auth.collectionName = 'users' &&\n      @collection.org_parent_map.organization ?= plant.organization.id &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  ) ||\n  // 자식 발전소를 볼 수 있다면 부모 발전소도 True\n  (\n    plant.inherits.permission.users.id ?= @request.auth.id ||\n    (\n      @request.auth.collectionName = 'users' &&\n      @collection.org_parent_map.organization ?= plant.inherits.organization.id &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  )\n)\n"
+    },
+    {
+      "id": "blueprints.createRule",
+      "operationId": "patch-data.blueprints.create",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations.id &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.permission.users.id ?= @request.auth.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "blueprints.updateRule",
+      "operationId": "patch-data.blueprints.update",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations.id &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.permission.users.id ?= @request.auth.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "blueprints_list.listRule",
+      "operationId": "patch-data.blueprints_list.list",
+      "ruleExpression": "isArchive = false &&\n@request.auth.id != '' &&\nplant.id = @request.query.plantId &&\nplant.refPlant = null &&\n(\n  // 부모 발전소 조직에 접근 가능하면 True\n  plant.organization.id ?= @request.auth.organizations.id ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each &&\n    @collection.org_parent_map.organization ?= plant.organization.id\n  ) ||\n  // 자식 발전소 조직에 접근 가능하면 부모 발전소 후보로 허용\n  plant.inherits.organization.id ?= @request.auth.organizations.id ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each &&\n    @collection.org_parent_map.organization ?= plant.inherits.organization.id\n  )\n) &&\n(\n  // 부모 발전소 자체 권한 체크\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.permission.users.id ?= @request.auth.id ||\n    (\n      @request.auth.collectionName = 'users' &&\n      @collection.org_parent_map.organization ?= plant.organization.id &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  ) ||\n  // 자식 발전소를 볼 수 있다면 부모 발전소도 True\n  (\n    plant.inherits.permission.users.id ?= @request.auth.id ||\n    (\n      @request.auth.collectionName = 'users' &&\n      @collection.org_parent_map.organization ?= plant.inherits.organization.id &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  )\n)\n"
+    },
+    {
+      "id": "blueprints_viewer.listRule",
+      "operationId": "patch-data.blueprints_viewer.list",
+      "ruleExpression": "plant.id = @request.query.plantId &&\nplant.refPlant = null &&\n(\n  // 부모 발전소 viewer 권한이 있으면 True\n  (\n    plant.organization.id ?= @request.auth.organizations.id &&\n    plant.permission.viewers.id ?= @request.auth.id\n  ) ||\n  // 자식 발전소를 viewer로 볼 수 있으면 부모 발전소도 True\n  (\n    plant.inherits.organization.id ?= @request.auth.organizations.id &&\n    plant.inherits.permission.viewers.id ?= @request.auth.id\n  )\n)"
+    },
+    {
+      "id": "blueprints_viewer_list.listRule",
+      "operationId": "patch-data.blueprints_viewer_list.list",
+      "ruleExpression": "plant.id = @request.query.plantId &&\nplant.refPlant = null &&\n(\n  // 부모 발전소 viewer 권한이 있으면 True\n  (\n    plant.organization.id ?= @request.auth.organizations.id &&\n    plant.permission.viewers.id ?= @request.auth.id\n  ) ||\n  // 자식 발전소를 viewer로 볼 수 있으면 부모 발전소도 True\n  (\n    plant.inherits.organization.id ?= @request.auth.organizations.id &&\n    plant.inherits.permission.viewers.id ?= @request.auth.id\n  )\n)"
+    },
+    {
+      "id": "command_history.listRule",
+      "operationId": "patch-data.command_history.list",
+      "ruleExpression": "@request.auth.id != '' &&\n(\n  (\n    plant.organization.id ?= @request.auth.organizations.id &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.permission.users.id ?= @request.auth.id\n    )\n  ) ||\n  (\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations.id\n  )\n)"
+    },
+    {
+      "id": "command_history.createRule",
+      "operationId": "patch-data.command_history.create",
+      "ruleExpression": "sender.id = @request.auth.id &&\n(\n  (\n    plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "comments.listRule",
+      "operationId": "patch-data.comments.list",
+      "ruleExpression": "@request.auth.id != '' &&\nisArchive = false &&\n(\n  parent = null ||\n  parent.isArchive = false\n) &&\n(\n  (\n    plant.organization.id ?= @request.auth.organizations.id &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.permission.users.id ?= @request.auth.id\n    )\n  ) ||\n  (\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations.id\n  )\n)"
+    },
+    {
+      "id": "comments.createRule",
+      "operationId": "patch-data.comments.create",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations:each &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.permission.users.id ?= @request.auth.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "comments.updateRule",
+      "operationId": "patch-data.comments.update",
+      "ruleExpression": "plant.organization.owner = @request.auth.id ||\nuser.id = @request.auth.id"
+    },
+    {
+      "id": "comments.deleteRule",
+      "operationId": "patch-data.comments.delete",
+      "ruleExpression": "plant.organization.owner = @request.auth.id ||\nuser.id = @request.auth.id"
+    },
+    {
+      "id": "dashboard.listRule",
+      "operationId": "patch-data.dashboard.list",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations:each &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.id ?= @request.auth.permissions_via_users.plant.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "dashboard.createRule",
+      "operationId": "patch-data.dashboard.create",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations:each &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.id ?= @request.auth.permissions_via_users.plant.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "files.listRule",
+      "operationId": "patch-data.files.list",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "files.viewRule",
+      "operationId": "patch-data.files.get",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "files.createRule",
+      "operationId": "patch-data.files.create",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "files.updateRule",
+      "operationId": "patch-data.files.update",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "files.deleteRule",
+      "operationId": "patch-data.files.delete",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "groupconditions.createRule",
+      "operationId": "patch-data.groupconditions.create",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations:each &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.id ?= @request.auth.permissions_via_users.plant.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "groupconditions.updateRule",
+      "operationId": "patch-data.groupconditions.update",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations:each &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.id ?= @request.auth.permissions_via_users.plant.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "groupconditions.deleteRule",
+      "operationId": "patch-data.groupconditions.delete",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations:each &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.id ?= @request.auth.permissions_via_users.plant.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "images.listRule",
+      "operationId": "patch-data.images.list",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "images.viewRule",
+      "operationId": "patch-data.images.get",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "images.createRule",
+      "operationId": "patch-data.images.create",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "images.deleteRule",
+      "operationId": "patch-data.images.delete",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "invitations.listRule",
+      "operationId": "patch-data.invitations.list",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "invitations.viewRule",
+      "operationId": "patch-data.invitations.get",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "invitations.createRule",
+      "operationId": "patch-data.invitations.create",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "invitations.updateRule",
+      "operationId": "patch-data.invitations.update",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "invitations.deleteRule",
+      "operationId": "patch-data.invitations.delete",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "issue_comments.listRule",
+      "operationId": "patch-data.issue_comments.list",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_comments.viewRule",
+      "operationId": "patch-data.issue_comments.get",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_comments.createRule",
+      "operationId": "patch-data.issue_comments.create",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_comments.updateRule",
+      "operationId": "patch-data.issue_comments.update",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_content_logs.listRule",
+      "operationId": "patch-data.issue_content_logs.list",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_content_logs.viewRule",
+      "operationId": "patch-data.issue_content_logs.get",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_fields_logs.listRule",
+      "operationId": "patch-data.issue_fields_logs.list",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_fields_logs.viewRule",
+      "operationId": "patch-data.issue_fields_logs.get",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_schedules.listRule",
+      "operationId": "patch-data.issue_schedules.list",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_schedules.viewRule",
+      "operationId": "patch-data.issue_schedules.get",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_schedules.createRule",
+      "operationId": "patch-data.issue_schedules.create",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_schedules.updateRule",
+      "operationId": "patch-data.issue_schedules.update",
+      "ruleExpression": "(\n  (\n    issue.plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      issue.plant.organization.owner = @request.auth.id ||\n      issue.plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= issue.plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issue_tags.listRule",
+      "operationId": "patch-data.issue_tags.list",
+      "ruleExpression": "@request.auth.id != \"\""
+    },
+    {
+      "id": "issue_tags.viewRule",
+      "operationId": "patch-data.issue_tags.get",
+      "ruleExpression": "@request.auth.id != \"\""
+    },
+    {
+      "id": "issues.listRule",
+      "operationId": "patch-data.issues.list",
+      "ruleExpression": "(\n  (\n    plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issues.viewRule",
+      "operationId": "patch-data.issues.get",
+      "ruleExpression": "(\n  (\n    plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issues.createRule",
+      "operationId": "patch-data.issues.create",
+      "ruleExpression": "(\n  (\n    plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "issues.updateRule",
+      "operationId": "patch-data.issues.update",
+      "ruleExpression": "(\n  (\n    plant.organization.id ?= @request.auth.organizations:each &&\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.id ?= @request.auth.permissions_via_users.plant.id\n    )\n  ) ||\n  (\n    @request.auth.collectionName = 'users' &&\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "latest_loss_reports.listRule",
+      "operationId": "patch-data.latest_loss_reports.list",
+      "ruleExpression": "organization.id ?= @request.auth.organizations.id ||\n(\n  @collection.org_parent_map.organization ?= organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "org_parent_map.listRule",
+      "operationId": "patch-data.org_parent_map.list",
+      "ruleExpression": "@request.auth.id != ''&&\n@request.auth.collectionName = 'users' &&\norganization = @request.query.organizationId"
+    },
+    {
+      "id": "organizations.listRule",
+      "operationId": "patch-data.organizations.list",
+      "ruleExpression": "(\n  @request.query.organizationId = null &&\n  (\n    id ?= @request.auth.organizations.id ||\n    (\n      @collection.org_parent_map.organization ?= id &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  )\n) ||\n(\n  @request.query.organizationId != null &&\n  (\n    id = @request.query.organizationId ||\n    (\n      @collection.org_parent_map.organization ?= id &&\n      @collection.org_parent_map.parent ?= @request.query.organizationId\n    )\n  )\n)"
+    },
+    {
+      "id": "organizations.viewRule",
+      "operationId": "patch-data.organizations.get",
+      "ruleExpression": "id ?= @request.auth.organizations.id ||\n(\n  @collection.org_parent_map.organization ?= @request.auth.organizations:each &&\n  @collection.org_parent_map.parent ?= id\n) ||\n(\n  @collection.org_parent_map.organization ?= id && \n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "organizations.createRule",
+      "operationId": "patch-data.organizations.create",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "organizations.updateRule",
+      "operationId": "patch-data.organizations.update",
+      "ruleExpression": "owner = @request.auth.id"
+    },
+    {
+      "id": "panelmaps.listRule",
+      "operationId": "patch-data.panelmaps.list",
+      "ruleExpression": "(\n  plant.id = @request.query.plantId ||\n  plant.inherits.id ?= @request.query.plantId\n) &&\n(\n  // 유저가 소유한 조직이라면 True\n  plant.organization.id ?= @request.auth.organizations.id ||\n  // 소유하지 않았지만, 하위 조직이라면 True\n  (\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each &&\n    @collection.org_parent_map.organization ?= plant.organization.id\n  )\n) &&\n(\n  // 물리 발전소의 패널맵 탐색\n  (\n    plant.id = @request.query.plantId &&\n    plant.refPlant = null &&\n    // 발전소 권한 체크\n    (\n      plant.organization.owner = @request.auth.id ||\n      plant.id ?= @request.auth.permissions_via_users.plant.id ||\n      // permissions 할당되지 않아도, 하위 조직의 발전소라면 True\n      (\n        @collection.org_parent_map.organization ?= plant.organization.id &&\n        @collection.org_parent_map.parent ?= @request.auth.organizations:each\n      )\n    )\n  ) ||\n  // 가상 발전소의 패널맵 탐색\n  (\n    plant.inherits.id ?= @request.query.plantId &&\n    // 발전소 권한 체크\n    (\n      @request.query.plantId ?= @request.auth.permissions_via_users.plant.id ||\n      // permissions 할당되지 않아도, 하위 조직의 발전소라면 True\n      (\n        @collection.org_parent_map.organization ?= plant.organization.id &&\n        @collection.org_parent_map.parent ?= @request.auth.organizations:each\n      )\n    )\n  )\n)"
+    },
+    {
+      "id": "panelmaps.createRule",
+      "operationId": "patch-data.panelmaps.create",
+      "ruleExpression": "(\n  plant.organization.id ?= @request.auth.organizations.id &&\n  (\n    plant.organization.owner = @request.auth.id ||\n    plant.id ?= @request.auth.permissions_via_users.plant.id\n  )\n) ||\n(\n  @collection.org_parent_map.organization ?= plant.organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "panelmaps_viewer.listRule",
+      "operationId": "patch-data.panelmaps_viewer.list",
+      "ruleExpression": "@request.query.plantId ?= @request.auth.permissions_via_viewers.plant.id &&\n(\n  plant.id = @request.query.plantId ||\n  plant.inherits.id ?= @request.query.plantId\n) &&\n(\n  (\n    plant.id = @request.query.plantId &&\n    plant.organization.id ?= @request.auth.organizations.id &&\n    plant.refPlant = null &&\n    plant.id ?= @request.auth.permissions_via_viewers.plant.id\n  ) ||\n  (\n    @collection.plants_viewer.id ?= @request.query.plantId &&\n    @collection.plants_viewer.refPlant ?= plant.id &&\n    plant.inherits.id ?= @request.query.plantId\n  )\n)"
+    },
+    {
+      "id": "passwords.listRule",
+      "operationId": "patch-data.passwords.list",
+      "ruleExpression": "organization.id ?= @request.auth.organizations.id ||\n(\n  @collection.org_parent_map.organization ?= organization.id &&\n  @collection.org_parent_map.parent ?= @request.auth.organizations:each\n)"
+    },
+    {
+      "id": "passwords.createRule",
+      "operationId": "patch-data.passwords.create",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "passwords.updateRule",
+      "operationId": "patch-data.passwords.update",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "permissions.listRule",
+      "operationId": "patch-data.permissions.list",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "permissions.viewRule",
+      "operationId": "patch-data.permissions.get",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "permissions.createRule",
+      "operationId": "patch-data.permissions.create",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "permissions.updateRule",
+      "operationId": "patch-data.permissions.update",
+      "ruleExpression": "@request.auth.id ?= users.id ||\nplant.organization.owner = @request.auth.id"
+    },
+    {
+      "id": "reports.listRule",
+      "operationId": "patch-data.reports.list",
+      "ruleExpression": "isArchive = false &&\n(\n  organization.id ?= @request.auth.organizations.id ||\n  (\n    @collection.org_parent_map.organization ?= organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "reports.createRule",
+      "operationId": "patch-data.reports.create",
+      "ruleExpression": "organization.id ?= @request.auth.organizations:each"
+    },
+    {
+      "id": "reports_v2.listRule",
+      "operationId": "patch-data.reports_v2.list",
+      "ruleExpression": "isArchive = false &&\n(\n  plant.organization.id ?= @request.auth.organizations.id ||\n  (\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "reports_v2.createRule",
+      "operationId": "patch-data.reports_v2.create",
+      "ruleExpression": "@request.body.plant.organization.id ?= @request.auth.organizations:each"
+    },
+    {
+      "id": "reports_v2_list.listRule",
+      "operationId": "patch-data.reports_v2_list.list",
+      "ruleExpression": "isArchive = false &&\n(\n  plant.organization.id ?= @request.auth.organizations.id ||\n  (\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "reports_v2_list.viewRule",
+      "operationId": "patch-data.reports_v2_list.get",
+      "ruleExpression": "isArchive = false &&\n(\n  plant.organization.id ?= @request.auth.organizations.id ||\n  (\n    @collection.org_parent_map.organization ?= plant.organization.id &&\n    @collection.org_parent_map.parent ?= @request.auth.organizations:each\n  )\n)"
+    },
+    {
+      "id": "resources.listRule",
+      "operationId": "patch-data.resources.list",
+      "ruleExpression": "(\n  @request.auth.id != '' &&\n  organization.name = \"DEFAULT\"\n) ||\n(\n  // A. 조직 리소스 접근 규칙\n  organization != null && \n  (\n    // A-1. 본인이 소속된 조직\n    organization.id ?= @request.auth.organizations.id ||\n    // A-2. 본인의 하위 조직\n    (\n      @collection.org_parent_map.organization ?= organization.id && \n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    ) ||\n    // A-3. 본인의 상위 조직\n    (\n      @collection.org_parent_map.organization ?= @request.auth.organizations:each &&\n      @collection.org_parent_map.parent ?= organization.id\n    )\n  )\n) ||\n(\n  // B. 발전소 리소스 접근 규칙\n  plant != null &&\n  (\n    // B-1. 본인 조직 소속 발전소 (권한 보유 시)\n    (\n      plant.organization.id ?= @request.auth.organizations.id &&\n      @request.auth.id ?= plant.permission.users.id\n    ) ||\n    // B-2. 하위 조직 발전소\n    (\n      @collection.org_parent_map.organization ?= plant.organization &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  )\n)"
+    },
+    {
+      "id": "resources.updateRule",
+      "operationId": "patch-data.resources.update",
+      "ruleExpression": "(\n  // A. 조직 리소스 접근 규칙\n  organization != null && \n  (\n    // A-1. 본인이 소속된 조직\n    organization.id ?= @request.auth.organizations.id ||\n    // A-2. 본인의 하위 조직\n    (\n      @collection.org_parent_map.organization ?= organization.id && \n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    ) ||\n    // A-3. 본인의 상위 조직\n    (\n      @collection.org_parent_map.organization ?= @request.auth.organizations:each &&\n      @collection.org_parent_map.parent ?= organization.id\n    )\n  )\n) ||\n(\n  // B. 발전소 리소스 접근 규칙\n  plant != null &&\n  (\n    // B-1. 본인 조직 소속 발전소 (권한 보유 시)\n    (\n      plant.organization.id ?= @request.auth.organizations.id &&\n      @request.auth.id ?= plant.permission.users.id\n    ) ||\n    // B-2. 하위 조직 발전소\n    (\n      @collection.org_parent_map.organization ?= plant.organization &&\n      @collection.org_parent_map.parent ?= @request.auth.organizations:each\n    )\n  )\n)"
+    },
+    {
+      "id": "rsd_command_tasks.listRule",
+      "operationId": "patch-data.rsd_command_tasks.list",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "rsd_command_tasks.viewRule",
+      "operationId": "patch-data.rsd_command_tasks.get",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\""
+    },
+    {
+      "id": "rsd_command_tasks.createRule",
+      "operationId": "patch-data.rsd_command_tasks.create",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\" && (@request.body.status = \"cancelable\" || @request.body.status = \"manual\") && @request.body.plant:isset = true && @request.body.detected_notification:isset = true && @request.body.command_targets:isset = true && @request.body.cancel_deadline_at:isset = true"
+    },
+    {
+      "id": "rsd_command_tasks.updateRule",
+      "operationId": "patch-data.rsd_command_tasks.update",
+      "ruleExpression": "@request.auth.email = \"patch-service@conalog.com\" &&\n@request.body.plant:isset = false &&\n@request.body.detected_notification:isset = false &&\n@request.body.command_targets:isset = false &&\n@request.body.cancel_deadline_at:isset = false &&\n(\n  (\n    (\n      (status = \"cancelable\" && cancel_deadline_at <= @now) ||\n      status = \"manual\" ||\n      (status = \"executing\" && claim_deadline_at <= @now)\n    ) &&\n    @request.body.status = \"executing\" &&\n    @request.body.claimed_at:isset = true &&\n    @request.body.claimed_by:isset = true &&\n    @request.body.claim_deadline_at:isset = true &&\n    @request.body.resolved_notification:isset = false\n  ) ||\n  (\n    (status = \"cancelable\" || status = \"manual\") &&\n    @request.body.status = \"canceled\" &&\n    @request.body.canceled_at:isset = true &&\n    @request.body.claim_deadline_at:isset = false &&\n    (\n      @request.body.resolved_notification:isset = false ||\n      @request.body.resolved_notification.id:isset = true\n    )\n  ) ||\n  (\n    status = \"executing\" &&\n    @request.body.status = \"canceled\" &&\n    @request.body.canceled_at:isset = true &&\n    @request.body.canceled_by:isset = false &&\n    @request.body.resolved_notification:isset = false &&\n    @request.body.claim_deadline_at:isset = false\n  ) ||\n  (\n    status = \"executing\" &&\n    (@request.body.status = \"completed\" || @request.body.status = \"failed\") &&\n    @request.body.finished_at:isset = true &&\n    @request.body.claim_deadline_at:isset = false &&\n    @request.body.resolved_notification:isset = false\n  )\n)"
+    },
+    {
+      "id": "temporary_accounts.listRule",
+      "operationId": "patch-data.temporary_accounts.list",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "temporary_accounts.updateRule",
+      "operationId": "patch-data.temporary_accounts.update",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "temporary_accounts.deleteRule",
+      "operationId": "patch-data.temporary_accounts.delete",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "temporary_accounts.manageRule",
+      "operationId": "patch-data.temporary_accounts.manage",
+      "ruleExpression": "organization.owner = @request.auth.id"
+    },
+    {
+      "id": "temporary_blueprints.listRule",
+      "operationId": "patch-data.temporary_blueprints.list",
+      "ruleExpression": "plant.organization.id = @request.auth.organization.id &&\nplant.id ?= @request.auth.permissions_via_temporary.plant.id"
+    },
+    {
+      "id": "temporary_blueprints_list.listRule",
+      "operationId": "patch-data.temporary_blueprints_list.list",
+      "ruleExpression": "plant.organization.id = @request.auth.organization.id &&\nplant.id ?= @request.auth.permissions_via_temporary.plant.id"
+    },
+    {
+      "id": "temporary_panelmaps.listRule",
+      "operationId": "patch-data.temporary_panelmaps.list",
+      "ruleExpression": "plant.organization.id = @request.auth.organization.id &&\nplant.id ?= @request.auth.permissions_via_temporary.plant.id"
+    },
+    {
+      "id": "users.listRule",
+      "operationId": "patch-data.users.list",
+      "ruleExpression": "@request.auth.id != '' &&\norganizations.id ?= @request.auth.organizations.id"
+    },
+    {
+      "id": "users.viewRule",
+      "operationId": "patch-data.users.get",
+      "ruleExpression": "@request.auth.id != ''"
+    },
+    {
+      "id": "viewers.listRule",
+      "operationId": "patch-data.viewers.list",
+      "ruleExpression": "@request.auth.id != '' &&\norganizations.owner ?= @request.auth.id || id = @request.auth.id"
+    },
+    {
+      "id": "work_orders.listRule",
+      "operationId": "patch-data.work_orders.list",
+      "ruleExpression": "plant.id = @request.auth.permissions_via_users.plant.id ||\nid = @request.auth.work_order.id"
+    },
+    {
+      "id": "work_orders.viewRule",
+      "operationId": "patch-data.work_orders.get",
+      "ruleExpression": "plant.id = @request.auth.permissions_via_users.plant.id ||\nid = @request.auth.work_order.id"
+    },
+    {
+      "id": "work_orders.createRule",
+      "operationId": "patch-data.work_orders.create",
+      "ruleExpression": "plant.id = @request.auth.permissions_via_users.plant.id"
+    },
+    {
+      "id": "work_orders.updateRule",
+      "operationId": "patch-data.work_orders.update",
+      "ruleExpression": "plant.id = @request.auth.permissions_via_users.plant.id"
+    }
+  ]
+}

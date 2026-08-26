@@ -9,7 +9,10 @@ use domain::{
 };
 use infra::{
     config::ReadConsistency,
-    database::{PatchDataAuthorityImport, PatchDataAuthorityImportResult},
+    database::{
+        AuthoritySnapshotV2, AuthoritySnapshotV2Result, PatchDataAuthorityImport,
+        PatchDataAuthorityImportResult,
+    },
     service::AppService,
 };
 use std::sync::Arc;
@@ -755,6 +758,23 @@ pub(crate) async fn import_patch_data_authority(
     Ok(Json(receipt))
 }
 
+pub(crate) async fn import_authority_snapshot_v2(
+    State(service): State<Arc<AppService>>,
+    headers: HeaderMap,
+    Json(snapshot): Json<AuthoritySnapshotV2>,
+) -> ApiResult<Json<AuthoritySnapshotV2Result>> {
+    require_master_key(service.as_ref(), &headers)?;
+    if snapshot.source_id == "patch-data" {
+        crate::patch_data_operations::validate_authority_snapshot(&snapshot)
+            .map_err(ApiError::bad_request)?;
+    }
+    let receipt = service
+        .import_authority_snapshot_v2(snapshot)
+        .await
+        .map_err(map_patch_data_import_error)?;
+    Ok(Json(receipt))
+}
+
 fn map_patch_data_import_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     let chain = error
@@ -771,6 +791,15 @@ fn map_patch_data_import_error(error: anyhow::Error) -> ApiError {
     }
     if [
         "manifest",
+        "snapshotDigest",
+        "snapshot digest",
+        "invalid snapshot",
+        "authority snapshot",
+        "snapshot arrays",
+        "principal",
+        "membership",
+        "application scope",
+        "effective binding",
         "unsupported manifestVersion",
         "unknown user",
         "unknown organization",

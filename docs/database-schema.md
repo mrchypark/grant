@@ -64,6 +64,14 @@ Patch Data API rule 이동의 deterministic import receipt와 소유권 provenan
 
 각 import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 canonical catalog에 보장하고, membership을 `organization_memberships`, plant permission을 `role_bindings`, application capability를 `application_actions`에 직접 반영한다. 따라서 strong evaluator와 plant-read decision은 정상 요청에서 Patch Data relation이나 import staging table을 dual-read하지 않는다. hierarchy는 child당 parent 하나, sorted/unique/acyclic/referentially complete를 검증하지만 의미가 확정되지 않아 evaluator에는 연결하지 않는다. `authority_import_assertions`는 generation CAS, catalog/native-row collision, application readiness, partial-write를 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
 
+### `authority_snapshots_v2`
+
+향후 Patch Data 외의 공급자도 같은 형식으로 권한 원본을 전달할 수 있도록 준비한 source-qualified 불변 snapshot receipt다. `(source_id, generation)`이 primary key이고, 같은 source의 generation은 1부터 끊김 없이 증가해야 한다. `(source_id, snapshot_digest)`도 unique라 같은 canonical snapshot을 다른 generation으로 다시 기록할 수 없다. `prior_generation`은 직전 저장 generation을 보존하며 첫 generation만 `NULL`이다.
+
+`canonical_json`은 principals, organizations, memberships, applications, effective bindings를 포함한 입력 전체의 canonical JSON이다. `snapshot_digest`, `source_revision`, `source_ledger_digest`, `source_watermark`, `produced_at`과 각 entity count는 재시도·감사·source provenance 검증을 위한 receipt다. 동일한 source/generation과 byte-equivalent canonical JSON 재시도는 기존 `applied_at`을 반환하고, 다른 내용은 충돌로 거부한다. 동시 최초 import도 transaction assertion으로 하나만 적용한다.
+
+Wave 0에서는 이 테이블의 row를 현재 evaluator의 `role_bindings`, `application_actions` 또는 다른 권한 row로 전개하지 않는다. 새 operation도 활성화하지 않으며 `plant.get`만 기존 v1 importer와 catalog 경로를 그대로 사용한다. 따라서 이 테이블은 저장·검증 framework이지 활성 authorization source가 아니다.
+
 ### `groups`, `group_memberships`
 
 조직 내부 권한 그룹과 membership 연결. `group_memberships.organization_membership_id`는 같은 조직의 active membership만 연결할 수 있다. 조회도 group과 membership의 조직이 같은 row만 반환한다. 그룹 삭제는 `subject_organization_id` 값과 관계없이 해당 group id를 참조하는 group-subject `role_bindings`가 하나라도 있으면 거부되고, 참조가 없을 때 membership과 그룹을 한 트랜잭션에서 삭제한다. 시작 시 missing reference 또는 cross-organization membership/group binding을 발견하면 자동 삭제하지 않고 schema validation을 실패시킨다. 권한 전개 입력이라 grant 경계에 남긴다.
@@ -173,6 +181,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `application_grants.organization_id` -> `organizations.id`
 - `application_grant_actions.application_grant_id` -> `application_grants.id`
 - `application_grant_actions.action_id` -> `actions.id`
+- `authority_snapshots_v2`는 외부 권한 row에 물리 FK를 만들지 않는다. 내부의 principal, organization, membership, application, binding 관계는 같은 canonical snapshot 안에서 import 시 referential validation하고 receipt 전체를 불변으로 저장한다.
 
 ## 주의할 점
 

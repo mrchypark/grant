@@ -967,6 +967,24 @@ fn imported_plant_request() -> Request<Body> {
         .expect("plant request")
 }
 
+fn imported_plant_v2_request() -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/v2/exposure-authz/decide")
+        .header("content-type", "application/json")
+        .header("authorization", AUTHORIZATION)
+        .header("x-organization-id", "imported-org")
+        .header("x-grant-app-auth-key", support::APP_AUTH_KEY)
+        .body(Body::from(serde_json::json!({
+            "operationId": "plant.get",
+            "operationVersion": 1,
+            "contractDigest": "sha256:7ca72b56a8f32ab247d4d8dc936b30cedf2f9995c1ad8cc5b2f2703dc20f488d",
+            "resource": {"id": "plant-a"},
+            "requestBinding": "wave0-v2-binding"
+        }).to_string()))
+        .expect("v2 P0 request")
+}
+
 fn plant_read_contract_fixture() -> Value {
     let bytes = include_bytes!("fixtures/plant_read_contract.json");
     assert_eq!(
@@ -980,6 +998,7 @@ fn plant_read_contract_fixture() -> Value {
 #[tokio::test]
 async fn public_import_assignment_enables_plant_read_and_omission_revokes_it() {
     let mut patch_data = LocalPatchData::start(vec![
+        ok(valid_response("imported-external", "imported-org")),
         ok(valid_response("imported-external", "imported-org")),
         ok(valid_response("imported-external", "imported-org")),
         ok(valid_response("imported-external", "imported-org")),
@@ -1035,6 +1054,21 @@ async fn public_import_assignment_enables_plant_read_and_omission_revokes_it() {
         );
     }
 
+    let v2 = app
+        .clone()
+        .oneshot(imported_plant_v2_request())
+        .await
+        .expect("v2 P0 decision");
+    assert_eq!(v2.status(), StatusCode::OK);
+    let v2 = support::response_json(v2).await;
+    assert_eq!(v2["allowed"], true);
+    assert_eq!(v2["operationId"], "plant.get");
+    assert_eq!(v2["providerId"], "patch-data");
+    assert_eq!(v2["actionId"], "patch-data.plant.read");
+    assert_eq!(v2["resource"]["type"], "plant");
+    assert_eq!(v2["resource"]["id"], "plant-a");
+    assert_eq!(v2["requestBinding"], "wave0-v2-binding");
+
     let omitted = authority_manifest("generation-c", Some("generation-b"), false);
     let omitted_response = app
         .clone()
@@ -1058,7 +1092,7 @@ async fn public_import_assignment_enables_plant_read_and_omission_revokes_it() {
         );
     }
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
     }
 }

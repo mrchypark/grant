@@ -11,27 +11,29 @@ mod dto;
 mod error;
 mod handlers;
 mod mappers;
+mod operation_catalog;
+mod patch_data_operations;
 mod rauthy_proxy;
 mod request;
 
 use authz::{
     application_authz_batch_check, application_authz_check, application_authz_filter,
     authz_batch_check, authz_check, authz_filter, exposure_read_authorization,
-    plant_read_authorization,
+    operation_authorization_v2, plant_read_authorization,
 };
 use backups::{list_backups_local, list_backups_s3, trigger_backup};
 use handlers::{
     add_group_member, bootstrap_external_owner, bootstrap_rauthy_owner, create_agreement,
     create_application, create_group, create_role, create_role_binding, deactivate_organization,
     delete_group, delete_role_binding, enroll_organization_member, get_agreement, get_application,
-    get_application_consent, get_current_user, get_group, healthz, import_patch_data_authority,
-    list_agreements, list_application_actions, list_application_grants, list_applications,
-    list_group_members, list_groups, list_providers, list_role_bindings, list_roles,
-    materialize_current_user, reactivate_organization, readyz, remove_group_member,
-    replace_application_actions, replace_application_consent, replace_provider_actions,
-    replace_role_actions, requires_voter_node, revoke_application_consent, set_application_trust,
-    set_user_active, update_agreement, update_group, upsert_provider,
-    verify_application_provisioning,
+    get_application_consent, get_current_user, get_group, healthz, import_authority_snapshot_v2,
+    import_patch_data_authority, list_agreements, list_application_actions,
+    list_application_grants, list_applications, list_group_members, list_groups, list_providers,
+    list_role_bindings, list_roles, materialize_current_user, reactivate_organization, readyz,
+    remove_group_member, replace_application_actions, replace_application_consent,
+    replace_provider_actions, replace_role_actions, requires_voter_node,
+    revoke_application_consent, set_application_trust, set_user_active, update_agreement,
+    update_group, upsert_provider, verify_application_provisioning,
 };
 use rauthy_proxy::{auth_root, proxy_rauthy_passthrough, proxy_rauthy_root};
 
@@ -122,6 +124,10 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/admin/imports/patch-data-authority",
             post(import_patch_data_authority),
+        )
+        .route(
+            "/api/v2/admin/imports/authority-snapshots",
+            post(import_authority_snapshot_v2),
         )
         .with_state(service)
 }
@@ -293,6 +299,10 @@ fn build_shared_router() -> Router<Arc<AppService>> {
         .route(
             "/api/v1/exposure-authz/plant-read",
             post(plant_read_authorization),
+        )
+        .route(
+            "/api/v2/exposure-authz/decide",
+            post(operation_authorization_v2),
         )
 }
 

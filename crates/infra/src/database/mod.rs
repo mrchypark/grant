@@ -27,6 +27,12 @@ mod application_grants;
 mod applications;
 mod authority_imports;
 pub use authority_imports::patch_data_manifest_digest;
+mod authority_snapshot_v2;
+pub use authority_snapshot_v2::{
+    ApplicationScopeV2, AuthorityApplicationV2, AuthorityMembershipV2, AuthorityOrganizationV2,
+    AuthorityPrincipalV2, AuthoritySnapshotV2, AuthoritySnapshotV2Result, EffectiveBindingV2,
+    snapshot_digest,
+};
 mod authz;
 mod backups;
 mod catalog;

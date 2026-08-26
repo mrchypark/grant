@@ -5,10 +5,11 @@ use crate::{
     config::{AppConfig, AuthProviderMode, ReadConsistency},
     database::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
-        ApplicationTrustMutationError, BackupEntry, BindIdentityInput, Database,
-        ExternalIdentityMaterialization, ExternalOwnerBootstrapCommand,
-        ExternalOwnerBootstrapError, OrganizationMembershipWriteError, PatchDataAuthorityImport,
-        PatchDataAuthorityImportResult, UserActionCheck,
+        ApplicationTrustMutationError, AuthoritySnapshotV2, AuthoritySnapshotV2Result, BackupEntry,
+        BindIdentityInput, Database, ExternalIdentityMaterialization,
+        ExternalOwnerBootstrapCommand, ExternalOwnerBootstrapError,
+        OrganizationMembershipWriteError, PatchDataAuthorityImport, PatchDataAuthorityImportResult,
+        UserActionCheck,
     },
 };
 use anyhow::Result;
@@ -305,6 +306,14 @@ pub struct ExposureReadAuthorizationDecision {
     pub expires_at: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct OperationAuthorizationTarget<'a> {
+    pub provider_id: &'a str,
+    pub action_id: &'a str,
+    pub resource_type: &'a str,
+    pub resource_id: &'a str,
+}
+
 struct ApplicationAuthorizationContext {
     user_id: String,
     organization_id: String,
@@ -438,6 +447,13 @@ impl AppService {
         command: PatchDataAuthorityImport,
     ) -> Result<PatchDataAuthorityImportResult> {
         self.db.import_patch_data_authority(command).await
+    }
+
+    pub async fn import_authority_snapshot_v2(
+        &self,
+        snapshot: AuthoritySnapshotV2,
+    ) -> Result<AuthoritySnapshotV2Result> {
+        self.db.import_authority_snapshot_v2(snapshot).await
     }
 
     pub fn rauthy_proxy_client(&self) -> &reqwest::Client {
@@ -2201,6 +2217,25 @@ impl AppService {
         organization_id: &str,
         plant_id: &str,
     ) -> Result<ExposureReadAuthorizationDecision> {
+        self.check_operation_authorization(
+            bearer_token,
+            organization_id,
+            OperationAuthorizationTarget {
+                provider_id: PATCH_DATA_PLANT_READ_PROVIDER_ID,
+                action_id: PATCH_DATA_PLANT_READ_ACTION_ID,
+                resource_type: PATCH_DATA_PLANT_RESOURCE_TYPE,
+                resource_id: plant_id,
+            },
+        )
+        .await
+    }
+
+    pub async fn check_operation_authorization(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: &str,
+        target: OperationAuthorizationTarget<'_>,
+    ) -> Result<ExposureReadAuthorizationDecision> {
         let context = self
             .resolve_application_authorization_context(bearer_token, organization_id)
             .await?;
@@ -2212,11 +2247,11 @@ impl AppService {
                         id: context.user_id.clone(),
                         organization_id: context.organization_id.clone(),
                     },
-                    action: PATCH_DATA_PLANT_READ_ACTION_ID.to_owned(),
+                    action: target.action_id.to_owned(),
                     resource: AuthorizationResource {
-                        provider_id: PATCH_DATA_PLANT_READ_PROVIDER_ID.to_owned(),
-                        resource_type: PATCH_DATA_PLANT_RESOURCE_TYPE.to_owned(),
-                        id: plant_id.to_owned(),
+                        provider_id: target.provider_id.to_owned(),
+                        resource_type: target.resource_type.to_owned(),
+                        id: target.resource_id.to_owned(),
                     },
                 }],
                 Some(ReadConsistency::Strong),
