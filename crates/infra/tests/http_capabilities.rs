@@ -1,5 +1,6 @@
 mod support;
 
+use chrono::{Duration, FixedOffset, Utc};
 use domain::{
     Application, ApplicationAppType, ApplicationConsentPolicy, ApplicationProvisioningStatus,
     ApplicationType, ServiceProvider,
@@ -267,6 +268,121 @@ async fn generations_are_immutable_idempotent_and_active_pointer_is_cas_versione
         .expect("rollback to immutable generation 1");
     assert_eq!(rollback.activation_sequence, 3);
     assert_eq!(rollback.from_generation, Some(2));
+}
+
+#[tokio::test]
+async fn concurrent_identical_generation_stage_is_idempotent() {
+    let (_runtime, db, _dir) = database().await;
+    let request = generation(
+        1,
+        None,
+        capability("plant.get", "/api/collections/plants/records/{plantId}"),
+    );
+
+    let (left, right) = tokio::join!(
+        db.stage_http_capability_generation(PROVIDER, request.clone()),
+        db.stage_http_capability_generation(PROVIDER, request.clone()),
+    );
+    let left = left.expect("left stage");
+    let right = right.expect("right stage");
+    assert_ne!(left.staged, right.staged, "exactly one request inserts");
+    for result in [left, right] {
+        assert_eq!(result.provider_id, PROVIDER);
+        assert_eq!(result.generation, request.generation);
+        assert_eq!(result.catalog_digest, request.catalog_digest);
+        assert_eq!(result.total_count, request.capabilities.len());
+    }
+}
+
+#[tokio::test]
+async fn activation_compares_offset_pep_expiry_as_an_instant() {
+    let (_runtime, db, _dir) = database().await;
+    let future_with_negative_offset = (Utc::now() + Duration::hours(1))
+        .with_timezone(&FixedOffset::west_opt(5 * 60 * 60).expect("fixed offset"))
+        .to_rfc3339();
+    let stored = db
+        .upsert_provider_pep_client(
+            PROVIDER,
+            PEP,
+            UpsertProviderPepClient {
+                application_id: APP.to_owned(),
+                lifecycle: ProviderPepClientLifecycle::Active,
+                valid_until: Some(future_with_negative_offset),
+            },
+            "test",
+        )
+        .await
+        .expect("bind future PEP");
+    assert!(
+        stored
+            .valid_until
+            .as_deref()
+            .is_some_and(|value| value.ends_with('Z')),
+        "stored expiry is canonical UTC"
+    );
+    let request = generation(
+        1,
+        None,
+        capability("plant.get", "/api/collections/plants/records/{plantId}"),
+    );
+    db.stage_http_capability_generation(PROVIDER, request.clone())
+        .await
+        .expect("stage");
+    db.activate_http_capability_generation(
+        PROVIDER,
+        ActivateHttpCapabilityGeneration {
+            expected_generation: None,
+            expected_catalog_digest: None,
+            target_generation: 1,
+            target_catalog_digest: request.catalog_digest,
+        },
+        "test",
+    )
+    .await
+    .expect("future offset expiry remains active");
+}
+
+#[tokio::test]
+async fn activation_rejects_expired_positive_offset_pep() {
+    let (_runtime, db, _dir) = database().await;
+    let past_with_positive_offset = (Utc::now() - Duration::hours(1))
+        .with_timezone(&FixedOffset::east_opt(5 * 60 * 60).expect("fixed offset"))
+        .to_rfc3339();
+    db.upsert_provider_pep_client(
+        PROVIDER,
+        PEP,
+        UpsertProviderPepClient {
+            application_id: APP.to_owned(),
+            lifecycle: ProviderPepClientLifecycle::Active,
+            valid_until: Some(past_with_positive_offset),
+        },
+        "test",
+    )
+    .await
+    .expect("bind expired PEP");
+    let request = generation(
+        1,
+        None,
+        capability("plant.get", "/api/collections/plants/records/{plantId}"),
+    );
+    db.stage_http_capability_generation(PROVIDER, request.clone())
+        .await
+        .expect("stage");
+    assert!(
+        db.activate_http_capability_generation(
+            PROVIDER,
+            ActivateHttpCapabilityGeneration {
+                expected_generation: None,
+                expected_catalog_digest: None,
+                target_generation: 1,
+                target_catalog_digest: request.catalog_digest,
+            },
+            "test",
+        )
+        .await
+        .is_err(),
+        "expired offset PEP must not activate a catalog"
+    );
 }
 
 #[tokio::test]

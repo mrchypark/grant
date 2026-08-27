@@ -106,6 +106,7 @@ fn structured_status(err: &anyhow::Error) -> Option<StatusCode> {
             .downcast_ref::<ServiceError>()
             .map(|err| match err.kind() {
                 ServiceErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+                ServiceErrorKind::UnprocessableEntity => StatusCode::UNPROCESSABLE_ENTITY,
                 ServiceErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
                 ServiceErrorKind::Forbidden => StatusCode::FORBIDDEN,
                 ServiceErrorKind::NotFound => StatusCode::NOT_FOUND,

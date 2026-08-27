@@ -9,10 +9,11 @@ use crate::{
         ApplicationTrustMutationError, AuthoritySnapshotV2, AuthoritySnapshotV2Result, BackupEntry,
         BindIdentityInput, Database, ExternalIdentityMaterialization,
         ExternalOwnerBootstrapCommand, ExternalOwnerBootstrapError, HttpCapability,
-        HttpCapabilityAccessMode, HttpCapabilityActivation, HttpQueryPolicy, HttpRequestBodyMode,
-        HttpResourceExtractor, OrganizationMembershipWriteError, PatchDataAuthorityImport,
-        PatchDataAuthorityImportResult, ProviderPepClient, StageHttpCapabilityGeneration,
-        StagedHttpCapabilityGeneration, UpsertProviderPepClient, UserActionCheck,
+        HttpCapabilityAccessMode, HttpCapabilityActivation, HttpCapabilityMutationError,
+        HttpQueryPolicy, HttpRequestBodyMode, HttpResourceExtractor,
+        OrganizationMembershipWriteError, PatchDataAuthorityImport, PatchDataAuthorityImportResult,
+        ProviderPepClient, StageHttpCapabilityGeneration, StagedHttpCapabilityGeneration,
+        UpsertProviderPepClient, UserActionCheck,
     },
 };
 use anyhow::Result;
@@ -60,6 +61,7 @@ const HTTP_CAPABILITY_CREDENTIAL_DIGEST_DOMAIN: &[u8] =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
     BadRequest,
+    UnprocessableEntity,
     Unauthorized,
     Forbidden,
     NotFound,
@@ -558,6 +560,7 @@ impl AppService {
         self.db
             .stage_http_capability_generation(provider_id, request)
             .await
+            .map_err(map_http_capability_mutation_error)
     }
 
     pub async fn set_provider_pep_client_admin(
@@ -569,6 +572,7 @@ impl AppService {
         self.db
             .upsert_provider_pep_client(provider_id, pep_client_id, input, "grant-master")
             .await
+            .map_err(map_http_capability_mutation_error)
     }
 
     pub async fn activate_http_capability_generation_admin(
@@ -579,6 +583,7 @@ impl AppService {
         self.db
             .activate_http_capability_generation(provider_id, input, "grant-master")
             .await
+            .map_err(map_http_capability_mutation_error)
     }
 
     pub async fn active_http_capability_catalog(
@@ -3277,6 +3282,19 @@ fn map_application_security_mutation_error(err: anyhow::Error) -> anyhow::Error 
         }
         Some(error @ ApplicationSecurityMutationError::LeaseExpiredOrInvalid { .. }) => {
             service_error(ServiceErrorKind::Conflict, error.to_string())
+        }
+        None => err,
+    }
+}
+
+fn map_http_capability_mutation_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast_ref::<HttpCapabilityMutationError>() {
+        Some(HttpCapabilityMutationError::Validation(message)) => {
+            service_error(ServiceErrorKind::UnprocessableEntity, message.clone())
+        }
+        Some(HttpCapabilityMutationError::PreconditionsChanged(message))
+        | Some(HttpCapabilityMutationError::Conflict(message)) => {
+            service_error(ServiceErrorKind::Conflict, message.clone())
         }
         None => err,
     }

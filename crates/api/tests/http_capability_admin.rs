@@ -355,6 +355,68 @@ async fn string_template_resource_extractors_are_rejected_before_staging() {
 }
 
 #[tokio::test]
+async fn capability_semantic_and_precondition_failures_are_deterministic_client_errors() {
+    let test = support::TestApi::new().await;
+    test.db
+        .upsert_service_provider(&ServiceProvider {
+            id: PROVIDER.to_owned(),
+            name: "Patch Data".to_owned(),
+            description: None,
+            active: true,
+        })
+        .await
+        .expect("provider");
+
+    let mut invalid_generation = serde_json::to_value(generation()).expect("generation JSON");
+    invalid_generation["schemaVersion"] = json!(2);
+    invalid_generation["capabilities"] = json!([]);
+    let invalid = test
+        .app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/admin/providers/patch-data/http-capability-generations",
+            invalid_generation,
+        ))
+        .await
+        .expect("invalid generation response");
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let invalid_expiry = test
+        .app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::PUT,
+            "/api/v1/admin/providers/patch-data/pep-clients/pep-exposure",
+            json!({
+                "applicationId": APPLICATION,
+                "lifecycle": "active",
+                "validUntil": "not-a-timestamp"
+            }),
+        ))
+        .await
+        .expect("invalid expiry response");
+    assert_eq!(invalid_expiry.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let precondition = test
+        .app
+        .clone()
+        .oneshot(support::master_json_request(
+            Method::POST,
+            "/api/v1/admin/providers/patch-data/http-capability-active",
+            json!({
+                "expectedGeneration": null,
+                "expectedCatalogDigest": null,
+                "targetGeneration": 1,
+                "targetCatalogDigest": format!("sha256:{}", "0".repeat(64))
+            }),
+        ))
+        .await
+        .expect("activation precondition response");
+    assert_eq!(precondition.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn active_catalog_and_authorized_decision_bind_every_request_dimension() {
     let (test, generation, token) = decision_fixture().await;
     let catalog = test
@@ -449,4 +511,41 @@ async fn public_authn_capability_cannot_be_used_as_an_authorization_decision() {
         .await
         .expect("public authn decision response");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn inactive_provider_blocks_catalog_including_public_authn_and_all_decisions() {
+    let (test, generation, token) = decision_fixture().await;
+    test.db
+        .upsert_service_provider(&ServiceProvider {
+            id: PROVIDER.to_owned(),
+            name: "Patch Data".to_owned(),
+            description: None,
+            active: false,
+        })
+        .await
+        .expect("deactivate provider");
+
+    let catalog = test
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/v2/http-capabilities/catalog/{PROVIDER}"))
+                .header("x-grant-app-auth-key", support::APP_AUTH_KEY)
+                .body(Body::empty())
+                .expect("catalog request"),
+        )
+        .await
+        .expect("catalog response");
+    assert_eq!(catalog.status(), StatusCode::FORBIDDEN);
+
+    let decision = test
+        .app
+        .clone()
+        .oneshot(decision_request(&token, decision_body(&generation, &token)))
+        .await
+        .expect("decision response");
+    assert_eq!(decision.status(), StatusCode::FORBIDDEN);
 }

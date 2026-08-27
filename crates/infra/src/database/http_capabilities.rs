@@ -1,10 +1,29 @@
 use super::core::now_string;
 use super::*;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 const CATALOG_SCHEMA_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpCapabilityMutationError {
+    Validation(String),
+    PreconditionsChanged(String),
+    Conflict(String),
+}
+
+impl fmt::Display for HttpCapabilityMutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(message)
+            | Self::PreconditionsChanged(message)
+            | Self::Conflict(message) => f.write_str(message),
+        }
+    }
+}
+
+impl StdError for HttpCapabilityMutationError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -221,10 +240,23 @@ struct CapabilityActivationRow {
     activation_sequence: i64,
 }
 
+#[derive(Debug)]
+struct CapabilityPreconditionRow {
+    valid: i64,
+}
+
 impl From<&mut Row<'_>> for CapabilityActivationRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             activation_sequence: row.get("activation_sequence"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for CapabilityPreconditionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            valid: row.get("valid"),
         }
     }
 }
@@ -283,11 +315,13 @@ impl Database {
         provider_id: &str,
         request: StageHttpCapabilityGeneration,
     ) -> Result<StagedHttpCapabilityGeneration> {
-        validate_generation(provider_id, &request)?;
+        validate_generation(provider_id, &request).map_err(http_capability_validation_error)?;
         let canonical = canonical_generation_json(provider_id, &request)?;
         let actual_digest = sha256_digest(canonical.as_bytes());
         if request.catalog_digest != actual_digest {
-            anyhow::bail!("catalogDigest does not match canonical generation");
+            return Err(http_capability_validation_error(anyhow!(
+                "catalogDigest does not match canonical generation"
+            )));
         }
         let existing: Vec<CapabilitySetRow> = self
             .query_rows_with(
@@ -301,9 +335,12 @@ impl Database {
             if existing.catalog_digest != request.catalog_digest
                 || existing.canonical_json != canonical
             {
-                anyhow::bail!("HTTP capability generation conflict");
+                return Err(HttpCapabilityMutationError::Conflict(
+                    "HTTP capability generation conflict".to_owned(),
+                )
+                .into());
             }
-            return Ok(staged_result(false, provider_id, &request));
+            return staged_result_from_existing(false, provider_id, &existing);
         }
 
         let assertion = Uuid::new_v4().simple().to_string();
@@ -322,7 +359,7 @@ impl Database {
             ),
             (
                 Cow::Borrowed("INSERT INTO provider_http_capability_sets (provider_id,generation,catalog_digest,canonical_json,created_at) VALUES ($1,$2,$3,$4,$5)"),
-                params!(provider_id.to_owned(), request.generation as i64, request.catalog_digest.clone(), canonical, created_at),
+                params!(provider_id.to_owned(), request.generation as i64, request.catalog_digest.clone(), canonical.clone(), created_at),
             ),
         ];
         for capability in &request.capabilities {
@@ -351,10 +388,50 @@ impl Database {
             Cow::Borrowed("DELETE FROM provider_http_capability_assertions WHERE id=$1"),
             params!(assertion),
         ));
-        self.runtime
-            .transaction(statements)
-            .await
-            .context("stage HTTP capability generation")?;
+        if let Err(error) = self.runtime.transaction(statements).await {
+            // A byte-identical concurrent deployment retry may lose the insert
+            // race. Re-read the committed canonical row before classifying the
+            // failure so the loser observes the same immutable generation.
+            let existing: Vec<CapabilitySetRow> = self
+                .query_rows_with(
+                    ReadConsistency::Strong,
+                    "SELECT catalog_digest,canonical_json FROM provider_http_capability_sets WHERE provider_id=$1 AND generation=$2",
+                    params!(provider_id.to_owned(), request.generation as i64),
+                    "concurrent HTTP capability generation",
+                )
+                .await?;
+            if let Some(existing) = existing.into_iter().next() {
+                if existing.catalog_digest == request.catalog_digest
+                    && existing.canonical_json == canonical
+                {
+                    return staged_result_from_existing(false, provider_id, &existing);
+                }
+                return Err(HttpCapabilityMutationError::Conflict(
+                    "HTTP capability generation conflict".to_owned(),
+                )
+                .into());
+            }
+            let preconditions: CapabilityPreconditionRow = self
+                .query_row_with(
+                    ReadConsistency::Strong,
+                    "SELECT CASE WHEN
+                     EXISTS (SELECT 1 FROM service_providers WHERE id=$1 AND active=1)
+                     AND COALESCE((SELECT MAX(generation) FROM provider_http_capability_sets WHERE provider_id=$1),0)+1=$2
+                     AND (($3 IS NULL AND NOT EXISTS (SELECT 1 FROM provider_http_capability_sets WHERE provider_id=$1))
+                          OR $3=(SELECT MAX(generation) FROM provider_http_capability_sets WHERE provider_id=$1))
+                     THEN 1 ELSE 0 END AS valid",
+                    params!(provider_id.to_owned(), request.generation as i64, request.expected_latest_generation.map(|value| value as i64)),
+                    "HTTP capability generation preconditions",
+                )
+                .await?;
+            if preconditions.valid == 0 {
+                return Err(HttpCapabilityMutationError::PreconditionsChanged(
+                    "HTTP capability generation preconditions changed".to_owned(),
+                )
+                .into());
+            }
+            return Err(error).context("stage HTTP capability generation");
+        }
         Ok(staged_result(true, provider_id, &request))
     }
 
@@ -362,16 +439,19 @@ impl Database {
         &self,
         provider_id: &str,
         pep_client_id: &str,
-        input: UpsertProviderPepClient,
+        mut input: UpsertProviderPepClient,
         changed_by: &str,
     ) -> Result<ProviderPepClient> {
-        require_token("providerId", provider_id)?;
-        require_token("pepClientId", pep_client_id)?;
-        require_token("applicationId", &input.application_id)?;
-        validate_expiry(input.valid_until.as_deref())?;
+        require_token("providerId", provider_id).map_err(http_capability_validation_error)?;
+        require_token("pepClientId", pep_client_id).map_err(http_capability_validation_error)?;
+        require_token("applicationId", &input.application_id)
+            .map_err(http_capability_validation_error)?;
+        input.valid_until = canonical_expiry(input.valid_until.as_deref())
+            .map_err(http_capability_validation_error)?;
         let now = now_string();
         let receipt_id = Uuid::new_v4().simple().to_string();
-        self.runtime.transaction([
+        let application_id = input.application_id.clone();
+        let applied = self.runtime.transaction([
             (
                 Cow::Borrowed("INSERT INTO provider_http_capability_assertions (id,valid) SELECT $1,CASE WHEN EXISTS (SELECT 1 FROM service_providers WHERE id=$2 AND active=1) AND EXISTS (SELECT 1 FROM applications WHERE id=$3 AND active=1 AND provisioning_status='ready') AND NOT EXISTS (SELECT 1 FROM provider_pep_clients WHERE pep_client_id=$4 AND (provider_id<>$2 OR application_id<>$3)) AND NOT EXISTS (SELECT 1 FROM provider_pep_clients WHERE application_id=$3 AND pep_client_id<>$4) THEN 1 ELSE 0 END"),
                 params!(receipt_id.clone(), provider_id.to_owned(), input.application_id.clone(), pep_client_id.to_owned()),
@@ -385,7 +465,26 @@ impl Database {
                 params!(receipt_id.clone(), pep_client_id.to_owned(), input.application_id, provider_id.to_owned(), input.lifecycle.as_str().to_owned(), input.valid_until, now, changed_by.to_owned()),
             ),
             (Cow::Borrowed("DELETE FROM provider_http_capability_assertions WHERE id=$1"), params!(receipt_id)),
-        ]).await.context("upsert provider PEP client")?;
+        ]).await;
+        if let Err(error) = applied {
+            let preconditions: CapabilityPreconditionRow = self.query_row_with(
+                ReadConsistency::Strong,
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM service_providers WHERE id=$1 AND active=1)
+                 AND EXISTS (SELECT 1 FROM applications WHERE id=$2 AND active=1 AND provisioning_status='ready')
+                 AND NOT EXISTS (SELECT 1 FROM provider_pep_clients WHERE pep_client_id=$3 AND (provider_id<>$1 OR application_id<>$2))
+                 AND NOT EXISTS (SELECT 1 FROM provider_pep_clients WHERE application_id=$2 AND pep_client_id<>$3)
+                 THEN 1 ELSE 0 END AS valid",
+                params!(provider_id.to_owned(), application_id, pep_client_id.to_owned()),
+                "provider PEP client preconditions",
+            ).await?;
+            if preconditions.valid == 0 {
+                return Err(HttpCapabilityMutationError::PreconditionsChanged(
+                    "provider PEP client preconditions changed".to_owned(),
+                )
+                .into());
+            }
+            return Err(error).context("upsert provider PEP client");
+        }
         self.provider_pep_client(provider_id, pep_client_id).await
     }
 
@@ -395,20 +494,34 @@ impl Database {
         input: ActivateHttpCapabilityGeneration,
         activated_by: &str,
     ) -> Result<HttpCapabilityActivation> {
-        validate_digest("targetCatalogDigest", &input.target_catalog_digest)?;
+        validate_digest("targetCatalogDigest", &input.target_catalog_digest)
+            .map_err(http_capability_validation_error)?;
         if input.expected_generation.is_some() != input.expected_catalog_digest.is_some() {
-            anyhow::bail!("expectedGeneration and expectedCatalogDigest must be supplied together");
+            return Err(http_capability_validation_error(anyhow!(
+                "expectedGeneration and expectedCatalogDigest must be supplied together"
+            )));
         }
         if let Some(digest) = input.expected_catalog_digest.as_deref() {
-            validate_digest("expectedCatalogDigest", digest)?;
+            validate_digest("expectedCatalogDigest", digest)
+                .map_err(http_capability_validation_error)?;
         }
         let now = now_string();
+        let activation_started_at = Utc::now();
+        let activation_cutoff = activation_started_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        let pep = self
+            .active_activation_pep(provider_id, activation_started_at)
+            .await?
+            .ok_or_else(|| {
+                anyhow::Error::new(HttpCapabilityMutationError::PreconditionsChanged(
+                    "HTTP capability activation requires an active unexpired PEP client".to_owned(),
+                ))
+            })?;
         let assertion = Uuid::new_v4().simple().to_string();
         let activation_receipt_id = Uuid::new_v4().simple().to_string();
-        self.runtime.transaction([
+        let applied = self.runtime.transaction([
             (
-                Cow::Borrowed("INSERT INTO provider_http_capability_assertions (id,valid) SELECT $1,CASE WHEN EXISTS (SELECT 1 FROM provider_http_capability_sets WHERE provider_id=$2 AND generation=$3 AND catalog_digest=$4) AND (($5 IS NULL AND NOT EXISTS (SELECT 1 FROM provider_http_capability_active WHERE provider_id=$2)) OR EXISTS (SELECT 1 FROM provider_http_capability_active WHERE provider_id=$2 AND generation=$5 AND catalog_digest=$6)) AND EXISTS (SELECT 1 FROM provider_pep_clients pc JOIN applications a ON a.id=pc.application_id WHERE pc.provider_id=$2 AND pc.lifecycle='active' AND (pc.valid_until IS NULL OR pc.valid_until>$7) AND a.active=1 AND a.provisioning_status='ready') THEN 1 ELSE 0 END"),
-                params!(assertion.clone(), provider_id.to_owned(), input.target_generation as i64, input.target_catalog_digest.clone(), input.expected_generation.map(|v| v as i64), input.expected_catalog_digest.clone(), now.clone()),
+                Cow::Borrowed("INSERT INTO provider_http_capability_assertions (id,valid) SELECT $1,CASE WHEN EXISTS (SELECT 1 FROM service_providers WHERE id=$2 AND active=1) AND EXISTS (SELECT 1 FROM provider_http_capability_sets WHERE provider_id=$2 AND generation=$3 AND catalog_digest=$4) AND (($5 IS NULL AND NOT EXISTS (SELECT 1 FROM provider_http_capability_active WHERE provider_id=$2)) OR EXISTS (SELECT 1 FROM provider_http_capability_active WHERE provider_id=$2 AND generation=$5 AND catalog_digest=$6)) AND EXISTS (SELECT 1 FROM provider_pep_clients pc JOIN applications a ON a.id=pc.application_id WHERE pc.provider_id=$2 AND pc.pep_client_id=$7 AND pc.lifecycle='active' AND pc.valid_until IS $8 AND (pc.valid_until IS NULL OR pc.valid_until>$9) AND a.active=1 AND a.provisioning_status='ready') THEN 1 ELSE 0 END"),
+                params!(assertion.clone(), provider_id.to_owned(), input.target_generation as i64, input.target_catalog_digest.clone(), input.expected_generation.map(|v| v as i64), input.expected_catalog_digest.clone(), pep.pep_client_id.clone(), pep.valid_until.clone(), activation_cutoff.clone()),
             ),
             (
                 Cow::Borrowed("INSERT INTO provider_http_capability_activations (activation_receipt_id,provider_id,activation_sequence,from_generation,to_generation,catalog_digest,activated_at,activated_by) VALUES ($1,$2,COALESCE((SELECT MAX(activation_sequence) FROM provider_http_capability_activations WHERE provider_id=$2),0)+1,(SELECT generation FROM provider_http_capability_active WHERE provider_id=$2),$3,$4,$5,$6)"),
@@ -419,7 +532,31 @@ impl Database {
                 params!(provider_id.to_owned(), input.target_generation as i64, input.target_catalog_digest.clone(), now.clone(), activated_by.to_owned()),
             ),
             (Cow::Borrowed("DELETE FROM provider_http_capability_assertions WHERE id=$1"), params!(assertion)),
-        ]).await.context("activate HTTP capability generation")?;
+        ]).await;
+        if let Err(error) = applied {
+            let preconditions: CapabilityPreconditionRow = self.query_row_with(
+                ReadConsistency::Strong,
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM service_providers WHERE id=$1 AND active=1)
+                 AND EXISTS (SELECT 1 FROM provider_http_capability_sets WHERE provider_id=$1 AND generation=$2 AND catalog_digest=$3)
+                 AND (($4 IS NULL AND NOT EXISTS (SELECT 1 FROM provider_http_capability_active WHERE provider_id=$1))
+                      OR EXISTS (SELECT 1 FROM provider_http_capability_active WHERE provider_id=$1 AND generation=$4 AND catalog_digest=$5))
+                 AND EXISTS (SELECT 1 FROM provider_pep_clients pc JOIN applications a ON a.id=pc.application_id
+                             WHERE pc.provider_id=$1 AND pc.pep_client_id=$6 AND pc.lifecycle='active'
+                               AND pc.valid_until IS $7
+                               AND (pc.valid_until IS NULL OR pc.valid_until>$8)
+                               AND a.active=1 AND a.provisioning_status='ready')
+                 THEN 1 ELSE 0 END AS valid",
+                params!(provider_id.to_owned(), input.target_generation as i64, input.target_catalog_digest.clone(), input.expected_generation.map(|value| value as i64), input.expected_catalog_digest.clone(), pep.pep_client_id, pep.valid_until, activation_cutoff),
+                "HTTP capability activation preconditions",
+            ).await?;
+            if preconditions.valid == 0 {
+                return Err(HttpCapabilityMutationError::PreconditionsChanged(
+                    "HTTP capability activation preconditions changed".to_owned(),
+                )
+                .into());
+            }
+            return Err(error).context("activate HTTP capability generation");
+        }
         let inserted: CapabilityActivationRow = self.query_row_with(
             ReadConsistency::Strong,
             "SELECT activation_sequence FROM provider_http_capability_activations WHERE activation_receipt_id=$1 AND provider_id=$2",
@@ -438,6 +575,40 @@ impl Database {
         })
     }
 
+    async fn active_activation_pep(
+        &self,
+        provider_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ProviderPepClient>> {
+        let rows: Vec<PepClientRow> = self.query_rows_with(
+            ReadConsistency::Strong,
+            "SELECT pc.pep_client_id,pc.application_id,pc.provider_id,pc.lifecycle,pc.valid_until,pc.created_at,pc.updated_at
+             FROM provider_pep_clients pc
+             JOIN applications a ON a.id=pc.application_id
+             JOIN service_providers provider ON provider.id=pc.provider_id AND provider.active=1
+             WHERE pc.provider_id=$1 AND pc.lifecycle='active'
+               AND a.active=1 AND a.provisioning_status='ready'
+             ORDER BY pc.pep_client_id",
+            params!(provider_id.to_owned()),
+            "active provider PEP clients",
+        ).await?;
+        for row in rows {
+            let pep: ProviderPepClient = row.into();
+            let unexpired = match pep.valid_until.as_deref() {
+                None => true,
+                Some(value) => {
+                    DateTime::parse_from_rfc3339(value)
+                        .context("parse stored provider PEP expiry")?
+                        > now
+                }
+            };
+            if unexpired {
+                return Ok(Some(pep));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn active_http_capability_catalog(
         &self,
         provider_id: &str,
@@ -445,12 +616,17 @@ impl Database {
     ) -> Result<ActiveHttpCapabilityCatalog> {
         let pep = self.provider_pep_client(provider_id, pep_client_id).await?;
         require_active_pep(&pep)?;
-        let active: Vec<ActiveCapabilityRow> = self.query_rows_with(
-            ReadConsistency::Strong,
-            "SELECT generation,catalog_digest FROM provider_http_capability_active WHERE provider_id=$1",
-            params!(provider_id.to_owned()),
-            "active HTTP capability pointer",
-        ).await?;
+        let active: Vec<ActiveCapabilityRow> = self
+            .query_rows_with(
+                ReadConsistency::Strong,
+                "SELECT active.generation,active.catalog_digest
+             FROM provider_http_capability_active active
+             JOIN service_providers provider ON provider.id=active.provider_id AND provider.active=1
+             WHERE active.provider_id=$1",
+                params!(provider_id.to_owned()),
+                "active HTTP capability pointer",
+            )
+            .await?;
         let active = active.into_iter().next().ok_or_else(|| {
             anyhow!("HTTP capability catalog is not active for provider {provider_id}")
         })?;
@@ -485,7 +661,10 @@ impl Database {
     ) -> Result<ProviderPepClient> {
         let rows: Vec<PepClientRow> = self.query_rows_with(
             ReadConsistency::Strong,
-            "SELECT pep_client_id,application_id,provider_id,lifecycle,valid_until,created_at,updated_at FROM provider_pep_clients WHERE provider_id=$1 AND pep_client_id=$2",
+            "SELECT pc.pep_client_id,pc.application_id,pc.provider_id,pc.lifecycle,pc.valid_until,pc.created_at,pc.updated_at
+             FROM provider_pep_clients pc
+             JOIN service_providers provider ON provider.id=pc.provider_id AND provider.active=1
+             WHERE pc.provider_id=$1 AND pc.pep_client_id=$2",
             params!(provider_id.to_owned(), pep_client_id.to_owned()),
             "provider PEP client",
         ).await?;
@@ -518,6 +697,7 @@ impl Database {
             "SELECT pc.pep_client_id,pc.application_id,pc.provider_id,pc.lifecycle,pc.valid_until,pc.created_at,pc.updated_at
              FROM provider_pep_clients pc
              JOIN applications a ON a.id=pc.application_id
+             JOIN service_providers provider ON provider.id=pc.provider_id AND provider.active=1
              WHERE pc.provider_id=$1 AND pc.application_id=$2
                AND a.active=1 AND a.provisioning_status='ready'",
             params!(provider_id.to_owned(), application_id.to_owned()),
@@ -864,11 +1044,18 @@ fn validate_digest(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_expiry(value: Option<&str>) -> Result<()> {
-    if let Some(value) = value {
-        DateTime::parse_from_rfc3339(value).context("validUntil must be RFC3339")?;
-    }
-    Ok(())
+fn canonical_expiry(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .context("validUntil must be RFC3339")
+                .map(|value| {
+                    value
+                        .with_timezone(&Utc)
+                        .to_rfc3339_opts(SecondsFormat::Nanos, true)
+                })
+        })
+        .transpose()
 }
 
 fn require_active_pep(pep: &ProviderPepClient) -> Result<()> {
@@ -902,6 +1089,36 @@ fn staged_result(
         enabled_count,
         disabled_count: request.capabilities.len() - enabled_count,
     }
+}
+
+fn staged_result_from_existing(
+    staged: bool,
+    provider_id: &str,
+    existing: &CapabilitySetRow,
+) -> Result<StagedHttpCapabilityGeneration> {
+    let stored: CanonicalGeneration = serde_json::from_str(&existing.canonical_json)
+        .context("decode stored HTTP capability generation")?;
+    if stored.provider_id != provider_id {
+        anyhow::bail!("stored HTTP capability provider mismatch");
+    }
+    let enabled_count = stored
+        .capabilities
+        .iter()
+        .filter(|capability| capability.enabled)
+        .count();
+    Ok(StagedHttpCapabilityGeneration {
+        staged,
+        provider_id: stored.provider_id,
+        generation: stored.generation,
+        catalog_digest: existing.catalog_digest.clone(),
+        total_count: stored.capabilities.len(),
+        enabled_count,
+        disabled_count: stored.capabilities.len() - enabled_count,
+    })
+}
+
+fn http_capability_validation_error(error: anyhow::Error) -> anyhow::Error {
+    HttpCapabilityMutationError::Validation(error.to_string()).into()
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
