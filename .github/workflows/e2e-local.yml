@@ -50,6 +50,17 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
+      - name: Reclaim runner disk
+        run: |
+          echo "[storage] before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af --volumes || true
+          echo "[storage] after cleanup"
+          df -h
+          docker system df || true
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

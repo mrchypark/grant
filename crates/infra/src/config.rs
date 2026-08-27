@@ -13,6 +13,10 @@ pub struct ServerConfig {
 pub struct SecurityConfig {
     pub master_key: String,
     pub app_auth_key: String,
+    /// Application identity represented by the service-to-service app key on
+    /// the HTTP capability endpoints. Keeping this explicit prevents a caller
+    /// from selecting an arbitrary PEP client with the shared credential.
+    pub http_capability_pep_application_id: Option<String>,
     pub bootstrap_user_id: String,
     pub bootstrap_user_name: String,
 }
@@ -99,6 +103,14 @@ impl AppConfig {
         let security = SecurityConfig {
             master_key,
             app_auth_key,
+            http_capability_pep_application_id: env::var(
+                "GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID",
+            )
+            .ok()
+            .and_then(|value| {
+                let value = value.trim().to_owned();
+                (!value.is_empty()).then_some(value)
+            }),
             bootstrap_user_id: env_or("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"),
             bootstrap_user_name: env_or("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant"),
         };

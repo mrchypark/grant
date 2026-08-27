@@ -4,16 +4,19 @@ use crate::{
     },
     config::{AppConfig, AuthProviderMode, ReadConsistency},
     database::{
+        ActivateHttpCapabilityGeneration, ActiveHttpCapabilityCatalog,
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
         ApplicationTrustMutationError, AuthoritySnapshotV2, AuthoritySnapshotV2Result, BackupEntry,
         BindIdentityInput, Database, ExternalIdentityMaterialization,
-        ExternalOwnerBootstrapCommand, ExternalOwnerBootstrapError,
-        OrganizationMembershipWriteError, PatchDataAuthorityImport, PatchDataAuthorityImportResult,
-        UserActionCheck,
+        ExternalOwnerBootstrapCommand, ExternalOwnerBootstrapError, HttpCapability,
+        HttpCapabilityAccessMode, HttpCapabilityActivation, HttpQueryPolicy, HttpRequestBodyMode,
+        HttpResourceExtractor, OrganizationMembershipWriteError, PatchDataAuthorityImport,
+        PatchDataAuthorityImportResult, ProviderPepClient, StageHttpCapabilityGeneration,
+        StagedHttpCapabilityGeneration, UpsertProviderPepClient, UserActionCheck,
     },
 };
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use domain::{
     Action, Agreement, AgreementStatus, AgreementType, Application, ApplicationAppType,
     ApplicationConsentPolicy, ApplicationGrant, ApplicationGrantStatus,
@@ -21,7 +24,7 @@ use domain::{
     MembershipStatus, Organization, OrganizationMembership, Role, RoleBinding, RoleBindingState,
     RoleBindingSubjectType, ServiceProvider, User,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::{
@@ -51,6 +54,8 @@ const PATCH_DATA_PLANT_READ_ACTION_ID: &str = "patch-data.plant.read";
 const PATCH_DATA_PLANT_RESOURCE_TYPE: &str = "plant";
 const EXPOSURE_DECISION_TTL_SECONDS: i64 = 5;
 const EXPOSURE_PRINCIPAL_DIGEST_DOMAIN: &[u8] = b"grant.exposure-read.principal.v1";
+const HTTP_CAPABILITY_CREDENTIAL_DIGEST_DOMAIN: &[u8] =
+    b"grant.http-capability.provider-credential.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceErrorKind {
@@ -318,6 +323,78 @@ struct ApplicationAuthorizationContext {
     user_id: String,
     organization_id: String,
     application_id: String,
+    external_subject: String,
+    provider_audience: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpCapabilityCredentialEvidence {
+    pub subject: String,
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpCapabilityResourceEvidence {
+    pub kind: String,
+    pub name: Option<String>,
+    pub canonical_value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpCapabilityDecisionInput {
+    pub provider_id: String,
+    pub pep_client_id: String,
+    pub catalog_generation: u64,
+    pub catalog_digest: String,
+    pub capability_id: String,
+    pub capability_version: u64,
+    pub contract_digest: String,
+    pub method: String,
+    pub canonical_path: String,
+    pub canonical_query: String,
+    pub canonical_query_digest: String,
+    pub forwarded_header_digest: String,
+    pub body_digest: String,
+    pub body_length: u64,
+    pub provider_credential_digest: String,
+    pub provider_credential: HttpCapabilityCredentialEvidence,
+    pub resource_evidence: HttpCapabilityResourceEvidence,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub request_binding: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpCapabilityDecision {
+    pub allowed: bool,
+    pub reason: String,
+    pub provider_id: String,
+    pub pep_client_id: String,
+    pub catalog_generation: u64,
+    pub catalog_digest: String,
+    pub capability_id: String,
+    pub capability_version: u64,
+    pub contract_digest: String,
+    pub action_id: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub method: String,
+    pub canonical_path: String,
+    pub canonical_query_digest: String,
+    pub forwarded_header_digest: String,
+    pub body_digest: String,
+    pub body_length: u64,
+    pub provider_credential_digest: String,
+    pub provider_subject: String,
+    pub provider_audience: String,
+    pub request_binding: String,
+    pub principal_digest: String,
+    pub issued_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +531,233 @@ impl AppService {
         snapshot: AuthoritySnapshotV2,
     ) -> Result<AuthoritySnapshotV2Result> {
         self.db.import_authority_snapshot_v2(snapshot).await
+    }
+
+    pub async fn stage_http_capability_generation_admin(
+        &self,
+        provider_id: &str,
+        request: StageHttpCapabilityGeneration,
+    ) -> Result<StagedHttpCapabilityGeneration> {
+        let actions = self
+            .db
+            .list_actions_for_provider_with_consistency(provider_id, Some(ReadConsistency::Strong))
+            .await?;
+        let action_ids = actions
+            .into_iter()
+            .map(|action| action.id)
+            .collect::<HashSet<_>>();
+        for capability in &request.capabilities {
+            if let Some(action_id) = capability.action_id.as_deref()
+                && !action_ids.contains(action_id)
+            {
+                return Err(bad_request_error(format!(
+                    "HTTP capability action not found for provider {provider_id}: {action_id}"
+                )));
+            }
+        }
+        self.db
+            .stage_http_capability_generation(provider_id, request)
+            .await
+    }
+
+    pub async fn set_provider_pep_client_admin(
+        &self,
+        provider_id: &str,
+        pep_client_id: &str,
+        input: UpsertProviderPepClient,
+    ) -> Result<ProviderPepClient> {
+        self.db
+            .upsert_provider_pep_client(provider_id, pep_client_id, input, "grant-master")
+            .await
+    }
+
+    pub async fn activate_http_capability_generation_admin(
+        &self,
+        provider_id: &str,
+        input: ActivateHttpCapabilityGeneration,
+    ) -> Result<HttpCapabilityActivation> {
+        self.db
+            .activate_http_capability_generation(provider_id, input, "grant-master")
+            .await
+    }
+
+    pub async fn active_http_capability_catalog(
+        &self,
+        provider_id: &str,
+    ) -> Result<ActiveHttpCapabilityCatalog> {
+        let pep = self.configured_http_capability_pep(provider_id).await?;
+        self.db
+            .active_http_capability_catalog(provider_id, &pep.pep_client_id)
+            .await
+    }
+
+    pub async fn decide_http_capability(
+        &self,
+        bearer_token: Option<&str>,
+        organization_id: &str,
+        request: HttpCapabilityDecisionInput,
+    ) -> Result<HttpCapabilityDecision> {
+        let bearer = bearer_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                service_error(
+                    ServiceErrorKind::Unauthorized,
+                    "unauthorized: missing bearer token",
+                )
+            })?;
+        let pep = self
+            .configured_http_capability_pep(&request.provider_id)
+            .await?;
+        if pep.pep_client_id != request.pep_client_id {
+            return Err(forbidden_error("forbidden: PEP client binding mismatch"));
+        }
+        let catalog = self
+            .db
+            .active_http_capability_catalog(&request.provider_id, &pep.pep_client_id)
+            .await?;
+        if catalog.generation != request.catalog_generation
+            || catalog.catalog_digest != request.catalog_digest
+        {
+            return Err(forbidden_error("forbidden: stale HTTP capability catalog"));
+        }
+        let capability = catalog
+            .capabilities
+            .iter()
+            .find(|capability| {
+                capability.enabled
+                    && capability.capability_id == request.capability_id
+                    && capability.version == request.capability_version
+            })
+            .ok_or_else(|| forbidden_error("forbidden: HTTP capability is not active"))?;
+        if capability.access_mode != HttpCapabilityAccessMode::Authorized {
+            return Err(forbidden_error(
+                "forbidden: public authentication capability has no authorization decision",
+            ));
+        }
+        validate_http_request_evidence(capability, &request)?;
+
+        let credential_digest = credential_digest(bearer);
+        if credential_digest != request.provider_credential_digest {
+            return Err(forbidden_error(
+                "forbidden: provider credential digest mismatch",
+            ));
+        }
+        let context = self
+            .resolve_application_authorization_context(Some(bearer), organization_id)
+            .await?;
+        if context.external_subject != request.provider_credential.subject
+            || context.provider_audience != request.provider_credential.audience
+        {
+            return Err(forbidden_error(
+                "forbidden: provider credential principal mismatch",
+            ));
+        }
+        let action_id = capability.action_id.as_deref().ok_or_else(|| {
+            service_error(
+                ServiceErrorKind::Unavailable,
+                "authorized capability action missing",
+            )
+        })?;
+        let resource = capability.resource.as_ref().ok_or_else(|| {
+            service_error(
+                ServiceErrorKind::Unavailable,
+                "authorized capability resource missing",
+            )
+        })?;
+        let decision = self
+            .evaluate_authorizations(
+                &[AuthorizationCheck {
+                    subject: AuthorizationSubject {
+                        subject_type: "user".to_owned(),
+                        id: context.user_id.clone(),
+                        organization_id: context.organization_id.clone(),
+                    },
+                    action: action_id.to_owned(),
+                    resource: AuthorizationResource {
+                        provider_id: request.provider_id.clone(),
+                        resource_type: resource.resource_type.clone(),
+                        id: request.resource_id.clone(),
+                    },
+                }],
+                Some(ReadConsistency::Strong),
+                Some(&context.application_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    "HTTP capability authorization failed",
+                )
+            })?;
+        let issued_at = Utc::now();
+        let expires_at = issued_at + chrono::Duration::seconds(EXPOSURE_DECISION_TTL_SECONDS);
+        Ok(HttpCapabilityDecision {
+            allowed: decision.allowed,
+            reason: decision.reason,
+            provider_id: request.provider_id,
+            pep_client_id: request.pep_client_id,
+            catalog_generation: request.catalog_generation,
+            catalog_digest: request.catalog_digest,
+            capability_id: request.capability_id,
+            capability_version: request.capability_version,
+            contract_digest: request.contract_digest,
+            action_id: action_id.to_owned(),
+            resource_type: request.resource_type,
+            resource_id: request.resource_id,
+            method: request.method,
+            canonical_path: request.canonical_path,
+            canonical_query_digest: request.canonical_query_digest,
+            forwarded_header_digest: request.forwarded_header_digest,
+            body_digest: request.body_digest,
+            body_length: request.body_length,
+            provider_credential_digest: request.provider_credential_digest,
+            provider_subject: context.external_subject,
+            provider_audience: context.provider_audience,
+            request_binding: request.request_binding,
+            principal_digest: exposure_principal_digest(
+                &context.user_id,
+                &context.organization_id,
+                &context.application_id,
+            ),
+            issued_at: issued_at.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+        })
+    }
+
+    async fn configured_http_capability_pep(&self, provider_id: &str) -> Result<ProviderPepClient> {
+        let application_id = self
+            .cfg
+            .security
+            .http_capability_pep_application_id
+            .as_deref()
+            .ok_or_else(|| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    "HTTP capability PEP application is not configured",
+                )
+            })?;
+        let pep = self
+            .db
+            .find_provider_pep_client_for_application(provider_id, application_id)
+            .await?
+            .ok_or_else(|| forbidden_error("forbidden: PEP client binding mismatch"))?;
+        if pep.lifecycle != "active" {
+            return Err(forbidden_error("forbidden: PEP client is not active"));
+        }
+        if let Some(valid_until) = pep.valid_until.as_deref()
+            && DateTime::parse_from_rfc3339(valid_until).map_err(|_| {
+                service_error(
+                    ServiceErrorKind::Unavailable,
+                    "provider PEP expiry is invalid",
+                )
+            })? <= Utc::now()
+        {
+            return Err(forbidden_error("forbidden: PEP client is expired"));
+        }
+        Ok(pep)
     }
 
     pub fn rauthy_proxy_client(&self) -> &reqwest::Client {
@@ -2352,6 +2656,8 @@ impl AppService {
             user_id: user.id,
             organization_id,
             application_id: application.id,
+            external_subject: identity.external_user_id,
+            provider_audience: identity.client_id,
         })
     }
 
@@ -2539,6 +2845,317 @@ fn exposure_principal_digest(user_id: &str, organization_id: &str, application_i
         digest.update(value.as_bytes());
     }
     hex::encode(digest.finalize())
+}
+
+fn credential_digest(credential: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(HTTP_CAPABILITY_CREDENTIAL_DIGEST_DOMAIN);
+    digest.update((credential.len() as u64).to_be_bytes());
+    digest.update(credential.as_bytes());
+    format!("sha256:{}", hex::encode(digest.finalize()))
+}
+
+fn validate_http_request_evidence(
+    capability: &HttpCapability,
+    request: &HttpCapabilityDecisionInput,
+) -> Result<()> {
+    if request.contract_digest != capability.contract_digest {
+        return Err(forbidden_error(
+            "forbidden: HTTP capability contract digest mismatch",
+        ));
+    }
+    if request.method != capability.method {
+        return Err(forbidden_error("forbidden: HTTP method mismatch"));
+    }
+    validate_sha256("canonicalQueryDigest", &request.canonical_query_digest)?;
+    validate_sha256("forwardedHeaderDigest", &request.forwarded_header_digest)?;
+    validate_sha256("bodyDigest", &request.body_digest)?;
+    validate_sha256(
+        "providerCredentialDigest",
+        &request.provider_credential_digest,
+    )?;
+    if sha256_text(&request.canonical_query) != request.canonical_query_digest {
+        return Err(forbidden_error(
+            "forbidden: canonical query digest mismatch",
+        ));
+    }
+    validate_canonical_query(&capability.query, &request.canonical_query)?;
+    match capability.request.body {
+        HttpRequestBodyMode::None => {
+            if request.body_length != 0 || request.body_digest != sha256_text("") {
+                return Err(forbidden_error(
+                    "forbidden: bodyless request policy mismatch",
+                ));
+            }
+        }
+        HttpRequestBodyMode::Json => {
+            if request.body_length > capability.request.max_bytes {
+                return Err(forbidden_error(
+                    "forbidden: request body exceeds capability limit",
+                ));
+            }
+        }
+    }
+    if capability.request.forward_headers.is_empty()
+        && request.forwarded_header_digest != sha256_text("")
+    {
+        return Err(forbidden_error(
+            "forbidden: forwarded header policy mismatch",
+        ));
+    }
+    require_exact_value("requestBinding", &request.request_binding, 256)?;
+    if request.request_binding.len() < 22
+        || !request
+            .request_binding
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(bad_request_error(
+            "requestBinding must contain at least 128 bits of base64url entropy",
+        ));
+    }
+    require_exact_value(
+        "providerCredential.subject",
+        &request.provider_credential.subject,
+        512,
+    )?;
+    require_exact_value(
+        "providerCredential.audience",
+        &request.provider_credential.audience,
+        512,
+    )?;
+    let resource = capability.resource.as_ref().ok_or_else(|| {
+        service_error(ServiceErrorKind::Unavailable, "capability resource missing")
+    })?;
+    if request.resource_type != resource.resource_type {
+        return Err(forbidden_error("forbidden: resource type mismatch"));
+    }
+    let captures = match_path_template(&capability.path_template, &request.canonical_path)?;
+    let extracted = match &resource.id {
+        HttpResourceExtractor::PathSegment { name, format } => {
+            if request.resource_evidence.kind != "pathSegment"
+                || request.resource_evidence.name.as_deref() != Some(name)
+            {
+                return Err(forbidden_error(
+                    "forbidden: path resource evidence mismatch",
+                ));
+            }
+            let value = captures
+                .iter()
+                .find_map(|(capture, value)| (capture == name).then_some(value.as_str()))
+                .ok_or_else(|| forbidden_error("forbidden: path resource was not captured"))?;
+            validate_scalar_format(format, value)?;
+            value.to_owned()
+        }
+        HttpResourceExtractor::QueryScalar { name, format } => {
+            if request.resource_evidence.kind != "queryScalar"
+                || request.resource_evidence.name.as_deref() != Some(name)
+            {
+                return Err(forbidden_error(
+                    "forbidden: query resource evidence mismatch",
+                ));
+            }
+            let value = exact_query_scalar(&request.canonical_query, name)?;
+            validate_scalar_format(format, &value)?;
+            value
+        }
+        HttpResourceExtractor::JsonPointer { pointer, format } => {
+            if request.resource_evidence.kind != "jsonPointer"
+                || request.resource_evidence.name.as_deref() != Some(pointer)
+            {
+                return Err(forbidden_error(
+                    "forbidden: body resource evidence mismatch",
+                ));
+            }
+            validate_scalar_format(format, &request.resource_evidence.canonical_value)?;
+            request.resource_evidence.canonical_value.clone()
+        }
+        HttpResourceExtractor::Constant { value } => {
+            if request.resource_evidence.kind != "constant"
+                || request.resource_evidence.name.is_some()
+            {
+                return Err(forbidden_error(
+                    "forbidden: constant resource evidence mismatch",
+                ));
+            }
+            value.clone()
+        }
+    };
+    if extracted != request.resource_evidence.canonical_value || extracted != request.resource_id {
+        return Err(forbidden_error("forbidden: resource evidence mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_canonical_query(policy: &HttpQueryPolicy, query: &str) -> Result<()> {
+    match policy {
+        HttpQueryPolicy::None {} => {
+            if !query.is_empty() {
+                return Err(forbidden_error("forbidden: query is not allowed"));
+            }
+        }
+        HttpQueryPolicy::Exact { parameters } => {
+            let mut values = std::collections::HashMap::new();
+            let mut prior_key: Option<&str> = None;
+            if !query.is_empty() {
+                for pair in query.split('&') {
+                    let Some((key, value)) = pair.split_once('=') else {
+                        return Err(bad_request_error("canonicalQuery contains an invalid pair"));
+                    };
+                    if key.is_empty()
+                        || key.contains('%')
+                        || value.contains('%')
+                        || pair.contains(';')
+                    {
+                        return Err(bad_request_error("canonicalQuery is not canonical"));
+                    }
+                    if prior_key.is_some_and(|prior| prior >= key) {
+                        return Err(bad_request_error(
+                            "canonicalQuery keys must be unique and sorted",
+                        ));
+                    }
+                    prior_key = Some(key);
+                    let parameter = parameters
+                        .iter()
+                        .find(|parameter| parameter.name == key)
+                        .ok_or_else(|| forbidden_error("forbidden: query key is not allowed"))?;
+                    validate_scalar_format(&parameter.format, value)?;
+                    values.insert(key, value);
+                }
+            }
+            for parameter in parameters {
+                if parameter.required && !values.contains_key(parameter.name.as_str()) {
+                    return Err(forbidden_error("forbidden: required query key is missing"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn match_path_template(template: &str, path: &str) -> Result<Vec<(String, String)>> {
+    if !path.starts_with('/')
+        || path.contains('%')
+        || path.contains("//")
+        || path.contains('\\')
+        || path.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(bad_request_error("canonicalPath is not canonical"));
+    }
+    let template = template.split('/').collect::<Vec<_>>();
+    let path = path.split('/').collect::<Vec<_>>();
+    if template.len() != path.len() {
+        return Err(forbidden_error(
+            "forbidden: HTTP path does not match capability",
+        ));
+    }
+    let mut captures = Vec::new();
+    for (expected, actual) in template.into_iter().zip(path) {
+        if expected.starts_with('{') && expected.ends_with('}') {
+            if actual.is_empty() || actual == "." || actual == ".." {
+                return Err(bad_request_error(
+                    "canonicalPath contains an invalid segment",
+                ));
+            }
+            captures.push((
+                expected[1..expected.len() - 1].to_owned(),
+                actual.to_owned(),
+            ));
+        } else if expected != actual {
+            return Err(forbidden_error(
+                "forbidden: HTTP path does not match capability",
+            ));
+        }
+    }
+    Ok(captures)
+}
+
+fn exact_query_scalar(query: &str, name: &str) -> Result<String> {
+    let mut found = None;
+    if query.is_empty() {
+        return Err(forbidden_error(
+            "forbidden: required query resource is missing",
+        ));
+    }
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(bad_request_error("canonicalQuery contains an invalid pair"));
+        };
+        if key == name {
+            if found.is_some() {
+                return Err(bad_request_error(
+                    "canonicalQuery contains a duplicate resource key",
+                ));
+            }
+            found = Some(value.to_owned());
+        }
+    }
+    found.ok_or_else(|| forbidden_error("forbidden: required query resource is missing"))
+}
+
+fn validate_scalar_format(format: &str, value: &str) -> Result<()> {
+    let valid = match format {
+        "pocketbaseId" => {
+            value.len() == 15 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        }
+        "uuid" => uuid::Uuid::parse_str(value).is_ok(),
+        "xid" => {
+            value.len() == 20
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        }
+        "slug" => {
+            (1..=128).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        }
+        "asciiToken" => {
+            (1..=256).contains(&value.len())
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':')
+                })
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(bad_request_error(
+            "resource scalar does not match capability format",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sha256(field: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(bad_request_error(format!(
+            "{field} must be a sha256 digest"
+        )));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(bad_request_error(format!(
+            "{field} must be a sha256 digest"
+        )));
+    }
+    Ok(())
+}
+
+fn sha256_text(value: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn require_exact_value(field: &str, value: &str, max_len: usize) -> Result<()> {
+    if value.is_empty() || value.trim() != value || value.len() > max_len {
+        return Err(bad_request_error(format!(
+            "{field} must be a bounded exact non-empty value"
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_action_id(provider_id: &str, code: &str, provided_id: &str) -> Result<String> {
@@ -2884,14 +3501,16 @@ fn ensure_organization_application_mutable(application: &Application) -> Result<
 mod tests {
     use super::{
         SCHEMA_READINESS_CACHE_TTL, SchemaReadinessCache, SchemaReadinessRoute,
-        SchemaReadinessState, ServiceError, ServiceErrorKind, exposure_principal_digest,
-        map_application_consent_write_error, map_application_security_mutation_error,
-        map_application_trust_mutation_error, map_external_owner_bootstrap_error,
-        sanitize_rauthy_error_field,
+        SchemaReadinessState, ServiceError, ServiceErrorKind, exact_query_scalar,
+        exposure_principal_digest, map_application_consent_write_error,
+        map_application_security_mutation_error, map_application_trust_mutation_error,
+        map_external_owner_bootstrap_error, match_path_template, sanitize_rauthy_error_field,
+        validate_canonical_query,
     };
     use crate::database::{
         ApplicationConsentWriteError, ApplicationSecurityMutationError,
-        ApplicationTrustMutationError, ExternalOwnerBootstrapError,
+        ApplicationTrustMutationError, ExternalOwnerBootstrapError, HttpQueryParameter,
+        HttpQueryPolicy,
     };
     use std::{
         sync::{
@@ -2918,6 +3537,79 @@ mod tests {
             exposure_principal_digest("ab", "c", "d"),
             exposure_principal_digest("a", "bc", "d")
         );
+    }
+
+    #[test]
+    fn canonical_path_and_query_extractors_are_exact_and_unambiguous() {
+        let captures = match_path_template(
+            "/api/collections/plants/records/{plantId}",
+            "/api/collections/plants/records/abcdefghijklmn1",
+        )
+        .expect("canonical path");
+        assert_eq!(
+            captures,
+            vec![("plantId".to_owned(), "abcdefghijklmn1".to_owned())]
+        );
+        for path in [
+            "/api/collections/plants/records/%61bcdefghijklmn1",
+            "/api/collections/plants//records/abcdefghijklmn1",
+            "/api/collections/plants/records/..",
+            "/api/collections/other/records/abcdefghijklmn1",
+        ] {
+            assert!(
+                match_path_template("/api/collections/plants/records/{plantId}", path).is_err(),
+                "noncanonical or mismatched path was accepted: {path}"
+            );
+        }
+
+        assert_eq!(
+            exact_query_scalar("plant=abcdefghijklmn1&expand=organization", "plant")
+                .expect("exact query scalar"),
+            "abcdefghijklmn1"
+        );
+        for query in [
+            "",
+            "expand=organization",
+            "plant=abcdefghijklmn1&plant=zzzzzzzzzzzzzzz",
+            "plant",
+        ] {
+            assert!(
+                exact_query_scalar(query, "plant").is_err(),
+                "missing, duplicate, or malformed scalar was accepted: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_query_policy_rejects_unknown_duplicate_unsorted_and_noncanonical_values() {
+        let policy = HttpQueryPolicy::Exact {
+            parameters: vec![
+                HttpQueryParameter {
+                    name: "optional".to_owned(),
+                    format: "slug".to_owned(),
+                    required: false,
+                },
+                HttpQueryParameter {
+                    name: "plant".to_owned(),
+                    format: "pocketbaseId".to_owned(),
+                    required: true,
+                },
+            ],
+        };
+        validate_canonical_query(&policy, "optional=site-a&plant=abcdefghijklmn1")
+            .expect("closed canonical query");
+        for query in [
+            "plant=abcdefghijklmn1&unknown=x",
+            "plant=abcdefghijklmn1&plant=abcdefghijklmn1",
+            "plant=abcdefghijklmn1&optional=site-a",
+            "plant=%61bcdefghijklmn1",
+            "optional=site-a",
+        ] {
+            assert!(
+                validate_canonical_query(&policy, query).is_err(),
+                "invalid query was accepted: {query}"
+            );
+        }
     }
 
     #[test]

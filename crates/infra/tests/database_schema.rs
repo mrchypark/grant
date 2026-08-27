@@ -26,6 +26,12 @@ const AUTHORIZATION_TABLES: &[&str] = &[
     "application_grants",
     "application_grant_actions",
     "application_consent_assertions",
+    "provider_http_capability_sets",
+    "provider_http_capabilities",
+    "provider_http_capability_active",
+    "provider_http_capability_activations",
+    "provider_pep_clients",
+    "provider_pep_client_receipts",
 ];
 
 const REMOVED_GRANT_TABLES: &[&str] = &[

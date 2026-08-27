@@ -157,6 +157,7 @@ fn loads_default_config() {
     assert_eq!(cfg.server.bind_addr, "0.0.0.0:8080");
     assert_eq!(cfg.security.bootstrap_user_id, "conalog-grant");
     assert_eq!(cfg.security.app_auth_key, "dev-only-app-auth-key");
+    assert_eq!(cfg.security.http_capability_pep_application_id, None);
     assert_eq!(cfg.auth.rauthy.base_url, "http://127.0.0.1:8080");
     assert_eq!(cfg.auth.rauthy.client_id, "grant".to_owned());
     assert_eq!(cfg.auth.rauthy.client_secret, "default-secret".to_owned());

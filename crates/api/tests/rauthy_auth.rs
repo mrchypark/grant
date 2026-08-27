@@ -109,6 +109,7 @@ async fn build_service_with_rauthy(
         security: SecurityConfig {
             master_key: "dev-only-master-key".to_owned(),
             app_auth_key: "dev-only-app-auth-key".to_owned(),
+            http_capability_pep_application_id: None,
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },

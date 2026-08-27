@@ -37,6 +37,8 @@ mod authz;
 mod backups;
 mod catalog;
 mod groups;
+mod http_capabilities;
+pub use http_capabilities::*;
 mod identity;
 mod organizations;
 mod roles;

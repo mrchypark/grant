@@ -52,6 +52,11 @@ impl Database {
                             , ohe.source_generation AS hierarchy_source_generation
                             , paie.source_generation AS authority_entity_source_generation
                             , as2.snapshot_digest AS authority_snapshot_v2_digest
+                            , phcs.catalog_digest AS http_capability_set_digest
+                            , phc.contract_digest AS http_capability_contract_digest
+                            , phca.catalog_digest AS http_capability_active_digest
+                            , phcr.catalog_digest AS http_capability_receipt_digest
+                            , ppc.lifecycle AS provider_pep_lifecycle
                      FROM users u
                      LEFT JOIN user_identities ui ON 1 = 0
                      LEFT JOIN parties p ON 1 = 0
@@ -77,6 +82,11 @@ impl Database {
                      LEFT JOIN organization_hierarchy_edges ohe ON 1 = 0
                      LEFT JOIN patch_data_authority_import_entities paie ON 1 = 0
                      LEFT JOIN authority_snapshots_v2 as2 ON 1 = 0
+                     LEFT JOIN provider_http_capability_sets phcs ON 1 = 0
+                     LEFT JOIN provider_http_capabilities phc ON 1 = 0
+                     LEFT JOIN provider_http_capability_active phca ON 1 = 0
+                     LEFT JOIN provider_http_capability_activations phcr ON 1 = 0
+                     LEFT JOIN provider_pep_clients ppc ON 1 = 0
                      LIMIT 0
                  ) required_schema",
                 params!(),
@@ -434,6 +444,81 @@ impl Database {
                     PRIMARY KEY (source_id, generation),
                     UNIQUE (source_id, snapshot_digest)
                 );
+                CREATE TABLE IF NOT EXISTS provider_http_capability_sets (
+                    provider_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL CHECK (generation > 0),
+                    catalog_digest TEXT NOT NULL,
+                    canonical_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (provider_id, generation),
+                    UNIQUE (provider_id, catalog_digest),
+                    FOREIGN KEY (provider_id) REFERENCES service_providers(id)
+                );
+                CREATE TABLE IF NOT EXISTS provider_http_capability_assertions (
+                    id TEXT PRIMARY KEY,
+                    valid INTEGER NOT NULL CHECK (valid = 1)
+                );
+                CREATE TABLE IF NOT EXISTS provider_http_capabilities (
+                    provider_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    capability_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version > 0),
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    access_mode TEXT NOT NULL CHECK (access_mode IN ('public_authn', 'authorized')),
+                    method TEXT NOT NULL,
+                    path_template TEXT NOT NULL,
+                    action_id TEXT,
+                    resource_type TEXT,
+                    extractor_json TEXT NOT NULL,
+                    query_policy_json TEXT NOT NULL,
+                    request_policy_json TEXT NOT NULL,
+                    response_policy_json TEXT NOT NULL,
+                    contract_digest TEXT NOT NULL,
+                    PRIMARY KEY (provider_id, generation, capability_id, version),
+                    FOREIGN KEY (provider_id, generation)
+                        REFERENCES provider_http_capability_sets(provider_id, generation)
+                );
+                CREATE TABLE IF NOT EXISTS provider_http_capability_active (
+                    provider_id TEXT PRIMARY KEY,
+                    generation INTEGER NOT NULL,
+                    catalog_digest TEXT NOT NULL,
+                    activated_at TEXT NOT NULL,
+                    activated_by TEXT NOT NULL,
+                    FOREIGN KEY (provider_id, generation)
+                        REFERENCES provider_http_capability_sets(provider_id, generation)
+                );
+                CREATE TABLE IF NOT EXISTS provider_http_capability_activations (
+                    activation_receipt_id TEXT NOT NULL UNIQUE,
+                    provider_id TEXT NOT NULL,
+                    activation_sequence INTEGER NOT NULL,
+                    from_generation INTEGER,
+                    to_generation INTEGER NOT NULL,
+                    catalog_digest TEXT NOT NULL,
+                    activated_at TEXT NOT NULL,
+                    activated_by TEXT NOT NULL,
+                    PRIMARY KEY (provider_id, activation_sequence)
+                );
+                CREATE TABLE IF NOT EXISTS provider_pep_clients (
+                    pep_client_id TEXT PRIMARY KEY,
+                    application_id TEXT NOT NULL UNIQUE,
+                    provider_id TEXT NOT NULL,
+                    lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'disabled', 'deleted')),
+                    valid_until TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (application_id) REFERENCES applications(id),
+                    FOREIGN KEY (provider_id) REFERENCES service_providers(id)
+                );
+                CREATE TABLE IF NOT EXISTS provider_pep_client_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    pep_client_id TEXT NOT NULL,
+                    application_id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    lifecycle TEXT NOT NULL,
+                    valid_until TEXT,
+                    changed_at TEXT NOT NULL,
+                    changed_by TEXT NOT NULL
+                );
                 "#
                 .to_owned(),
             )
@@ -463,6 +548,12 @@ impl Database {
             "applications",
             "provisioning_status",
             "TEXT NOT NULL DEFAULT 'unprovisioned'",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "provider_http_capability_activations",
+            "activation_receipt_id",
+            "TEXT",
         )
         .await?;
         self.add_column_if_missing("applications", "security_mutation_token", "TEXT")
@@ -546,6 +637,17 @@ impl Database {
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_application_grants_active_unique
                     ON application_grants (user_id, application_id, organization_id)
                     WHERE status = 'active';
+                CREATE INDEX IF NOT EXISTS idx_provider_http_capabilities_match
+                    ON provider_http_capabilities
+                    (provider_id, generation, enabled, method, path_template);
+                CREATE INDEX IF NOT EXISTS idx_provider_http_activations_provider
+                    ON provider_http_capability_activations
+                    (provider_id, activation_sequence);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_http_activations_receipt
+                    ON provider_http_capability_activations (activation_receipt_id)
+                    WHERE activation_receipt_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_provider_pep_clients_provider_lifecycle
+                    ON provider_pep_clients (provider_id, lifecycle, valid_until);
                 "#
                 .to_owned(),
             )

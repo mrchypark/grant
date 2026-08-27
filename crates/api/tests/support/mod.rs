@@ -167,6 +167,13 @@ pub async fn test_service() -> (Arc<AppService>, Database, HiqliteRuntime, TempD
 pub async fn test_service_with_default_consistency(
     default_read_consistency: ReadConsistency,
 ) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
+    test_service_with_security(default_read_consistency, None).await
+}
+
+pub async fn test_service_with_security(
+    default_read_consistency: ReadConsistency,
+    http_capability_pep_application_id: Option<String>,
+) -> (Arc<AppService>, Database, HiqliteRuntime, TempDir) {
     let rauthy_base_url = start_mock_rauthy().await;
     let (runtime, dir) = test_runtime(default_read_consistency.clone()).await;
     let app_cfg = AppConfig {
@@ -176,6 +183,7 @@ pub async fn test_service_with_default_consistency(
         security: SecurityConfig {
             master_key: MASTER_KEY.to_owned(),
             app_auth_key: APP_AUTH_KEY.to_owned(),
+            http_capability_pep_application_id,
             bootstrap_user_id: BOOTSTRAP_USER_ID.to_owned(),
             bootstrap_user_name: BOOTSTRAP_USER_NAME.to_owned(),
         },
@@ -216,6 +224,18 @@ impl TestApi {
     pub async fn with_default_consistency(default_read_consistency: ReadConsistency) -> Self {
         let (service, db, runtime, dir) =
             test_service_with_default_consistency(default_read_consistency).await;
+        Self {
+            app: api::build_router(service),
+            db,
+            runtime,
+            _dir: dir,
+        }
+    }
+
+    pub async fn with_http_capability_pep(application_id: &str) -> Self {
+        let (service, db, runtime, dir) =
+            test_service_with_security(ReadConsistency::Local, Some(application_id.to_owned()))
+                .await;
         Self {
             app: api::build_router(service),
             db,

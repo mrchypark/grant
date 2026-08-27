@@ -80,6 +80,18 @@ Wave 0에서는 이 테이블의 row를 현재 evaluator의 `role_bindings`, `ap
 
 grant가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. 기본 provider는 `grant`이며, compos 같은 first-party 서비스도 이 테이블에 등록한 뒤 action manifest를 넣는다.
 
+### `provider_http_capability_sets`, `provider_http_capabilities`, `provider_http_capability_active`
+
+Exposure가 provider-native HTTP 요청을 권한 tuple로 고정할 때 사용하는 불변 HTTP capability catalog다. `provider_http_capability_sets`의 `(provider_id, generation)`은 1부터 연속 증가하며 canonical JSON과 digest를 보존한다. 같은 provider/digest를 다른 generation으로 재사용할 수 없고, 같은 generation의 byte-identical 재시도만 idempotent하다. `provider_http_capabilities`는 generation 안의 정규화된 검색 row이며 enabled 상태도 불변 manifest 일부다. entry를 바꾸거나 끄려면 새 generation을 stage해야 한다.
+
+`provider_http_capability_active`는 유일한 publication pointer다. stage된 최대 generation을 자동으로 읽지 않으며, CAS activation/rollback이 가리킨 generation만 catalog fetch와 decision에 사용한다. `provider_http_capability_activations`는 pointer 이동을 append-only sequence와 전역 unique `activation_receipt_id`로 기록한다. activation 응답은 transaction 밖의 `MAX(sequence)`를 읽지 않고, 같은 transaction에서 삽입한 receipt ID로 자신의 sequence를 다시 읽으므로 뒤따른 activation과 혼동되지 않는다. rollback도 기존 generation row를 수정하지 않고 pointer만 이전 retained generation으로 이동한다. `provider_http_capability_assertions`는 provider/action, generation CAS, active PEP 조건을 transaction 내부에서 fail closed시키는 임시 CHECK row이고 성공 시 비워진다.
+
+Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 exact method, closed path template, access mode, action/resource tuple, bounded extractor와 닫힌 query/request/response policy DTO만 저장한다. Phase A path는 resource extractor가 명시적으로 모델링한 변수 하나만 허용하며 collection 같은 추가 변수는 거부한다. 실제 origin과 transport는 Exposure 배포 설정 소유다. 기존 authority snapshot import는 capability를 생성하거나 활성화하지 않는다.
+
+### `provider_pep_clients`, `provider_pep_client_receipts`
+
+Exposure 같은 PEP service identity와 provider를 연결한다. `pep_client_id`는 전역 primary key, `application_id`는 전역 unique라 둘 중 하나를 다른 provider로 재결합할 수 없다. binding은 active/disabled/deleted lifecycle과 선택적 RFC3339 expiry를 가지며, active/ready application만 fetch·decision에 사용할 수 있다. application auth key가 나타내는 application ID는 `GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID`에 명시하고 Grant가 그 application으로 binding을 역조회한다. 따라서 요청 body나 provider path가 PEP identity를 선택하지 못한다. 모든 lifecycle 변경은 `provider_pep_client_receipts`에 별도 receipt를 추가하며 capability history를 변경하지 않는다.
+
 ### `actions`, `roles`, `role_actions`, `role_bindings`
 
 권한 엔진의 원본 데이터. `actions.provider_id`는 action을 제공하는 `service_providers.id`를 가리킨다. `actions.code`는 provider 안에서만 unique이며, 같은 code를 서로 다른 provider가 재사용할 수 있다. 실제 참조 key인 `actions.id`는 전역 PK라 grant provider는 기존처럼 code를 id로 쓰고, 외부 provider action은 provider/code 조합에서 정규화한 id를 사용한다.
@@ -163,6 +175,11 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `agreements.grantor_organization_id` -> `organizations.id`
 - `agreements.grantee_organization_id` -> `organizations.id`
 - `actions.provider_id` -> `service_providers.id`
+- `provider_http_capability_sets.provider_id` -> `service_providers.id`
+- `provider_http_capabilities.(provider_id, generation)` -> `provider_http_capability_sets.(provider_id, generation)`
+- `provider_http_capability_active.(provider_id, generation)` -> `provider_http_capability_sets.(provider_id, generation)`
+- `provider_pep_clients.provider_id` -> `service_providers.id`
+- `provider_pep_clients.application_id` -> `applications.id`
 - `roles.organization_id` -> `organizations.id`
 - `role_actions.role_id` -> `roles.id`
 - `role_actions.action_id` -> `actions.id`

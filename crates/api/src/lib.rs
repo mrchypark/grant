@@ -10,6 +10,7 @@ mod backups;
 mod dto;
 mod error;
 mod handlers;
+mod http_capabilities;
 mod mappers;
 mod operation_catalog;
 mod patch_data_operations;
@@ -35,6 +36,10 @@ use handlers::{
     revoke_application_consent, set_application_trust, set_user_active, update_agreement,
     update_group, upsert_provider, verify_application_provisioning,
 };
+use http_capabilities::{
+    activate_http_capability_generation, decide_http_capability,
+    get_active_http_capability_catalog, set_provider_pep_client, stage_http_capability_generation,
+};
 use rauthy_proxy::{auth_root, proxy_rauthy_passthrough, proxy_rauthy_root};
 
 pub fn build_router(service: Arc<AppService>) -> Router {
@@ -44,6 +49,18 @@ pub fn build_router(service: Arc<AppService>) -> Router {
         .route(
             "/api/v1/admin/providers/{providerId}/actions",
             put(replace_provider_actions),
+        )
+        .route(
+            "/api/v1/admin/providers/{providerId}/http-capability-generations",
+            post(stage_http_capability_generation),
+        )
+        .route(
+            "/api/v1/admin/providers/{providerId}/http-capability-active",
+            post(activate_http_capability_generation),
+        )
+        .route(
+            "/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}",
+            put(set_provider_pep_client),
         )
         .route(
             "/api/v1/orgs/{organizationId}/apps",
@@ -137,6 +154,18 @@ pub fn build_learner_router(service: Arc<AppService>) -> Router {
         .route("/api/v1/admin/providers", any(requires_voter_node))
         .route(
             "/api/v1/admin/providers/{providerId}/actions",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/admin/providers/{providerId}/http-capability-generations",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/admin/providers/{providerId}/http-capability-active",
+            any(requires_voter_node),
+        )
+        .route(
+            "/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}",
             any(requires_voter_node),
         )
         .route(
@@ -238,6 +267,14 @@ fn build_shared_router() -> Router<Arc<AppService>> {
         .route("/auth/v1/{*rauthyPath}", any(proxy_rauthy_passthrough))
         .route("/api/v1/me", get(get_current_user))
         .route("/api/v1/providers", get(list_providers))
+        .route(
+            "/api/v2/http-capabilities/catalog/{providerId}",
+            get(get_active_http_capability_catalog),
+        )
+        .route(
+            "/api/v2/http-capabilities/decide",
+            post(decide_http_capability),
+        )
         .route("/api/v1/orgs/{organizationId}/apps", get(list_applications))
         .route(
             "/api/v1/orgs/{organizationId}/apps/{applicationId}",

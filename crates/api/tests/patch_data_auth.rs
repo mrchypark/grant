@@ -27,7 +27,12 @@ use infra::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use std::{collections::HashMap, future::pending, process::Command, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::{Future, pending},
+    process::Command,
+    sync::Arc,
+};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -39,8 +44,15 @@ use tower::ServiceExt;
 
 const AUTHORIZATION: &str = "Bearer exact.original+credential/with=padding";
 const REFRESH_PATH: &str = "/api/collections/users/auth-refresh";
+const TEST_STEP_TIMEOUT: Duration = Duration::from_secs(10);
 const PLANT_READ_CONTRACT_SHA256: &str =
     "1da9293bbac25c94acfd154083ea057d0dd3aa321703aa0b6d15545bcad2bb2b";
+
+async fn bounded_test_step<T>(case: &str, phase: &str, future: impl Future<Output = T>) -> T {
+    tokio::time::timeout(TEST_STEP_TIMEOUT, future)
+        .await
+        .unwrap_or_else(|_| panic!("{case}: {phase} timed out"))
+}
 
 struct CountRow {
     count: i64,
@@ -302,6 +314,7 @@ async fn patch_data_api(
         security: SecurityConfig {
             master_key: support::MASTER_KEY.to_owned(),
             app_auth_key: support::APP_AUTH_KEY.to_owned(),
+            http_capability_pep_application_id: None,
             bootstrap_user_id: support::BOOTSTRAP_USER_ID.to_owned(),
             bootstrap_user_name: support::BOOTSTRAP_USER_NAME.to_owned(),
         },
@@ -368,7 +381,36 @@ async fn insert_exposure_application(
     active: bool,
     provisioning_status: ApplicationProvisioningStatus,
 ) {
-    db.insert_application(&Application {
+    db.insert_application(&exposure_application(
+        organization_id,
+        active,
+        provisioning_status,
+    ))
+    .await
+    .expect("exposure application");
+}
+
+async fn upsert_exposure_application(
+    db: &Database,
+    organization_id: &str,
+    active: bool,
+    provisioning_status: ApplicationProvisioningStatus,
+) {
+    db.upsert_application(&exposure_application(
+        organization_id,
+        active,
+        provisioning_status,
+    ))
+    .await
+    .expect("upsert exposure application");
+}
+
+fn exposure_application(
+    organization_id: &str,
+    active: bool,
+    provisioning_status: ApplicationProvisioningStatus,
+) -> Application {
+    Application {
         id: "grant-exposure".to_owned(),
         organization_id: organization_id.to_owned(),
         slug: "grant-exposure".to_owned(),
@@ -382,9 +424,7 @@ async fn insert_exposure_application(
         provisioning_status,
         rauthy_client_id: Some("irrelevant-rauthy-client".to_owned()),
         created_by_user_id: support::BOOTSTRAP_USER_ID.to_owned(),
-    })
-    .await
-    .expect("exposure application");
+    }
 }
 
 async fn grant_privileged_exposure_access(db: &Database, user_id: &str) {
@@ -828,44 +868,100 @@ async fn patch_data_mode_hides_both_rauthy_proxy_routes() {
 #[tokio::test]
 async fn patch_data_configured_exposure_application_must_exist_be_active_ready_and_match_org() {
     let cases = [
-        (None, true, ApplicationProvisioningStatus::Ready),
         (
+            "missing",
+            None,
+            true,
+            ApplicationProvisioningStatus::Ready,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "inactive-ready",
             Some("patch-org"),
             false,
             ApplicationProvisioningStatus::Ready,
+            StatusCode::FORBIDDEN,
         ),
         (
+            "active-unprovisioned",
             Some("patch-org"),
             true,
             ApplicationProvisioningStatus::Unprovisioned,
+            StatusCode::FORBIDDEN,
         ),
         (
+            "active-ready-wrong-org",
             Some("other-org"),
             true,
             ApplicationProvisioningStatus::Ready,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "active-ready-matching-org",
+            Some("patch-org"),
+            true,
+            ApplicationProvisioningStatus::Ready,
+            StatusCode::OK,
         ),
     ];
 
-    for (application_org, active, provisioning_status) in cases {
-        let mut patch_data =
-            LocalPatchData::start(vec![ok(valid_response("patch-user", "patch-org"))]).await;
-        let (app, db, runtime, _db_dir) = patch_data_api(patch_data.base_url.clone()).await;
-        seed_patch_data_membership(&db, &runtime, "patch-org").await;
+    let mut patch_data = bounded_test_step(
+        "setup",
+        "start Patch Data fixture",
+        LocalPatchData::start(
+            cases
+                .iter()
+                .map(|_| ok(valid_response("patch-user", "patch-org")))
+                .collect(),
+        ),
+    )
+    .await;
+    let (app, db, runtime, _db_dir) = bounded_test_step(
+        "setup",
+        "initialize Patch Data API",
+        patch_data_api(patch_data.base_url.clone()),
+    )
+    .await;
+    bounded_test_step(
+        "setup",
+        "seed Patch Data membership",
+        seed_patch_data_membership(&db, &runtime, "patch-org"),
+    )
+    .await;
+    bounded_test_step(
+        "setup",
+        "seed alternate organization",
+        db.upsert_organization_identity("other-org", None, "other-org"),
+    )
+    .await
+    .expect("other application organization");
+
+    for (case, application_org, active, provisioning_status, expected_status) in cases {
         if let Some(application_org) = application_org {
-            if application_org != "patch-org" {
-                db.upsert_organization_identity(application_org, None, application_org)
-                    .await
-                    .expect("other application organization");
-            }
-            insert_exposure_application(&db, application_org, active, provisioning_status).await;
+            bounded_test_step(
+                case,
+                "transition exposure application",
+                upsert_exposure_application(&db, application_org, active, provisioning_status),
+            )
+            .await;
         }
 
-        let response = app
-            .oneshot(application_authz_request(Some(support::APP_AUTH_KEY)))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(patch_data.next_request().await.path, REFRESH_PATH);
+        let response = bounded_test_step(
+            case,
+            "authorize application request",
+            app.clone()
+                .oneshot(application_authz_request(Some(support::APP_AUTH_KEY))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{case}: response: {error}"));
+        assert_eq!(response.status(), expected_status, "{case}");
+        let captured = bounded_test_step(
+            case,
+            "capture Patch Data refresh",
+            patch_data.next_request(),
+        )
+        .await;
+        assert_eq!(captured.path, REFRESH_PATH, "{case}");
     }
 }
 
@@ -1600,6 +1696,7 @@ async fn patch_data_owner_can_reactivate_the_requested_local_inactive_organizati
         security: SecurityConfig {
             master_key: support::MASTER_KEY.to_owned(),
             app_auth_key: support::APP_AUTH_KEY.to_owned(),
+            http_capability_pep_application_id: None,
             bootstrap_user_id: support::BOOTSTRAP_USER_ID.to_owned(),
             bootstrap_user_name: support::BOOTSTRAP_USER_NAME.to_owned(),
         },

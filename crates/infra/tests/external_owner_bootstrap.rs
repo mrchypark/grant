@@ -55,6 +55,7 @@ async fn patch_data_service() -> (Arc<AppService>, Database, HiqliteRuntime, tem
         security: SecurityConfig {
             master_key: "test-master-key".to_owned(),
             app_auth_key: "test-app-key".to_owned(),
+            http_capability_pep_application_id: None,
             bootstrap_user_id: "bootstrap-user".to_owned(),
             bootstrap_user_name: "Bootstrap User".to_owned(),
         },
