@@ -146,7 +146,7 @@ func TestMergePatchDataReadActionsPreservesExisting(t *testing.T) {
 	for _, code := range []string{"plant.read", "patch-data.plant.read"} {
 		existing := []Action{{ID: "patch-data.plant.read", ProviderID: "patch-data", Code: code, Name: "Existing plant", RiskLevel: "low"}, {ID: "patch-data.file.write", ProviderID: "patch-data", Code: "file.write", Name: "Write"}}
 		merged, err := MergePatchDataReadActions(existing, reads)
-		if err != nil || len(merged) != 36 || !reflect.DeepEqual(merged[:2], existing) {
+		if err != nil || len(merged) != len(reads)+len(existing)-1 || !reflect.DeepEqual(merged[:2], existing) {
 			t.Fatal("existing actions changed", merged, err)
 		}
 	}
