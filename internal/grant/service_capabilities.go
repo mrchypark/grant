@@ -24,6 +24,11 @@ func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provid
 			return StagedHttpCapabilityGeneration{}, serviceError(400, fmt.Sprintf("HTTP capability action not found for provider %s: %s", provider, *c.ActionID))
 		}
 	}
+	for _, node := range v.ResponseResources {
+		if !ids[node.ActionID] {
+			return StagedHttpCapabilityGeneration{}, serviceError(400, "response resource action not found for provider")
+		}
+	}
 	return s.store.StageHttpCapabilityGeneration(ctx, provider, v)
 }
 func (s *Service) ActivateHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v ActivateHttpCapabilityGeneration) (HttpCapabilityActivation, error) {
@@ -118,6 +123,12 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if cap.Batch == nil && (len(r.BatchChildren) != 0 || r.BatchDigest != "") {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: unexpected batch evidence")
 	}
+	if cap.ResponseAuthorization == nil && (r.ResponseDigest != "" || r.ResponseLength != 0 || r.ResponseReferencesDigest != "" || len(r.ResponseReferences) != 0) {
+		return HttpCapabilityDecision{}, serviceError(403, "forbidden: unexpected response evidence")
+	}
+	if _, err = responseExpansionPaths(*cap, catalog.ResponseResources, r.CanonicalQuery); err != nil {
+		return HttpCapabilityDecision{}, err
+	}
 	if err = validateHTTPRequestEvidence(*cap, r); err != nil {
 		return HttpCapabilityDecision{}, err
 	}
@@ -136,7 +147,14 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
-	if cap.Batch != nil {
+	if r.ResponseDigest != "" {
+		allowed, reason, err = s.responseDecision(ctx, token, org, r, c)
+		if err != nil {
+			return HttpCapabilityDecision{}, err
+		}
+	} else if r.ResponseLength != 0 || r.ResponseReferencesDigest != "" || len(r.ResponseReferences) != 0 {
+		return HttpCapabilityDecision{}, serviceError(403, "forbidden: incomplete response evidence")
+	} else if cap.Batch != nil {
 		allowed, reason, err = s.batchDecision(ctx, token, org, r, c)
 		if err != nil {
 			return HttpCapabilityDecision{}, err
@@ -155,5 +173,5 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 		allowed, reason = decisions[0].Allowed, decisions[0].Reason
 	}
 	now := time.Now().UTC()
-	return HttpCapabilityDecision{Allowed: allowed, Reason: reason, ProviderID: r.ProviderID, PEPClientID: r.PEPClientID, CatalogGeneration: r.CatalogGeneration, CatalogDigest: r.CatalogDigest, CapabilityID: r.CapabilityID, CapabilityVersion: r.CapabilityVersion, ContractDigest: r.ContractDigest, ActionID: *cap.ActionID, ResourceType: r.ResourceType, ResourceID: r.ResourceID, Method: r.Method, CanonicalPath: r.CanonicalPath, CanonicalQueryDigest: r.CanonicalQueryDigest, ForwardedHeaderDigest: r.ForwardedHeaderDigest, BodyDigest: r.BodyDigest, BodyLength: r.BodyLength, ProviderCredentialDigest: r.ProviderCredentialDigest, ProviderSubject: c.ExternalSubject, ProviderAudience: c.ProviderAudience, RequestBinding: r.RequestBinding, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(5 * time.Second).Format(time.RFC3339Nano), RecordScope: scope, BatchDigest: r.BatchDigest}, nil
+	return HttpCapabilityDecision{Allowed: allowed, Reason: reason, ProviderID: r.ProviderID, PEPClientID: r.PEPClientID, CatalogGeneration: r.CatalogGeneration, CatalogDigest: r.CatalogDigest, CapabilityID: r.CapabilityID, CapabilityVersion: r.CapabilityVersion, ContractDigest: r.ContractDigest, ActionID: *cap.ActionID, ResourceType: r.ResourceType, ResourceID: r.ResourceID, Method: r.Method, CanonicalPath: r.CanonicalPath, CanonicalQueryDigest: r.CanonicalQueryDigest, ForwardedHeaderDigest: r.ForwardedHeaderDigest, BodyDigest: r.BodyDigest, BodyLength: r.BodyLength, ProviderCredentialDigest: r.ProviderCredentialDigest, ProviderSubject: c.ExternalSubject, ProviderAudience: c.ProviderAudience, RequestBinding: r.RequestBinding, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(5 * time.Second).Format(time.RFC3339Nano), RecordScope: scope, BatchDigest: r.BatchDigest, ResponseDigest: r.ResponseDigest, ResponseLength: r.ResponseLength, ResponseReferencesDigest: r.ResponseReferencesDigest}, nil
 }

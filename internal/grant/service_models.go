@@ -123,6 +123,17 @@ type HttpCapabilityDecisionInput struct {
 	RequestBinding           string                           `json:"requestBinding"`
 	BatchChildren            []HttpBatchChild                 `json:"batchChildren,omitempty"`
 	BatchDigest              string                           `json:"batchDigest,omitempty"`
+	ResponseDigest           string                           `json:"responseDigest,omitempty"`
+	ResponseLength           uint64                           `json:"responseLength,omitempty"`
+	ResponseReferencesDigest string                           `json:"responseReferencesDigest,omitempty"`
+	ResponseReferences       []HttpResponseReference          `json:"responseReferences,omitempty"`
+}
+
+type HttpResponseReference struct {
+	ResourceKey   string  `json:"resourceKey"`
+	ID            string  `json:"id"`
+	ParentIndex   *uint64 `json:"parentIndex,omitempty"`
+	RelationField string  `json:"relationField,omitempty"`
 }
 
 // Child bodies represent semantic JSON extracted by the trusted PEP. Their
@@ -175,6 +186,9 @@ type HttpCapabilityDecision struct {
 	ExpiresAt                string           `json:"expiresAt"`
 	RecordScope              *HttpRecordScope `json:"recordScope,omitempty"`
 	BatchDigest              string           `json:"batchDigest,omitempty"`
+	ResponseDigest           string           `json:"responseDigest,omitempty"`
+	ResponseLength           uint64           `json:"responseLength,omitempty"`
+	ResponseReferencesDigest string           `json:"responseReferencesDigest,omitempty"`
 }
 type HttpRecordScope struct {
 	IDs []string `json:"ids"`

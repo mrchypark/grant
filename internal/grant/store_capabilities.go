@@ -180,7 +180,7 @@ func (s *Store) ActiveHttpCapabilityCatalog(ctx context.Context, p, pepID string
 		return out, e
 	}
 	now := time.Now().UTC()
-	return ActiveHttpCapabilityCatalog{SchemaVersion: 1, ProviderID: p, PepClientID: pepID, Generation: v.Generation, CatalogDigest: rowString(r[0], "catalog_digest"), Capabilities: v.Capabilities, IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano)}, nil
+	return ActiveHttpCapabilityCatalog{SchemaVersion: 1, ProviderID: p, PepClientID: pepID, Generation: v.Generation, CatalogDigest: rowString(r[0], "catalog_digest"), Capabilities: v.Capabilities, ResponseResources: v.ResponseResources, IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano)}, nil
 }
 func capabilityWriteError(err error) error {
 	if strings.Contains(err.Error(), "transaction rejected") {

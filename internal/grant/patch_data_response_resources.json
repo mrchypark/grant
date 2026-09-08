@@ -1,0 +1,656 @@
+[
+  {
+    "key": "blueprints",
+    "actionId": "patch-data.blueprints.read",
+    "resourceType": "blueprints",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_1114506494",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "blueprints_viewer",
+    "actionId": "patch-data.blueprints_viewer.read",
+    "resourceType": "blueprints_viewer",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_1337089469",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants_viewer"
+      }
+    ]
+  },
+  {
+    "key": "command_history",
+    "actionId": "patch-data.command_history.read",
+    "resourceType": "command_history",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "ogq6rbg3df1g496",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      },
+      {
+        "field": "sender",
+        "targetKey": "users"
+      }
+    ]
+  },
+  {
+    "key": "comments",
+    "actionId": "patch-data.comments.read",
+    "resourceType": "comments",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "lrsdfyc753nlnz7",
+    "relations": [
+      {
+        "field": "images",
+        "targetKey": "images"
+      },
+      {
+        "field": "parent",
+        "targetKey": "comments"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      },
+      {
+        "field": "user",
+        "targetKey": "users"
+      }
+    ]
+  },
+  {
+    "key": "dashboard",
+    "actionId": "patch-data.dashboard.read",
+    "resourceType": "dashboard",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "i95ea9ateuaxwqg",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "files",
+    "actionId": "patch-data.files.read",
+    "resourceType": "files",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_3446931122",
+    "relations": []
+  },
+  {
+    "key": "groupconditions",
+    "actionId": "patch-data.groupconditions.read",
+    "resourceType": "groupconditions",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "1t0dxj7x1r6vvo0",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "images",
+    "actionId": "patch-data.images.read",
+    "resourceType": "images",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "w8l3o9jedinck7g",
+    "relations": []
+  },
+  {
+    "key": "invitations",
+    "actionId": "patch-data.invitations.read",
+    "resourceType": "invitations",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "lrjsosb8mul77k0",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "plants",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "issue_comments",
+    "actionId": "patch-data.issue_comments.read",
+    "resourceType": "issue_comments",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "snv8bayo8ma6hw0",
+    "relations": [
+      {
+        "field": "images",
+        "targetKey": "images"
+      },
+      {
+        "field": "issue",
+        "targetKey": "issues"
+      },
+      {
+        "field": "user",
+        "targetKey": "users"
+      }
+    ]
+  },
+  {
+    "key": "issue_content_logs",
+    "actionId": "patch-data.issue_content_logs.read",
+    "resourceType": "issue_content_logs",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "misvzvyhp0fe7g4",
+    "relations": [
+      {
+        "field": "issue",
+        "targetKey": "issues"
+      },
+      {
+        "field": "user",
+        "targetKey": "users"
+      }
+    ]
+  },
+  {
+    "key": "issue_fields_logs",
+    "actionId": "patch-data.issue_fields_logs.read",
+    "resourceType": "issue_fields_logs",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "v5q8qxup8hbxg21",
+    "relations": [
+      {
+        "field": "issue",
+        "targetKey": "issues"
+      },
+      {
+        "field": "user",
+        "targetKey": "users"
+      }
+    ]
+  },
+  {
+    "key": "issue_schedules",
+    "actionId": "patch-data.issue_schedules.read",
+    "resourceType": "issue_schedules",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "kyzupz6cwz00swl",
+    "relations": [
+      {
+        "field": "issue",
+        "targetKey": "issues"
+      }
+    ]
+  },
+  {
+    "key": "issue_tags",
+    "actionId": "patch-data.issue_tags.read",
+    "resourceType": "issue_tags",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "i10pcc82twxf6pd",
+    "relations": []
+  },
+  {
+    "key": "issues",
+    "actionId": "patch-data.issues.read",
+    "resourceType": "issues",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "hqrb76fyop74r06",
+    "relations": [
+      {
+        "field": "assignee",
+        "targetKey": "users"
+      },
+      {
+        "field": "creator",
+        "targetKey": "users"
+      },
+      {
+        "field": "images",
+        "targetKey": "images"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      },
+      {
+        "field": "tags",
+        "targetKey": "issue_tags"
+      }
+    ]
+  },
+  {
+    "key": "latest_loss_reports",
+    "actionId": "patch-data.latest_loss_reports.read",
+    "resourceType": "latest_loss_reports",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_1915755548",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "org_parent_map",
+    "actionId": "patch-data.org_parent_map.read",
+    "resourceType": "org_parent_map",
+    "idField": "id",
+    "idFormat": "asciiToken",
+    "identityField": "collectionId",
+    "identityValue": "35180llsus0m925",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "parent",
+        "targetKey": "organizations"
+      }
+    ]
+  },
+  {
+    "key": "organizations",
+    "actionId": "patch-data.organizations.read",
+    "resourceType": "organizations",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "1l9cjra913llae4",
+    "relations": [
+      {
+        "field": "owner",
+        "targetKey": "users"
+      },
+      {
+        "field": "parent",
+        "targetKey": "organizations"
+      }
+    ]
+  },
+  {
+    "key": "panelmaps",
+    "actionId": "patch-data.panelmaps.read",
+    "resourceType": "panelmaps",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "l17r68r7ddzqcij",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "panelmaps_viewer",
+    "actionId": "patch-data.panelmaps_viewer.read",
+    "resourceType": "panelmaps_viewer",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "8hamrn2tnq9j6c6",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants_viewer"
+      }
+    ]
+  },
+  {
+    "key": "passwords",
+    "actionId": "patch-data.passwords.read",
+    "resourceType": "passwords",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "8ngtkucypa7xlaj",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      }
+    ]
+  },
+  {
+    "key": "permissions",
+    "actionId": "patch-data.permissions.read",
+    "resourceType": "permissions",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pt20y45muocfut5",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      },
+      {
+        "field": "temporary",
+        "targetKey": "temporary_accounts"
+      },
+      {
+        "field": "users",
+        "targetKey": "users"
+      },
+      {
+        "field": "viewers",
+        "targetKey": "viewers"
+      }
+    ]
+  },
+  {
+    "key": "plants",
+    "actionId": "patch-data.plant.read",
+    "resourceType": "plant",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "30hrtar148uy66c",
+    "relations": [
+      {
+        "field": "files",
+        "targetKey": "files"
+      },
+      {
+        "field": "images",
+        "targetKey": "images"
+      },
+      {
+        "field": "inherits",
+        "targetKey": "plants"
+      },
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "permission",
+        "targetKey": "permissions"
+      },
+      {
+        "field": "refPlant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "plants_viewer",
+    "actionId": "patch-data.plants_viewer.read",
+    "resourceType": "plants_viewer",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "6260lz1eo0w2vcr",
+    "relations": [
+      {
+        "field": "images",
+        "targetKey": "images"
+      },
+      {
+        "field": "inherits",
+        "targetKey": "plants"
+      },
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "permission",
+        "targetKey": "permissions"
+      },
+      {
+        "field": "refPlant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "reports",
+    "actionId": "patch-data.reports.read",
+    "resourceType": "reports",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "r0thjxht4e4dz2m",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "plants",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "reports_v2",
+    "actionId": "patch-data.reports_v2.read",
+    "resourceType": "reports_v2",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_3451676670",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "reports_v2_list",
+    "actionId": "patch-data.reports_v2_list.read",
+    "resourceType": "reports_v2_list",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_2089487142",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "resources",
+    "actionId": "patch-data.resources.read",
+    "resourceType": "resources",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_2337082678",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "temporary_accounts",
+    "actionId": "patch-data.temporary_accounts.read",
+    "resourceType": "temporary_accounts",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "d57i4dxnnp7l8hh",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "work_order",
+        "targetKey": "work_orders"
+      }
+    ]
+  },
+  {
+    "key": "temporary_blueprints",
+    "actionId": "patch-data.temporary_blueprints.read",
+    "resourceType": "temporary_blueprints",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_405412299",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "temporary_panelmaps",
+    "actionId": "patch-data.temporary_panelmaps.read",
+    "resourceType": "temporary_panelmaps",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "zkvh97egvg137hs",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "temporary_plants",
+    "actionId": "patch-data.temporary_plants.read",
+    "resourceType": "temporary_plants",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "fiqvrx9bli2qvag",
+    "relations": [
+      {
+        "field": "organization",
+        "targetKey": "organizations"
+      },
+      {
+        "field": "refPlant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "users",
+    "actionId": "patch-data.users.read",
+    "resourceType": "users",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "_pb_users_auth_",
+    "relations": [
+      {
+        "field": "organizations",
+        "targetKey": "organizations"
+      }
+    ]
+  },
+  {
+    "key": "viewers",
+    "actionId": "patch-data.viewers.read",
+    "resourceType": "viewers",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "kovp4j74yv9jr2v",
+    "relations": [
+      {
+        "field": "organizations",
+        "targetKey": "organizations"
+      }
+    ]
+  },
+  {
+    "key": "work_orders",
+    "actionId": "patch-data.work_orders.read",
+    "resourceType": "work_orders",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "yzruwgkyotkp02h",
+    "relations": [
+      {
+        "field": "issues",
+        "targetKey": "issues"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      },
+      {
+        "field": "user",
+        "targetKey": "users"
+      }
+    ]
+  }
+]

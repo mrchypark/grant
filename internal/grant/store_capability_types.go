@@ -5,21 +5,45 @@ type HttpCapabilityResource struct {
 	ID           HttpResourceExtractor `json:"id"`
 }
 type HttpCapability struct {
-	CapabilityID   string                   `json:"capabilityId"`
-	Version        uint64                   `json:"version"`
-	Enabled        bool                     `json:"enabled"`
-	AccessMode     HttpCapabilityAccessMode `json:"accessMode"`
-	Method         string                   `json:"method"`
-	PathTemplate   string                   `json:"pathTemplate"`
-	ActionID       *string                  `json:"actionId"`
-	Resource       *HttpCapabilityResource  `json:"resource"`
-	Query          HttpQueryPolicy          `json:"query"`
-	Request        HttpRequestPolicy        `json:"request"`
-	Response       HttpResponsePolicy       `json:"response"`
-	ContractDigest string                   `json:"contractDigest"`
-	PathParameters []HttpPathParameter      `json:"pathParameters,omitempty"`
-	RecordScope    *HttpRecordScopePolicy   `json:"recordScope,omitempty"`
-	Batch          *HttpBatchPolicy         `json:"batch,omitempty"`
+	CapabilityID          string                     `json:"capabilityId"`
+	Version               uint64                     `json:"version"`
+	Enabled               bool                       `json:"enabled"`
+	AccessMode            HttpCapabilityAccessMode   `json:"accessMode"`
+	Method                string                     `json:"method"`
+	PathTemplate          string                     `json:"pathTemplate"`
+	ActionID              *string                    `json:"actionId"`
+	Resource              *HttpCapabilityResource    `json:"resource"`
+	Query                 HttpQueryPolicy            `json:"query"`
+	Request               HttpRequestPolicy          `json:"request"`
+	Response              HttpResponsePolicy         `json:"response"`
+	ContractDigest        string                     `json:"contractDigest"`
+	PathParameters        []HttpPathParameter        `json:"pathParameters,omitempty"`
+	RecordScope           *HttpRecordScopePolicy     `json:"recordScope,omitempty"`
+	Batch                 *HttpBatchPolicy           `json:"batch,omitempty"`
+	ResponseAuthorization *HttpResponseAuthorization `json:"responseAuthorization,omitempty"`
+}
+
+type HttpResponseResource struct {
+	Key           string                 `json:"key"`
+	ActionID      string                 `json:"actionId"`
+	ResourceType  string                 `json:"resourceType"`
+	IDField       string                 `json:"idField"`
+	IDFormat      string                 `json:"idFormat"`
+	IdentityField string                 `json:"identityField"`
+	IdentityValue string                 `json:"identityValue"`
+	Relations     []HttpResponseRelation `json:"relations"`
+}
+type HttpResponseRelation struct {
+	Field     string `json:"field"`
+	TargetKey string `json:"targetKey"`
+}
+type HttpResponseAuthorization struct {
+	RootKey        string `json:"rootKey"`
+	RecordsPointer string `json:"recordsPointer"`
+	ExpansionField string `json:"expansionField"`
+	QueryParameter string `json:"queryParameter"`
+	MaxDepth       uint64 `json:"maxDepth"`
+	MaxRecords     uint64 `json:"maxRecords"`
 }
 
 type HttpBatchPolicy struct {
@@ -86,11 +110,12 @@ type HttpResponsePolicy struct {
 	ErrorStatuses  []int              `json:"errorStatuses,omitempty"`
 }
 type StageHttpCapabilityGeneration struct {
-	SchemaVersion            uint64           `json:"schemaVersion"`
-	Generation               uint64           `json:"generation"`
-	ExpectedLatestGeneration *uint64          `json:"expectedLatestGeneration"`
-	Capabilities             []HttpCapability `json:"capabilities"`
-	CatalogDigest            string           `json:"catalogDigest"`
+	SchemaVersion            uint64                 `json:"schemaVersion"`
+	Generation               uint64                 `json:"generation"`
+	ExpectedLatestGeneration *uint64                `json:"expectedLatestGeneration"`
+	Capabilities             []HttpCapability       `json:"capabilities"`
+	ResponseResources        []HttpResponseResource `json:"responseResources,omitempty"`
+	CatalogDigest            string                 `json:"catalogDigest"`
 }
 type StagedHttpCapabilityGeneration struct {
 	Staged        bool   `json:"staged"`
@@ -132,14 +157,15 @@ type ProviderPepClient struct {
 	UpdatedAt     string  `json:"updatedAt"`
 }
 type ActiveHttpCapabilityCatalog struct {
-	SchemaVersion uint64           `json:"schemaVersion"`
-	ProviderID    string           `json:"providerId"`
-	PepClientID   string           `json:"pepClientId"`
-	Generation    uint64           `json:"generation"`
-	CatalogDigest string           `json:"catalogDigest"`
-	Capabilities  []HttpCapability `json:"capabilities"`
-	IssuedAt      string           `json:"issuedAt"`
-	ExpiresAt     string           `json:"expiresAt"`
+	SchemaVersion     uint64                 `json:"schemaVersion"`
+	ProviderID        string                 `json:"providerId"`
+	PepClientID       string                 `json:"pepClientId"`
+	Generation        uint64                 `json:"generation"`
+	CatalogDigest     string                 `json:"catalogDigest"`
+	Capabilities      []HttpCapability       `json:"capabilities"`
+	ResponseResources []HttpResponseResource `json:"responseResources,omitempty"`
+	IssuedAt          string                 `json:"issuedAt"`
+	ExpiresAt         string                 `json:"expiresAt"`
 }
 type HttpCapabilityAccessMode = string
 type HttpRequestBodyMode = string

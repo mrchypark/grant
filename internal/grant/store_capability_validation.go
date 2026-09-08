@@ -99,17 +99,18 @@ func HttpCapabilityContractDigest(c HttpCapability) (string, error) {
 }
 
 type canonicalGeneration struct {
-	SchemaVersion uint64           `json:"schemaVersion"`
-	ProviderID    string           `json:"providerId"`
-	Generation    uint64           `json:"generation"`
-	Capabilities  []HttpCapability `json:"capabilities"`
+	SchemaVersion     uint64                 `json:"schemaVersion"`
+	ProviderID        string                 `json:"providerId"`
+	Generation        uint64                 `json:"generation"`
+	Capabilities      []HttpCapability       `json:"capabilities"`
+	ResponseResources []HttpResponseResource `json:"responseResources,omitempty"`
 }
 
 func generationJSON(provider string, c StageHttpCapabilityGeneration) (string, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
-	e := enc.Encode(canonicalGeneration{c.SchemaVersion, provider, c.Generation, c.Capabilities})
+	e := enc.Encode(canonicalGeneration{c.SchemaVersion, provider, c.Generation, c.Capabilities, c.ResponseResources})
 	return strings.TrimSuffix(b.String(), "\n"), e
 }
 func HttpCapabilityCatalogDigest(provider string, c StageHttpCapabilityGeneration) (string, error) {
@@ -159,6 +160,9 @@ func pathVariables(s string) ([]string, error) {
 	return v, nil
 }
 func validateCapability(c HttpCapability) error {
+	if err := validateResponsePolicy(c); err != nil {
+		return err
+	}
 	if err := validateBatchPolicy(c); err != nil {
 		return err
 	}
@@ -202,6 +206,9 @@ func validateCapability(c HttpCapability) error {
 			return fmt.Errorf("invalid recordScope sortParameter")
 		}
 		roles := map[string]string{p.FilterParameter: "text"}
+		if c.ResponseAuthorization != nil {
+			roles[c.ResponseAuthorization.QueryParameter] = "text"
+		}
 		if p.SortParameter != "" {
 			roles[p.SortParameter] = "text"
 		}
@@ -365,6 +372,9 @@ func fieldIdentifier(value string) bool {
 	return true
 }
 func validateGeneration(provider string, c StageHttpCapabilityGeneration) error {
+	if err := validateResponseResources(c); err != nil {
+		return err
+	}
 	if err := validateBatchReferences(c.Capabilities); err != nil {
 		return err
 	}

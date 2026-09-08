@@ -212,4 +212,5 @@ func TestBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(false)
+	t.Run("response-fence", func(t *testing.T) { testResponseDecisionInGrant(t, ctx, svc, stage) })
 }

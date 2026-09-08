@@ -10,7 +10,8 @@ Scope: Grant and Exposure only. The audited business service is Patch Data `05f8
 | Lists and searches | Actual Grant/learner/PocketBase integration passed for the representative catalog | Exact record authority IDs, row key, safe scalar fields, filter/sort parameters, bounded fexpr ACL |
 | Multipart and opaque uploads | Actual Grant-authorized multipart upload passed; generic transport also tested separately | Exact media types and action/resource mapping; body bytes are preserved |
 | Files, Range, conditional reads | Actual Grant-authorized exact-byte download passed; Range/conditional/HEAD verified with a controlled PDP | Record-to-file authority mapping and explicit filename segment bound |
-| Relation expand and cross-record filter/sort | Pending, not published | Related resource checks; root-record permission does not cover related records |
+| Relation expand | Explicit graph and buffered post-response authorization implemented | Root and every related read checked in one fenced snapshot before bytes are released |
+| Cross-record filter/sort | Pending, not published | Separate query semantics; expansion does not permit arbitrary joins |
 | Batch and upsert | Generic bounded request-array contract implemented | Explicit batch root and all child actions, declared PUT create/update pair, one fenced decision before unchanged native atomic request |
 | Realtime subscriptions and events | Pending, not published | Principal-bound subscription scope, changes, revocation and stream lifetime checks |
 | PocketBase account APIs | Separate Patch Auth service | Explicit account-service catalog; business profile collections are not login endpoints |
@@ -19,6 +20,8 @@ Scope: Grant and Exposure only. The audited business service is Patch Data `05f8
 List filtering uses an upstream ACL filter, not response post-filtering, so native pagination and total counts remain meaningful. Under the configured service token PocketBase may bypass its own user list/view rules; Grant/Exposure therefore cannot rely on those rules to repair an overly broad catalog. The fexpr limit is 200 expressions, including the client filter. Overflow is an error, never a truncated permission set.
 
 ### Verification evidence
+
+The expansion run `patch-auth-e2e.xBjuEy` passed on 2026-09-09 using the 35-node, 68-edge response graph. It verified both collection aliases, nested and array relations, scoped list counts/pages, empty lists, revocation during the upstream fetch, native 404 behavior and unchanged permitted response bytes. Every fetched expanded response was withheld until its post-response decision passed. This is representative native coverage plus generic graph validation; it does not claim positive fixtures for every graph edge or realtime support.
 
 The subsequent batch run `patch-auth-e2e.74577o` passed on 2026-09-09 with 323 routes and 122 actions. It verified root-plus-child permission requirements, JSON and multipart batch forwarding with the exact original body and one upstream request, explicit-ID PUT upsert checks, native atomic rollback, and revocation denying a whole batch. Grant unit tests additionally reject missing/reordered upsert checks, inconsistent original paths/IDs/body digests, forged child capabilities, query injection and more than 20 operations. Relationship expansion and realtime are not covered by this result.
 
@@ -125,8 +128,8 @@ Scalar filter/sort fields are pinned to the audited schema snapshot `1778142859_
 
 For each published API, provide the fixed provider, collection name and ID aliases, action IDs, canonical resource type, and resource-ID extraction. Creation and collection management require their own explicit authority target. Declare which root fields are safe scalar filter/sort fields; relation paths, view-to-source identity mappings, nested JSON fields and expansion require separate semantics. Supply media types and byte limits for uploads/files, and the complete permitted request/response header and status policy.
 
-The generated catalog publishes list/detail reads, base create/update/delete, and record-file GET/HEAD. Realtime, relationship expansion, cross-record filters and native field projection remain unpublished. Catalog generation and activation remain explicit and digest-bound.
+The generated catalog publishes list/detail reads, base create/update/delete, and record-file GET/HEAD. Realtime, cross-record filters and native field projection remain unpublished. Catalog generation and activation remain explicit and digest-bound.
 
 Primary API evidence: [PocketBase record CRUD](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/record_crud.go), [batch API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/batch.go), [realtime API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/realtime.go), and [filter expression limit](https://github.com/pocketbase/pocketbase/blob/v0.40.3/tools/search/provider.go).
 
-Scoped list queries only admit the declared filter/sort roles and explicitly mapped numeric page/page-size or boolean skip-total controls. Arbitrary text or scalar passthrough is unsupported. Native `fields` projection, expansion and relational query options therefore remain unpublished. This provides record-level result filtering, not field-level authorization or automatic discovery of safe upstream parameter semantics.
+Scoped list queries only admit the declared filter/sort roles and explicitly mapped numeric page/page-size or boolean skip-total controls. Arbitrary text or scalar passthrough is unsupported. Native `fields` projection and cross-record filtering remain unpublished; declared `expand` paths use the separate response graph. This provides record-level result filtering, not field-level authorization or automatic discovery of safe upstream parameter semantics.

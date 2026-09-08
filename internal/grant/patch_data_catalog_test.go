@@ -50,7 +50,7 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	active, err := store.ActiveHttpCapabilityCatalog(ctx, "patch-data", "catalog-pep")
-	if err != nil || !reflect.DeepEqual(active.Capabilities, stage.Capabilities) {
+	if err != nil || !reflect.DeepEqual(active.Capabilities, stage.Capabilities) || !reflect.DeepEqual(active.ResponseResources, stage.ResponseResources) {
 		t.Fatal("published catalog changed", err)
 	}
 	principal := applicationAuthorizationContext{UserID: "conalog-grant", OrganizationID: "conalog-grant", ApplicationID: app.ID}

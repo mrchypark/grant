@@ -279,3 +279,9 @@ Capability canonical JSON may include a bounded record-scope policy; no separate
 배치 계약은 `provider_http_capability_sets.canonical_json` 내부의 `batch` 정책으로 저장하며 새 테이블은 추가하지 않는다. 정책이 참조하는 child capability는 같은 generation의 활성 mutation 계약이어야 한다. Patch Data의 배치 루트는 `patch-data.batch.execute` action과 `(patch-data, batch, patch-data)` resource tuple을 사용하고, 이를 허용해도 child 레코드/컬렉션 권한을 대신하지 않는다. 원본 body digest와 ordered child digest를 함께 응답에 결합하고, 동일한 fenced snapshot에서 루트 및 모든 child의 membership/application/role/consent를 평가한다.
 
 PUT upsert는 catalog의 명시적 create/update 계약 쌍을 참조한다. 요청 ID가 있으면 collection 생성 권한과 해당 record 수정 권한을 모두 요구하고, 없으면 생성 권한만 요구한다. 존재 여부를 미리 조회하여 권한을 선택하지 않는다. 실제 PocketBase transaction은 변경하지 않으며, 권한 실패 시 원본 배치 전체를 upstream에 보내지 않는다.
+
+## 응답 관계 확장의 canonical 관계
+
+`provider_http_capability_sets.canonical_json`에는 선택적 `responseResources` 그래프를 한 번만 저장한다. 그래프가 없으면 JSON 필드를 생략하여 기존 catalog digest를 유지한다. 각 노드의 action/resource type 및 record ID/collection identity 필드와 명시적 relation edge를 catalog digest에 포함한다. 개별 GET 계약은 `responseAuthorization.rootKey`로 그래프를 참조하며 새 DDL이나 업무 DB 테이블은 만들지 않는다.
+
+Patch Data 그래프는 고정 schema snapshot의 35개 컬렉션과 공개 relation 필드 68개에서 추출했다. 뷰는 독립적인 노드/action/resource type을 유지한다. 관계 edge는 조회 경로만 선언하며 권한을 전개하지 않는다. 응답의 루트와 관련 레코드는 각각 기존 role/application 권한을 충족해야 한다. 원본 응답 hash, 길이, 순서가 있는 reference digest를 같은 요청에 결합하고 한 fenced snapshot에서 다시 판단한다. 목록은 collection 이름의 가상 grant를 요구하지 않고 기존 목록 admission 및 반환된 root ID를 재검사한다.

@@ -9,6 +9,9 @@ import (
 //go:embed patch_data_collections.json
 var patchDataCollectionManifest []byte
 
+//go:embed patch_data_response_resources.json
+var patchDataResponseResourceManifest []byte
+
 // PatchDataCollection defines independent, whole-record read authority. Relations
 // and matching IDs in another collection never imply authority over this tuple.
 type PatchDataCollection struct {
@@ -39,6 +42,9 @@ func PatchDataReadCatalog(generation uint64, previous *uint64) (StageHttpCapabil
 	if err != nil {
 		return stage, nil, err
 	}
+	if err = json.Unmarshal(patchDataResponseResourceManifest, &stage.ResponseResources); err != nil {
+		return stage, nil, err
+	}
 	actions := make([]Action, 0, len(collections))
 	for _, collection := range collections {
 		action := "patch-data." + collection.ResourceType + ".read"
@@ -53,12 +59,16 @@ func PatchDataReadCatalog(generation uint64, previous *uint64) (StageHttpCapabil
 					Request:  HttpRequestPolicy{Body: "none", ForwardHeaders: []string{"accept"}, Authorization: "service-token"},
 					Response: HttpResponsePolicy{MaxBytes: 1 << 20, ForwardHeaders: []string{"content-type"}, Redirects: "deny", ErrorStatuses: []int{400, 403, 404}},
 				}
+				c.ResponseAuthorization = &HttpResponseAuthorization{RootKey: collection.Name, ExpansionField: "expand", QueryParameter: "expand", MaxDepth: 6, MaxRecords: 200}
 				if operation == "get" {
 					c.PathTemplate += "/{id}"
 					c.Resource.ID = HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: collection.RecordIDFormat}
+					c.Query = HttpQueryPolicy{Mode: "exact", Parameters: []HttpQueryParameter{{Name: "expand", Format: "text", MaxBytes: 4096}}}
 				} else {
+					c.ResponseAuthorization.RecordsPointer = "/items"
 					c.Query = HttpQueryPolicy{Mode: "exact", Parameters: []HttpQueryParameter{{Name: "filter", Format: "text", MaxBytes: 4096}, {Name: "page", Format: "uint"}, {Name: "perPage", Format: "uint"}, {Name: "skipTotal", Format: "bool"}, {Name: "sort", Format: "text", MaxBytes: 1024}}}
 					c.RecordScope = &HttpRecordScopePolicy{FilterParameter: "filter", RowKey: "id", Grammar: "fexpr", MaxIDs: 100, MaxFilterBytes: 8192, AllowedFields: append([]string(nil), collection.AllowedFields...), SortParameter: "sort", Pagination: &HttpPaginationPolicy{PageParameter: "page", PageSizeParameter: "perPage", SkipTotalParameter: "skipTotal"}}
+					c.Query.Parameters = append([]HttpQueryParameter{{Name: "expand", Format: "text", MaxBytes: 4096}}, c.Query.Parameters...)
 				}
 				c.ContractDigest, err = HttpCapabilityContractDigest(c)
 				if err != nil {
