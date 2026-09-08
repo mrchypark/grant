@@ -66,8 +66,22 @@ docker() {
       done
       return 90
       ;;
-    "exec -i vcluster.cp.grant-ci ctr -n k8s.io"*)
-      cat >/dev/null
+    "cp "*)
+      if [[ "${MOCK_TRANSFER_FAIL:-0}" == "1" ]]; then
+        echo 'container archive transfer failed' >&2
+        return 43
+      fi
+      return 0
+      ;;
+    "exec vcluster.cp.grant-ci ctr -n k8s.io images"*)
+      if [[ "${7:-}" == "ls" && "${8:-}" == "-q" ]]; then
+        cat "${RUNTIME_REFS}"
+        if [[ "${MOCK_FIRST_LIST_FAILURE:-0}" == "1" && ! -e "${TMP_DIR}/first-list-seen" ]]; then
+          : >"${TMP_DIR}/first-list-seen"
+          return 19
+        fi
+        return 0
+      fi
       if [[ -n "${MOCK_IMPORT_SIGNAL:-}" ]]; then
         signal_import_subshell "${MOCK_IMPORT_SIGNAL}"
         return 99
@@ -82,16 +96,8 @@ docker() {
       printf '%s\n' "$(( $(cat "${IMPORT_COUNT}") + 1 ))" >"${IMPORT_COUNT}"
       return 0
       ;;
-    "exec vcluster.cp.grant-ci ctr -n k8s.io images"*)
-      if [[ "${7:-}" == "ls" && "${8:-}" == "-q" ]]; then
-        cat "${RUNTIME_REFS}"
-        if [[ "${MOCK_FIRST_LIST_FAILURE:-0}" == "1" && ! -e "${TMP_DIR}/first-list-seen" ]]; then
-          : >"${TMP_DIR}/first-list-seen"
-          return 19
-        fi
-        return 0
-      fi
-      return 91
+    "exec vcluster.cp.grant-ci rm -f "*)
+      return 0
       ;;
   esac
 
@@ -110,8 +116,12 @@ MOCK_FIRST_LIST_FAILURE=1 ensure_runtime_image 'grant:local'
 
 grep -Eq '^docker <save> <grant:local> <-o> <.+>$' "${MOCK_LOG}" \
   || fail 'tag-qualified local Grant image was not archived for runtime preload'
-grep -Eq '^docker <exec> <-i> <vcluster.cp.grant-ci> <ctr> <-n> <k8s.io> <images> <import> <->$' "${MOCK_LOG}" \
+grep -Eq '^docker <cp> <.+> <vcluster.cp.grant-ci:/home/grant-ci.image-import.[0-9]+.tar>$' "${MOCK_LOG}" \
+  || fail 'archive was not copied to a container-visible path'
+grep -Eq '^docker <exec> <vcluster.cp.grant-ci> <ctr> <-n> <k8s.io> <images> <import> </home/grant-ci.image-import.[0-9]+.tar>$' "${MOCK_LOG}" \
   || fail 'archive import did not use ctr in the Kubernetes containerd namespace'
+grep -Eq '^docker <exec> <vcluster.cp.grant-ci> <rm> <-f> </home/grant-ci.image-import.[0-9]+.tar>$' "${MOCK_LOG}" \
+  || fail 'remote archive was not removed after import'
 [ "$(cat "${IMPORT_COUNT}")" -eq 1 ] \
   || fail 'a failed runtime-list producer was hidden by the grep result despite pipefail'
 
@@ -119,6 +129,28 @@ pull_secret_line="$(grep -n '^apply_rauthy_registry_pull_secret$' "${ROOT_DIR}/s
 workload_line="$(grep -n '^kubectl apply -k ' "${ROOT_DIR}/scripts/vind-bootstrap.sh" | cut -d: -f1)"
 [[ -n "${pull_secret_line}" && -n "${workload_line}" && "${pull_secret_line}" -lt "${workload_line}" ]] \
   || fail 'Rauthy imagePullSecret is not applied before the workload'
+
+grant_image_override_line="$(grep -n 'set image statefulset/grant-voter' "${ROOT_DIR}/scripts/vind-bootstrap.sh" | cut -d: -f1)"
+[[ -n "${grant_image_override_line}" && "${workload_line}" -lt "${grant_image_override_line}" ]] \
+  || fail 'selected IMAGE_NAME is not applied to the Grant StatefulSet'
+grep -q 'applied_grant_image=' "${ROOT_DIR}/scripts/vind-bootstrap.sh" \
+  || fail 'Grant image override is not verified after application'
+if grep -Eq 'export GRANT_(MASTER_KEY|APP_AUTH_KEY)=\$\{GRANT_(MASTER_KEY|APP_AUTH_KEY)\}' \
+  "${ROOT_DIR}/scripts/vind-bootstrap.sh"; then
+  fail 'vind bootstrap completion guidance exposes a Grant secret value'
+fi
+
+: >"${MOCK_LOG}"
+if MOCK_TRANSFER_FAIL=1 import_image_with_ctr_vcluster 'grant:local' >"${TMP_DIR}/transfer-failure.log" 2>&1; then
+  fail 'archive transfer failure unexpectedly succeeded'
+fi
+grep -q 'during containerd archive transfer' "${TMP_DIR}/transfer-failure.log" \
+  || fail 'transfer failure did not identify the failed runtime step'
+if grep -q '<images> <import>' "${MOCK_LOG}"; then
+  fail 'failed archive transfer was followed by an import'
+fi
+grep -q '<rm> <-f> </home/' "${MOCK_LOG}" \
+  || fail 'failed transfer did not attempt remote archive cleanup'
 
 : >"${MOCK_LOG}"
 : >"${RUNTIME_REFS}"

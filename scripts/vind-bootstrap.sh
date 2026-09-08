@@ -116,6 +116,13 @@ if ! kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m; 
 fi
 
 wait_for_resource statefulset grant-voter
+kubectl -n "${NAMESPACE}" set image statefulset/grant-voter "grant=${IMAGE_NAME}" >/dev/null
+applied_grant_image="$(kubectl -n "${NAMESPACE}" get statefulset/grant-voter \
+  -o 'jsonpath={.spec.template.spec.containers[?(@.name=="grant")].image}')"
+if [[ "${applied_grant_image}" != "${IMAGE_NAME}" ]]; then
+  echo "Grant image override did not apply: expected ${IMAGE_NAME}, got ${applied_grant_image:-<empty>}" >&2
+  exit 1
+fi
 if ! kubectl -n "${NAMESPACE}" rollout status statefulset/grant-voter --timeout=15m; then
   dump_grant_debug
   exit 1
@@ -130,7 +137,6 @@ Image: ${IMAGE_NAME}
 Rauthy Image: ${RAUTHY_IMAGE}
 
 Next:
-  export GRANT_MASTER_KEY=${GRANT_MASTER_KEY}
-  export GRANT_APP_AUTH_KEY=${GRANT_APP_AUTH_KEY}
+  load GRANT_MASTER_KEY and GRANT_APP_AUTH_KEY from caller-owned 0600 secret files without echoing them
   kubectl -n ${NAMESPACE} port-forward svc/grant 18080:80
 EOF
