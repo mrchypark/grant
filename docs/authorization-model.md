@@ -1,6 +1,22 @@
 # Grant Authorization Model
 
-`grant`는 identity provider가 아니다. 사용자의 로그인과 외부 identity 확인은 Rauthy 같은 OIDC provider가 맡고, `grant`는 조직, 애플리케이션, service provider, resource scope에 대한 권한 부여와 판정을 맡는다.
+`grant`는 identity provider가 아니다. 로그인과 외부 identity 검증은 외부 인증 공급자가 맡고, `grant`는 검증된 identity를 내부 사용자에 연결해 조직, 애플리케이션, service provider, resource scope의 권한을 관리하고 판정한다.
+
+## 인증 공급자 방향과 현재 지원 범위
+
+인증 연동 대상은 **PocketBase, Rauthy, 개발 중인 Goauthy**다. 세 공급자가 같은 프로토콜을 구현한다고 가정하지 않는다. 현재 `GRANT_AUTH_PROVIDER`는 배포당 `rauthy` 또는 `patch-data` 하나를 선택하며, 세 공급자의 동시 등록이나 Goauthy adapter는 구현되어 있지 않다.
+
+| 대상 | 현재 구현 |
+|---|---|
+| PocketBase | `patch-data` 모드의 전용 adapter로 연결한다. 설정된 origin의 `/api/collections/users/auth-refresh`에 토큰을 전달하고 검증된 record를 읽는다. 임의 auth collection이나 `viewers` 인증을 지원하는 범용 PocketBase adapter는 아니다. |
+| Rauthy | 설정된 introspection endpoint에 client 인증과 토큰을 보내고, userinfo의 subject가 같은지 확인한다. 기본 경로는 `/auth/v1/oidc/introspect`, `/auth/v1/oidc/userinfo`다. 로컬 JWT 서명 검증이나 OIDC discovery 방식은 아니다. |
+| Goauthy | 연동 목표다. 저장소·인증 인터페이스가 확인되면 토큰 검증 요청/응답, 안정적인 subject, 앱·audience 매핑, 만료·철회 동작을 정한다. OIDC 또는 PocketBase 호환이라고 미리 가정하지 않는다. |
+
+인증 공급자와 권한 대상인 `service_providers`는 다른 개념이다. 현재 외부 identity 매핑 키는 `(provider, external_user_id)`이며 provider 값은 `rauthy` 또는 `patch-data`다. issuer·collection까지 구분하는 키는 아직 없다. 새 공급자를 연결할 때 기존 identity를 이름만 바꿔 재연결하거나 외부 subject를 내부 사용자 ID와 동일시하지 않아야 한다.
+
+일반 요청에서 조직 소속과 역할·리소스 권한은 Grant의 로컬 권한 데이터가 결정한다. 인증 성공 자체가 조직 가입이나 관리자 권한을 뜻하지 않는다. 기존 master 인증 owner bootstrap은 별도 관리 동작이며 아래에 설명한다. `GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID`는 현재 Patch Data 토큰을 연결할 Grant 애플리케이션 설정으로 남아 있으며, 별도의 인증 공급자나 폐기된 Exposure 판정 API를 뜻하지 않는다.
+
+구현 근거: [공급자 설정](../internal/grant/config.go), [외부 토큰 검증](../internal/grant/auth_external.go), [내부 identity·조직 검증](../internal/grant/auth_current.go). `/auth/v1/*` 프록시와 앱 provisioning 확인은 현재 Rauthy 전용이다. Goauthy 추가를 이유로 이 기능을 다른 공급자에 자동 적용하지 않는다.
 
 ## 핵심 객체
 
