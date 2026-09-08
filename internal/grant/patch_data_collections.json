@@ -1,0 +1,456 @@
+[
+  {
+    "name": "users",
+    "id": "_pb_users_auth_",
+    "type": "base",
+    "resourceType": "users",
+    "allowedFields": [
+      "created",
+      "deleted",
+      "id",
+      "name",
+      "updated",
+      "username"
+    ]
+  },
+  {
+    "name": "plants",
+    "id": "30hrtar148uy66c",
+    "type": "base",
+    "resourceType": "plant",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "name",
+      "updated"
+    ]
+  },
+  {
+    "name": "panelmaps",
+    "id": "l17r68r7ddzqcij",
+    "type": "base",
+    "resourceType": "panelmaps",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "organizations",
+    "id": "1l9cjra913llae4",
+    "type": "base",
+    "resourceType": "organizations",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "updated"
+    ]
+  },
+  {
+    "name": "viewers",
+    "id": "kovp4j74yv9jr2v",
+    "type": "base",
+    "resourceType": "viewers",
+    "allowedFields": [
+      "created",
+      "deleted",
+      "id",
+      "name",
+      "updated",
+      "username"
+    ]
+  },
+  {
+    "name": "invitations",
+    "id": "lrjsosb8mul77k0",
+    "type": "base",
+    "resourceType": "invitations",
+    "allowedFields": [
+      "created",
+      "email",
+      "expired",
+      "id",
+      "isUsed",
+      "updated"
+    ]
+  },
+  {
+    "name": "images",
+    "id": "w8l3o9jedinck7g",
+    "type": "base",
+    "resourceType": "images",
+    "allowedFields": [
+      "created",
+      "id",
+      "tags",
+      "updated"
+    ]
+  },
+  {
+    "name": "dashboard",
+    "id": "i95ea9ateuaxwqg",
+    "type": "base",
+    "resourceType": "dashboard",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "comments",
+    "id": "lrsdfyc753nlnz7",
+    "type": "base",
+    "resourceType": "comments",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "isPrivate",
+      "related",
+      "resolved",
+      "text",
+      "title",
+      "updated"
+    ]
+  },
+  {
+    "name": "permissions",
+    "id": "pt20y45muocfut5",
+    "type": "base",
+    "resourceType": "permissions",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "groupconditions",
+    "id": "1t0dxj7x1r6vvo0",
+    "type": "base",
+    "resourceType": "groupconditions",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "updated"
+    ]
+  },
+  {
+    "name": "passwords",
+    "id": "8ngtkucypa7xlaj",
+    "type": "base",
+    "resourceType": "passwords",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "temporary_accounts",
+    "id": "d57i4dxnnp7l8hh",
+    "type": "base",
+    "resourceType": "temporary_accounts",
+    "allowedFields": [
+      "created",
+      "expired",
+      "id",
+      "updated",
+      "username"
+    ]
+  },
+  {
+    "name": "issue_comments",
+    "id": "snv8bayo8ma6hw0",
+    "type": "base",
+    "resourceType": "issue_comments",
+    "allowedFields": [
+      "created",
+      "deleted",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "issue_content_logs",
+    "id": "misvzvyhp0fe7g4",
+    "type": "base",
+    "resourceType": "issue_content_logs",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "issue_fields_logs",
+    "id": "v5q8qxup8hbxg21",
+    "type": "base",
+    "resourceType": "issue_fields_logs",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "issue_tags",
+    "id": "i10pcc82twxf6pd",
+    "type": "base",
+    "resourceType": "issue_tags",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "updated"
+    ]
+  },
+  {
+    "name": "issues",
+    "id": "hqrb76fyop74r06",
+    "type": "base",
+    "resourceType": "issues",
+    "allowedFields": [
+      "created",
+      "date",
+      "deleted",
+      "id",
+      "isPublic",
+      "is_all_day",
+      "resolved",
+      "title",
+      "updated"
+    ]
+  },
+  {
+    "name": "work_orders",
+    "id": "yzruwgkyotkp02h",
+    "type": "base",
+    "resourceType": "work_orders",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "command_history",
+    "id": "ogq6rbg3df1g496",
+    "type": "base",
+    "resourceType": "command_history",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "issue_schedules",
+    "id": "kyzupz6cwz00swl",
+    "type": "base",
+    "resourceType": "issue_schedules",
+    "allowedFields": [
+      "created",
+      "date",
+      "deleted",
+      "id",
+      "title",
+      "updated"
+    ]
+  },
+  {
+    "name": "reports",
+    "id": "r0thjxht4e4dz2m",
+    "type": "base",
+    "resourceType": "reports",
+    "allowedFields": [
+      "comment",
+      "created",
+      "description",
+      "end",
+      "id",
+      "isArchive",
+      "start",
+      "title",
+      "updated"
+    ]
+  },
+  {
+    "name": "files",
+    "id": "pbc_3446931122",
+    "type": "base",
+    "resourceType": "files",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "tags",
+      "updated"
+    ]
+  },
+  {
+    "name": "blueprints",
+    "id": "pbc_1114506494",
+    "type": "base",
+    "resourceType": "blueprints",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "isArchive",
+      "updated"
+    ]
+  },
+  {
+    "name": "resources",
+    "id": "pbc_2337082678",
+    "type": "base",
+    "resourceType": "resources",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "reports_v2",
+    "id": "pbc_3451676670",
+    "type": "base",
+    "resourceType": "reports_v2",
+    "allowedFields": [
+      "created",
+      "description",
+      "end",
+      "gen",
+      "id",
+      "isArchive",
+      "loss_defect",
+      "loss_dust",
+      "loss_indirect",
+      "loss_shade",
+      "loss_total",
+      "start",
+      "title",
+      "type",
+      "updated"
+    ]
+  },
+  {
+    "name": "org_parent_map",
+    "id": "35180llsus0m925",
+    "type": "base",
+    "resourceType": "org_parent_map",
+    "allowedFields": [
+      "depth",
+      "id",
+      "name"
+    ]
+  },
+  {
+    "name": "plants_viewer",
+    "id": "6260lz1eo0w2vcr",
+    "type": "view",
+    "resourceType": "plants_viewer",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "name"
+    ]
+  },
+  {
+    "name": "panelmaps_viewer",
+    "id": "8hamrn2tnq9j6c6",
+    "type": "view",
+    "resourceType": "panelmaps_viewer",
+    "allowedFields": [
+      "created",
+      "id"
+    ]
+  },
+  {
+    "name": "temporary_panelmaps",
+    "id": "zkvh97egvg137hs",
+    "type": "view",
+    "resourceType": "temporary_panelmaps",
+    "allowedFields": [
+      "created",
+      "id"
+    ]
+  },
+  {
+    "name": "temporary_plants",
+    "id": "fiqvrx9bli2qvag",
+    "type": "view",
+    "resourceType": "temporary_plants",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "name"
+    ]
+  },
+  {
+    "name": "temporary_blueprints",
+    "id": "pbc_405412299",
+    "type": "view",
+    "resourceType": "temporary_blueprints",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "blueprints_viewer",
+    "id": "pbc_1337089469",
+    "type": "view",
+    "resourceType": "blueprints_viewer",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ]
+  },
+  {
+    "name": "latest_loss_reports",
+    "id": "pbc_1915755548",
+    "type": "view",
+    "resourceType": "latest_loss_reports",
+    "allowedFields": [
+      "id",
+      "organizationName",
+      "plantName"
+    ]
+  },
+  {
+    "name": "reports_v2_list",
+    "id": "pbc_2089487142",
+    "type": "view",
+    "resourceType": "reports_v2_list",
+    "allowedFields": [
+      "created",
+      "description",
+      "end",
+      "gen",
+      "id",
+      "isArchive",
+      "loss_defect",
+      "loss_dust",
+      "loss_indirect",
+      "loss_shade",
+      "loss_total",
+      "start",
+      "title",
+      "type",
+      "updated"
+    ]
+  }
+]

@@ -20,6 +20,8 @@ List filtering uses an upstream ACL filter, not response post-filtering, so nati
 
 ### Verification evidence
 
+The fresh actual-Grant/PocketBase wrapper run `patch-auth-e2e.SvCea0` passed on 2026-09-09. It checked deny/empty scope for all 34 newly mapped collections, then explicit positive grants for three base collections and six views, including revocation, name/ID aliases and native list pagination/counts. Existing plant, upload/download, account and management checks also passed. This does not claim positive native fixtures for every collection: the generated catalog's all-35 stage/activation, independent grant and revocation behavior is additionally covered by Grant store/evaluator tests. No deployed rollout is implied.
+
 The fresh local wrapper run `patch-auth-e2e.lrIQXj` passed on 2026-09-09 using actual Grant, its fenced learner, Exposure and native PocketBase. It verified multipart upload through an explicit `file.write` collection binding, exact-byte download through a `file.read` record binding, scoped lists through collection-name and collection-ID aliases, intersection with a client OR filter, native pagination, and revocation producing an empty HTTP 200 list. The existing account, management and failed-fence checks also passed. These are isolated synthetic fixtures; they do not establish missing authority mappings for other business collections or prove a deployed rollout.
 
 A separate native PocketBase suite with a controlled PDP verified Range, conditional responses, HEAD and denied multipart requests. Those results test transport behavior; they are not an actual-Grant authorization proof for every Range or conditional request. Batch, realtime and related-record expansion remain pending as listed above.
@@ -28,51 +30,79 @@ A separate native PocketBase suite with a controlled PDP verified Range, conditi
 
 The fixed schema contains 35 non-system collections: 27 base collections and 8 views. The three former account collections are base business profiles in the extracted service. System collections are excluded. Both concrete collection names and IDs must map to the same operator-chosen canonical resource; a wildcard collection variable must not expose arbitrary collections.
 
-Only the existing `plants` → `plant` / `patch-data.plant.read` mapping is established for the representative read fixture. Every other mapping remains an explicit operator input. In particular, a view's name or a relation to a plant does not establish inherited authority.
+All 35 collections now have explicit list and single-record GET mappings in [patch_data_collections.json](../internal/grant/patch_data_collections.json), built by `go run ./cmd/patch-data-catalog`. The output contains 140 concrete routes: two read operations for both name and stable-ID aliases. `plants` preserves its existing authority; every other collection has an independent resource type equal to its collection name. A view's relation or matching source ID does not establish inherited authority. These are whole-record read mappings, not a migration of legacy PocketBase rules or an automatic grant to existing plant readers.
 
 | Collection name | Stable collection ID | Runtime type | Authority mapping |
 |---|---|---|---|
-| `users` | `_pb_users_auth_` | base | Operator mapping required |
-| `plants` | `30hrtar148uy66c` | base | Existing plant/read mapping; representative fixture |
-| `panelmaps` | `l17r68r7ddzqcij` | base | Operator mapping required |
-| `organizations` | `1l9cjra913llae4` | base | Operator mapping required |
-| `viewers` | `kovp4j74yv9jr2v` | base | Operator mapping required |
-| `invitations` | `lrjsosb8mul77k0` | base | Operator mapping required |
-| `images` | `w8l3o9jedinck7g` | base | Operator mapping required |
-| `dashboard` | `i95ea9ateuaxwqg` | base | Operator mapping required |
-| `comments` | `lrsdfyc753nlnz7` | base | Operator mapping required |
-| `permissions` | `pt20y45muocfut5` | base | Operator mapping required |
-| `groupconditions` | `1t0dxj7x1r6vvo0` | base | Operator mapping required |
-| `passwords` | `8ngtkucypa7xlaj` | base | Operator mapping required |
-| `temporary_accounts` | `d57i4dxnnp7l8hh` | base | Operator mapping required |
-| `issue_comments` | `snv8bayo8ma6hw0` | base | Operator mapping required |
-| `issue_content_logs` | `misvzvyhp0fe7g4` | base | Operator mapping required |
-| `issue_fields_logs` | `v5q8qxup8hbxg21` | base | Operator mapping required |
-| `issue_tags` | `i10pcc82twxf6pd` | base | Operator mapping required |
-| `issues` | `hqrb76fyop74r06` | base | Operator mapping required |
-| `work_orders` | `yzruwgkyotkp02h` | base | Operator mapping required |
-| `command_history` | `ogq6rbg3df1g496` | base | Operator mapping required |
-| `issue_schedules` | `kyzupz6cwz00swl` | base | Operator mapping required |
-| `reports` | `r0thjxht4e4dz2m` | base | Operator mapping required |
-| `files` | `pbc_3446931122` | base | Operator mapping required |
-| `blueprints` | `pbc_1114506494` | base | Operator mapping required |
-| `resources` | `pbc_2337082678` | base | Operator mapping required |
-| `reports_v2` | `pbc_3451676670` | base | Operator mapping required |
-| `org_parent_map` | `35180llsus0m925` | base | Operator mapping required |
-| `plants_viewer` | `6260lz1eo0w2vcr` | view | Operator mapping required |
-| `panelmaps_viewer` | `8hamrn2tnq9j6c6` | view | Operator mapping required |
-| `temporary_panelmaps` | `zkvh97egvg137hs` | view | Operator mapping required |
-| `temporary_plants` | `fiqvrx9bli2qvag` | view | Operator mapping required |
-| `temporary_blueprints` | `pbc_405412299` | view | Operator mapping required |
-| `blueprints_viewer` | `pbc_1337089469` | view | Operator mapping required |
-| `latest_loss_reports` | `pbc_1915755548` | view | Operator mapping required |
-| `reports_v2_list` | `pbc_2089487142` | view | Operator mapping required |
+| `users` | `_pb_users_auth_` | base | `users` / `patch-data.users.read` |
+| `plants` | `30hrtar148uy66c` | base | `plant` / `patch-data.plant.read` |
+| `panelmaps` | `l17r68r7ddzqcij` | base | `panelmaps` / `patch-data.panelmaps.read` |
+| `organizations` | `1l9cjra913llae4` | base | `organizations` / `patch-data.organizations.read` |
+| `viewers` | `kovp4j74yv9jr2v` | base | `viewers` / `patch-data.viewers.read` |
+| `invitations` | `lrjsosb8mul77k0` | base | `invitations` / `patch-data.invitations.read` |
+| `images` | `w8l3o9jedinck7g` | base | `images` / `patch-data.images.read` |
+| `dashboard` | `i95ea9ateuaxwqg` | base | `dashboard` / `patch-data.dashboard.read` |
+| `comments` | `lrsdfyc753nlnz7` | base | `comments` / `patch-data.comments.read` |
+| `permissions` | `pt20y45muocfut5` | base | `permissions` / `patch-data.permissions.read` |
+| `groupconditions` | `1t0dxj7x1r6vvo0` | base | `groupconditions` / `patch-data.groupconditions.read` |
+| `passwords` | `8ngtkucypa7xlaj` | base | `passwords` / `patch-data.passwords.read` |
+| `temporary_accounts` | `d57i4dxnnp7l8hh` | base | `temporary_accounts` / `patch-data.temporary_accounts.read` |
+| `issue_comments` | `snv8bayo8ma6hw0` | base | `issue_comments` / `patch-data.issue_comments.read` |
+| `issue_content_logs` | `misvzvyhp0fe7g4` | base | `issue_content_logs` / `patch-data.issue_content_logs.read` |
+| `issue_fields_logs` | `v5q8qxup8hbxg21` | base | `issue_fields_logs` / `patch-data.issue_fields_logs.read` |
+| `issue_tags` | `i10pcc82twxf6pd` | base | `issue_tags` / `patch-data.issue_tags.read` |
+| `issues` | `hqrb76fyop74r06` | base | `issues` / `patch-data.issues.read` |
+| `work_orders` | `yzruwgkyotkp02h` | base | `work_orders` / `patch-data.work_orders.read` |
+| `command_history` | `ogq6rbg3df1g496` | base | `command_history` / `patch-data.command_history.read` |
+| `issue_schedules` | `kyzupz6cwz00swl` | base | `issue_schedules` / `patch-data.issue_schedules.read` |
+| `reports` | `r0thjxht4e4dz2m` | base | `reports` / `patch-data.reports.read` |
+| `files` | `pbc_3446931122` | base | `files` / `patch-data.files.read` |
+| `blueprints` | `pbc_1114506494` | base | `blueprints` / `patch-data.blueprints.read` |
+| `resources` | `pbc_2337082678` | base | `resources` / `patch-data.resources.read` |
+| `reports_v2` | `pbc_3451676670` | base | `reports_v2` / `patch-data.reports_v2.read` |
+| `org_parent_map` | `35180llsus0m925` | base | `org_parent_map` / `patch-data.org_parent_map.read` |
+| `plants_viewer` | `6260lz1eo0w2vcr` | view | `plants_viewer` / `patch-data.plants_viewer.read` |
+| `panelmaps_viewer` | `8hamrn2tnq9j6c6` | view | `panelmaps_viewer` / `patch-data.panelmaps_viewer.read` |
+| `temporary_panelmaps` | `zkvh97egvg137hs` | view | `temporary_panelmaps` / `patch-data.temporary_panelmaps.read` |
+| `temporary_plants` | `fiqvrx9bli2qvag` | view | `temporary_plants` / `patch-data.temporary_plants.read` |
+| `temporary_blueprints` | `pbc_405412299` | view | `temporary_blueprints` / `patch-data.temporary_blueprints.read` |
+| `blueprints_viewer` | `pbc_1337089469` | view | `blueprints_viewer` / `patch-data.blueprints_viewer.read` |
+| `latest_loss_reports` | `pbc_1915755548` | view | `latest_loss_reports` / `patch-data.latest_loss_reports.read` |
+| `reports_v2_list` | `pbc_2089487142` | view | `reports_v2_list` / `patch-data.reports_v2_list.read` |
 
-## Required operator inputs
+## Generate, register and activate
+
+Run from the Grant repository. Generation is explicit; use the actual latest staged generation for the compare-and-swap precondition (omit `-previous-generation` only for a new provider catalog).
+
+```sh
+go run ./cmd/patch-data-catalog -generation 2 -previous-generation 1 > catalog.json
+go run ./cmd/patch-data-catalog -actions > read-actions.json
+jq '{actions: .}' read-actions.json > actions-request.json
+```
+
+For an existing provider, save its complete current action array as `existing-actions.json`, then use `go run ./cmd/patch-data-catalog -actions -existing-actions existing-actions.json > merged-actions.json` and `jq '{actions: .}' merged-actions.json > actions-request.json`. The merge retains unrelated actions and existing read-action metadata, including either previously stored `plant.read` or `patch-data.plant.read` code. New action IDs use the provider prefix, with short codes such as `panelmaps.read`. Review the full replacement payload before registration; the merge cannot discover actions absent from its supplied snapshot.
+
+The command only emits files; it makes no network calls and does not grant or activate anything. The provider is fixed to `patch-data`. Register the action definitions through `PUT /api/v1/admin/providers/patch-data/actions` with the `{actions:[...]}` body. This endpoint replaces the provider action set: merge any existing write/file/custom action definitions with these reads before submitting to an existing provider. Likewise, the generated stage replaces the active route set when activated; preserve separately reviewed write/file routes in a combined generation and recompute its contract/catalog digests if they must remain available. Do not deploy this read-only stage as a replacement for unrelated active routes without that review.
+
+For example, reading a `panelmaps` record requires a role containing `patch-data.panelmaps.read`, an admitted application containing that action, and a binding with `providerId:"patch-data", resourceType:"panelmaps", resourceId:"<actual-record-id>"`. Create the role with `POST /api/v1/orgs/{org}/roles`, set its `{actionIds:["patch-data.panelmaps.read"]}` through `PUT /api/v1/orgs/{org}/roles/{role}/actions`, and admit the action through `PUT /api/v1/orgs/{org}/apps/{app}/actions` under the existing application trust/consent workflow. These PUT endpoints replace their respective action sets, so preserve existing entries. Bind a permitted subject with:
+
+```json
+{"id":"panelmap-reader-binding","subjectType":"user","subjectId":"<grant-user-id>","subjectOrganizationId":"<org>","providerId":"patch-data","resourceType":"panelmaps","resourceId":"<actual-record-id>","roleId":"<role>","agreementId":null,"state":"active"}
+```
+
+Submit that body to `POST /api/v1/orgs/{org}/bindings`. Membership, application admission, agreements and consent remain enforced by the existing evaluator. A list needs the same exact record grants as GET; the list's constant collection-name target does not grant all rows. With no matching record grants an admitted application receives an empty list, and a detail read is denied. A view requires its own binding using the view's returned `id`, even when that ID equals a source row ID. Revoke the binding through the existing binding lifecycle; the next authorized list reflects the revoked scope.
+
+Stage `catalog.json` through `POST /api/v1/admin/providers/patch-data/http-capability-generations`, register the actual PEP application at `PUT /api/v1/admin/providers/patch-data/pep-clients/{pep}`, then activate via `POST /api/v1/admin/providers/patch-data/http-capability-active` with the current active generation/digest as `expectedGeneration`/`expectedCatalogDigest` and the output generation/digest as `targetGeneration`/`targetCatalogDigest`. Configure Exposure with the resulting catalog digest. Current active and latest staged generations can differ; do not substitute one for the other. No production registration or activation is implied by generating this artifact.
+
+## Read authority and remaining API inputs
+
+The read actions are marked high risk because they authorize the entire native record response, including business profile data and any sensitive fields exposed by the service token. In particular, `passwords` may contain business password values; `temporary_accounts`, `users`, `permissions` and invitation records can contain sensitive access or identity metadata. Grant these explicit actions/record bindings only to principals allowed to receive the whole record. The scalar query allowlist does not redact response fields, implement field authorization, or permit login through business profiles. No role, organization membership, or action is inferred from those records.
+
+Scalar filter/sort fields are pinned to the audited schema snapshot `1778142859_collections_snapshot.js` after its auth-to-base field removal. The checked-in manifest excludes hidden fields, relations, JSON, file fields, password values, temporary links and removed auth fields. View fields are only their declared scalar output fields; no source relation lookup is inferred. `plants` retains `created,id,isArchive,name,updated`. The source snapshot supplies structure and row identity, while the independent resource namespaces here are explicit new policy mappings. Changes to the source schema require reviewing the manifest before publication.
 
 For each published API, provide the fixed provider, collection name and ID aliases, action IDs, canonical resource type, and resource-ID extraction. Creation and collection management require their own explicit authority target. Declare which root fields are safe scalar filter/sort fields; relation paths, view-to-source identity mappings, nested JSON fields and expansion require separate semantics. Supply media types and byte limits for uploads/files, and the complete permitted request/response header and status policy.
 
-The representative plants catalog fixture is a bounded example, not automatic enrollment of all collections. Catalog generation and activation remain explicit and digest-bound. A schema snapshot identifies API structure; it does not supply missing business authorization decisions.
+The generated collection catalog publishes only list/detail GET. Base mutations and file routes still require separate reviewed contracts; views remain read-only. Batch, realtime, relationship expansion, cross-record filters and native field projection remain unpublished. Catalog generation and activation remain explicit and digest-bound.
 
 Primary API evidence: [PocketBase record CRUD](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/record_crud.go), [batch API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/batch.go), [realtime API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/realtime.go), and [filter expression limit](https://github.com/pocketbase/pocketbase/blob/v0.40.3/tools/search/provider.go).
 

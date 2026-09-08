@@ -158,6 +158,13 @@ PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, 
 
 ## 주요 릴레이션
 
+- Patch Data의 35개 컬렉션 읽기 카탈로그는 기존 `role_bindings.(provider_id, resource_type, resource_id)`와 `role_actions.action_id`를 사용한다. `provider_id`는 `patch-data`, resource type은 컬렉션 이름이며 `plants`만 기존 `plant`를 유지한다. action ID는 `patch-data.<resource_type>.read`다. 컬렉션 이름과 PocketBase ID 경로는 동일한 canonical tuple을 사용하고 resource ID는 응답 레코드의 `id`다.
+- 뷰도 독립된 resource type을 사용한다. 원본과 뷰의 레코드 ID가 같거나 업무 relation이 연결되어 있어도 권한을 전파하지 않는다. 조직 및 발전소 권한 import가 새 컬렉션의 binding을 자동 생성하지 않는다. 스키마 DDL과 기존 canonical key의 의미는 변경하지 않는다.
+
+### 컬렉션 읽기 권한 구조의 이유
+
+PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므로 업무 relation을 근거로 허용 범위를 확대하지 않는다. 목록은 각 canonical record binding을 기존 membership·application·consent 평가기로 검사해 허용 ID를 만들고, 상세 조회는 같은 action/resource tuple을 검사한다. `patch_data_collections.json`은 경로와 검색 가능한 scalar 필드만 선언하며 실제 권한이나 응답 필드 마스킹을 생성하지 않는다. 비밀번호 및 업무 계정 컬렉션을 포함한 읽기 action은 전체 레코드 접근을 뜻한다. 운영자는 해당 데이터에 접근 가능한 주체에게만 명시적으로 부여해야 한다. 등록 및 activation 절차는 [카탈로그 현황](catalog-coverage.md)에 설명한다.
+
 - `user_identities.user_id` -> `users.id`
 - `organization_memberships.user_id` -> `users.id`
 - `organization_memberships.organization_id` -> `organizations.id`
