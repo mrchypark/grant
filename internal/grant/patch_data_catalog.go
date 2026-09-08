@@ -12,11 +12,13 @@ var patchDataCollectionManifest []byte
 // PatchDataCollection defines independent, whole-record read authority. Relations
 // and matching IDs in another collection never imply authority over this tuple.
 type PatchDataCollection struct {
-	Name          string   `json:"name"`
-	ID            string   `json:"id"`
-	Type          string   `json:"type"`
-	ResourceType  string   `json:"resourceType"`
-	AllowedFields []string `json:"allowedFields"`
+	Name           string   `json:"name"`
+	ID             string   `json:"id"`
+	Type           string   `json:"type"`
+	ResourceType   string   `json:"resourceType"`
+	AllowedFields  []string `json:"allowedFields"`
+	RecordIDFormat string   `json:"recordIdFormat"`
+	HasFiles       bool     `json:"hasFiles"`
 }
 
 func PatchDataCollections() ([]PatchDataCollection, error) {
@@ -53,7 +55,7 @@ func PatchDataReadCatalog(generation uint64, previous *uint64) (StageHttpCapabil
 				}
 				if operation == "get" {
 					c.PathTemplate += "/{id}"
-					c.Resource.ID = HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: "pocketbaseId"}
+					c.Resource.ID = HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: collection.RecordIDFormat}
 				} else {
 					c.Query = HttpQueryPolicy{Mode: "exact", Parameters: []HttpQueryParameter{{Name: "filter", Format: "text", MaxBytes: 4096}, {Name: "page", Format: "uint"}, {Name: "perPage", Format: "uint"}, {Name: "skipTotal", Format: "bool"}, {Name: "sort", Format: "text", MaxBytes: 1024}}}
 					c.RecordScope = &HttpRecordScopePolicy{FilterParameter: "filter", RowKey: "id", Grammar: "fexpr", MaxIDs: 100, MaxFilterBytes: 8192, AllowedFields: append([]string(nil), collection.AllowedFields...), SortParameter: "sort", Pagination: &HttpPaginationPolicy{PageParameter: "page", PageSizeParameter: "perPage", SkipTotalParameter: "skipTotal"}}
@@ -61,6 +63,77 @@ func PatchDataReadCatalog(generation uint64, previous *uint64) (StageHttpCapabil
 				c.ContractDigest, err = HttpCapabilityContractDigest(c)
 				if err != nil {
 					return stage, nil, err
+				}
+				stage.Capabilities = append(stage.Capabilities, c)
+			}
+		}
+	}
+	stage.CatalogDigest, err = HttpCapabilityCatalogDigest("patch-data", stage)
+	if err == nil {
+		err = validateGeneration("patch-data", stage)
+	}
+	return stage, actions, err
+}
+
+// PatchDataCatalog includes native whole-record mutation authority. A mutation
+// authorizes the native operation, including relation edits and hook/cascade
+// effects; it does not separately evaluate every affected related record.
+func PatchDataCatalog(generation uint64, previous *uint64) (StageHttpCapabilityGeneration, []Action, error) {
+	stage, actions, err := PatchDataReadCatalog(generation, previous)
+	if err != nil {
+		return stage, actions, err
+	}
+	collections, err := PatchDataCollections()
+	if err != nil {
+		return stage, actions, err
+	}
+	for _, collection := range collections {
+		if collection.Type == "view" {
+			continue
+		}
+		for _, operation := range []struct{ name, method string }{{"create", "POST"}, {"update", "PATCH"}, {"delete", "DELETE"}} {
+			code := collection.ResourceType + "." + operation.name
+			action := "patch-data." + code
+			description := "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked."
+			actions = append(actions, Action{ID: action, ProviderID: "patch-data", Code: code, Name: operation.name + " " + collection.Name + " records", Description: &description, RiskLevel: "high", GrantableToApplications: true})
+			for aliasIndex, alias := range []string{collection.Name, collection.ID} {
+				c := HttpCapability{CapabilityID: fmt.Sprintf("%s.%s.%d", collection.Name, operation.name, aliasIndex), Version: 1, Enabled: true, AccessMode: "authorized", Method: operation.method, PathTemplate: "/api/collections/" + alias + "/records/{id}", ActionID: &action,
+					Resource: &HttpCapabilityResource{ResourceType: collection.ResourceType, ID: HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: collection.RecordIDFormat}}, Query: HttpQueryPolicy{Mode: "none"},
+					Request: HttpRequestPolicy{Body: "none", Authorization: "service-token", ForwardHeaders: []string{}}, Response: HttpResponsePolicy{MaxBytes: 1 << 20, ForwardHeaders: []string{"content-type"}, Redirects: "deny", ErrorStatuses: []int{400, 403, 404, 409, 422}}}
+				if operation.name == "create" {
+					c.PathTemplate = "/api/collections/" + alias + "/records"
+					c.Resource = &HttpCapabilityResource{ResourceType: "collection", ID: HttpResourceExtractor{Kind: "constant", Value: collection.Name}}
+				}
+				if operation.name != "delete" {
+					limit := uint64(1 << 20)
+					if collection.HasFiles {
+						limit = 128 << 20
+					}
+					c.Request = HttpRequestPolicy{Body: "opaque", MaxBytes: limit, ForwardHeaders: []string{"content-type"}, Authorization: "service-token", ContentTypes: []string{"application/json", "multipart/form-data"}}
+				}
+				c.ContractDigest, err = HttpCapabilityContractDigest(c)
+				if err != nil {
+					return stage, actions, err
+				}
+				stage.Capabilities = append(stage.Capabilities, c)
+			}
+		}
+		if !collection.HasFiles {
+			continue
+		}
+		code := collection.ResourceType + ".file.read"
+		action := "patch-data." + code
+		actions = append(actions, Action{ID: action, ProviderID: "patch-data", Code: code, Name: "Read " + collection.Name + " record files", RiskLevel: "high", GrantableToApplications: true})
+		for aliasIndex, alias := range []string{collection.Name, collection.ID} {
+			for _, operation := range []struct{ name, method string }{{"file-get", "GET"}, {"file-head", "HEAD"}} {
+				c := HttpCapability{CapabilityID: fmt.Sprintf("%s.%s.%d", collection.Name, operation.name, aliasIndex), Version: 1, Enabled: true, AccessMode: "authorized", Method: operation.method, PathTemplate: "/api/files/" + alias + "/{id}/{filename}", ActionID: &action,
+					Resource: &HttpCapabilityResource{ResourceType: collection.ResourceType, ID: HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: collection.RecordIDFormat}}, PathParameters: []HttpPathParameter{{Name: "filename", Format: "utf8Segment", MaxBytes: 1024}},
+					Query:    HttpQueryPolicy{Mode: "exact", Parameters: []HttpQueryParameter{{Name: "download", Format: "text", MaxBytes: 5}, {Name: "thumb", Format: "text", MaxBytes: 256}}},
+					Request:  HttpRequestPolicy{Body: "none", Authorization: "service-token", ForwardHeaders: []string{"if-match", "if-modified-since", "if-none-match", "if-range", "if-unmodified-since", "range"}},
+					Response: HttpResponsePolicy{MaxBytes: 128 << 20, ForwardHeaders: []string{"accept-ranges", "cache-control", "content-disposition", "content-length", "content-range", "content-type", "etag", "last-modified"}, Redirects: "deny", ErrorStatuses: []int{304, 400, 403, 404, 412, 416}}}
+				c.ContractDigest, err = HttpCapabilityContractDigest(c)
+				if err != nil {
+					return stage, actions, err
 				}
 				stage.Capabilities = append(stage.Capabilities, c)
 			}

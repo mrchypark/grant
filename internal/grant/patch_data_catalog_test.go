@@ -22,11 +22,11 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 	if _, err = svc.UpsertServiceProviderAdmin(ctx, ServiceProvider{ID: "patch-data", Name: "Patch Data", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	stage, actions, err := PatchDataReadCatalog(1, nil)
+	stage, actions, err := PatchDataCatalog(1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 140 || len(actions) != 35 {
+	if len(stage.Capabilities) != 322 || len(actions) != 121 {
 		t.Fatal("incomplete inventory")
 	}
 	// Reproduce the existing baseline's short action code before adding reads.
@@ -54,7 +54,7 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 		t.Fatal("published catalog changed", err)
 	}
 	principal := applicationAuthorizationContext{UserID: "conalog-grant", OrganizationID: "conalog-grant", ApplicationID: app.ID}
-	for i := 0; i < len(stage.Capabilities); i += 4 {
+	for i := 0; i < 140; i += 4 {
 		list, get, alias := stage.Capabilities[i], stage.Capabilities[i+1], stage.Capabilities[i+2]
 		t.Run(list.Resource.ResourceType, func(t *testing.T) {
 			if !reflect.DeepEqual(list.Resource, alias.Resource) || !reflect.DeepEqual(list.RecordScope, alias.RecordScope) || *list.ActionID != *get.ActionID || get.Resource.ResourceType != list.Resource.ResourceType {

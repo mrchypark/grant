@@ -1,4 +1,4 @@
-// patch-data-catalog emits explicit read mappings for offline review and staging.
+// patch-data-catalog emits explicit native record mappings for review and staging.
 package main
 
 import (
@@ -14,13 +14,18 @@ func main() {
 	generation := flag.Uint64("generation", 1, "new catalog generation")
 	previous := flag.Uint64("previous-generation", 0, "expected latest generation (0 means none)")
 	actions := flag.Bool("actions", false, "emit action definitions instead of stage payload")
+	readOnly := flag.Bool("read-only", false, "emit only collection list/detail reads (140 routes)")
 	existingActions := flag.String("existing-actions", "", "with -actions, merge an existing provider action array without removing actions or changing existing metadata")
 	flag.Parse()
 	var expected *uint64
 	if *previous != 0 {
 		expected = previous
 	}
-	stage, definitions, err := grant.PatchDataReadCatalog(*generation, expected)
+	build := grant.PatchDataCatalog
+	if *readOnly {
+		build = grant.PatchDataReadCatalog
+	}
+	stage, definitions, err := build(*generation, expected)
 	if err == nil && *existingActions != "" {
 		if !*actions {
 			err = fmt.Errorf("-existing-actions requires -actions")

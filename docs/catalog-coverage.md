@@ -6,7 +6,7 @@ Scope: Grant and Exposure only. The audited business service is Patch Data `05f8
 
 | API family | Contract status | Publication requirement |
 |---|---|---|
-| Single-record JSON CRUD | Implemented | Explicit action/resource mapping, including create targets and mutable relation fields |
+| Single-record JSON CRUD | Explicit mappings for all 27 base collections | Separate create collection target and update/delete record target; authority includes the whole native operation and its side effects |
 | Lists and searches | Actual Grant/learner/PocketBase integration passed for the representative catalog | Exact record authority IDs, row key, safe scalar fields, filter/sort parameters, bounded fexpr ACL |
 | Multipart and opaque uploads | Actual Grant-authorized multipart upload passed; generic transport also tested separately | Exact media types and action/resource mapping; body bytes are preserved |
 | Files, Range, conditional reads | Actual Grant-authorized exact-byte download passed; Range/conditional/HEAD verified with a controlled PDP | Record-to-file authority mapping and explicit filename segment bound |
@@ -20,6 +20,8 @@ List filtering uses an upstream ACL filter, not response post-filtering, so nati
 
 ### Verification evidence
 
+The full native collection run `patch-auth-e2e.4VMTgp` passed on 2026-09-09 with 322 routes and 121 registered actions. It exercised denied base mutations across aliases, explicit create/update/delete grants, byte-preserved native JSON and multipart changes, independent file-read rights, and a real 62-character `org_parent_map` detail ID through both aliases. Native `If-Match` returned 412 for a mismatched ETag; `download=1/0/TRUE/FALSE` retained native behavior. Exposure returned `Cache-Control: no-store` for authorized responses so file caching does not bypass subsequent revocation checks. Grant tests additionally cover every generated mutation action's exact-resource grant/revocation and a 200-action replacement whose failed final insert preserves prior actions and role edges, followed by successful retry.
+
 The fresh actual-Grant/PocketBase wrapper run `patch-auth-e2e.SvCea0` passed on 2026-09-09. It checked deny/empty scope for all 34 newly mapped collections, then explicit positive grants for three base collections and six views, including revocation, name/ID aliases and native list pagination/counts. Existing plant, upload/download, account and management checks also passed. This does not claim positive native fixtures for every collection: the generated catalog's all-35 stage/activation, independent grant and revocation behavior is additionally covered by Grant store/evaluator tests. No deployed rollout is implied.
 
 The fresh local wrapper run `patch-auth-e2e.lrIQXj` passed on 2026-09-09 using actual Grant, its fenced learner, Exposure and native PocketBase. It verified multipart upload through an explicit `file.write` collection binding, exact-byte download through a `file.read` record binding, scoped lists through collection-name and collection-ID aliases, intersection with a client OR filter, native pagination, and revocation producing an empty HTTP 200 list. The existing account, management and failed-fence checks also passed. These are isolated synthetic fixtures; they do not establish missing authority mappings for other business collections or prove a deployed rollout.
@@ -30,7 +32,7 @@ A separate native PocketBase suite with a controlled PDP verified Range, conditi
 
 The fixed schema contains 35 non-system collections: 27 base collections and 8 views. The three former account collections are base business profiles in the extracted service. System collections are excluded. Both concrete collection names and IDs must map to the same operator-chosen canonical resource; a wildcard collection variable must not expose arbitrary collections.
 
-All 35 collections now have explicit list and single-record GET mappings in [patch_data_collections.json](../internal/grant/patch_data_collections.json), built by `go run ./cmd/patch-data-catalog`. The output contains 140 concrete routes: two read operations for both name and stable-ID aliases. `plants` preserves its existing authority; every other collection has an independent resource type equal to its collection name. A view's relation or matching source ID does not establish inherited authority. These are whole-record read mappings, not a migration of legacy PocketBase rules or an automatic grant to existing plant readers.
+All 35 collections have explicit list and single-record GET mappings in [patch_data_collections.json](../internal/grant/patch_data_collections.json). `go run ./cmd/patch-data-catalog` produces 322 concrete routes and 121 action definitions: 140 list/detail routes, 162 create/update/delete routes for 27 base collections, and 20 file GET/HEAD routes for five file-bearing collections. Both name and stable-ID aliases use the same authority. `-read-only` retains the 140-route, 35-action read catalog. `plants` preserves its existing resource type; every other collection has an independent resource type equal to its collection name. A view's relation or matching source ID does not establish inherited authority. These mappings do not migrate legacy PocketBase rules or automatically grant new rights to existing plant readers.
 
 | Collection name | Stable collection ID | Runtime type | Authority mapping |
 |---|---|---|---|
@@ -76,13 +78,13 @@ Run from the Grant repository. Generation is explicit; use the actual latest sta
 
 ```sh
 go run ./cmd/patch-data-catalog -generation 2 -previous-generation 1 > catalog.json
-go run ./cmd/patch-data-catalog -actions > read-actions.json
-jq '{actions: .}' read-actions.json > actions-request.json
+go run ./cmd/patch-data-catalog -actions > actions.json
+jq '{actions: .}' actions.json > actions-request.json
 ```
 
 For an existing provider, save its complete current action array as `existing-actions.json`, then use `go run ./cmd/patch-data-catalog -actions -existing-actions existing-actions.json > merged-actions.json` and `jq '{actions: .}' merged-actions.json > actions-request.json`. The merge retains unrelated actions and existing read-action metadata, including either previously stored `plant.read` or `patch-data.plant.read` code. New action IDs use the provider prefix, with short codes such as `panelmaps.read`. Review the full replacement payload before registration; the merge cannot discover actions absent from its supplied snapshot.
 
-The command only emits files; it makes no network calls and does not grant or activate anything. The provider is fixed to `patch-data`. Register the action definitions through `PUT /api/v1/admin/providers/patch-data/actions` with the `{actions:[...]}` body. This endpoint replaces the provider action set: merge any existing write/file/custom action definitions with these reads before submitting to an existing provider. Likewise, the generated stage replaces the active route set when activated; preserve separately reviewed write/file routes in a combined generation and recompute its contract/catalog digests if they must remain available. Do not deploy this read-only stage as a replacement for unrelated active routes without that review.
+The command only emits files; it makes no network calls and does not grant or activate anything. The provider is fixed to `patch-data`. Register the action definitions through `PUT /api/v1/admin/providers/patch-data/actions` with the `{actions:[...]}` body. This endpoint replaces the provider action set: merge any existing custom action definitions with the generated definitions before submitting to an existing provider. Likewise, the generated stage replaces the active route set when activated; preserve separately reviewed custom routes in a combined generation and recompute its contract/catalog digests if they must remain available. If an old route overlaps a generated route, review its action/resource contract before replacement; blindly appending both is rejected. Do not replace unrelated active routes without that review.
 
 For example, reading a `panelmaps` record requires a role containing `patch-data.panelmaps.read`, an admitted application containing that action, and a binding with `providerId:"patch-data", resourceType:"panelmaps", resourceId:"<actual-record-id>"`. Create the role with `POST /api/v1/orgs/{org}/roles`, set its `{actionIds:["patch-data.panelmaps.read"]}` through `PUT /api/v1/orgs/{org}/roles/{role}/actions`, and admit the action through `PUT /api/v1/orgs/{org}/apps/{app}/actions` under the existing application trust/consent workflow. These PUT endpoints replace their respective action sets, so preserve existing entries. Bind a permitted subject with:
 
@@ -94,6 +96,25 @@ Submit that body to `POST /api/v1/orgs/{org}/bindings`. Membership, application 
 
 Stage `catalog.json` through `POST /api/v1/admin/providers/patch-data/http-capability-generations`, register the actual PEP application at `PUT /api/v1/admin/providers/patch-data/pep-clients/{pep}`, then activate via `POST /api/v1/admin/providers/patch-data/http-capability-active` with the current active generation/digest as `expectedGeneration`/`expectedCatalogDigest` and the output generation/digest as `targetGeneration`/`targetCatalogDigest`. Configure Exposure with the resulting catalog digest. Current active and latest staged generations can differ; do not substitute one for the other. No production registration or activation is implied by generating this artifact.
 
+## Mutation and file authority
+
+For a base collection with resource type `R` and collection name `C`, the catalog declares the following independent rights. A role or application must explicitly contain the requested action; possessing a read action or a grant in another namespace never implies these rights.
+
+| Native operation | Action | Resource type / ID |
+|---|---|---|
+| POST create | `patch-data.R.create` | `collection` / `C` |
+| PATCH update, including native file upload/removal | `patch-data.R.update` | `R` / path record ID |
+| DELETE | `patch-data.R.delete` | `R` / path record ID |
+| GET or HEAD record file | `patch-data.R.file.read` | `R` / path record ID |
+
+These high-risk mutation actions authorize the complete native operation, including mutable relation fields, implicit relation cleanup, cascaded deletes, and existing PocketBase hook effects. They do **not** separately check the authority of each related or affected record, impose field allowlists, or inherit permissions from a relation. In the unchanged source, organization writes maintain `org_parent_map`, issue updates may append issue logs, plant writes invoke geocoding hooks, and relation cascade settings can delete dependent records. Grant these actions only to subjects permitted to perform the full operation. Updating business `permissions`, `users` or organization rows does not create Grant memberships, roles or grants. Existing issue logging uses the native service principal; this catalog does not rewrite it into the end-user identity.
+
+POST/PATCH accept bounded native JSON or multipart using the existing `opaque` transport and exact `application/json` / `multipart/form-data` content types. Exposure hashes and forwards original bytes; PocketBase validates their syntax and fields. Non-file collections have a 1 MiB request bound; `users`, `organizations`, `images`, `reports` and `files` have a 128 MiB request bound. JSON responses remain bounded at 1 MiB. The seven source file fields are `users.avatar`, `organizations.logo/icon/homeBanner`, `images.image`, `reports.file`, and `files.file`; their native validation limits still apply. Uploads use create/update rights, while downloading any file on the record requires the separate `.file.read` right. File bytes are bounded at 128 MiB, filename segments at 1024 decoded bytes, with Range/conditional headers and bounded `download`/`thumb` query parameters.
+
+Configure **both** Exposure request and response maxima to at least 128 MiB when loading the full catalog. A smaller response maximum rejects the catalog, and a smaller request maximum rejects file-collection mutation policies even for small payloads. These are explicit supported transport limits, not unlimited native file support.
+
+`org_parent_map` is a base collection materialized by existing organization hooks. Its native IDs use `lower(hex(organizationID || ':' || parentID))` (62 characters for two 15-character IDs), so its detail/mutation extractor uses bounded `asciiToken`; other collection record IDs retain `pocketbaseId`. It receives explicit whole-record mutation rights like other bases, but source hooks may rebuild its rows. Views remain read-only.
+
 ## Read authority and remaining API inputs
 
 The read actions are marked high risk because they authorize the entire native record response, including business profile data and any sensitive fields exposed by the service token. In particular, `passwords` may contain business password values; `temporary_accounts`, `users`, `permissions` and invitation records can contain sensitive access or identity metadata. Grant these explicit actions/record bindings only to principals allowed to receive the whole record. The scalar query allowlist does not redact response fields, implement field authorization, or permit login through business profiles. No role, organization membership, or action is inferred from those records.
@@ -102,7 +123,7 @@ Scalar filter/sort fields are pinned to the audited schema snapshot `1778142859_
 
 For each published API, provide the fixed provider, collection name and ID aliases, action IDs, canonical resource type, and resource-ID extraction. Creation and collection management require their own explicit authority target. Declare which root fields are safe scalar filter/sort fields; relation paths, view-to-source identity mappings, nested JSON fields and expansion require separate semantics. Supply media types and byte limits for uploads/files, and the complete permitted request/response header and status policy.
 
-The generated collection catalog publishes only list/detail GET. Base mutations and file routes still require separate reviewed contracts; views remain read-only. Batch, realtime, relationship expansion, cross-record filters and native field projection remain unpublished. Catalog generation and activation remain explicit and digest-bound.
+The generated catalog publishes list/detail reads, base create/update/delete, and record-file GET/HEAD. Batch, realtime, relationship expansion, cross-record filters and native field projection remain unpublished. Catalog generation and activation remain explicit and digest-bound.
 
 Primary API evidence: [PocketBase record CRUD](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/record_crud.go), [batch API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/batch.go), [realtime API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/realtime.go), and [filter expression limit](https://github.com/pocketbase/pocketbase/blob/v0.40.3/tools/search/provider.go).
 

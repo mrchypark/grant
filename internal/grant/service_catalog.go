@@ -70,11 +70,19 @@ func (s *Service) ReplaceProviderActionsAdmin(ctx context.Context, provider stri
 	if err != nil {
 		return nil, err
 	}
-	stmts := []Statement{assertion("SELECT 1 FROM service_providers WHERE id=?", provider)}
-	for _, table := range []string{"application_grant_actions", "application_actions", "role_actions"} {
-		stmts = append(stmts, Statement{SQL: "DELETE FROM " + table + " WHERE action_id IN(SELECT id FROM actions WHERE provider_id=? AND id NOT IN(SELECT json_extract(value,'$.id') FROM json_each(?)))", Args: []any{provider, payload}})
+	// Keep the complete replacement atomic without repeating the full action
+	// manifest in five statements inside one bounded consensus command.
+	stageID := requestID()
+	const stageKind = "provider-actions"
+	if err = s.store.stageText(ctx, stageID, stageKind, payload); err != nil {
+		return nil, err
 	}
-	stmts = append(stmts, Statement{SQL: "DELETE FROM actions WHERE provider_id=? AND id NOT IN(SELECT json_extract(value,'$.id') FROM json_each(?))", Args: []any{provider, payload}}, Statement{SQL: "INSERT INTO actions(id,provider_id,code,name,description,risk_level,visibility_granting,grantable_to_applications,consent_label,consent_description,created_at,updated_at) SELECT json_extract(value,'$.id'),?,json_extract(value,'$.code'),json_extract(value,'$.name'),json_extract(value,'$.description'),json_extract(value,'$.riskLevel'),0,json_extract(value,'$.grantableToApplications'),json_extract(value,'$.consentLabel'),json_extract(value,'$.consentDescription'),?,? FROM json_each(?) WHERE 1 ON CONFLICT(provider_id,code) DO UPDATE SET name=excluded.name,description=excluded.description,risk_level=excluded.risk_level,grantable_to_applications=excluded.grantable_to_applications,consent_label=excluded.consent_label,consent_description=excluded.consent_description,updated_at=excluded.updated_at", Args: []any{provider, nowString(), nowString(), payload}})
+	rows := "json_each(" + stagedTextSQL() + ")"
+	stmts := []Statement{assertion("SELECT 1 FROM service_providers WHERE id=?", provider), assertion("SELECT 1 WHERE json_array_length("+stagedTextSQL()+")=?", stageID, stageKind, len(normalized))}
+	for _, table := range []string{"application_grant_actions", "application_actions", "role_actions"} {
+		stmts = append(stmts, Statement{SQL: "DELETE FROM " + table + " WHERE action_id IN(SELECT id FROM actions WHERE provider_id=? AND id NOT IN(SELECT json_extract(value,'$.id') FROM " + rows + "))", Args: []any{provider, stageID, stageKind}})
+	}
+	stmts = append(stmts, Statement{SQL: "DELETE FROM actions WHERE provider_id=? AND id NOT IN(SELECT json_extract(value,'$.id') FROM " + rows + ")", Args: []any{provider, stageID, stageKind}}, Statement{SQL: "INSERT INTO actions(id,provider_id,code,name,description,risk_level,visibility_granting,grantable_to_applications,consent_label,consent_description,created_at,updated_at) SELECT json_extract(value,'$.id'),?,json_extract(value,'$.code'),json_extract(value,'$.name'),json_extract(value,'$.description'),json_extract(value,'$.riskLevel'),0,json_extract(value,'$.grantableToApplications'),json_extract(value,'$.consentLabel'),json_extract(value,'$.consentDescription'),?,? FROM " + rows + " WHERE 1 ON CONFLICT(provider_id,code) DO UPDATE SET name=excluded.name,description=excluded.description,risk_level=excluded.risk_level,grantable_to_applications=excluded.grantable_to_applications,consent_label=excluded.consent_label,consent_description=excluded.consent_description,updated_at=excluded.updated_at", Args: []any{provider, nowString(), nowString(), stageID, stageKind}}, Statement{SQL: "DELETE FROM grant_import_payloads WHERE import_id=? AND kind=?", Args: []any{stageID, stageKind}})
 	if err = s.store.Transaction(ctx, stmts); err != nil {
 		return nil, err
 	}

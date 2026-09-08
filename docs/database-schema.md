@@ -165,6 +165,14 @@ PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, 
 
 PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므로 업무 relation을 근거로 허용 범위를 확대하지 않는다. 목록은 각 canonical record binding을 기존 membership·application·consent 평가기로 검사해 허용 ID를 만들고, 상세 조회는 같은 action/resource tuple을 검사한다. `patch_data_collections.json`은 경로와 검색 가능한 scalar 필드만 선언하며 실제 권한이나 응답 필드 마스킹을 생성하지 않는다. 비밀번호 및 업무 계정 컬렉션을 포함한 읽기 action은 전체 레코드 접근을 뜻한다. 운영자는 해당 데이터에 접근 가능한 주체에게만 명시적으로 부여해야 한다. 등록 및 activation 절차는 [카탈로그 현황](catalog-coverage.md)에 설명한다.
 
+### 컬렉션 변경 및 파일 권한 릴레이션
+
+27개 base 컬렉션 생성은 `patch-data.<resource_type>.create`와 `(patch-data, collection, 컬렉션 이름)`을 함께 검사한다. 수정 및 삭제는 각각 `.update`, `.delete`와 기존 레코드 tuple을 검사한다. 파일이 있는 5개 컬렉션의 다운로드는 `.file.read`와 같은 레코드 tuple을 사용하며 일반 `.read`나 업로드 권한으로 대신할 수 없다. 이름/ID URL alias는 이 canonical key를 공유한다. `org_parent_map`은 원본 hook이 만드는 62자 hex ID를 수용하도록 `asciiToken` 추출기를 사용한다. 원본 키의 의미를 바꾸지는 않는다.
+
+이 구조는 native API의 전체 작업 단위를 권한으로 표현한다. relation 변경, hook 및 cascade 부작용도 해당 쓰기 권한에 포함하며 관련 레코드별 권한을 추가로 검사한다고 주장하지 않는다. PocketBase 업무 데이터의 관계를 Grant 권한으로 자동 전개하지 않고 새 권한은 명시적 action/role/binding으로만 부여한다. 뷰에는 변경 권한을 발행하지 않는다.
+
+큰 provider action manifest는 기존 `grant_import_payloads`에 `kind='provider-actions'`로 불변 문자열 조각을 먼저 저장한다. 한 최종 transaction에서 전체 action 교체, 생략된 action의 role/application/consent 연결 삭제, staging 정리를 함께 수행한다. 중간 chunk는 권한 판단에 사용하지 않으며 최종 실패 시 기존 권한을 유지한다. 실패한 요청의 참조되지 않는 staging 조각이 남을 수 있다. 새 테이블이나 DDL 변경은 없다.
+
 - `user_identities.user_id` -> `users.id`
 - `organization_memberships.user_id` -> `users.id`
 - `organization_memberships.organization_id` -> `organizations.id`
