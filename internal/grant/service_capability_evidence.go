@@ -111,7 +111,14 @@ func matchPath(template, path string) (map[string]string, error) {
 			if v == "" || v == "." || v == ".." {
 				return nil, serviceError(400, "canonicalPath contains an invalid segment")
 			}
-			out[w[1:len(w)-1]] = v
+			if err := scalarFormat("asciiToken", v); err != nil {
+				return nil, err
+			}
+			name := w[1 : len(w)-1]
+			if _, duplicate := out[name]; duplicate {
+				return nil, serviceError(400, "duplicate path variable")
+			}
+			out[name] = v
 		} else if w != v {
 			return nil, serviceError(403, "forbidden: HTTP path does not match capability")
 		}

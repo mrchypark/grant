@@ -138,6 +138,7 @@ func pathVariables(s string) ([]string, error) {
 		return nil, fmt.Errorf("invalid pathTemplate")
 	}
 	var v []string
+	seen := map[string]bool{}
 	for _, part := range strings.Split(s, "/")[1:] {
 		if part == "" || part == "." || part == ".." {
 			return nil, fmt.Errorf("invalid path segment")
@@ -146,12 +147,24 @@ func pathVariables(s string) ([]string, error) {
 			if !strings.HasPrefix(part, "{") || !strings.HasSuffix(part, "}") || !capabilityToken(part[1:len(part)-1]) {
 				return nil, fmt.Errorf("invalid variable")
 			}
-			v = append(v, part[1:len(part)-1])
+			name := part[1 : len(part)-1]
+			if seen[name] {
+				return nil, fmt.Errorf("duplicate path variable")
+			}
+			seen[name] = true
+			v = append(v, name)
 		}
 	}
 	return v, nil
 }
 func validateCapability(c HttpCapability) error {
+	previous := 399
+	for _, status := range c.Response.ErrorStatuses {
+		if status < 400 || status > 599 || status <= previous {
+			return fmt.Errorf("errorStatuses must be sorted unique 400..599")
+		}
+		previous = status
+	}
 	if !capabilityToken(c.CapabilityID) || c.Version == 0 || c.Method == "" {
 		return fmt.Errorf("invalid capability identity")
 	}
@@ -187,7 +200,7 @@ func validateCapability(c HttpCapability) error {
 	for _, item := range []struct {
 		headers []string
 		allow   string
-	}{{c.Request.ForwardHeaders, "|accept|content-type|if-match|if-none-match|"}, {c.Response.ForwardHeaders, "|cache-control|content-type|etag|last-modified|"}} {
+	}{{c.Request.ForwardHeaders, "|accept|content-type|if-match|if-none-match|x-organization-id|"}, {c.Response.ForwardHeaders, "|cache-control|content-type|etag|last-modified|"}} {
 		prev := ""
 		for _, h := range item.headers {
 			if h <= prev || !strings.Contains(item.allow, "|"+h+"|") {
@@ -211,7 +224,11 @@ func validateCapability(c HttpCapability) error {
 		}
 		switch r.Kind {
 		case "pathSegment":
-			if len(vars) != 1 || vars[0] != r.Name {
+			found := false
+			for _, name := range vars {
+				found = found || name == r.Name
+			}
+			if !found {
 				return fmt.Errorf("path extractor mismatch")
 			}
 		case "queryScalar":

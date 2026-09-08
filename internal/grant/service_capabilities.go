@@ -56,6 +56,11 @@ func (s *Service) configuredPEP(ctx context.Context, provider string) (ProviderP
 	return pep, nil
 }
 func (s *Service) ActiveHttpCapabilityCatalog(ctx context.Context, provider string) (ActiveHttpCapabilityCatalog, error) {
+	return localReplicaRead(ctx, s, func(ctx context.Context) (ActiveHttpCapabilityCatalog, error) {
+		return s.activeHttpCapabilityCatalog(ctx, provider)
+	})
+}
+func (s *Service) activeHttpCapabilityCatalog(ctx context.Context, provider string) (ActiveHttpCapabilityCatalog, error) {
 	pep, err := s.configuredPEP(ctx, provider)
 	if err != nil {
 		return ActiveHttpCapabilityCatalog{}, err
@@ -63,6 +68,21 @@ func (s *Service) ActiveHttpCapabilityCatalog(ctx context.Context, provider stri
 	return s.store.ActiveHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
 }
 func (s *Service) DecideHttpCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput) (HttpCapabilityDecision, error) {
+	if s.cfg.Database.LocalNodeRole == "learner" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		identity, e := s.externalIdentity(ctx, token)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		ctx = context.WithValue(ctx, replicaIdentityKey{}, identity)
+	}
+	return localReplicaRead(ctx, s, func(ctx context.Context) (HttpCapabilityDecision, error) {
+		return s.decideHttpCapability(ctx, token, org, r)
+	})
+}
+func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput) (HttpCapabilityDecision, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return HttpCapabilityDecision{}, serviceError(401, "unauthorized: missing bearer token")

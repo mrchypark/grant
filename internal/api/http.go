@@ -42,8 +42,18 @@ func New(service *grant.Service, learner bool) *Server {
 	s.routes()
 	return s
 }
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
-func failure(status int, msg string) error                         { return &grant.Error{Status: status, Message: msg} }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.learner && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
+		if _, pattern := s.mux.Handler(r); pattern == "" {
+			http.NotFound(w, r)
+			return
+		}
+		writeError(w, failure(503, "read replica only serves capability decisions and catalogs"))
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
+func failure(status int, msg string) error { return &grant.Error{Status: status, Message: msg} }
 func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, grant.ErrorStatus(err), map[string]string{"error": err.Error()})
 }

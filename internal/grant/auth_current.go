@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func (s *Service) effectiveConsistency(c ReadConsistency) ReadConsistency {
@@ -14,6 +15,9 @@ func (s *Service) effectiveConsistency(c ReadConsistency) ReadConsistency {
 }
 func (s *Service) localIdentity(ctx context.Context, identity ExternalIdentity, c ReadConsistency) (User, error) {
 	c = s.effectiveConsistency(c)
+	if readScope(ctx) != nil {
+		c = ReadLocal
+	}
 	if c == ReadStrong || c == ReadPreferStrong {
 		var u User
 		var err error
@@ -121,6 +125,16 @@ func (s *Service) SetUserActiveAdmin(ctx context.Context, id string, active bool
 	return s.store.SetUserActive(ctx, id, active)
 }
 func (s *Service) Readiness(ctx context.Context) (HealthStatus, bool) {
+	if s.cfg.Database.LocalNodeRole == "learner" {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		_, e := localReplicaRead(ctx, s, func(ctx context.Context) (bool, error) { return true, s.store.verifySchemaAt(ctx, ReadLocal) })
+		status := "ok"
+		if e != nil {
+			status = "down"
+		}
+		return HealthStatus{Status: status, ReadReady: e == nil, WriteReady: false, RuntimeMode: s.cfg.Database.RuntimeMode, DefaultReadConsistency: ReadLocal}, e == nil
+	}
 	h := s.store.Health(ctx)
 	switch h.DefaultReadConsistency {
 	case ReadStrong:

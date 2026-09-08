@@ -37,7 +37,7 @@ type DatabaseConfig struct {
 	Rhiza                                                                                                              rhiza.Config
 	Replica                                                                                                            rhiza.ReplicaConfig
 	RemoteNodes                                                                                                        []string
-	RemoteAPISecret, RuntimeBindAddr                                                                                   string
+	RemoteAPISecret, RuntimeBindAddr, ReadFenceKey                                                                     string
 }
 type Config struct {
 	Server   ServerConfig
@@ -100,6 +100,7 @@ func loadDatabaseConfig(c *Config) error {
 	d := &c.Database
 	d.NodeID = envDefault("GRANT_NODE_ID", envDefault("POD_NAME", "grant-1"))
 	d.RemoteAPISecret = os.Getenv("GRANT_REMOTE_API_SECRET")
+	d.ReadFenceKey = os.Getenv("GRANT_READ_FENCE_KEY")
 	d.RuntimeBindAddr = os.Getenv("GRANT_RUNTIME_BIND_ADDR")
 	for _, v := range strings.Split(os.Getenv("GRANT_REMOTE_NODES"), ",") {
 		if v = strings.TrimSpace(v); v != "" {
@@ -113,10 +114,16 @@ func loadDatabaseConfig(c *Config) error {
 			d.RemoteNodes = append(d.RemoteNodes, strings.TrimRight(v, "/"))
 		}
 	}
-	if d.RuntimeBindAddr != "" || len(d.RemoteNodes) > 0 {
+	if d.RuntimeBindAddr != "" || (len(d.RemoteNodes) > 0 && d.LocalNodeRole != "learner") {
 		if len(d.RemoteAPISecret) < 32 || d.RemoteAPISecret == c.Security.MasterKey || d.RemoteAPISecret == c.Security.AppAuthKey {
 			return fmt.Errorf("runtime transport needs distinct GRANT_REMOTE_API_SECRET of at least 32 bytes")
 		}
+	}
+	if d.ReadFenceKey != "" && (len(d.ReadFenceKey) < 32 || d.ReadFenceKey == d.RemoteAPISecret || d.ReadFenceKey == c.Security.MasterKey || d.ReadFenceKey == c.Security.AppAuthKey) {
+		return fmt.Errorf("read fence key must be distinct and at least 32 bytes")
+	}
+	if d.LocalNodeRole == "learner" && (len(d.RemoteNodes) == 0 || len(d.ReadFenceKey) < 32 || d.RuntimeBindAddr != "" || d.RemoteAPISecret != "") {
+		return fmt.Errorf("learner requires private read-fence transport, without runtime writer credentials/listener")
 	}
 	switch d.RuntimeMode {
 	case "embedded", "remote", "split":
@@ -144,6 +151,18 @@ func loadDatabaseConfig(c *Config) error {
 	if raw := os.Getenv("GRANT_RHIZA_REPLICA_CONFIG_JSON"); raw != "" {
 		if e := json.Unmarshal([]byte(raw), &d.Replica); e != nil {
 			return e
+		}
+	}
+	if d.LocalNodeRole == "learner" {
+		if len(d.Replica.Members) == 0 {
+			return fmt.Errorf("learner requires public replica members")
+		}
+		for _, members := range [][]rhiza.Member{d.Members, d.Rhiza.Members} {
+			for _, member := range members {
+				if member.Token != "" {
+					return fmt.Errorf("learner must not receive voter member tokens")
+				}
+			}
 		}
 	}
 	r := &d.Rhiza

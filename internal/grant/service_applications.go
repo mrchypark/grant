@@ -104,6 +104,10 @@ func (s *Service) CreateApplication(ctx context.Context, user, org string, in Cr
 	}
 	clientID := "grant-" + strings.ReplaceAll(requestID(), "-", "")
 	a := Application{ID: vals[0], OrganizationID: org, Slug: vals[1], Name: vals[2], Description: optionalText(in.Description), ApplicationType: in.ApplicationType, AppType: in.AppType, FirstParty: false, ConsentPolicy: "explicit", Active: in.Active, ProvisioningStatus: "unprovisioned", RauthyClientID: &clientID, CreatedByUserID: user}
+	if s.cfg.Auth.ProviderMode == "pocketbase" {
+		a.ProvisioningStatus = "ready"
+		a.RauthyClientID = nil
+	}
 	var uri *string
 	if in.RedirectURI != nil {
 		v, err := CanonicalRedirectURI(*in.RedirectURI)

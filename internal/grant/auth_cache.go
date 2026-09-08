@@ -50,6 +50,9 @@ func (s *Service) cacheIdentity(key string, v cachedIdentity) {
 	}
 }
 func (s *Service) resolveExternalIdentity(ctx context.Context, authorization string, c ReadConsistency) (ExternalIdentity, error) {
+	if identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity); ok {
+		return identity, nil
+	}
 	if s.AuthProviderMode() != "rauthy" || s.store == nil {
 		return s.externalIdentity(ctx, authorization)
 	}

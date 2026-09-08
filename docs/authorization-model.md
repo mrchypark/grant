@@ -171,3 +171,5 @@ V2 authority snapshot 수신 API와 exporter는 제거됐다. V1 manifest import
 - developer console application 설정 권한 규칙
 - authz check/filter 응답 계약
 - coarse/field capability 경계와 preserved field-work 상태
+
+In PocketBase mode, creating a Grant application immediately sets its provisioning state to `ready` without a Rauthy client ID: there is no OIDC client provisioning step. The application remains untrusted and requires explicit consent by default; readiness does not grant action scope or user authority. Rauthy mode retains its existing external-client provisioning workflow.

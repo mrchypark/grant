@@ -122,6 +122,10 @@ func (s *Store) remoteCall(ctx context.Context, path string, in, out any) error 
 }
 func (s *Store) RuntimeHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/read-fence" {
+			s.serveReadFence(w, r)
+			return
+		}
 		secret := s.cfg.Database.RemoteAPISecret
 		if len(secret) < 32 || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+secret)) != 1 {
 			http.Error(w, "unauthorized", 401)

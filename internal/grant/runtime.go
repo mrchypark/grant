@@ -190,6 +190,22 @@ func (s *Store) Query(ctx context.Context, consistency, sql string, args ...any)
 	return rows, nil
 }
 func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...any) (rhiza.QueryResponse, error) {
+	if scope := readScope(ctx); scope != nil {
+		if s.replica == nil {
+			return rhiza.QueryResponse{}, fmt.Errorf("read replica required")
+		}
+		result, e := s.replica.Query(ctx, rhiza.QueryRequest{SQL: sql, Args: sqlArgs(args), Consistency: rhiza.ConsistencyLocal})
+		if e != nil {
+			return result, e
+		}
+		if result.AppliedSlot < scope.fence || (scope.pinned && scope.slot != result.AppliedSlot) {
+			scope.changed = true
+			return rhiza.QueryResponse{}, serviceError(503, "unavailable: replica snapshot changed")
+		}
+		scope.slot = result.AppliedSlot
+		scope.pinned = true
+		return result, nil
+	}
 	if consistency == "" {
 		consistency = s.cfg.Database.DefaultReadConsistency
 	}
@@ -261,6 +277,9 @@ func sqlArgs(args []any) []any {
 	return out
 }
 func (s *Store) Execute(ctx context.Context, id string, stmts ...Statement) (rhiza.ExecuteResponse, error) {
+	if readScope(ctx) != nil {
+		return rhiza.ExecuteResponse{}, serviceError(503, "unavailable: read-only decision cannot mutate authority")
+	}
 	if s.cfg.Database.LocalNodeRole == "learner" {
 		return rhiza.ExecuteResponse{}, fmt.Errorf("mutation requires voter")
 	}

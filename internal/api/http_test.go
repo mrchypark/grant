@@ -293,3 +293,15 @@ func TestJSONUnicodeBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestLearnerOnlyPublishesPDP(t *testing.T) {
+	s := testServer()
+	s.learner = true
+	for _, path := range []string{"/auth/v1/users", "/api/v1/authz/check", "/api/v1/admin/providers", "/api/v1/admin/imports/patch-data-authority"} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
+		if w.Code != 503 {
+			t.Errorf("%s status%d", path, w.Code)
+		}
+	}
+}

@@ -33,6 +33,7 @@ type HttpResponsePolicy struct {
 	MaxBytes       uint64             `json:"maxBytes"`
 	ForwardHeaders []string           `json:"forwardHeaders"`
 	Redirects      HttpRedirectPolicy `json:"redirects"`
+	ErrorStatuses  []int              `json:"errorStatuses,omitempty"`
 }
 type StageHttpCapabilityGeneration struct {
 	SchemaVersion            uint64           `json:"schemaVersion"`

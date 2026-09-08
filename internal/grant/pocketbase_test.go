@@ -121,3 +121,62 @@ func TestPocketBaseConfigOrigin(t *testing.T) {
 		}
 	}
 }
+
+func TestManagementCapabilityHeaderAndErrorStatusPolicy(t *testing.T) {
+	action := "organization.group.manage"
+	c := HttpCapability{CapabilityID: "group-list", Version: 1, Enabled: true, AccessMode: "authorized", Method: "GET", PathTemplate: "/orgs/{id}/groups", ActionID: &action, Resource: &HttpCapabilityResource{ResourceType: "organization", ID: HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: "asciiToken"}}, Query: HttpQueryPolicy{Mode: "none"}, Request: HttpRequestPolicy{Body: "none", ForwardHeaders: []string{"x-organization-id"}}, Response: HttpResponsePolicy{MaxBytes: 1024, Redirects: "deny", ForwardHeaders: []string{}, ErrorStatuses: []int{400, 403, 409}}}
+	if e := validateTestCapability(c); e != nil {
+		t.Fatal(e)
+	}
+	for _, statuses := range [][]int{{302}, {399}, {600}, {403, 400}, {403, 403}} {
+		c.Response.ErrorStatuses = statuses
+		if e := validateTestCapability(c); e == nil {
+			t.Errorf("accepted %v", statuses)
+		}
+	}
+	c.Response.ErrorStatuses = nil
+	for _, h := range []string{"x-grant-master-key", "authorization", "X-Organization-Id"} {
+		c.Request.ForwardHeaders = []string{h}
+		if e := validateTestCapability(c); e == nil {
+			t.Errorf("accepted %s", h)
+		}
+	}
+}
+
+func TestManagementNestedPathResource(t *testing.T) {
+	action := "organization.group.manage"
+	c := HttpCapability{CapabilityID: "group-delete", Version: 1, Enabled: true, AccessMode: "authorized", Method: "DELETE", PathTemplate: "/orgs/{organizationId}/groups/{groupId}", ActionID: &action, Resource: &HttpCapabilityResource{ResourceType: "organization", ID: HttpResourceExtractor{Kind: "pathSegment", Name: "organizationId", Format: "asciiToken"}}, Query: HttpQueryPolicy{Mode: "none"}, Request: HttpRequestPolicy{Body: "none", ForwardHeaders: []string{}}, Response: HttpResponsePolicy{MaxBytes: 1024, Redirects: "deny", ForwardHeaders: []string{}}}
+	if e := validateTestCapability(c); e != nil {
+		t.Fatal(e)
+	}
+	values, e := matchPath(c.PathTemplate, "/orgs/home/groups/selected-group")
+	if e != nil || values["organizationId"] != "home" || values["groupId"] != "selected-group" {
+		t.Fatal(values, e)
+	}
+	for _, path := range []string{"/orgs/home/groups/%2e%2e", "/orgs/home/groups/..", "/orgs/home/groups/a/b", "/orgs/home/groups/a b", "/orgs/home/groups/" + strings.Repeat("a", 257)} {
+		if _, e := matchPath(c.PathTemplate, path); e == nil {
+			t.Errorf("accepted %s", path)
+		}
+	}
+	c.Resource.ID.Name = "missing"
+	if e := validateTestCapability(c); e == nil {
+		t.Fatal("missing extractor accepted")
+	}
+	c.Resource.ID.Name = "organizationId"
+	c.PathTemplate = "/orgs/{organizationId}/groups/{organizationId}"
+	if e := validateTestCapability(c); e == nil {
+		t.Fatal("duplicate variable accepted")
+	}
+	if _, e := matchPath(c.PathTemplate, "/orgs/home/groups/group"); e == nil {
+		t.Fatal("duplicate evidence accepted")
+	}
+}
+
+func validateTestCapability(c HttpCapability) error {
+	digest, e := HttpCapabilityContractDigest(c)
+	if e != nil {
+		return e
+	}
+	c.ContractDigest = digest
+	return validateCapability(c)
+}
