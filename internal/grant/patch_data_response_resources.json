@@ -1,5 +1,40 @@
 [
   {
+    "key": "agreement_documents",
+    "actionId": "patch-data.agreement_documents.read",
+    "resourceType": "agreement_documents",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_165310787",
+    "relations": []
+  },
+  {
+    "key": "anomaly_occurrence_checkpoints",
+    "actionId": "patch-data.anomaly_occurrence_checkpoints.read",
+    "resourceType": "anomaly_occurrence_checkpoints",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "projcheckpoint1",
+    "relations": []
+  },
+  {
+    "key": "anomaly_occurrences",
+    "actionId": "patch-data.anomaly_occurrences.read",
+    "resourceType": "anomaly_occurrences",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "anomalyoccur001",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
     "key": "blueprints",
     "actionId": "patch-data.blueprints.read",
     "resourceType": "blueprints",
@@ -15,6 +50,21 @@
     ]
   },
   {
+    "key": "blueprints_list",
+    "actionId": "patch-data.blueprints_list.read",
+    "resourceType": "blueprints_list",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_1185224127",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
     "key": "blueprints_viewer",
     "actionId": "patch-data.blueprints_viewer.read",
     "resourceType": "blueprints_viewer",
@@ -22,6 +72,21 @@
     "idFormat": "pocketbaseId",
     "identityField": "collectionId",
     "identityValue": "pbc_1337089469",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants_viewer"
+      }
+    ]
+  },
+  {
+    "key": "blueprints_viewer_list",
+    "actionId": "patch-data.blueprints_viewer_list.read",
+    "resourceType": "blueprints_viewer_list",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_1337089470",
     "relations": [
       {
         "field": "plant",
@@ -533,6 +598,25 @@
     ]
   },
   {
+    "key": "rsd_command_tasks",
+    "actionId": "patch-data.rsd_command_tasks.read",
+    "resourceType": "rsd_command_tasks",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_4011293327",
+    "relations": [
+      {
+        "field": "canceled_by",
+        "targetKey": "users"
+      },
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
     "key": "temporary_accounts",
     "actionId": "patch-data.temporary_accounts.read",
     "resourceType": "temporary_accounts",
@@ -559,6 +643,21 @@
     "idFormat": "pocketbaseId",
     "identityField": "collectionId",
     "identityValue": "pbc_405412299",
+    "relations": [
+      {
+        "field": "plant",
+        "targetKey": "plants"
+      }
+    ]
+  },
+  {
+    "key": "temporary_blueprints_list",
+    "actionId": "patch-data.temporary_blueprints_list.read",
+    "resourceType": "temporary_blueprints_list",
+    "idField": "id",
+    "idFormat": "pocketbaseId",
+    "identityField": "collectionId",
+    "identityValue": "pbc_405412300",
     "relations": [
       {
         "field": "plant",

@@ -26,7 +26,7 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 323 || len(actions) != 122 {
+	if len(stage.Capabilities) != 369 || len(actions) != 138 {
 		t.Fatal("incomplete inventory")
 	}
 	// Reproduce the existing baseline's short action code before adding reads.
@@ -54,7 +54,7 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 		t.Fatal("published catalog changed", err)
 	}
 	principal := applicationAuthorizationContext{UserID: "conalog-grant", OrganizationID: "conalog-grant", ApplicationID: app.ID}
-	for i := 0; i < 140; i += 4 {
+	for i := 0; i < 168; i += 4 {
 		list, get, alias := stage.Capabilities[i], stage.Capabilities[i+1], stage.Capabilities[i+2]
 		t.Run(list.Resource.ResourceType, func(t *testing.T) {
 			if !reflect.DeepEqual(list.Resource, alias.Resource) || !reflect.DeepEqual(list.RecordScope, alias.RecordScope) || *list.ActionID != *get.ActionID || get.Resource.ResourceType != list.Resource.ResourceType {

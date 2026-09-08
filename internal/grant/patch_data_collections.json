@@ -522,5 +522,121 @@
     ],
     "recordIdFormat": "pocketbaseId",
     "hasFiles": false
+  },
+  {
+    "name": "blueprints_list",
+    "id": "pbc_1185224127",
+    "type": "view",
+    "resourceType": "blueprints_list",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "isArchive",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "rsd_command_tasks",
+    "id": "pbc_4011293327",
+    "type": "base",
+    "resourceType": "rsd_command_tasks",
+    "allowedFields": [
+      "cancel_deadline_at",
+      "cancel_reason",
+      "canceled_at",
+      "claim_deadline_at",
+      "claimed_at",
+      "claimed_by",
+      "created",
+      "error_message",
+      "finished_at",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false,
+    "readOnly": true
+  },
+  {
+    "name": "agreement_documents",
+    "id": "pbc_165310787",
+    "type": "base",
+    "resourceType": "agreement_documents",
+    "allowedFields": [
+      "content_md",
+      "id",
+      "is_active",
+      "is_required",
+      "key",
+      "published_at",
+      "show_on_sign_up",
+      "title",
+      "version"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "anomaly_occurrences",
+    "id": "anomalyoccur001",
+    "type": "base",
+    "resourceType": "anomaly_occurrences",
+    "allowedFields": [
+      "anomaly_type",
+      "created",
+      "detected_at",
+      "event_key",
+      "id",
+      "resolved_at",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "blueprints_viewer_list",
+    "id": "pbc_1337089470",
+    "type": "view",
+    "resourceType": "blueprints_viewer_list",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "temporary_blueprints_list",
+    "id": "pbc_405412300",
+    "type": "view",
+    "resourceType": "temporary_blueprints_list",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "anomaly_occurrence_checkpoints",
+    "id": "projcheckpoint1",
+    "type": "base",
+    "resourceType": "anomaly_occurrence_checkpoints",
+    "allowedFields": [
+      "created",
+      "cursor_created",
+      "cursor_id",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
   }
 ]

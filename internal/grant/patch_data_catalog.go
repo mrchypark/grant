@@ -22,6 +22,7 @@ type PatchDataCollection struct {
 	AllowedFields  []string `json:"allowedFields"`
 	RecordIDFormat string   `json:"recordIdFormat"`
 	HasFiles       bool     `json:"hasFiles"`
+	ReadOnly       bool     `json:"readOnly,omitempty"`
 }
 
 func PatchDataCollections() ([]PatchDataCollection, error) {
@@ -98,7 +99,7 @@ func PatchDataCatalog(generation uint64, previous *uint64) (StageHttpCapabilityG
 		return stage, actions, err
 	}
 	for _, collection := range collections {
-		if collection.Type == "view" {
+		if collection.Type == "view" || collection.ReadOnly {
 			continue
 		}
 		for _, operation := range []struct{ name, method string }{{"create", "POST"}, {"update", "PATCH"}, {"delete", "DELETE"}} {

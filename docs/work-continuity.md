@@ -16,3 +16,13 @@ Read-only inspection of retained local run `patch-auth-e2e.SvCea0` found both `s
 The next local checkpoint adds the generic request-array batch contract to the full catalog: explicit root authority plus every child, declared PUT upsert pairs, original-byte forwarding and one fenced Grant decision. This expands the catalog beyond per-record CRUD; it does not by itself complete relationship expansion or realtime subscription authorization. Preserve exact verification evidence for each completed family instead of calling all API support complete from route counts alone.
 
 The following checkpoint adds buffered relationship expansion through one explicit catalog graph. Every root and expanded record requires its own existing read authority, verified again before native response bytes are released. This is response authorization, not relation-based grant inheritance. It does not complete realtime subscription/event lifetime authorization, which remains a distinct next family.
+
+## IED deployment preparation after local completion
+
+The user authorized source integration and native GitHub Actions images for IED
+development, then explicitly excluded Patch Data and Patch Auth from main merges.
+Those two remain on reviewed work branches; Grant and Exposure may merge to main.
+Realtime remains deferred. Latest business main adds seven public collections;
+Grant now generates 369 routes/138 actions for 42 collections, with RSD task
+mutations withheld because native API business invariants are bypassed by the
+service superuser. Auth CSAP hooks and state are preserved in Patch Auth.

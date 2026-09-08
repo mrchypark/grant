@@ -35,9 +35,9 @@ A separate native PocketBase suite with a controlled PDP verified Range, conditi
 
 ## Business collection inventory and mapping status
 
-The fixed schema contains 35 non-system collections: 27 base collections and 8 views. The three former account collections are base business profiles in the extracted service. System collections are excluded. Both concrete collection names and IDs must map to the same operator-chosen canonical resource; a wildcard collection variable must not expose arbitrary collections.
+The reconciled schema contains 42 non-system collections: 31 base collections and 11 views. The three former account collections are base business profiles in the extracted service. System collections are excluded. Both concrete collection names and IDs must map to the same operator-chosen canonical resource; a wildcard collection variable must not expose arbitrary collections.
 
-All 35 collections have explicit list and single-record GET mappings in [patch_data_collections.json](../internal/grant/patch_data_collections.json). `go run ./cmd/patch-data-catalog` produces 323 concrete routes and 122 action definitions: 140 list/detail routes, 162 create/update/delete routes for 27 base collections, and 20 file GET/HEAD routes for five file-bearing collections, plus one batch route. Both name and stable-ID aliases use the same authority. `-read-only` retains the 140-route, 35-action read catalog. `plants` preserves its existing resource type; every other collection has an independent resource type equal to its collection name. A view's relation or matching source ID does not establish inherited authority. These mappings do not migrate legacy PocketBase rules or automatically grant new rights to existing plant readers.
+All 42 collections have explicit list and single-record GET mappings in [patch_data_collections.json](../internal/grant/patch_data_collections.json). `go run ./cmd/patch-data-catalog` produces 369 concrete routes and 138 action definitions: 168 list/detail routes, 180 create/update/delete routes for 30 base collections, and 20 file GET/HEAD routes for five file-bearing collections, plus one batch route. Both name and stable-ID aliases use the same authority. `-read-only` retains the 168-route, 42-action read catalog. `plants` preserves its existing resource type; every other collection has an independent resource type equal to its collection name. A view's relation or matching source ID does not establish inherited authority. These mappings do not migrate legacy PocketBase rules or automatically grant new rights to existing plant readers.
 
 | Collection name | Stable collection ID | Runtime type | Authority mapping |
 |---|---|---|---|
@@ -133,3 +133,25 @@ The generated catalog publishes list/detail reads, base create/update/delete, an
 Primary API evidence: [PocketBase record CRUD](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/record_crud.go), [batch API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/batch.go), [realtime API](https://github.com/pocketbase/pocketbase/blob/v0.40.3/apis/realtime.go), and [filter expression limit](https://github.com/pocketbase/pocketbase/blob/v0.40.3/tools/search/provider.go).
 
 Scoped list queries only admit the declared filter/sort roles and explicitly mapped numeric page/page-size or boolean skip-total controls. Arbitrary text or scalar passthrough is unsupported. Native `fields` projection and cross-record filtering remain unpublished; declared `expand` paths use the separate response graph. This provides record-level result filtering, not field-level authorization or automatic discovery of safe upstream parameter semantics.
+
+## Latest main source reconciliation for IED development
+
+The catalog now follows the business schema from Patch Data main `af6b560`,
+reconciled with the auth extraction branch. It contains 42 collections and 74
+explicit relation edges. Added namespaces are `blueprints_list`,
+`temporary_blueprints_list`, `blueprints_viewer_list`, `rsd_command_tasks`,
+`anomaly_occurrences`, `anomaly_occurrence_checkpoints`, and `agreement_documents`.
+The three blueprint list collections remain independent view authorities.
+
+`rsd_command_tasks` is explicitly read-only in the manifest despite being a base
+collection. Its native API rules include business state-transition constraints
+that a service superuser bypasses. Create/update/delete and batch upsert routes
+are therefore not published for that collection. No replacement hook was added.
+All other published whole-record mutation semantics remain as stated above.
+
+MFA challenge and send-window state moved to Patch Auth and is excluded from this
+business catalog. Historical native verification runs above used the older
+35-collection snapshot; the reconciled catalog has its own stage/activation and
+all-namespace authority tests and requires fresh native integration evidence.
+Patch Data and Patch Auth remain on their work branches for deployment; only
+Grant and Exposure are merged to main, per the latest user instruction.

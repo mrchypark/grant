@@ -12,7 +12,7 @@ func TestPatchDataNativeCatalogBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 323 || len(actions) != 122 {
+	if len(stage.Capabilities) != 369 || len(actions) != 138 {
 		t.Fatal("inventory", len(stage.Capabilities), len(actions))
 	}
 	collections, err := PatchDataCollections()
@@ -26,7 +26,7 @@ func TestPatchDataNativeCatalogBoundaries(t *testing.T) {
 	for _, collection := range collections {
 		for _, suffix := range []string{"create", "update", "delete"} {
 			name, found := byID[collection.Name+"."+suffix+".0"]
-			if collection.Type == "view" {
+			if collection.Type == "view" || collection.ReadOnly {
 				if found {
 					t.Fatal("view mutation", name)
 				}
@@ -94,7 +94,7 @@ func TestPatchDataMutationActionsRequireExactGrant(t *testing.T) {
 	if _, err = store.Exec(ctx, "INSERT INTO application_actions(application_id,action_id) SELECT ?,id FROM actions WHERE provider_id='patch-data'", app.ID); err != nil {
 		t.Fatal(err)
 	}
-	for _, cap := range stage.Capabilities[140:] {
+	for _, cap := range stage.Capabilities[168:] {
 		if !strings.HasSuffix(cap.CapabilityID, ".0") || cap.Method == "HEAD" {
 			continue
 		}

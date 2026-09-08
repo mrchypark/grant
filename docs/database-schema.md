@@ -158,7 +158,7 @@ PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, 
 
 ## 주요 릴레이션
 
-- Patch Data의 35개 컬렉션 읽기 카탈로그는 기존 `role_bindings.(provider_id, resource_type, resource_id)`와 `role_actions.action_id`를 사용한다. `provider_id`는 `patch-data`, resource type은 컬렉션 이름이며 `plants`만 기존 `plant`를 유지한다. action ID는 `patch-data.<resource_type>.read`다. 컬렉션 이름과 PocketBase ID 경로는 동일한 canonical tuple을 사용하고 resource ID는 응답 레코드의 `id`다.
+- Patch Data의 42개 컬렉션 읽기 카탈로그는 기존 `role_bindings.(provider_id, resource_type, resource_id)`와 `role_actions.action_id`를 사용한다. `provider_id`는 `patch-data`, resource type은 컬렉션 이름이며 `plants`만 기존 `plant`를 유지한다. action ID는 `patch-data.<resource_type>.read`다. 컬렉션 이름과 PocketBase ID 경로는 동일한 canonical tuple을 사용하고 resource ID는 응답 레코드의 `id`다.
 - 뷰도 독립된 resource type을 사용한다. 원본과 뷰의 레코드 ID가 같거나 업무 relation이 연결되어 있어도 권한을 전파하지 않는다. 조직 및 발전소 권한 import가 새 컬렉션의 binding을 자동 생성하지 않는다. 스키마 DDL과 기존 canonical key의 의미는 변경하지 않는다.
 
 ### 컬렉션 읽기 권한 구조의 이유
@@ -167,7 +167,7 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 
 ### 컬렉션 변경 및 파일 권한 릴레이션
 
-27개 base 컬렉션 생성은 `patch-data.<resource_type>.create`와 `(patch-data, collection, 컬렉션 이름)`을 함께 검사한다. 수정 및 삭제는 각각 `.update`, `.delete`와 기존 레코드 tuple을 검사한다. 파일이 있는 5개 컬렉션의 다운로드는 `.file.read`와 같은 레코드 tuple을 사용하며 일반 `.read`나 업로드 권한으로 대신할 수 없다. 이름/ID URL alias는 이 canonical key를 공유한다. `org_parent_map`은 원본 hook이 만드는 62자 hex ID를 수용하도록 `asciiToken` 추출기를 사용한다. 원본 키의 의미를 바꾸지는 않는다.
+30개 base 컬렉션 생성은 `patch-data.<resource_type>.create`와 `(patch-data, collection, 컬렉션 이름)`을 함께 검사한다. 수정 및 삭제는 각각 `.update`, `.delete`와 기존 레코드 tuple을 검사한다. 파일이 있는 5개 컬렉션의 다운로드는 `.file.read`와 같은 레코드 tuple을 사용하며 일반 `.read`나 업로드 권한으로 대신할 수 없다. 이름/ID URL alias는 이 canonical key를 공유한다. `org_parent_map`은 원본 hook이 만드는 62자 hex ID를 수용하도록 `asciiToken` 추출기를 사용한다. 원본 키의 의미를 바꾸지는 않는다.
 
 이 구조는 native API의 전체 작업 단위를 권한으로 표현한다. relation 변경, hook 및 cascade 부작용도 해당 쓰기 권한에 포함하며 관련 레코드별 권한을 추가로 검사한다고 주장하지 않는다. PocketBase 업무 데이터의 관계를 Grant 권한으로 자동 전개하지 않고 새 권한은 명시적 action/role/binding으로만 부여한다. 뷰에는 변경 권한을 발행하지 않는다.
 
@@ -284,4 +284,8 @@ PUT upsert는 catalog의 명시적 create/update 계약 쌍을 참조한다. 요
 
 `provider_http_capability_sets.canonical_json`에는 선택적 `responseResources` 그래프를 한 번만 저장한다. 그래프가 없으면 JSON 필드를 생략하여 기존 catalog digest를 유지한다. 각 노드의 action/resource type 및 record ID/collection identity 필드와 명시적 relation edge를 catalog digest에 포함한다. 개별 GET 계약은 `responseAuthorization.rootKey`로 그래프를 참조하며 새 DDL이나 업무 DB 테이블은 만들지 않는다.
 
-Patch Data 그래프는 고정 schema snapshot의 35개 컬렉션과 공개 relation 필드 68개에서 추출했다. 뷰는 독립적인 노드/action/resource type을 유지한다. 관계 edge는 조회 경로만 선언하며 권한을 전개하지 않는다. 응답의 루트와 관련 레코드는 각각 기존 role/application 권한을 충족해야 한다. 원본 응답 hash, 길이, 순서가 있는 reference digest를 같은 요청에 결합하고 한 fenced snapshot에서 다시 판단한다. 목록은 collection 이름의 가상 grant를 요구하지 않고 기존 목록 admission 및 반환된 root ID를 재검사한다.
+Patch Data 그래프는 고정 schema snapshot의 42개 컬렉션과 공개 relation 필드 74개에서 추출했다. 뷰는 독립적인 노드/action/resource type을 유지한다. 관계 edge는 조회 경로만 선언하며 권한을 전개하지 않는다. 응답의 루트와 관련 레코드는 각각 기존 role/application 권한을 충족해야 한다. 원본 응답 hash, 길이, 순서가 있는 reference digest를 같은 요청에 결합하고 한 fenced snapshot에서 다시 판단한다. 목록은 collection 이름의 가상 grant를 요구하지 않고 기존 목록 admission 및 반환된 root ID를 재검사한다.
+
+### 최신 business schema 통합
+
+Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 목록은 base 31개와 view 11개다. 이 중 `rsd_command_tasks`는 native API rule이 업무 상태 전이를 제한하므로 superuser 경로에서 쓰기를 허용하지 않는다. manifest의 `readOnly`가 CRUD 및 batch upsert 생성을 막으며 조회 권한만 등록한다. 나머지 base 30개의 전체 레코드 변경 권한은 기존 의미를 유지한다. MFA challenge/send-window 두 컬렉션은 Patch Auth 내부 상태로 분리하여 사업 리소스 graph에 포함하지 않는다.
