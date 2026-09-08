@@ -21,7 +21,7 @@ docker run -d --name "$container" --platform linux/amd64 \
  -e GRANT_RAUTHY_CLIENT_SECRET=local-smoke-rauthy-secret -e GRANT_RAUTHY_CLIENT_READ_API_KEY=local-smoke-read-key \
  -e GRANT_NODE_ID=smoke -e GRANT_CLUSTER_ID="$container" -e GRANT_PEER_ADDR=127.0.0.1:8100 \
  -e GRANT_RUNTIME_MODE=embedded -e GRANT_LOCAL_NODE_ROLE=voter -e GRANT_READ_CONSISTENCY=strong \
- -e RHIZA_OBJSTORE_PROVIDER=fs -e RHIZA_OBJSTORE_DIR=/data/objects \
+ -e RHIZA_OBJSTORE_PROVIDER=filesystem -e RHIZA_OBJSTORE_DIR=/data/objects \
  "${IMAGE_NAME:-grant:container-verify}" >/dev/null
 port=$(docker inspect "$container" | jq -r '.[0].NetworkSettings.Ports["8080/tcp"][0].HostPort')
 i=0
