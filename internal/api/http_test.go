@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"github.com/Conalog/grant/internal/grant"
 	"net/http"
 	"net/http/httptest"
@@ -130,7 +132,13 @@ func TestProxyDoesNotFollowRedirectOrLeakTransport(t *testing.T) {
 	}
 }
 
-func TestExactBaselineRouteMethods(t *testing.T) {
+var retiredExposureRoutes = []string{
+	"/api/v1/exposure-authz/read",
+	"/api/v1/exposure-authz/plant-read",
+	"/api/v2/exposure-authz/decide",
+}
+
+func TestRouteMethodsAfterExposureRetirement(t *testing.T) {
 	raw, err := os.ReadFile("testdata/routes-voter.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +165,50 @@ func TestExactBaselineRouteMethods(t *testing.T) {
 	s.ServeHTTP(w, r)
 	if w.Code != 404 {
 		t.Fatalf("private SQL exposed on public router: %d", w.Code)
+	}
+}
+
+func TestRetiredExposureRoutesAreNotFound(t *testing.T) {
+	for _, learner := range []bool{false, true} {
+		s := testServer()
+		s.learner = learner
+		for _, path := range retiredExposureRoutes {
+			r := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, r)
+			if w.Code != 404 {
+				t.Errorf("learner=%v %s: %d %s", learner, path, w.Code, w.Body.String())
+			}
+		}
+	}
+}
+
+func TestGenericAuthorizationAfterExposureRetirement(t *testing.T) {
+	ctx := context.Background()
+	cfg := grant.Config{Security: grant.SecurityConfig{MasterKey: "master-secret"}, Database: grant.DatabaseConfig{DataDir: t.TempDir(), DefaultReadConsistency: grant.ReadStrong}}
+	store, err := grant.OpenStore(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.EnsureBootstrapData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := New(grant.NewService(cfg, store), false)
+	for _, tc := range []struct {
+		user    string
+		allowed bool
+	}{{"conalog-grant", true}, {"unknown-user", false}} {
+		r := httptest.NewRequest("POST", "/api/v1/authz/check?consistency=strong", strings.NewReader(`{"subject":{"type":"user","id":"`+tc.user+`","orgId":"conalog-grant"},"action":"organization.profile.read","resource":{"provider":"grant","type":"organization","id":"conalog-grant"}}`))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Grant-Master-Key", "master-secret")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		var decision grant.AuthorizationDecision
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &decision) != nil || decision.Allowed != tc.allowed {
+			t.Errorf("%s: %d %s", tc.user, w.Code, w.Body.String())
+		}
 	}
 }
 func TestRustEnumRejection(t *testing.T) {

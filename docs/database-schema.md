@@ -70,7 +70,7 @@ Patch Data API rule 이동의 deterministic import receipt와 소유권 provenan
 
 `canonical_json`은 principals, organizations, memberships, applications, effective bindings를 포함한 입력 전체의 canonical JSON이다. `snapshot_digest`, `source_revision`, `source_ledger_digest`, `source_watermark`, `produced_at`과 각 entity count는 재시도·감사·source provenance 검증을 위한 receipt다. 동일한 source/generation과 byte-equivalent canonical JSON 재시도는 기존 `applied_at`을 반환하고, 다른 내용은 충돌로 거부한다. 동시 최초 import도 transaction assertion으로 하나만 적용한다.
 
-Wave 0에서는 이 테이블의 row를 현재 evaluator의 `role_bindings`, `application_actions` 또는 다른 권한 row로 전개하지 않는다. 새 operation도 활성화하지 않으며 `plant.get`만 기존 v1 importer와 catalog 경로를 그대로 사용한다. 따라서 이 테이블은 저장·검증 framework이지 활성 authorization source가 아니다.
+이 테이블의 row를 현재 evaluator의 `role_bindings`, `application_actions` 또는 다른 권한 row로 전개하지 않는다. 고정 `plant.get` 계약과 Exposure 전용 API는 폐기됐다. V1 importer의 canonical 권한 반영과 범용 HTTP capability는 유지한다. 따라서 V2 receipt는 저장·검증 기록이지 활성 authorization source가 아니다.
 
 ### `groups`, `group_memberships`
 
@@ -82,11 +82,11 @@ grant가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. �
 
 ### `provider_http_capability_sets`, `provider_http_capabilities`, `provider_http_capability_active`
 
-Exposure가 provider-native HTTP 요청을 권한 tuple로 고정할 때 사용하는 불변 HTTP capability catalog다. `provider_http_capability_sets`의 `(provider_id, generation)`은 1부터 연속 증가하며 canonical JSON과 digest를 보존한다. 같은 provider/digest를 다른 generation으로 재사용할 수 없고, 같은 generation의 byte-identical 재시도만 idempotent하다. `provider_http_capabilities`는 generation 안의 정규화된 검색 row이며 enabled 상태도 불변 manifest 일부다. entry를 바꾸거나 끄려면 새 generation을 stage해야 한다.
+PEP가 provider-native HTTP 요청을 권한 tuple로 고정할 때 사용하는 불변 HTTP capability catalog다. `provider_http_capability_sets`의 `(provider_id, generation)`은 1부터 연속 증가하며 canonical JSON과 digest를 보존한다. 같은 provider/digest를 다른 generation으로 재사용할 수 없고, 같은 generation의 byte-identical 재시도만 idempotent하다. `provider_http_capabilities`는 generation 안의 정규화된 검색 row이며 enabled 상태도 불변 manifest 일부다. entry를 바꾸거나 끄려면 새 generation을 stage해야 한다.
 
 `provider_http_capability_active`는 유일한 publication pointer다. stage된 최대 generation을 자동으로 읽지 않으며, CAS activation/rollback이 가리킨 generation만 catalog fetch와 decision에 사용한다. `provider_http_capability_activations`는 pointer 이동을 append-only sequence와 전역 unique `activation_receipt_id`로 기록한다. activation 응답은 transaction 밖의 `MAX(sequence)`를 읽지 않고, 같은 transaction에서 삽입한 receipt ID로 자신의 sequence를 다시 읽으므로 뒤따른 activation과 혼동되지 않는다. rollback도 기존 generation row를 수정하지 않고 pointer만 이전 retained generation으로 이동한다. `provider_http_capability_assertions`는 provider/action, generation CAS, active PEP 조건을 transaction 내부에서 fail closed시키는 임시 CHECK row이고 성공 시 비워진다.
 
-Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 exact method, closed path template, access mode, action/resource tuple, bounded extractor와 닫힌 query/request/response policy DTO만 저장한다. Phase A path는 resource extractor가 명시적으로 모델링한 변수 하나만 허용하며 collection 같은 추가 변수는 거부한다. 실제 origin과 transport는 Exposure 배포 설정 소유다. 기존 authority snapshot import는 capability를 생성하거나 활성화하지 않는다.
+Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 exact method, closed path template, access mode, action/resource tuple, bounded extractor와 닫힌 query/request/response policy DTO만 저장한다. Phase A path는 resource extractor가 명시적으로 모델링한 변수 하나만 허용하며 collection 같은 추가 변수는 거부한다. 실제 origin과 transport는 PEP 배포 설정 소유다. 기존 authority snapshot import는 capability를 생성하거나 활성화하지 않는다.
 
 ### `provider_pep_clients`, `provider_pep_client_receipts`
 
@@ -98,7 +98,7 @@ Exposure 같은 PEP service identity와 provider를 연결한다. `pep_client_id
 
 coarse 배포에서는 모든 action의 `visibility_granting`이 false여야 한다. bootstrap은 `organization.profile.read`를 포함해 모두 0으로 seed하고, provider action 관리 및 DB write boundary는 `visibility_granting = true` 요청을 write 전에 거부한다. `grantable_to_applications`와 application consent 의미는 그대로 유지한다.
 
-`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. 일반 외부 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다. Exposure read V1만 frozen mapping에 따라 `resource_type`에 exact `exposureId`, `resource_id`에 exact `resourceId`를 저장한다. version/digest를 이 두 값에 합성 인코딩하지 않는다.
+`role_bindings`는 `provider_id`, `resource_type`, `resource_id`를 함께 저장한다. grant 내부 조직 권한은 `provider_id = grant`, `resource_type = organization`, `resource_id = organizations.id`로 표현한다. 일반 외부 리소스는 해당 provider의 resource type/id를 그대로 저장하며, grant는 외부 리소스 존재 여부를 스키마에서 검증하지 않는다. 폐기된 Exposure 전용 mapping은 적용하지 않으며 범용 capability가 정의한 resource tuple을 사용한다.
 
 `agreements`는 별도 테이블로 다시 살아났지만, `role_bindings.agreement_id`는 물리 FK 없이 앱 레벨로 검증한다.
 grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을 만들 수 있다.

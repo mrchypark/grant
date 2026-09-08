@@ -3,7 +3,6 @@ package grant
 import (
 	"context"
 	"fmt"
-	"time"
 )
 
 type applicationAuthorizationContext struct{ UserID, OrganizationID, ApplicationID, ExternalSubject, ProviderAudience string }
@@ -55,22 +54,4 @@ func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org
 		exact[i] = AuthorizationCheck{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: v.Action, Resource: v.Resource}
 	}
 	return s.evaluateAuthorizations(ctx, exact, ReadStrong, &c.ApplicationID)
-}
-func (s *Service) CheckExposureReadAuthorization(ctx context.Context, token, org, exposure, resource string) (ExposureReadAuthorizationDecision, error) {
-	return s.CheckOperationAuthorization(ctx, token, org, OperationAuthorizationTarget{ProviderID: "exposure", ActionID: "exposure.read", ResourceType: exposure, ResourceID: resource})
-}
-func (s *Service) CheckPatchDataPlantReadAuthorization(ctx context.Context, token, org, resource string) (ExposureReadAuthorizationDecision, error) {
-	return s.CheckOperationAuthorization(ctx, token, org, OperationAuthorizationTarget{ProviderID: "patch-data", ActionID: "patch-data.plant.read", ResourceType: "plant", ResourceID: resource})
-}
-func (s *Service) CheckOperationAuthorization(ctx context.Context, token, org string, target OperationAuthorizationTarget) (ExposureReadAuthorizationDecision, error) {
-	c, err := s.resolveApplicationAuthorizationContext(ctx, token, org)
-	if err != nil {
-		return ExposureReadAuthorizationDecision{}, err
-	}
-	ds, err := s.evaluateAuthorizations(ctx, []AuthorizationCheck{{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: target.ActionID, Resource: AuthorizationResource{ProviderID: target.ProviderID, ResourceType: target.ResourceType, ID: target.ResourceID}}}, ReadStrong, &c.ApplicationID)
-	if err != nil {
-		return ExposureReadAuthorizationDecision{}, err
-	}
-	issued := time.Now().UTC()
-	return ExposureReadAuthorizationDecision{Allowed: ds[0].Allowed, Reason: ds[0].Reason, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: issued.Format(time.RFC3339Nano), ExpiresAt: issued.Add(5 * time.Second).Format(time.RFC3339Nano)}, nil
 }

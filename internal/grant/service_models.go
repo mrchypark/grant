@@ -89,21 +89,6 @@ type AuthorizationDecision struct {
 	Reason  string `json:"reason"`
 }
 
-type ExposureReadAuthorizationDecision struct {
-	Allowed         bool   `json:"allowed"`
-	Reason          string `json:"reason"`
-	PrincipalDigest string `json:"principalDigest"`
-	IssuedAt        string `json:"issuedAt"`
-	ExpiresAt       string `json:"expiresAt"`
-}
-
-type OperationAuthorizationTarget struct {
-	ProviderID   string `json:"providerId"`
-	ActionID     string `json:"actionId"`
-	ResourceType string `json:"resourceType"`
-	ResourceID   string `json:"resourceId"`
-}
-
 type HttpCapabilityCredentialEvidence struct {
 	Subject  string `json:"subject"`
 	Audience string `json:"audience"`

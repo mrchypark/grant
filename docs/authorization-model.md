@@ -105,56 +105,7 @@ POST /api/v1/authz/filter
 
 grant는 외부 provider의 전체 resource 목록을 모른다. 따라서 unbounded list API는 제공하지 않는다.
 
-Exposure read V1은 한 개의 application-authenticated endpoint만 추가한다.
-
-```text
-POST /api/v1/exposure-authz/read
-```
-
-이 endpoint는 기존 application-authz와 같은 `Authorization: Bearer ...`, `x-organization-id`,
-`x-grant-app-auth-key`를 요구하고 strong consistency coarse evaluator를 사용한다. body는 닫힌 object이며
-`exposureId`, 0보다 큰 정수 `exposureVersion`, 정확히 71 ASCII byte인
-`sha256:<64 lowercase hex>` literal `artifactDigest`,
-`resourceId`, opaque `requestBinding`만 허용한다. action은 caller가 선택하지 않고 `exposure.read`로
-고정된다. Compos schema, pointer, field/view/mask, filter, transform, resource version은 받거나 반환하지
-않는다.
-
-V1 policy key는 아래처럼 version/digest와 분리한다.
-
-```text
-provider_id = exposure
-action_id = exposure.read
-resource_type = exposureId
-resource_id = resourceId
-```
-
-따라서 같은 `exposureId`에 대한 기존 permission은 Exposure가 publish한 새 immutable version에도
-의도적으로 이어진다. `exposureVersion`과 `artifactDigest`는 policy row가 아니라 decision replay
-binding이다. prefix가 없는 digest, uppercase, 다른 prefix, whitespace는 거부하며 accepted
-`artifactDigest`를 normalize하거나 prefix를 추가하지 않고 byte-for-byte echo한다. allow와 policy deny 모두
-exact exposure tuple, `resourceId`, `requestBinding`, 검증된 내부
-user/org/application에서 만든 domain-separated `principalDigest`, `issuedAt`, `expiresAt`을 반환한다.
-5초 `expiresAt`은 Grant decision freshness envelope이지 bearer token 만료 시각에 대한 주장이 아니다.
-Exposure는 business data를 읽기 전에 모든 echo field와 `requestBinding`, 아직 지나지 않은 `expiresAt`을
-원 요청과 비교해야 하며 다른 tuple/resource에 decision을 재사용하면 안 된다. per-version grant는 V1
-non-goal이다. Grant는 Compos를 조회하지 않고 authoritative source가 없으므로 `resourceVersion` 또는
-`expectedResourceVersion`을 만들지 않는다.
-
-fresh database는 의도적으로 Grant 자체 provider/action만 seed하므로 Exposure read는 사전 provisioning
-전까지 fail-closed deny다. 배포/IaC는 기존 surface를 사용해 다음 상태를 명시적으로 만들어야 한다.
-
-1. master `POST /api/v1/admin/providers`로 active provider `exposure`를 등록한다.
-2. master `PUT /api/v1/admin/providers/exposure/actions`로 `exposure.read`를
-   `visibilityGranting=false`, `grantableToApplications=true`로 등록한다.
-3. 조직 role을 만들고 `PUT .../roles/{roleId}/actions`로 `exposure.read`를 연결한 뒤,
-   `POST .../bindings`로 exact `resourceType=exposureId`, `resourceId=resourceId` scope를 부여한다.
-4. Exposure application reservation과 Rauthy client를 기존 provisioning/verify 절차로 ready 상태로 만들고
-   current application action에 `exposure.read`를 포함한다. 그 뒤 master trust를 명시적으로 부여하거나
-   exact 사용자의 active consent에 이 action을 포함한다.
-
-이 절차는 provider/action catalog나 application capability를 준비할 뿐 grant, binding, trust, consent를
-자동 생성하지 않는다. 어느 단계든 빠지거나 inactive/expired이면 decision은 deny다.
-
+Exposure 전용 API 세 개와 고정 `plant.get` 계약은 폐기되어 404를 반환한다. provider별 HTTP 계약은 [범용 HTTP capability](http-capabilities.md)를 사용한다. 기존 소비자는 catalog·PEP binding·요청 evidence를 준비해야 하며 자동 호환 경로는 없다.
 애플리케이션이 최종 사용자 토큰으로 판정을 요청할 때는 별도 API를 사용한다.
 
 ```text
@@ -191,7 +142,6 @@ exporter at the fixed path
 image entrypoint at `/usr/local/bin/grant`; packaging the exporter does not run
 it or add runtime wiring.
 
-Exposure의 plant 조회는 closed endpoint `POST /api/v1/exposure-authz/plant-read`를 사용한다. caller는 기존 replay tuple과 `operationId=plant.get`만 제공하고 Grant는 이를 고정적으로 provider `patch-data`, action `patch-data.plant.read`, resource type `plant`에 매핑한다. 응답은 operation/provider/action/resource type을 모두 echo하며 임의 selector는 strict JSON decode 또는 operation validation으로 거부한다.
 
 `deploy/overlays/patch-data`는 IED-style Grant-only manifest다. 이 overlay는 `GRANT_AUTH_PROVIDER=patch-data`, 내부 `http://patch-data.patch.svc.cluster.local:8090`, 고정 application id `patch-data-exposure`을 설정하고 Rauthy workload와 Grant의 Rauthy secretKeyRef를 제거한다. `deploy/overlays/ied-patch-data`는 이 정확한 manifest를 compose하는 명시적 IED 선택 이름이다. 기존 `deploy/overlays/ied`는 legacy chaos namespace mode이므로 Patch Data 용도로 재사용하지 않는다. Grant master/app 및 Hiqlite secret은 별도로 제공해야 한다. base와 production overlay는 Rauthy deployment contract를 그대로 유지한다.
 

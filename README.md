@@ -6,6 +6,8 @@
 
 ## 구성
 
+Exposure 전용 `/api/v1/exposure-authz/read`, `/api/v1/exposure-authz/plant-read`, `/api/v2/exposure-authz/decide`와 고정 `plant.get` 계약은 폐기됐다. 기존 소비자는 [범용 HTTP capability](docs/http-capabilities.md)로 명시적으로 전환해야 한다. 현재 공개 API는 48개 경로 패턴에 61개 메서드 항목을 등록한다.
+
 - `internal/grant`: 설정, 모델, identity 검증, 권한 서비스, Rhiza 저장소와 스키마
 - `internal/api`: HTTP route, JSON 계약, 인증 경계와 Rauthy proxy
 - `cmd/grant`: 서버와 명시적 데이터 이전 명령

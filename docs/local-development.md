@@ -13,7 +13,7 @@ export GRANT_BIND_ADDR=127.0.0.1:8080
 export GRANT_PEER_ADDR=127.0.0.1:8100
 # Load GRANT_MASTER_KEY and GRANT_APP_AUTH_KEY from private caller-owned files.
 # Configure GRANT_RAUTHY_BASE_URL and the Rauthy client credentials, or select
-# GRANT_AUTH_PROVIDER=patch-data with its origin and Exposure application ID.
+# GRANT_AUTH_PROVIDER=patch-data with its origin and configured application ID.
 go run ./cmd/grant
 ```
 

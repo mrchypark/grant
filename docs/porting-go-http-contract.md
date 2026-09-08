@@ -2,7 +2,7 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The HTTP boundary retains all 51 original distinct paths. GET registrations also accept HEAD.
+The current HTTP boundary has 48 distinct paths and 61 method registrations. The three Exposure-specific paths from the 51-path Rust baseline are retired and return 404. GET registrations also accept HEAD.
 
 ## Method, path, authorization and node role
 
@@ -64,22 +64,19 @@ The HTTP boundary retains all 51 original distinct paths. GET registrations also
 | POST | `/api/v1/application-authz/check` | application | false | 200 |
 | POST | `/api/v1/application-authz/batch-check` | application | false | 200 |
 | POST | `/api/v1/application-authz/filter` | application | false | 200 |
-| POST | `/api/v1/exposure-authz/read` | application | false | 200 |
-| POST | `/api/v1/exposure-authz/plant-read` | application | false | 200 |
-| POST | `/api/v2/exposure-authz/decide` | application | false | 200 |
 | GET/HEAD | `/healthz` | public | false | 200 |
 | GET/HEAD | `/readyz` | public | false | 200/503 |
 | GET/HEAD | `/auth` | public | false | 307 |
 | ANY | `/auth/v1` | Rauthy mode only | false | upstream status |
 | ANY | `/auth/v1/{*rauthyPath}` | Rauthy mode only | false | upstream status |
 
-There are 64 method registrations across 51 distinct paths. The exact frozen voter method inventory is `internal/api/testdata/routes-voter.txt`, extracted from the Rust baseline before source removal and checked against the Go router by `TestExactBaselineRouteMethods`.
+There are 61 method registrations across 48 distinct paths. The inventory in `internal/api/testdata/routes-voter.txt` derives from the Rust baseline with the three retired Exposure routes removed. The fixed `plant.get` contract is retired. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`; existing consumers must migrate explicitly, without aliases or redirects.
 
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 
-Legacy JSON DTOs retain permissive unknown-field behavior where the Rust DTO did not declare `deny_unknown_fields`. Capability, authority import and Exposure operation contracts are closed. Required fields cannot be omitted or null; duplicate object fields are rejected. Rust enum inputs are checked before service execution. Body limit is 2 MiB for JSON and 10 MiB for Rauthy proxy requests. Canonical signatures/hashes are computed by shared storage/domain functions rather than the HTTP layer.
+Legacy JSON DTOs retain permissive unknown-field behavior where the Rust DTO did not declare `deny_unknown_fields`. Capability and authority import contracts are closed. Required fields cannot be omitted or null; duplicate object fields are rejected. Rust enum inputs are checked before service execution. Body limit is 2 MiB for JSON and 10 MiB for Rauthy proxy requests. Canonical signatures/hashes are computed by shared storage/domain functions rather than the HTTP layer.
 
-All six authorization routes reject any present `resource.view` value, including null. Batch/filter requests permit at most 1,000 items. `filter` returns `resource_ids`; batch returns `results`. Unknown operation IDs and mismatched frozen operation contracts fail before evaluation. An absent consent returns 404; successful deletion returns an empty 204 body. Domain errors retain the JSON `{ "error": "..." }` envelope.
+All six authorization routes reject any present `resource.view` value, including null. Batch/filter requests permit at most 1,000 items. `filter` returns `resource_ids`; batch returns `results`. Generic HTTP capability requests validate the active catalog and exact contract before evaluation. An absent consent returns 404; successful deletion returns an empty 204 body. Domain errors retain the JSON `{ "error": "..." }` envelope.
 
 The Rauthy proxy preserves the original method, path/query and repeated response headers, does not follow redirects, and returns generic 502/504 errors without upstream transport details. Patch Data mode returns 404 for the proxy. `/auth` remains the 307 redirect to `/auth/v1`.
 
