@@ -124,8 +124,21 @@ func (s *Service) SetUserActiveAdmin(ctx context.Context, id string, active bool
 	return s.store.SetUserActive(ctx, id, active)
 }
 func (s *Service) HealthStatus(ctx context.Context) HealthStatus { return s.store.Health(ctx) }
-func (s *Service) IsReady(ctx context.Context) bool              { h := s.store.Health(ctx); return h.ReadReady }
-func (s *Service) Bootstrap(ctx context.Context) error           { return s.store.EnsureBootstrapData(ctx) }
+func (s *Service) IsReady(ctx context.Context) bool              { _, ready := s.Readiness(ctx); return ready }
+func (s *Service) Readiness(ctx context.Context) (HealthStatus, bool) {
+	h := s.store.Health(ctx)
+	switch h.DefaultReadConsistency {
+	case ReadStrong:
+		return h, h.WriteReady
+	case ReadLocal:
+		return h, h.ReadReady
+	case ReadPreferStrong:
+		return h, h.ReadReady || h.WriteReady
+	default:
+		return h, false
+	}
+}
+func (s *Service) Bootstrap(ctx context.Context) error { return s.store.EnsureBootstrapData(ctx) }
 func (s *Service) Initialize(ctx context.Context) error {
 	if err := s.MigrateSchema(ctx); err != nil {
 		return err

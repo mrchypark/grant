@@ -27,13 +27,16 @@ func appResponse(v grant.ApplicationRead, e error) (any, error) {
 	return applicationResponse{v.Application, v.RedirectURI}, e
 }
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, s.service.HealthStatus(r.Context())) })
+	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		health, ready := s.service.Readiness(r.Context())
 		code := 200
-		if !s.service.IsReady(r.Context()) {
+		if !ready {
 			code = 503
 		}
-		writeJSON(w, code, s.service.HealthStatus(r.Context()))
+		writeJSON(w, code, health)
 	})
 	s.mux.HandleFunc("GET /auth", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/auth/v1", 307) })
 	s.mux.HandleFunc("/auth/v1", s.proxy)

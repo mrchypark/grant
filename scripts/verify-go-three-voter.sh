@@ -108,11 +108,57 @@ curl -fsS "http://127.0.0.1:$http2/api/v1/providers?consistency=strong" \
   | jq -e 'any(.[]; .id == "quorum-recovery")' >/dev/null
 printf '%s\n' 'Native three-voter shared-S3 write, quorum survival and same-directory recovery passed'
 
+# Production uses emptyDir: replacement must recover from shared S3 without any
+# original node-local state. Preserve old fixture directories for diagnosis.
+kill -KILL "$pid2"; wait "$pid2" || true
+pids="$pid0 $pid1"
+source_root=$node_root
+node_root="$task_dir/cold-single"
+mkdir "$node_root"
+start 2 "$http2" "$peer2"; pid2=$started_pid
+node_root=$source_root
+i=0
+until curl --max-time 3 -fsS "http://127.0.0.1:$http2/readyz" >/dev/null 2>&1; do
+ check_children
+ i=$((i+1)); [ "$i" -lt 90 ] || { cat "$task_dir"/node-*.log >&2; exit 1; }; sleep 1
+done
+curl -fsS "http://127.0.0.1:$http2/api/v1/providers?consistency=strong" \
+ | jq -e 'any(.[]; .id=="quorum-recovery")' >/dev/null
+curl -fsS -H 'X-Grant-Master-Key: local-master-secret' -H 'Content-Type: application/json' \
+ --data '{"id":"cold-recovery-latest","name":"Latest before cold loss","active":true}' \
+ "http://127.0.0.1:$http0/api/v1/admin/providers" >/dev/null
+
+# Loss of quorum must close strong readiness without failing process liveness.
+kill -KILL "$pid1" "$pid2"
+wait "$pid1" || true; wait "$pid2" || true
+pids=$pid0
+kill -0 "$pid0"
+curl --max-time 2 -fsS "http://127.0.0.1:$http0/healthz" | jq -e '.status=="ok"' >/dev/null
+ready_code=$(curl --max-time 3 -sS -o "$task_dir/no-quorum-ready.json" -w '%{http_code}' "http://127.0.0.1:$http0/readyz")
+[ "$ready_code" = 503 ] || { echo "strong readiness remained open without quorum: $ready_code" >&2; exit 1; }
+kill -KILL "$pid0"; wait "$pid0" || true
+pids=''
+node_root="$task_dir/cold-all"
+mkdir "$node_root"
+start 0 "$http0" "$peer0"; pid0=$started_pid
+start 1 "$http1" "$peer1"; pid1=$started_pid
+start 2 "$http2" "$peer2"; pid2=$started_pid
+for port in "$http0" "$http1" "$http2"; do
+ i=0
+ until curl --max-time 3 -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1; do
+  check_children
+  i=$((i+1)); [ "$i" -lt 90 ] || { cat "$task_dir"/node-*.log >&2; exit 1; }; sleep 1
+ done
+ curl -fsS "http://127.0.0.1:$port/api/v1/providers?consistency=strong" \
+  | jq -e 'any(.[]; .id=="quorum-fixture") and any(.[]; .id=="quorum-recovery") and any(.[]; .id=="cold-recovery-latest")' >/dev/null
+done
+printf '%s\n' 'Cold single-voter and entire-quorum S3 recovery, process liveness and strong readiness passed'
+
 # Restore a populated logical snapshot into a distinct, wholly fresh cluster.
 # The original prefix and directories remain intact throughout this fixture.
 curl -fsS -X POST -H 'X-Grant-Master-Key: local-master-secret' \
   "http://127.0.0.1:$http0/api/v1/admin/backups" >/dev/null
-set -- "$task_dir"/backups-0/grant-*.json
+set -- "$node_root"/backups-0/grant-*.json
 [ "$#" -eq 1 ] && [ -f "$1" ] || { echo 'expected one verified source snapshot' >&2; exit 1; }
 restore_snapshot=$1
 for pid in $pids; do kill "$pid"; done

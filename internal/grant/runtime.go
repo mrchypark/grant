@@ -307,8 +307,14 @@ func (s *Store) Transaction(ctx context.Context, stmts []Statement) error {
 	return e
 }
 func (s *Store) Health(ctx context.Context) HealthStatus {
-	re := s.verifySchemaAt(ctx, ReadLocal)
-	we := s.verifySchemaAt(ctx, ReadStrong)
+	// Each check has its own deadline so a healthy local fallback is observable
+	// even when the quorum is unavailable. Kubernetes readiness allows 3 seconds.
+	localCtx, cancelLocal := context.WithTimeout(ctx, time.Second)
+	re := s.verifySchemaAt(localCtx, ReadLocal)
+	cancelLocal()
+	strongCtx, cancelStrong := context.WithTimeout(ctx, time.Second)
+	we := s.verifySchemaAt(strongCtx, ReadStrong)
+	cancelStrong()
 	status := "ok"
 	if re != nil && we != nil {
 		status = "down"
