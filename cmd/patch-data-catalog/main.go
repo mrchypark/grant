@@ -14,7 +14,7 @@ func main() {
 	generation := flag.Uint64("generation", 1, "new catalog generation")
 	previous := flag.Uint64("previous-generation", 0, "expected latest generation (0 means none)")
 	actions := flag.Bool("actions", false, "emit action definitions instead of stage payload")
-	readOnly := flag.Bool("read-only", false, "emit only collection list/detail reads (140 routes)")
+	readOnly := flag.Bool("read-only", false, "emit only collection list/detail reads (168 routes)")
 	existingActions := flag.String("existing-actions", "", "with -actions, merge an existing provider action array without removing actions or changing existing metadata")
 	flag.Parse()
 	var expected *uint64

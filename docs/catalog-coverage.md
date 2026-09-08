@@ -1,12 +1,12 @@
 # HTTP capability catalog coverage
 
-Scope: Grant and Exposure only. The audited business service is Patch Data `05f897b`, account service is Patch Auth `0151ad6`, and native API reference is PocketBase 0.40.3. Those services are unchanged by this catalog work. Route transport support does not by itself establish authority over the returned business records.
+Scope: Grant and Exposure with the reconciled Patch Data `8155f8a` business schema and Patch Auth `bc973ff` security extraction; native API reference is PocketBase 0.40.3. The two PocketBase services remain on work branches. Route transport support does not by itself establish authority over the returned business records.
 
 ## Runtime coverage
 
 | API family | Contract status | Publication requirement |
 |---|---|---|
-| Single-record JSON CRUD | Explicit mappings for all 27 base collections | Separate create collection target and update/delete record target; authority includes the whole native operation and its side effects |
+| Single-record JSON CRUD | Explicit mutations for 30 base collections; RSD tasks remain read-only | Separate create collection target and update/delete record target; authority includes the whole native operation and its side effects |
 | Lists and searches | Actual Grant/learner/PocketBase integration passed for the representative catalog | Exact record authority IDs, row key, safe scalar fields, filter/sort parameters, bounded fexpr ACL |
 | Multipart and opaque uploads | Actual Grant-authorized multipart upload passed; generic transport also tested separately | Exact media types and action/resource mapping; body bytes are preserved |
 | Files, Range, conditional reads | Actual Grant-authorized exact-byte download passed; Range/conditional/HEAD verified with a controlled PDP | Record-to-file authority mapping and explicit filename segment bound |
@@ -77,6 +77,14 @@ All 42 collections have explicit list and single-record GET mappings in [patch_d
 | `latest_loss_reports` | `pbc_1915755548` | view | `latest_loss_reports` / `patch-data.latest_loss_reports.read` |
 | `reports_v2_list` | `pbc_2089487142` | view | `reports_v2_list` / `patch-data.reports_v2_list.read` |
 
+| `blueprints_list` | `pbc_1185224127` | view | `blueprints_list` / `patch-data.blueprints_list.read` |
+| `rsd_command_tasks` | `pbc_4011293327` | base | `rsd_command_tasks` / `patch-data.rsd_command_tasks.read` |
+| `agreement_documents` | `pbc_165310787` | base | `agreement_documents` / `patch-data.agreement_documents.read` |
+| `anomaly_occurrences` | `anomalyoccur001` | base | `anomaly_occurrences` / `patch-data.anomaly_occurrences.read` |
+| `blueprints_viewer_list` | `pbc_1337089470` | view | `blueprints_viewer_list` / `patch-data.blueprints_viewer_list.read` |
+| `temporary_blueprints_list` | `pbc_405412300` | view | `temporary_blueprints_list` / `patch-data.temporary_blueprints_list.read` |
+| `anomaly_occurrence_checkpoints` | `projcheckpoint1` | base | `anomaly_occurrence_checkpoints` / `patch-data.anomaly_occurrence_checkpoints.read` |
+
 ## Generate, register and activate
 
 Run from the Grant repository. Generation is explicit; use the actual latest staged generation for the compare-and-swap precondition (omit `-previous-generation` only for a new provider catalog).
@@ -124,7 +132,7 @@ Configure **both** Exposure request and response maxima to at least 128 MiB when
 
 The read actions are marked high risk because they authorize the entire native record response, including business profile data and any sensitive fields exposed by the service token. In particular, `passwords` may contain business password values; `temporary_accounts`, `users`, `permissions` and invitation records can contain sensitive access or identity metadata. Grant these explicit actions/record bindings only to principals allowed to receive the whole record. The scalar query allowlist does not redact response fields, implement field authorization, or permit login through business profiles. No role, organization membership, or action is inferred from those records.
 
-Scalar filter/sort fields are pinned to the audited schema snapshot `1778142859_collections_snapshot.js` after its auth-to-base field removal. The checked-in manifest excludes hidden fields, relations, JSON, file fields, password values, temporary links and removed auth fields. View fields are only their declared scalar output fields; no source relation lookup is inferred. `plants` retains `created,id,isArchive,name,updated`. The source snapshot supplies structure and row identity, while the independent resource namespaces here are explicit new policy mappings. Changes to the source schema require reviewing the manifest before publication.
+Scalar filter/sort fields are pinned to the audited schema snapshot `1785485804_collections_snapshot.js` after its auth-to-base field removal. The checked-in manifest excludes hidden fields, relations, JSON, file fields, password values, temporary links and removed auth fields. View fields are only their declared scalar output fields; no source relation lookup is inferred. `plants` retains `created,id,isArchive,name,updated`. The source snapshot supplies structure and row identity, while the independent resource namespaces here are explicit new policy mappings. Changes to the source schema require reviewing the manifest before publication.
 
 For each published API, provide the fixed provider, collection name and ID aliases, action IDs, canonical resource type, and resource-ID extraction. Creation and collection management require their own explicit authority target. Declare which root fields are safe scalar filter/sort fields; relation paths, view-to-source identity mappings, nested JSON fields and expansion require separate semantics. Supply media types and byte limits for uploads/files, and the complete permitted request/response header and status policy.
 
