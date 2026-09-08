@@ -88,7 +88,3 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
  AND ($9 IS NULL OR EXISTS(SELECT 1 FROM agreements WHERE id=$9 AND status='active' AND (starts_at IS NULL OR starts_at<=$14) AND (ends_at IS NULL OR ends_at>=$14) AND ($5<>'grant' OR $6<>'organization' OR $7=$4 OR (grantor_organization_id=$7 AND grantee_organization_id=$4))))`, Args: []any{b.ID, b.SubjectType, b.SubjectID, b.SubjectOrganizationID, b.ProviderID, b.ResourceType, b.ResourceID, b.RoleID, b.AgreementID, b.State, b.CreatedByUserID, b.CreatedAt, b.UpdatedAt, nowString()}, ExpectedRowsAffected: requireOne()})
 	return e
 }
-func (s *Store) DeleteRoleBinding(ctx context.Context, id string) error {
-	_, e := s.Execute(ctx, requestID(), Statement{SQL: "DELETE FROM role_bindings WHERE id=?", Args: []any{id}, ExpectedRowsAffected: requireOne()})
-	return e
-}

@@ -39,8 +39,7 @@ func (s *Store) StageHttpCapabilityGeneration(ctx context.Context, p string, in 
 		return out, e
 	}
 	ss := []Statement{{SQL: "INSERT INTO provider_http_capability_sets(provider_id,generation,catalog_digest,canonical_json,created_at) SELECT ?,?,?," + stagedTextSQL() + ",? WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND ?=COALESCE((SELECT MAX(generation) FROM provider_http_capability_sets WHERE provider_id=?),0)+1 AND ((? IS NULL AND NOT EXISTS(SELECT 1 FROM provider_http_capability_sets WHERE provider_id=?)) OR ?=(SELECT MAX(generation) FROM provider_http_capability_sets WHERE provider_id=?))", Args: []any{p, in.Generation, in.CatalogDigest, stageID, "capabilities", nowString(), p, in.Generation, p, in.ExpectedLatestGeneration, p, in.ExpectedLatestGeneration, p}, ExpectedRowsAffected: requireOne()},
-		{SQL: `INSERT INTO provider_http_capabilities(provider_id,generation,capability_id,version,enabled,access_mode,method,path_template,action_id,resource_type,extractor_json,query_policy_json,request_policy_json,response_policy_json,contract_digest)
- SELECT ?,?,j.value->>'capabilityId',j.value->>'version',j.value->>'enabled',j.value->>'accessMode',j.value->>'method',j.value->>'pathTemplate',j.value->>'actionId',j.value->'resource'->>'type',COALESCE(j.value->'resource'->'id','null'),j.value->'query',j.value->'request',j.value->'response',j.value->>'contractDigest' FROM provider_http_capability_sets s,json_each(s.canonical_json,'$.capabilities') j WHERE s.provider_id=? AND s.generation=?`, Args: []any{p, in.Generation, p, in.Generation}, ExpectedRowsAffected: &n}}
+		capabilityCatalogAssertion(p, in.Generation, n)}
 	ss = append(ss, Statement{SQL: "DELETE FROM grant_import_payloads WHERE import_id=? AND kind='capabilities'", Args: []any{stageID}})
 	if e = s.Transaction(ctx, ss); e != nil {
 		return out, capabilityWriteError(e)
@@ -48,6 +47,23 @@ func (s *Store) StageHttpCapabilityGeneration(ctx context.Context, p string, in 
 	out.Staged = true
 	return out, nil
 }
+
+// Validate persisted chunks in the publication transaction, without storing a second catalog.
+func capabilityCatalogAssertion(provider string, generation uint64, count int64) Statement {
+	return assertion(`SELECT 1 FROM provider_http_capability_sets s WHERE provider_id=? AND generation=?
+ AND json_type(canonical_json,'$.capabilities')='array'
+ AND json_array_length(canonical_json,'$.capabilities')=?
+ AND NOT EXISTS(SELECT 1 FROM json_each(s.canonical_json,'$.capabilities') j WHERE
+ json_type(j.value) IS NOT 'object' OR j.value->>'capabilityId' IS NULL
+ OR json_type(j.value,'$.version') IS NOT 'integer' OR j.value->>'version'<=0
+ OR json_type(j.value,'$.enabled') NOT IN ('true','false') OR json_type(j.value,'$.enabled') IS NULL
+ OR j.value->>'accessMode' IS NULL OR j.value->>'accessMode' NOT IN ('public_authn','authorized')
+ OR j.value->>'method' IS NULL OR j.value->>'pathTemplate' IS NULL OR j.value->>'contractDigest' IS NULL
+ OR j.value->'query' IS NULL OR j.value->'request' IS NULL OR j.value->'response' IS NULL)
+ AND NOT EXISTS(SELECT 1 FROM json_each(s.canonical_json,'$.capabilities') j
+ GROUP BY j.value->>'capabilityId',j.value->>'version' HAVING COUNT(*)>1)`, provider, generation, count)
+}
+
 func (s *Store) UpsertProviderPepClient(ctx context.Context, p, id, actor string, in UpsertProviderPepClient) (ProviderPepClient, error) {
 	if !capabilityToken(p) || !capabilityToken(id) || !capabilityToken(in.ApplicationID) || (in.Lifecycle != "active" && in.Lifecycle != "disabled" && in.Lifecycle != "deleted") {
 		return ProviderPepClient{}, serviceError(422, "invalid PEP client")

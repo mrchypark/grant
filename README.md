@@ -6,13 +6,14 @@
 
 ## 구성
 
-Exposure 전용 `/api/v1/exposure-authz/read`, `/api/v1/exposure-authz/plant-read`, `/api/v2/exposure-authz/decide`와 고정 `plant.get` 계약은 폐기됐다. 기존 소비자는 [범용 HTTP capability](docs/http-capabilities.md)로 명시적으로 전환해야 한다. 현재 공개 API는 48개 경로 패턴에 61개 메서드 항목을 등록한다.
+Exposure 전용 판정과 고정 `plant.get` 계약, 권한 행을 반영하지 않던 V2 snapshot 수신 API·exporter는 폐기됐다. 현재 공개 API는 47개 경로 패턴에 60개 메서드 항목을 등록한다. [범용 HTTP capability](docs/http-capabilities.md)와 실제 권한을 반영하는 V1 import는 유지한다.
+
+이번 정리는 의도적인 비호환 변경이다. 이전 스키마 checksum을 가진 DB는 시작 시 거부되고 이전 backup도 현재 스키마와 호환되지 않으므로 새 DB로 시작해야 한다. 기존 데이터를 삭제하거나 자동 변환하지 않는다. 폐기한 snapshot 수신 경로는 404를 반환하고 exporter 실행 파일은 더 이상 제공하지 않는다.
 
 - `internal/grant`: 설정, 모델, identity 검증, 권한 서비스, Rhiza 저장소와 스키마
 - `internal/api`: HTTP route, JSON 계약, 인증 경계와 Rauthy proxy
 - `cmd/grant`: 서버와 명시적 데이터 이전 명령
 - `cmd/grant-patch-data-manifest-digest`: canonical manifest digest 도구
-- `cmd/grant-patch-data-authority-snapshot`: frozen PocketBase SQLite의 읽기 전용 exporter
 
 ## 개발 검증
 

@@ -245,35 +245,11 @@
                     PRIMARY KEY (source_provider, parent_organization_id, child_organization_id),
                     UNIQUE (source_provider, child_organization_id)
                 );
-                CREATE TABLE IF NOT EXISTS authority_import_assertions (
-                    id TEXT PRIMARY KEY,
-                    valid INTEGER NOT NULL
-                        CONSTRAINT authority_import_assertion_valid CHECK (valid = 1)
-                );
                 CREATE TABLE IF NOT EXISTS patch_data_authority_import_entities (
                     entity_type TEXT NOT NULL,
                     entity_id TEXT NOT NULL,
                     source_generation TEXT NOT NULL,
                     PRIMARY KEY (entity_type, entity_id)
-                );
-                CREATE TABLE IF NOT EXISTS authority_snapshots_v2 (
-                    source_id TEXT NOT NULL,
-                    generation INTEGER NOT NULL,
-                    prior_generation INTEGER,
-                    snapshot_digest TEXT NOT NULL,
-                    canonical_json TEXT NOT NULL,
-                    source_revision TEXT NOT NULL,
-                    source_ledger_digest TEXT NOT NULL,
-                    source_watermark TEXT NOT NULL,
-                    produced_at TEXT NOT NULL,
-                    principal_count INTEGER NOT NULL,
-                    organization_count INTEGER NOT NULL,
-                    membership_count INTEGER NOT NULL,
-                    application_count INTEGER NOT NULL,
-                    effective_binding_count INTEGER NOT NULL,
-                    applied_at TEXT NOT NULL,
-                    PRIMARY KEY (source_id, generation),
-                    UNIQUE (source_id, snapshot_digest)
                 );
                 CREATE TABLE IF NOT EXISTS provider_http_capability_sets (
                     provider_id TEXT NOT NULL,
@@ -284,30 +260,6 @@
                     PRIMARY KEY (provider_id, generation),
                     UNIQUE (provider_id, catalog_digest),
                     FOREIGN KEY (provider_id) REFERENCES service_providers(id)
-                );
-                CREATE TABLE IF NOT EXISTS provider_http_capability_assertions (
-                    id TEXT PRIMARY KEY,
-                    valid INTEGER NOT NULL CHECK (valid = 1)
-                );
-                CREATE TABLE IF NOT EXISTS provider_http_capabilities (
-                    provider_id TEXT NOT NULL,
-                    generation INTEGER NOT NULL,
-                    capability_id TEXT NOT NULL,
-                    version INTEGER NOT NULL CHECK (version > 0),
-                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-                    access_mode TEXT NOT NULL CHECK (access_mode IN ('public_authn', 'authorized')),
-                    method TEXT NOT NULL,
-                    path_template TEXT NOT NULL,
-                    action_id TEXT,
-                    resource_type TEXT,
-                    extractor_json TEXT NOT NULL,
-                    query_policy_json TEXT NOT NULL,
-                    request_policy_json TEXT NOT NULL,
-                    response_policy_json TEXT NOT NULL,
-                    contract_digest TEXT NOT NULL,
-                    PRIMARY KEY (provider_id, generation, capability_id, version),
-                    FOREIGN KEY (provider_id, generation)
-                        REFERENCES provider_http_capability_sets(provider_id, generation)
                 );
                 CREATE TABLE IF NOT EXISTS provider_http_capability_active (
                     provider_id TEXT PRIMARY KEY,

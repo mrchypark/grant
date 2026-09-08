@@ -57,9 +57,6 @@ func (s *Service) CreateAgreementAuthorized(ctx context.Context, user, org strin
 	}
 	return s.agreement(ctx, user, org, in, true)
 }
-func (s *Service) UpsertAgreementAuthorized(ctx context.Context, user, org string, in UpsertAgreementInput) (Agreement, error) {
-	return s.agreement(ctx, user, org, in, false)
-}
 func (s *Service) UpdateAgreementAuthorized(ctx context.Context, user, org, id string, in UpsertAgreementInput) (Agreement, error) {
 	a, err := s.GetAgreementAuthorized(ctx, user, org, id, ReadStrong)
 	if err != nil {

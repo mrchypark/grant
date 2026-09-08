@@ -1,6 +1,6 @@
 # Local development
 
-The runtime and all three executables use Go 1.27. Use `go test ./...`, `go vet ./...`, and `CGO_ENABLED=0 go build ./cmd/...` from the repository root. Rhiza embeds SQLite through its native Go API; no Rust compiler or cgo toolchain is needed.
+The server and manifest digest executable use Go 1.27. Use `go test ./...`, `go vet ./...`, and `CGO_ENABLED=0 go build ./cmd/...` from the repository root. Rhiza embeds SQLite through its native Go API; no Rust compiler or cgo toolchain is needed.
 
 For a local single voter, select a new directory and provide distinct master/application keys plus the identity provider configuration:
 
@@ -21,20 +21,16 @@ The command does not convert an existing Hiqlite store. Follow [backup-restore.m
 
 `sh scripts/verify-go-three-voter.sh` creates an isolated local Docker MinIO container and three local Grant processes. It verifies a replicated write, strong reads on every voter, writes with one voter down, and recovery into the same node directory. It then restores a populated logical snapshot into a separate fresh three-voter prefix, checks that readiness waits for all admissions, and verifies restored quorum recovery. It never invokes kubectl. `KEEP_GRANT_FIXTURE=1` retains its own temporary logs for diagnosis; it never cleans unrelated containers or files.
 
-`sh scripts/verify-go-cli-contract.sh` builds all three executables with cgo disabled and checks actual process output, including initialization. It requires the local `sqlite3` CLI and `jq`; its frozen SQLite fixture verifies the exporter independently of the Go hash helpers.
+`sh scripts/verify-go-cli-contract.sh` builds both executables with cgo disabled and checks actual process output, including initialization and the V1 manifest digest contract.
 
 The disposable Kubernetes overlay remains a three-voter topology. Use a dedicated kubeconfig and explicit local context when running `scripts/ci-local.sh`. Never point it at an existing production context. Its object-store fixture credentials are local test values, not operational credentials. The MinIO server/client image versions are fixed to published [upstream releases](https://github.com/minio/minio/releases).
 
-The two artifact tools preserve the existing binary names:
+Compute the V1 authority manifest digest with:
 
 ```sh
 go run ./cmd/grant-patch-data-manifest-digest < manifest.json
-go run ./cmd/grant-patch-data-authority-snapshot \
-  --database frozen-pocketbase.sqlite --source-revision REVISION \
-  --source-ledger-digest sha256:LOWERCASE_HEX_DIGEST --generation 1 \
-  --produced-at 2026-09-08T00:00:00Z --output-dir new-snapshot-bundle
 ```
 
-The exporter rejects SQLite WAL/SHM sidecars and existing output directories. Publication uses an atomic no-replace rename. Tests use temporary SQLite files and do not access live PocketBase data.
+The receipt-only V2 authority snapshot receiver and exporter have been removed. Runtime logical backup and restore remain separate supported operations.
 
 Historical Rust commands are preserved in [the previous development guide](history/hiqlite/local-development.md).

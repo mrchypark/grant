@@ -61,9 +61,6 @@ func (s *Service) Authenticate(ctx context.Context, token, organization string, 
 	}
 	return AuthenticatedPrincipal{UserID: user.ID, OrganizationID: organization}, nil
 }
-func (s *Service) AuthenticateRequest(ctx context.Context, token, organization string, c ReadConsistency) (AuthenticatedPrincipal, error) {
-	return s.Authenticate(ctx, token, organization, c)
-}
 func (s *Service) CurrentUser(ctx context.Context, token, organization string, c ReadConsistency) (CurrentUserView, error) {
 	identity, err := s.resolveExternalIdentity(ctx, token, c)
 	if err != nil {
@@ -123,8 +120,6 @@ func (s *Service) MaterializeCurrentUser(ctx context.Context, token, org string)
 func (s *Service) SetUserActiveAdmin(ctx context.Context, id string, active bool) (User, error) {
 	return s.store.SetUserActive(ctx, id, active)
 }
-func (s *Service) HealthStatus(ctx context.Context) HealthStatus { return s.store.Health(ctx) }
-func (s *Service) IsReady(ctx context.Context) bool              { _, ready := s.Readiness(ctx); return ready }
 func (s *Service) Readiness(ctx context.Context) (HealthStatus, bool) {
 	h := s.store.Health(ctx)
 	switch h.DefaultReadConsistency {
@@ -139,9 +134,3 @@ func (s *Service) Readiness(ctx context.Context) (HealthStatus, bool) {
 	}
 }
 func (s *Service) Bootstrap(ctx context.Context) error { return s.store.EnsureBootstrapData(ctx) }
-func (s *Service) Initialize(ctx context.Context) error {
-	if err := s.MigrateSchema(ctx); err != nil {
-		return err
-	}
-	return s.Bootstrap(ctx)
-}

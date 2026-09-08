@@ -1,11 +1,7 @@
-                CREATE INDEX IF NOT EXISTS idx_organization_memberships_org_user
-                    ON organization_memberships (organization_id, user_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_party_links_org_relation
                     ON organization_party_links (organization_id, relation_type);
                 CREATE INDEX IF NOT EXISTS idx_organization_party_links_party
                     ON organization_party_links (party_id, relation_type);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_parties_business_no
-                    ON parties (business_no);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_identities_provider_external
                     ON user_identities (provider, external_user_id);
                 CREATE INDEX IF NOT EXISTS idx_auth_identity_cache_expires_at
@@ -15,8 +11,6 @@
                     ON applications (rauthy_client_id)
                     WHERE rauthy_client_id IS NOT NULL
                       AND TRIM(rauthy_client_id) <> '';
-                CREATE INDEX IF NOT EXISTS idx_group_memberships_group_member
-                    ON group_memberships (group_id, organization_membership_id);
                 CREATE INDEX IF NOT EXISTS idx_agreements_grantor_grantee
                     ON agreements (grantor_organization_id, grantee_organization_id, status);
                 CREATE INDEX IF NOT EXISTS idx_service_providers_active
@@ -54,14 +48,5 @@
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_application_grants_active_unique
                     ON application_grants (user_id, application_id, organization_id)
                     WHERE status = 'active';
-                CREATE INDEX IF NOT EXISTS idx_provider_http_capabilities_match
-                    ON provider_http_capabilities
-                    (provider_id, generation, enabled, method, path_template);
-                CREATE INDEX IF NOT EXISTS idx_provider_http_activations_provider
-                    ON provider_http_capability_activations
-                    (provider_id, activation_sequence);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_http_activations_receipt
-                    ON provider_http_capability_activations (activation_receipt_id)
-                    WHERE activation_receipt_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_provider_pep_clients_provider_lifecycle
                     ON provider_pep_clients (provider_id, lifecycle, valid_until);

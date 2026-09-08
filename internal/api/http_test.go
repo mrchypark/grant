@@ -132,10 +132,11 @@ func TestProxyDoesNotFollowRedirectOrLeakTransport(t *testing.T) {
 	}
 }
 
-var retiredExposureRoutes = []string{
+var retiredAPIRoutes = []string{
 	"/api/v1/exposure-authz/read",
 	"/api/v1/exposure-authz/plant-read",
 	"/api/v2/exposure-authz/decide",
+	"/api/v2/admin/imports/authority-snapshots",
 }
 
 func TestRouteMethodsAfterExposureRetirement(t *testing.T) {
@@ -168,11 +169,11 @@ func TestRouteMethodsAfterExposureRetirement(t *testing.T) {
 	}
 }
 
-func TestRetiredExposureRoutesAreNotFound(t *testing.T) {
+func TestRetiredAPIRoutesAreNotFound(t *testing.T) {
 	for _, learner := range []bool{false, true} {
 		s := testServer()
 		s.learner = learner
-		for _, path := range retiredExposureRoutes {
+		for _, path := range retiredAPIRoutes {
 			r := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()

@@ -2,7 +2,7 @@
 
 ## Frozen reference and boundary
 
-The reference is merge commit `c716877` (its tree contains the standalone bootstrap fixes first staged as `ee5852b`). The original dirty `feature/grant-compos-company-strong` work is excluded: its unfinished authorization projection/signing work is not a port target. The retired Rust implementation remains available in the [immutable baseline](https://github.com/Conalog/grant/tree/c716877e7b970b7d38392b377f64384936992884). Current fixtures are stored under internal/api/testdata and cmd/grant-patch-data-authority-snapshot/testdata; runtime builds use Go only.
+The reference is merge commit `c716877` (its tree contains the standalone bootstrap fixes first staged as `ee5852b`). The original dirty `feature/grant-compos-company-strong` work is excluded: its unfinished authorization projection/signing work is not a port target. The retired Rust implementation remains available in the [immutable baseline](https://github.com/Conalog/grant/tree/c716877e7b970b7d38392b377f64384936992884). Current fixtures are stored under internal/api/testdata and internal/grant tests; runtime builds use Go only.
 
 The reference has **51 distinct HTTP paths**, **60 router registrations** (30 shared and 30 voter registrations with 9 overlapping paths), **35 persistent CREATE TABLE definitions**, and **3 executable programs**. Learner routing additionally reserves management paths with the voter-required failure. The [method/path/auth inventory](porting-go-http-contract.md) records method-level details; counting paths alone is not evidence of semantic equivalence.
 
@@ -14,7 +14,7 @@ The reference has **51 distinct HTTP paths**, **60 router registrations** (30 sh
 
 ## HTTP paths in the reference
 
-This section is historical: it records the original Rust baseline, not the current route inventory. The current API has 48 paths and 61 method registrations after retiring `/api/v1/exposure-authz/read`, `/api/v1/exposure-authz/plant-read`, and `/api/v2/exposure-authz/decide`. These paths return 404; generic HTTP capabilities remain supported. See the current [HTTP contract](porting-go-http-contract.md).
+This section is historical: it records the original Rust baseline, not the current route inventory. The current API has 47 paths and 60 method registrations after retiring the three Exposure endpoints and the receipt-only V2 authority snapshot receiver. These paths return 404; generic HTTP capabilities and V1 authority imports remain supported. See the current [HTTP contract](porting-go-http-contract.md).
 
 The following is extracted from [crates/api/src/lib.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/lib.rs); management/shared overlap is intentional. Learner writes must fail with HTTP 503 and `endpoint requires voter node`.
 
@@ -110,12 +110,8 @@ Schema meaning, migration, constraints and relation changes must be documented i
 - `application_consent_assertions`
 - `patch_data_authority_imports`
 - `organization_hierarchy_edges`
-- `authority_import_assertions`
 - `patch_data_authority_import_entities`
-- `authority_snapshots_v2`
 - `provider_http_capability_sets`
-- `provider_http_capability_assertions`
-- `provider_http_capabilities`
 - `provider_http_capability_active`
 - `provider_http_capability_activations`
 - `provider_pep_clients`
@@ -127,7 +123,6 @@ Schema meaning, migration, constraints and relation changes must be documented i
 |---|---|---|
 | `grant` | [crates/app/src/main.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/app/src/main.rs) | Validated configuration, native DB lifecycle, migration before serving, voter/learner separation, health/readiness, HTTP |
 | `grant-patch-data-manifest-digest` | [crates/app/src/bin/grant-patch-data-manifest-digest.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/app/src/bin/grant-patch-data-manifest-digest.rs) | JSON stdin, strict shape, canonical digest excludes `manifestDigest`, lowercase digest stdout |
-| `grant-patch-data-authority-snapshot` | [crates/app/src/bin/grant-patch-data-authority-snapshot.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/app/src/bin/grant-patch-data-authority-snapshot.rs) | Required flags `--database`, `--source-revision`, `--source-ledger-digest`, `--generation`, `--produced-at`, `--output-dir`; read-only source snapshot; canonical snapshot and receipt; atomic publication |
 
 ## Semantic obligations and evidence
 
@@ -139,7 +134,7 @@ Schema meaning, migration, constraints and relation changes must be documented i
 | Applications | Reservation precedes external provisioning; Rauthy verify is read-only; explicit consent versus trusted application; transaction preconditions and stale-action cleanup | [crates/api/tests/application_routes.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/tests/application_routes.rs), `application_authz.rs`; [crates/infra/tests/application_update.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/tests/application_update.rs) |
 | Retired Exposure decisions (historical only) | Exact server-owned mapping; binary decision; five-second bound; length-framed principal digest; echo replay bindings without field data | [crates/api/tests/exposure_authz.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/tests/exposure_authz.rs); [crates/api/tests/fixtures/plant_read_contract.json](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/tests/fixtures/plant_read_contract.json) |
 | HTTP capabilities | Immutable staging; activation compare-and-swap and receipts; configured PEP identity; provider/application lifecycle checks; all request dimensions validated before decision | [crates/api/tests/http_capability_admin.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/tests/http_capability_admin.rs); [crates/infra/tests/http_capabilities.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/tests/http_capabilities.rs); Go canonical evidence tests |
-| Authority import | Canonical JSON and digest, exact source ownership, contiguous generations, idempotent replay, all-or-nothing import even above Rhiza's statement bound | [crates/api/tests/patch_data_authority_v2.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/tests/patch_data_authority_v2.rs); [crates/infra/tests/patch_data_authority_import.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/tests/patch_data_authority_import.rs); Go real-engine import rollback tests |
+| V1 authority import | Length-framed canonical digest, exact source ownership, generation compare-and-swap, idempotent replay, atomic import beyond Rhiza's statement bound | [crates/infra/tests/patch_data_authority_import.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/tests/patch_data_authority_import.rs); Go real-engine import rollback tests |
 | Runtime and migration | No silent read-consistency downgrade; learner writes closed; legacy state preserved/exported through verified import; schema-aware readiness | [crates/infra/tests/runtime_routing.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/tests/runtime_routing.rs), `database_schema.rs`; native Rhiza tests |
 
 JSON integer generations and revisions must remain exact `uint64`/`int64` (or `json.Number`), not float64. Null, omitted optional fields, empty arrays, acronym casing and canonical collection ordering are separate contracts. `domain_contract_test.go` uses explicit expected wire JSON and the frozen Rust negative vectors; it does not regenerate expected answers from the new implementation.

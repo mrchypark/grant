@@ -10,9 +10,6 @@ import (
 func (s *Service) ImportPatchDataAuthority(ctx context.Context, v PatchDataAuthorityImport) (PatchDataAuthorityImportResult, error) {
 	return s.store.ImportPatchDataAuthority(ctx, v)
 }
-func (s *Service) ImportAuthoritySnapshotV2(ctx context.Context, v AuthoritySnapshotV2) (AuthoritySnapshotV2Result, error) {
-	return s.store.ImportAuthoritySnapshotV2(ctx, v)
-}
 func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v StageHttpCapabilityGeneration) (StagedHttpCapabilityGeneration, error) {
 	actions, err := serviceRows[Action](ctx, s, ReadStrong, "SELECT * FROM actions WHERE provider_id=?", provider)
 	if err != nil {

@@ -62,13 +62,10 @@ type Service struct {
 func NewService(cfg Config, store *Store) *Service {
 	return &Service{cfg: cfg, store: store, authCache: make(map[string]cachedIdentity), client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
 }
-func (s *Service) Config() Config                          { return s.cfg }
-func (s *Service) MasterKey() string                       { return s.cfg.Security.MasterKey }
-func (s *Service) AppAuthKey() string                      { return s.cfg.Security.AppAuthKey }
-func (s *Service) RauthyBaseURL() string                   { return s.cfg.Auth.Rauthy.BaseURL }
-func (s *Service) AuthProviderMode() string                { return s.cfg.Auth.ProviderMode }
-func (s *Service) RauthyProxyClient() *http.Client         { return s.client }
-func (s *Service) MigrateSchema(ctx context.Context) error { return s.store.Migrate(ctx) }
+func (s *Service) Config() Config                  { return s.cfg }
+func (s *Service) RauthyBaseURL() string           { return s.cfg.Auth.Rauthy.BaseURL }
+func (s *Service) AuthProviderMode() string        { return s.cfg.Auth.ProviderMode }
+func (s *Service) RauthyProxyClient() *http.Client { return s.client }
 
 func (s *Service) CheckAuthorization(ctx context.Context, subject AuthorizationSubject, action string, resource AuthorizationResource, consistency ReadConsistency) (AuthorizationDecision, error) {
 	decisions, err := s.CheckAuthorizations(ctx, []AuthorizationCheck{{Subject: subject, Action: action, Resource: resource}}, consistency)

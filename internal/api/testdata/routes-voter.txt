@@ -46,7 +46,6 @@ POST /api/v1/orgs/{organizationId}/deactivate
 POST /api/v1/orgs/{organizationId}/groups
 POST /api/v1/orgs/{organizationId}/reactivate
 POST /api/v1/orgs/{organizationId}/roles
-POST /api/v2/admin/imports/authority-snapshots
 POST /api/v2/http-capabilities/decide
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust
 PUT /api/v1/admin/providers/{providerId}/actions

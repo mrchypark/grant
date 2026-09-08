@@ -212,11 +212,7 @@ jobs:
             scripts/materialize-s3-restore.sh
             scripts/create-recovery-pair.sh
             scripts/restore-full-cluster.sh
-            scripts/recovery-state-machine.sh
-            scripts/verify-recovery-state-machine.sh
-            scripts/verify-restore-once.sh
             deploy/k8s/lifecycle-gate.sh
-            deploy/k8s/restore-once.sh
           )
           bash -n "${bash_scripts[@]}"
           for script in "${posix_scripts[@]}"; do sh -n "${script}"; done
@@ -228,8 +224,6 @@ jobs:
           scripts/verify-docs.sh
           sh scripts/verify-rhiza-deployment.sh
           sh scripts/verify-ghcr-tag-preflight.sh
-          scripts/verify-recovery-state-machine.sh
-          scripts/verify-restore-once.sh
           scripts/verify-ephemeral-k8s.sh static
 
       - name: Run local bootstrap regression

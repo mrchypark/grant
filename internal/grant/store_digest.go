@@ -110,13 +110,6 @@ func jsonUTF8Separators(s string) string {
 	}
 	return out.String()
 }
-func SnapshotDigest(s AuthoritySnapshotV2) (string, error) {
-	v, e := canonicalJSON(s, "snapshotDigest")
-	if e != nil {
-		return "", e
-	}
-	return digestBytes([]byte(v)), nil
-}
 func validDigest(v string) bool {
 	if len(v) != 71 || !strings.HasPrefix(v, "sha256:") {
 		return false

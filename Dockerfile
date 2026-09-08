@@ -7,8 +7,7 @@ COPY --link internal ./internal
 COPY --link cmd ./cmd
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant ./cmd/grant \
-    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-patch-data-manifest-digest ./cmd/grant-patch-data-manifest-digest \
-    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-patch-data-authority-snapshot ./cmd/grant-patch-data-authority-snapshot
+    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-patch-data-manifest-digest ./cmd/grant-patch-data-manifest-digest
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
@@ -19,7 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY --link --from=builder --chown=10001:10001 /workspace/grant /usr/local/bin/grant
 COPY --link --from=builder --chown=10001:10001 /workspace/grant-patch-data-manifest-digest /usr/local/bin/grant-patch-data-manifest-digest
-COPY --link --from=builder --chown=10001:10001 /workspace/grant-patch-data-authority-snapshot /usr/local/bin/grant-patch-data-authority-snapshot
 USER 10001:10001
 ENV GRANT_BIND_ADDR=0.0.0.0:8080 GRANT_DATA_DIR=/data/rhiza GRANT_BACKUP_DIR=/data/backups
 EXPOSE 8080 8100/udp

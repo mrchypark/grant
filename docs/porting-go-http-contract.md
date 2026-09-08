@@ -2,7 +2,7 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The current HTTP boundary has 48 distinct paths and 61 method registrations. The three Exposure-specific paths from the 51-path Rust baseline are retired and return 404. GET registrations also accept HEAD.
+The current HTTP boundary has 47 distinct paths and 60 method registrations. The three Exposure-specific paths and V2 authority snapshot receiving path are retired and return 404. GET registrations also accept HEAD.
 
 ## Method, path, authorization and node role
 
@@ -14,7 +14,6 @@ The current HTTP boundary has 48 distinct paths and 61 method registrations. The
 | GET | `/api/v2/http-capabilities/catalog/{providerId}` | app | false | 200 |
 | POST | `/api/v2/http-capabilities/decide` | application | false | 200 |
 | POST | `/api/v1/admin/imports/patch-data-authority` | master | true | 200 |
-| POST | `/api/v2/admin/imports/authority-snapshots` | master | true | 200 |
 | GET | `/api/v1/me` | bearer | false | 200 |
 | POST | `/api/v1/me/materialize` | bearer | true | 200 |
 | GET | `/api/v1/providers` |  | false | 200 |
@@ -70,7 +69,7 @@ The current HTTP boundary has 48 distinct paths and 61 method registrations. The
 | ANY | `/auth/v1` | Rauthy mode only | false | upstream status |
 | ANY | `/auth/v1/{*rauthyPath}` | Rauthy mode only | false | upstream status |
 
-There are 61 method registrations across 48 distinct paths. The inventory in `internal/api/testdata/routes-voter.txt` derives from the Rust baseline with the three retired Exposure routes removed. The fixed `plant.get` contract is retired. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`; existing consumers must migrate explicitly, without aliases or redirects.
+There are 60 method registrations across 47 distinct paths. The current fixture excludes the three retired Exposure routes and the receipt-only V2 authority snapshot receiver. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`. V1 authority import remains supported; removed APIs have no aliases or redirects.
 
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 

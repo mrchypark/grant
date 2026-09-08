@@ -48,4 +48,6 @@ The local three-voter verification script checks continued writes with one voter
 
 ## Retired Grant Hiqlite entrypoints
 
-This native checkout refuses real Grant operations through `restore-full-cluster.sh`, `create-recovery-pair.sh`, and `materialize-s3-restore.sh grant` before any external mutation. Their dry runs remain available for historical contract fixtures. Recover a legacy Grant source from its preserved Hiqlite checkout; do not bypass the native backend boundary. `materialize-s3-restore.sh rauthy` remains supported for Rauthy's unchanged backend.
+`restore-full-cluster.sh` and `create-recovery-pair.sh` are retirement notices that exit 2 for every invocation, including dry runs. Their old recovery state machine, paired recovery workflow and fixtures have been removed. Historical Hiqlite procedures remain in the [immutable c716877 checkout](https://github.com/Conalog/grant/tree/c716877e7b970b7d38392b377f64384936992884); use that checkout for a legacy source.
+
+`materialize-s3-restore.sh grant` still refuses real Grant mutations. `materialize-s3-restore.sh rauthy`, the live Rauthy lifecycle gate, and the Go Rauthy launcher's authorized one-shot recovery remain supported. The unused shell `restore-once.sh` is removed from the generated ConfigMap; Rauthy's StatefulSet runs `/usr/local/bin/rauthy-launcher` directly. Native Grant uses the coordinated Rhiza recovery procedure above, not the retired paired Hiqlite workflow.

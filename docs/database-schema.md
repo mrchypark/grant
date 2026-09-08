@@ -60,17 +60,9 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 Patch Data API rule 이동의 deterministic import receipt와 소유권 provenance, 조직 parent-child snapshot이다. `grant.patch-data-authority.v1` manifest는 user/external identity, organization, membership, hierarchy edge, plant binding, active/ready application assignment를 정렬된 전체 snapshot으로 전달한다. receipt는 provider별 exact `generation`, 원본 ledger lowercase SHA-256, versioned payload 전체의 length-framed canonical SHA-256, manifest version, 적용 시각을 저장한다. canonical digest는 `manifestDigest` 자신과 `expectedPreviousGeneration`만 제외하므로 CAS 경로와 무관하게 같은 authority payload는 같은 digest를 갖는다.
 
-`patch_data_authority_import_entities`는 importer가 교체할 수 있는 canonical user, organization, membership, plant binding, application assignment의 `(entity_type, entity_id)`만 추적한다. importer는 absent row를 만들거나 같은 kind/id가 이미 import-owned인 경우만 갱신한다. 우연히 같은 native row는 채택하지 않으며 import replacement나 omission으로 삭제하지도 않는다. 다음 generation은 이전 import-owned membership, binding, `application_actions` assignment만 제거한 뒤 새 snapshot과 provenance를 하나의 Hiqlite transaction으로 기록한다. omitted user/organization/identity는 남을 수 있지만 imported membership/binding이 없어서 권한을 갖지 않는다. application 자체는 importer가 생성·수정·삭제하지 않고 manifest의 `applicationAssignments`가 가리키는 existing active/ready same-org application만 검증한다.
+`patch_data_authority_import_entities`는 importer가 교체할 수 있는 canonical user, organization, membership, plant binding, application assignment의 `(entity_type, entity_id)`만 추적한다. importer는 absent row를 만들거나 같은 kind/id가 이미 import-owned인 경우만 갱신한다. 우연히 같은 native row는 채택하지 않으며 import replacement나 omission으로 삭제하지도 않는다. 다음 generation은 이전 import-owned membership, binding, `application_actions` assignment만 제거한 뒤 새 snapshot과 provenance를 하나의 Rhiza transaction으로 기록한다. omitted user/organization/identity는 남을 수 있지만 imported membership/binding이 없어서 권한을 갖지 않는다. application 자체는 importer가 생성·수정·삭제하지 않고 manifest의 `applicationAssignments`가 가리키는 existing active/ready same-org application만 검증한다.
 
-각 import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 canonical catalog에 보장하고, membership을 `organization_memberships`, plant permission을 `role_bindings`, application capability를 `application_actions`에 직접 반영한다. 따라서 strong evaluator와 plant-read decision은 정상 요청에서 Patch Data relation이나 import staging table을 dual-read하지 않는다. hierarchy는 child당 parent 하나, sorted/unique/acyclic/referentially complete를 검증하지만 의미가 확정되지 않아 evaluator에는 연결하지 않는다. `authority_import_assertions`는 generation CAS, catalog/native-row collision, application readiness, partial-write를 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
-
-### `authority_snapshots_v2`
-
-향후 Patch Data 외의 공급자도 같은 형식으로 권한 원본을 전달할 수 있도록 준비한 source-qualified 불변 snapshot receipt다. `(source_id, generation)`이 primary key이고, 같은 source의 generation은 1부터 끊김 없이 증가해야 한다. `(source_id, snapshot_digest)`도 unique라 같은 canonical snapshot을 다른 generation으로 다시 기록할 수 없다. `prior_generation`은 직전 저장 generation을 보존하며 첫 generation만 `NULL`이다.
-
-`canonical_json`은 principals, organizations, memberships, applications, effective bindings를 포함한 입력 전체의 canonical JSON이다. `snapshot_digest`, `source_revision`, `source_ledger_digest`, `source_watermark`, `produced_at`과 각 entity count는 재시도·감사·source provenance 검증을 위한 receipt다. 동일한 source/generation과 byte-equivalent canonical JSON 재시도는 기존 `applied_at`을 반환하고, 다른 내용은 충돌로 거부한다. 동시 최초 import도 transaction assertion으로 하나만 적용한다.
-
-이 테이블의 row를 현재 evaluator의 `role_bindings`, `application_actions` 또는 다른 권한 row로 전개하지 않는다. 고정 `plant.get` 계약과 Exposure 전용 API는 폐기됐다. V1 importer의 canonical 권한 반영과 범용 HTTP capability는 유지한다. 따라서 V2 receipt는 저장·검증 기록이지 활성 authorization source가 아니다.
+각 import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 canonical catalog에 보장하고, membership을 `organization_memberships`, plant permission을 `role_bindings`, application capability를 `application_actions`에 직접 반영한다. 따라서 strong evaluator와 plant-read decision은 정상 요청에서 Patch Data relation이나 import staging table을 dual-read하지 않는다. hierarchy는 child당 parent 하나, sorted/unique/acyclic/referentially complete를 검증하지만 의미가 확정되지 않아 evaluator에는 연결하지 않는다. `application_consent_assertions`는 generation CAS, catalog/native-row collision, application readiness, partial-write를 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
 
 ### `groups`, `group_memberships`
 
@@ -80,11 +72,11 @@ Patch Data API rule 이동의 deterministic import receipt와 소유권 provenan
 
 grant가 권한 판정 대상으로 인정하는 서비스 제공자 catalog. 기본 provider는 `grant`이며, compos 같은 first-party 서비스도 이 테이블에 등록한 뒤 action manifest를 넣는다.
 
-### `provider_http_capability_sets`, `provider_http_capabilities`, `provider_http_capability_active`
+### `provider_http_capability_sets`, `provider_http_capability_active`
 
-PEP가 provider-native HTTP 요청을 권한 tuple로 고정할 때 사용하는 불변 HTTP capability catalog다. `provider_http_capability_sets`의 `(provider_id, generation)`은 1부터 연속 증가하며 canonical JSON과 digest를 보존한다. 같은 provider/digest를 다른 generation으로 재사용할 수 없고, 같은 generation의 byte-identical 재시도만 idempotent하다. `provider_http_capabilities`는 generation 안의 정규화된 검색 row이며 enabled 상태도 불변 manifest 일부다. entry를 바꾸거나 끄려면 새 generation을 stage해야 한다.
+PEP가 provider-native HTTP 요청을 권한 tuple로 고정할 때 사용하는 불변 HTTP capability catalog다. `provider_http_capability_sets`의 `(provider_id, generation)`은 1부터 연속 증가하며 canonical JSON과 digest를 보존한다. 같은 provider/digest를 다른 generation으로 재사용할 수 없고, 같은 generation의 byte-identical 재시도만 idempotent하다. capability는 canonical JSON에 한 번만 저장하며 enabled 상태도 불변 manifest 일부다. 최종 transaction은 저장된 JSON의 배열 형태, 항목 수, 필수 값, version/enabled/access mode 및 capability/version 중복을 검증한다. entry를 바꾸거나 끄려면 새 generation을 stage해야 한다.
 
-`provider_http_capability_active`는 유일한 publication pointer다. stage된 최대 generation을 자동으로 읽지 않으며, CAS activation/rollback이 가리킨 generation만 catalog fetch와 decision에 사용한다. `provider_http_capability_activations`는 pointer 이동을 append-only sequence와 전역 unique `activation_receipt_id`로 기록한다. activation 응답은 transaction 밖의 `MAX(sequence)`를 읽지 않고, 같은 transaction에서 삽입한 receipt ID로 자신의 sequence를 다시 읽으므로 뒤따른 activation과 혼동되지 않는다. rollback도 기존 generation row를 수정하지 않고 pointer만 이전 retained generation으로 이동한다. `provider_http_capability_assertions`는 provider/action, generation CAS, active PEP 조건을 transaction 내부에서 fail closed시키는 임시 CHECK row이고 성공 시 비워진다.
+`provider_http_capability_active`는 유일한 publication pointer다. stage된 최대 generation을 자동으로 읽지 않으며, CAS activation/rollback이 가리킨 generation만 catalog fetch와 decision에 사용한다. `provider_http_capability_activations`는 pointer 이동을 append-only sequence와 전역 unique `activation_receipt_id`로 기록한다. activation 응답은 transaction 밖의 `MAX(sequence)`를 읽지 않고, 같은 transaction에서 삽입한 receipt ID로 자신의 sequence를 다시 읽으므로 뒤따른 activation과 혼동되지 않는다. rollback도 기존 generation row를 수정하지 않고 pointer만 이전 retained generation으로 이동한다. `application_consent_assertions`는 provider/action, generation CAS, active PEP 조건을 transaction 내부에서 fail closed시키는 임시 CHECK row이고 성공 시 비워진다.
 
 Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 exact method, closed path template, access mode, action/resource tuple, bounded extractor와 닫힌 query/request/response policy DTO만 저장한다. Phase A path는 resource extractor가 명시적으로 모델링한 변수 하나만 허용하며 collection 같은 추가 변수는 거부한다. 실제 origin과 transport는 PEP 배포 설정 소유다. 기존 authority snapshot import는 capability를 생성하거나 활성화하지 않는다.
 
@@ -176,7 +168,6 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `agreements.grantee_organization_id` -> `organizations.id`
 - `actions.provider_id` -> `service_providers.id`
 - `provider_http_capability_sets.provider_id` -> `service_providers.id`
-- `provider_http_capabilities.(provider_id, generation)` -> `provider_http_capability_sets.(provider_id, generation)`
 - `provider_http_capability_active.(provider_id, generation)` -> `provider_http_capability_sets.(provider_id, generation)`
 - `provider_pep_clients.provider_id` -> `service_providers.id`
 - `provider_pep_clients.application_id` -> `applications.id`
@@ -198,7 +189,6 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `application_grants.organization_id` -> `organizations.id`
 - `application_grant_actions.application_grant_id` -> `application_grants.id`
 - `application_grant_actions.action_id` -> `actions.id`
-- `authority_snapshots_v2`는 외부 권한 row에 물리 FK를 만들지 않는다. 내부의 principal, organization, membership, application, binding 관계는 같은 canonical snapshot 안에서 import 시 referential validation하고 receipt 전체를 불변으로 저장한다.
 
 ## 주의할 점
 
@@ -209,9 +199,22 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 
 ## Go/Rhiza storage port
 
+현재 스키마는 Grant 테이블 33개(논리 snapshot 대상 31개, 내부 staging 1개,
+restore receipt 1개)와 명시적 인덱스 16개를 생성한다. 사용하지 않던 import/capability
+assertion 테이블 2개와 중복 capability projection, V2 authority snapshot 저장 기능을 제거했다.
+실제 transaction 검증은 공통 `application_consent_assertions`를 계속 사용한다.
+membership, party 사업자번호, group membership, activation sequence/receipt의 중복 인덱스
+5개는 제거했지만 같은 키를 강제하는 PK/UNIQUE 제약은 유지한다.
+
+이번 정리는 호환성을 깨는 canonical schema 교체다. migration과 snapshot 버전 번호를
+올리거나 이전 DB/snapshot 변환기를 추가하지 않았다. 이전 Go DB는 migration checksum이
+달라 재사용할 수 없으며, 이전 logical snapshot은 schema digest/table inventory가 달라
+restore 검증에서 거부된다. 기존 데이터 경로에 덮어쓰거나 자동 삭제하지 않는다.
+새 스키마로 만든 별도 데이터 경로와 snapshot을 사용해야 한다.
+
 The Go runtime's canonical schema is [store_schema.sql](../internal/grant/store_schema.sql),
 with indexes in [store_indexes.sql](../internal/grant/store_indexes.sql). Rhiza v0.12.3
-applies the two named migrations through its replicated migration ledger. Existing
+applies the three named migrations through its replicated migration ledger. Existing
 Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
 export/restore procedure in [backup-restore.md](backup-restore.md).
 

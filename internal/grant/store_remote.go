@@ -10,19 +10,11 @@ import (
 	"github.com/mrchypark/rhiza"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
 const remoteBodyLimit = 20 << 20
 
-func encodeRemote(v any) ([]byte, error) {
-	raw, e := json.Marshal(v)
-	if e != nil {
-		return nil, e
-	}
-	return raw, nil
-}
 func normalizeWireArgs(v []any) ([]any, error) {
 	for i, a := range v {
 		switch x := a.(type) {
@@ -72,7 +64,7 @@ func (s *Store) remoteCall(ctx context.Context, path string, in, out any) error 
 		}
 		in = v
 	}
-	payload, e := encodeRemote(in)
+	payload, e := json.Marshal(in)
 	if e != nil {
 		return e
 	}
@@ -211,8 +203,6 @@ func (s *Store) RuntimeHandler() http.Handler {
 		json.NewEncoder(w).Encode(result)
 	})
 }
-
-var _ = strings.TrimSpace
 
 func decodeRemoteRequest(d *json.Decoder, v any) error {
 	if e := d.Decode(v); e != nil {

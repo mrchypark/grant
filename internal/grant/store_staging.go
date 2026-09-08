@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
 	"unicode/utf8"
 )
 
@@ -45,34 +43,6 @@ func (s *Store) stageImport(ctx context.Context, id string, c PatchDataAuthority
 		}
 	}
 	return nil
-}
-func stagedStatements(id, j, ij string, ss []Statement) []Statement {
-	re := regexp.MustCompile(`json_each\(\?(?:,\s*'\$\.([A-Za-z]+)')?\)`)
-	for i := range ss {
-		q := ss[i].SQL
-		remove := map[int]bool{}
-		for _, m := range re.FindAllStringSubmatchIndex(q, -1) {
-			remove[strings.Count(q[:m[0]], "?")] = true
-		}
-		q = re.ReplaceAllStringFunc(q, func(fragment string) string {
-			m := re.FindStringSubmatch(fragment)
-			kind := m[1]
-			if kind == "" {
-				kind = "identities"
-			}
-			return stageRowsSQL(id, kind)
-		})
-		args := []any{}
-		for index, a := range ss[i].Args {
-			if remove[index] {
-				continue
-			}
-			args = append(args, a)
-		}
-		ss[i].SQL = q
-		ss[i].Args = args
-	}
-	return append(ss, Statement{SQL: "DELETE FROM grant_import_payloads WHERE import_id=?", Args: []any{id}})
 }
 func stageRowsSQL(id, kind string) string {
 	return "(SELECT j.value FROM grant_import_payloads p,json_each(p.payload) j WHERE p.import_id='" + id + "' AND p.kind='" + kind + "')"
