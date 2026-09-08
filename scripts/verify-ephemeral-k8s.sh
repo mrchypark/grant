@@ -989,7 +989,7 @@ assert_live_storage() {
 wait_for_grant() {
   attempts=0
   while [ "${attempts}" -lt 60 ]; do
-    if curl -fsS "http://127.0.0.1:${GRANT_SMOKE_PORT}/healthz" >/dev/null 2>&1; then
+    if curl --max-time 4 -fsS "http://127.0.0.1:${GRANT_SMOKE_PORT}/readyz" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts + 1))
@@ -1013,9 +1013,12 @@ wait_for_rauthy_proxy() {
 assert_runtime() {
   base_url="http://127.0.0.1:${GRANT_SMOKE_PORT}"
 
-  curl -fsS "${base_url}/healthz" \
+  curl --max-time 4 -fsS "${base_url}/healthz" \
+    | jq -e '.status == "ok"' >/dev/null \
+    || fail "Grant process is not healthy"
+  curl --max-time 4 -fsS "${base_url}/readyz" \
     | jq -e '.status == "ok" and .readReady == true and .writeReady == true' >/dev/null \
-    || fail "Grant health is not ready"
+    || fail "Grant database is not ready"
   curl -fsS "${base_url}/auth/v1/health" >/dev/null \
     || fail "Rauthy health proxy failed"
   curl -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_CLIENT_READ_API_KEY}" \
@@ -1027,6 +1030,33 @@ assert_runtime() {
     "${base_url}/auth/v1/oidc/introspect" \
     | jq -e '.active == false' >/dev/null \
     || fail "Rauthy introspection proxy did not reject the invalid token"
+}
+
+# Each mock PATH is intentionally isolated so real verification keeps its tools.
+# shellcheck disable=SC2030,SC2031
+verify_runtime_probe_contract() {
+  mock_dir=$(mktemp -d "${TMPDIR:-/tmp}/grant-probe-contract.XXXXXX")
+  cat >"${mock_dir}/curl" <<'MOCK'
+#!/bin/sh
+for url do :; done
+case "$url" in
+  */healthz) printf '{"status":"%s"}\n' "${MOCK_HEALTH_STATUS:-ok}" ;;
+  */readyz) printf '{"status":"ok","readReady":true,"writeReady":%s}\n' "${MOCK_WRITE_READY:-true}" ;;
+  */auth/v1/oidc/introspect) printf '{"active":false}\n' ;;
+  */auth/v1/health|*/auth/v1/clients/*) printf '{}\n' ;;
+  *) exit 1 ;;
+esac
+MOCK
+  chmod +x "${mock_dir}/curl"
+  mock_path="${mock_dir}:${PATH}"
+  (export PATH="${mock_path}"; assert_runtime) || { rm -r "${mock_dir}"; fail "runtime probe rejected split health/readiness contract"; }
+  if (export PATH="${mock_path}" MOCK_WRITE_READY=false; assert_runtime) >/dev/null 2>&1; then
+    rm -r "${mock_dir}"; fail "runtime probe accepted an unavailable quorum"
+  fi
+  if (export PATH="${mock_path}" MOCK_HEALTH_STATUS=down; assert_runtime) >/dev/null 2>&1; then
+    rm -r "${mock_dir}"; fail "runtime probe accepted an unhealthy process"
+  fi
+  rm -r "${mock_dir}"
 }
 
 verify_live() {
@@ -1076,6 +1106,7 @@ verify_native_static() {
   sh "${ROOT_DIR}/scripts/verify-runtime-tools.sh"
   bash "${ROOT_DIR}/scripts/verify-vind-bootstrap.sh"
   sh "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
+  verify_runtime_probe_contract
   echo "Native Grant and preserved Rauthy deployment profiles verified"
 }
 
