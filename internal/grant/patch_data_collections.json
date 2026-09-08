@@ -1,0 +1,642 @@
+[
+  {
+    "name": "users",
+    "id": "_pb_users_auth_",
+    "type": "base",
+    "resourceType": "users",
+    "allowedFields": [
+      "created",
+      "deleted",
+      "id",
+      "name",
+      "updated",
+      "username"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": true
+  },
+  {
+    "name": "plants",
+    "id": "30hrtar148uy66c",
+    "type": "base",
+    "resourceType": "plant",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "name",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "panelmaps",
+    "id": "l17r68r7ddzqcij",
+    "type": "base",
+    "resourceType": "panelmaps",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "organizations",
+    "id": "1l9cjra913llae4",
+    "type": "base",
+    "resourceType": "organizations",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": true
+  },
+  {
+    "name": "viewers",
+    "id": "kovp4j74yv9jr2v",
+    "type": "base",
+    "resourceType": "viewers",
+    "allowedFields": [
+      "created",
+      "deleted",
+      "id",
+      "name",
+      "updated",
+      "username"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "invitations",
+    "id": "lrjsosb8mul77k0",
+    "type": "base",
+    "resourceType": "invitations",
+    "allowedFields": [
+      "created",
+      "email",
+      "expired",
+      "id",
+      "isUsed",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "images",
+    "id": "w8l3o9jedinck7g",
+    "type": "base",
+    "resourceType": "images",
+    "allowedFields": [
+      "created",
+      "id",
+      "tags",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": true
+  },
+  {
+    "name": "dashboard",
+    "id": "i95ea9ateuaxwqg",
+    "type": "base",
+    "resourceType": "dashboard",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "comments",
+    "id": "lrsdfyc753nlnz7",
+    "type": "base",
+    "resourceType": "comments",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "isPrivate",
+      "related",
+      "resolved",
+      "text",
+      "title",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "permissions",
+    "id": "pt20y45muocfut5",
+    "type": "base",
+    "resourceType": "permissions",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "groupconditions",
+    "id": "1t0dxj7x1r6vvo0",
+    "type": "base",
+    "resourceType": "groupconditions",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "passwords",
+    "id": "8ngtkucypa7xlaj",
+    "type": "base",
+    "resourceType": "passwords",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "temporary_accounts",
+    "id": "d57i4dxnnp7l8hh",
+    "type": "base",
+    "resourceType": "temporary_accounts",
+    "allowedFields": [
+      "created",
+      "expired",
+      "id",
+      "updated",
+      "username"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "issue_comments",
+    "id": "snv8bayo8ma6hw0",
+    "type": "base",
+    "resourceType": "issue_comments",
+    "allowedFields": [
+      "created",
+      "deleted",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "issue_content_logs",
+    "id": "misvzvyhp0fe7g4",
+    "type": "base",
+    "resourceType": "issue_content_logs",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "issue_fields_logs",
+    "id": "v5q8qxup8hbxg21",
+    "type": "base",
+    "resourceType": "issue_fields_logs",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "issue_tags",
+    "id": "i10pcc82twxf6pd",
+    "type": "base",
+    "resourceType": "issue_tags",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "issues",
+    "id": "hqrb76fyop74r06",
+    "type": "base",
+    "resourceType": "issues",
+    "allowedFields": [
+      "created",
+      "date",
+      "deleted",
+      "id",
+      "isPublic",
+      "is_all_day",
+      "resolved",
+      "title",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "work_orders",
+    "id": "yzruwgkyotkp02h",
+    "type": "base",
+    "resourceType": "work_orders",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "command_history",
+    "id": "ogq6rbg3df1g496",
+    "type": "base",
+    "resourceType": "command_history",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "issue_schedules",
+    "id": "kyzupz6cwz00swl",
+    "type": "base",
+    "resourceType": "issue_schedules",
+    "allowedFields": [
+      "created",
+      "date",
+      "deleted",
+      "id",
+      "title",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "reports",
+    "id": "r0thjxht4e4dz2m",
+    "type": "base",
+    "resourceType": "reports",
+    "allowedFields": [
+      "comment",
+      "created",
+      "description",
+      "end",
+      "id",
+      "isArchive",
+      "start",
+      "title",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": true
+  },
+  {
+    "name": "files",
+    "id": "pbc_3446931122",
+    "type": "base",
+    "resourceType": "files",
+    "allowedFields": [
+      "created",
+      "id",
+      "name",
+      "tags",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": true
+  },
+  {
+    "name": "blueprints",
+    "id": "pbc_1114506494",
+    "type": "base",
+    "resourceType": "blueprints",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "isArchive",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "resources",
+    "id": "pbc_2337082678",
+    "type": "base",
+    "resourceType": "resources",
+    "allowedFields": [
+      "created",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "reports_v2",
+    "id": "pbc_3451676670",
+    "type": "base",
+    "resourceType": "reports_v2",
+    "allowedFields": [
+      "created",
+      "description",
+      "end",
+      "gen",
+      "id",
+      "isArchive",
+      "loss_defect",
+      "loss_dust",
+      "loss_indirect",
+      "loss_shade",
+      "loss_total",
+      "start",
+      "title",
+      "type",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "org_parent_map",
+    "id": "35180llsus0m925",
+    "type": "base",
+    "resourceType": "org_parent_map",
+    "allowedFields": [
+      "depth",
+      "id",
+      "name"
+    ],
+    "recordIdFormat": "asciiToken",
+    "hasFiles": false
+  },
+  {
+    "name": "plants_viewer",
+    "id": "6260lz1eo0w2vcr",
+    "type": "view",
+    "resourceType": "plants_viewer",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "name"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "panelmaps_viewer",
+    "id": "8hamrn2tnq9j6c6",
+    "type": "view",
+    "resourceType": "panelmaps_viewer",
+    "allowedFields": [
+      "created",
+      "id"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "temporary_panelmaps",
+    "id": "zkvh97egvg137hs",
+    "type": "view",
+    "resourceType": "temporary_panelmaps",
+    "allowedFields": [
+      "created",
+      "id"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "temporary_plants",
+    "id": "fiqvrx9bli2qvag",
+    "type": "view",
+    "resourceType": "temporary_plants",
+    "allowedFields": [
+      "created",
+      "id",
+      "isArchive",
+      "name"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "temporary_blueprints",
+    "id": "pbc_405412299",
+    "type": "view",
+    "resourceType": "temporary_blueprints",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "blueprints_viewer",
+    "id": "pbc_1337089469",
+    "type": "view",
+    "resourceType": "blueprints_viewer",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "latest_loss_reports",
+    "id": "pbc_1915755548",
+    "type": "view",
+    "resourceType": "latest_loss_reports",
+    "allowedFields": [
+      "id",
+      "organizationName",
+      "plantName"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "reports_v2_list",
+    "id": "pbc_2089487142",
+    "type": "view",
+    "resourceType": "reports_v2_list",
+    "allowedFields": [
+      "created",
+      "description",
+      "end",
+      "gen",
+      "id",
+      "isArchive",
+      "loss_defect",
+      "loss_dust",
+      "loss_indirect",
+      "loss_shade",
+      "loss_total",
+      "start",
+      "title",
+      "type",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "blueprints_list",
+    "id": "pbc_1185224127",
+    "type": "view",
+    "resourceType": "blueprints_list",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "isArchive",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "rsd_command_tasks",
+    "id": "pbc_4011293327",
+    "type": "base",
+    "resourceType": "rsd_command_tasks",
+    "allowedFields": [
+      "cancel_deadline_at",
+      "cancel_reason",
+      "canceled_at",
+      "claim_deadline_at",
+      "claimed_at",
+      "claimed_by",
+      "created",
+      "error_message",
+      "finished_at",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false,
+    "readOnly": true
+  },
+  {
+    "name": "agreement_documents",
+    "id": "pbc_165310787",
+    "type": "base",
+    "resourceType": "agreement_documents",
+    "allowedFields": [
+      "content_md",
+      "id",
+      "is_active",
+      "is_required",
+      "key",
+      "published_at",
+      "show_on_sign_up",
+      "title",
+      "version"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "anomaly_occurrences",
+    "id": "anomalyoccur001",
+    "type": "base",
+    "resourceType": "anomaly_occurrences",
+    "allowedFields": [
+      "anomaly_type",
+      "created",
+      "detected_at",
+      "event_key",
+      "id",
+      "resolved_at",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "blueprints_viewer_list",
+    "id": "pbc_1337089470",
+    "type": "view",
+    "resourceType": "blueprints_viewer_list",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "temporary_blueprints_list",
+    "id": "pbc_405412300",
+    "type": "view",
+    "resourceType": "temporary_blueprints_list",
+    "allowedFields": [
+      "created",
+      "date",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  },
+  {
+    "name": "anomaly_occurrence_checkpoints",
+    "id": "projcheckpoint1",
+    "type": "base",
+    "resourceType": "anomaly_occurrence_checkpoints",
+    "allowedFields": [
+      "created",
+      "cursor_created",
+      "cursor_id",
+      "id",
+      "updated"
+    ],
+    "recordIdFormat": "pocketbaseId",
+    "hasFiles": false
+  }
+]

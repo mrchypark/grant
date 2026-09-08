@@ -21,4 +21,3 @@ configMapGenerator:
   - name: lifecycle-gate
     files:
       - lifecycle-gate.sh
-      - restore-once.sh

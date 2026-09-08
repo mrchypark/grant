@@ -1,0 +1,71 @@
+# Local disposable test fixture. Production uses a separately provisioned shared bucket.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grant-rhiza-storage
+stringData:
+  GRANT_CLUSTER_MEMBERS: >-
+    [{"node_id":"grant-voter-0","peer_url":"quic://grant-voter-0.grant-headless:8100","token":"local-member-0-token"},{"node_id":"grant-voter-1","peer_url":"quic://grant-voter-1.grant-headless:8100","token":"local-member-1-token"},{"node_id":"grant-voter-2","peer_url":"quic://grant-voter-2.grant-headless:8100","token":"local-member-2-token"}]
+  RHIZA_OBJSTORE_PROVIDER: s3
+  RHIZA_OBJSTORE_ENDPOINT: http://grant-object-store:9000
+  RHIZA_OBJSTORE_BUCKET: grant-rhiza
+  RHIZA_OBJSTORE_PREFIX: local-grant
+  RHIZA_OBJSTORE_REGION: us-east-1
+  RHIZA_OBJSTORE_ACCESS_KEY: local-grant
+  RHIZA_OBJSTORE_SECRET_KEY: local-grant-storage-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grant-object-store
+spec:
+  selector: {app: grant-object-store}
+  ports:
+    - {name: s3, port: 9000, targetPort: 9000}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grant-object-store
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: grant-object-store}
+  template:
+    metadata:
+      labels: {app: grant-object-store}
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+          args: [server, /data]
+          env:
+            - {name: MINIO_ROOT_USER, value: local-grant}
+            - {name: MINIO_ROOT_PASSWORD, value: local-grant-storage-secret}
+          ports:
+            - {containerPort: 9000}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: 9000}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grant-object-store-init
+spec:
+  backoffLimit: 12
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+          command: ["/bin/sh", "-ec"]
+          args:
+            - >-
+              mc alias set local http://grant-object-store:9000 local-grant local-grant-storage-secret;
+              mc mb --ignore-existing local/grant-rhiza

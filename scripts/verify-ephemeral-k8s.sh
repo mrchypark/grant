@@ -150,208 +150,6 @@ assert_recovery_role_resolution_policy() {
     || fail "production recovery role-resolution policy does not grant scoped iam:GetRole"
 }
 
-assert_recovery_dry_run() {
-  pair="${TMP_DIR}/pair.json"
-  normalized="${TMP_DIR}/normalized-materialization.tsv"
-  "${ROOT_DIR}/scripts/materialize-s3-restore.sh" --dry-run rauthy test-bucket source version \
-    BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB ci-static 2030-01-01T00:00:00Z \
-    arn:aws:iam::222222222222:role/writer "${normalized}"
-  grep -q 'restore/rauthy/ci-static/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.enc' "${normalized}" \
-    || fail "materialized restore SHA is not normalized to lowercase"
-  rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' \
-    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")
-  [ -n "${rauthy_image}" ] || fail "cannot read the Rauthy launcher image pin"
-  RECOVERY_ID=ci-static RECOVERY_GENERATION=ci-generation RESTORE_RETAIN_UNTIL=2030-01-01T00:00:00Z \
-  ISOLATED_DRILL_ID=pending \
-  GRANT_BUCKET=grant-ci-backups GRANT_SOURCE_KEY=backup_node_1_1.sqlite GRANT_SOURCE_VERSION_ID=grant-v1 \
-  GRANT_SOURCE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  GRANT_IMAGE=registry.example.com/grant@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  GRANT_SCHEMA_ID=grant-schema-ci GRANT_KEY_ID=grant-key-ci \
-  GRANT_BACKUP_GENERATION=grant-ci-g1 \
-  GRANT_KEYRING_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-  GRANT_KEYRING_GENERATION=grant-keyring-ci GRANT_WRITER_PRINCIPAL_ARN=arn:aws:iam::111111111111:role/grant-writer \
-  GRANT_RESTORE_READER_PRINCIPAL_ARN=arn:aws:iam::111111111111:role/grant-reader \
-  RAUTHY_BUCKET=rauthy-ci-backups RAUTHY_SOURCE_KEY=backup_node_1_1.sqlite RAUTHY_SOURCE_VERSION_ID=rauthy-v1 \
-  RAUTHY_SOURCE_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  RAUTHY_IMAGE=${rauthy_image} \
-  RAUTHY_SCHEMA_ID=rauthy-0.36.0 RAUTHY_KEY_ID=rauthy-key-ci \
-  RAUTHY_BACKUP_GENERATION=rauthy-ci-g1 \
-  RAUTHY_KEYRING_SHA256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  RAUTHY_KEYRING_GENERATION=rauthy-keyring-ci RAUTHY_WRITER_PRINCIPAL_ARN=arn:aws:iam::222222222222:role/rauthy-writer \
-  RAUTHY_RESTORE_READER_PRINCIPAL_ARN=arn:aws:iam::222222222222:role/rauthy-reader \
-    "${ROOT_DIR}/scripts/create-recovery-pair.sh" --dry-run --output "${pair}"
-  jq -e '
-    (.grant.restoreReaderPrincipal | length > 0) and (.rauthy.restoreReaderPrincipal | length > 0) and
-    (.grant.writerPrincipal | length > 0) and (.rauthy.writerPrincipal | length > 0) and
-    (.grant.keyringSha256 | test("^[0-9a-f]{64}$")) and (.rauthy.keyringSha256 | test("^[0-9a-f]{64}$")) and
-    (.trafficWriteFence.snapshots.grant.snapshotId | length > 0) and
-    (.trafficWriteFence.snapshots.rauthy.snapshotId | length > 0)
-  ' "${pair}" >/dev/null || fail "recovery pair is missing reader, writer, keyring, or signed snapshot bindings"
-
-  restore_early_tmp="${TMP_DIR}/restore-cleanup-early"
-  mkdir -p "${restore_early_tmp}"
-  printf '%s\n' '{}' >"${TMP_DIR}/invalid-recovery-record.json"
-  if TMPDIR=${restore_early_tmp} "${ROOT_DIR}/scripts/restore-full-cluster.sh" \
-    --dry-run --isolated-drill --record "${TMP_DIR}/invalid-recovery-record.json" \
-    >"${TMP_DIR}/restore-cleanup-early.log" 2>&1; then
-    fail "invalid recovery record unexpectedly passed the cleanup fixture"
-  fi
-  if find "${restore_early_tmp}" -name 'grant-restore-full.*' -print | grep -q .; then
-    fail "restore early failure left private temporary state behind"
-  fi
-
-  restore_signal_tmp="${TMP_DIR}/restore-cleanup-signal"
-  restore_signal_bin="${TMP_DIR}/restore-cleanup-signal-bin"
-  restore_signal_marker="${TMP_DIR}/restore-cleanup-signal.marker"
-  restore_signal_order_marker="${TMP_DIR}/restore-cleanup-signal-order.marker"
-  restore_signal_order_failure="${TMP_DIR}/restore-cleanup-signal-order-failure.marker"
-  restore_signal_kubectl_log="${TMP_DIR}/restore-cleanup-signal-kubectl.log"
-  restore_signal_secret='restore-signal-secret-must-not-survive'
-  mkdir -p "${restore_signal_tmp}" "${restore_signal_bin}"
-  cat >"${restore_signal_bin}/kubectl" <<'EOF'
-#!/bin/sh
-set -eu
-printf '%s\n' "$*" >>"${RESTORE_KUBECTL_LOG}"
-case "$*" in
-  "get namespace ${RESTORE_SIGNAL_NAMESPACE} -o json")
-    printf '%s\n' '{"metadata":{"uid":"restore-signal-uid","labels":{"grant.cypark.dev/recovery-drill":"true"},"annotations":{"grant.cypark.dev/source-recovery-id":"ci-static"}}}'
-    ;;
-  "-n ${RESTORE_SIGNAL_NAMESPACE} get cronjob -o json")
-    printf '%s\n' '{"items":[]}'
-    ;;
-  "create -f -")
-    cat >/dev/null
-    [ "${RESTORE_LEASE_MODE}" != acquire-fail ] || exit 1
-    ;;
-  "-n ${RESTORE_SIGNAL_NAMESPACE} get configmap grant-recovery-state")
-    restore_dir=
-    for candidate in "${TMPDIR}"/grant-restore-full.*; do
-      if [ -d "${candidate}" ]; then restore_dir=${candidate}; break; fi
-    done
-    [ -n "${restore_dir}" ]
-    printf '%s\n' "${RESTORE_SIGNAL_SECRET}" >"${restore_dir}/signal-secret"
-    : >"${RESTORE_SIGNAL_MARKER}"
-    kill -TERM "${PPID}"
-    exit 143
-    ;;
-  "-n ${RESTORE_SIGNAL_NAMESPACE} patch service grant "*|"-n ${RESTORE_SIGNAL_NAMESPACE} patch service rauthy "*)
-    if find "${TMPDIR}" -name 'grant-restore-full.*' -print | grep -q .; then
-      : >"${RESTORE_SIGNAL_ORDER_FAILURE}"
-    else
-      : >"${RESTORE_SIGNAL_ORDER_MARKER}"
-    fi
-    ;;
-  "-n ${RESTORE_SIGNAL_NAMESPACE} get lease grant-recovery-lock "*)
-    printf '%s' 'another-recovery-operator'
-    ;;
-  "-n ${RESTORE_SIGNAL_NAMESPACE} delete lease grant-recovery-lock "*)
-    : >"${RESTORE_SIGNAL_LEASE_DELETED}"
-    ;;
-  *)
-    echo "unexpected kubectl invocation: $*" >&2
-    exit 1
-    ;;
-esac
-EOF
-  cat >"${restore_signal_bin}/aws" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-  cat >"${restore_signal_bin}/curl" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-  chmod +x "${restore_signal_bin}/kubectl" "${restore_signal_bin}/aws" "${restore_signal_bin}/curl"
-  set +e
-  PATH="${restore_signal_bin}:${PATH}" TMPDIR=${restore_signal_tmp} \
-    RESTORE_SIGNAL_NAMESPACE=grant-restore-signal RESTORE_SIGNAL_MARKER=${restore_signal_marker} \
-    RESTORE_SIGNAL_ORDER_MARKER=${restore_signal_order_marker} RESTORE_SIGNAL_ORDER_FAILURE=${restore_signal_order_failure} \
-    RESTORE_SIGNAL_LEASE_DELETED="${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" \
-    RESTORE_SIGNAL_SECRET=${restore_signal_secret} RESTORE_KUBECTL_LOG=${restore_signal_kubectl_log} RESTORE_LEASE_MODE=acquire-success \
-    "${ROOT_DIR}/scripts/restore-full-cluster.sh" --isolated-drill --record "${pair}" \
-    --namespace grant-restore-signal --confirm-recovery-id ci-static --expected-namespace-uid restore-signal-uid \
-    >"${TMP_DIR}/restore-cleanup-signal.log" 2>&1
-  restore_signal_status=$?
-  set -e
-  [ "${restore_signal_status}" -eq 143 ] \
-    || fail "restore TERM cleanup exited ${restore_signal_status}, expected 143"
-  [ -e "${restore_signal_marker}" ] || fail "restore TERM cleanup fixture did not inject its signal"
-  if find "${restore_signal_tmp}" -name 'grant-restore-full.*' -print | grep -q .; then
-    fail "restore TERM cleanup left private temporary state behind"
-  fi
-  if grep -Fq "${restore_signal_secret}" "${TMP_DIR}/restore-cleanup-signal.log"; then
-    fail "restore TERM cleanup exposed a temporary secret"
-  fi
-  [ -e "${restore_signal_order_marker}" ] \
-    || fail "restore TERM cleanup did not re-fence after acquiring the recovery lease"
-  [ ! -e "${restore_signal_order_failure}" ] \
-    || fail "restore TERM cleanup contacted the cluster before deleting private temporary state"
-  [ ! -e "${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" ] \
-    || fail "restore TERM cleanup deleted a lease now owned by another operator"
-  [ "$(grep -c 'patch service' "${restore_signal_kubectl_log}" || true)" -eq 2 ] \
-    || fail "restore TERM cleanup did not re-fence both services"
-
-  : >"${restore_signal_kubectl_log}"
-  set +e
-  PATH="${restore_signal_bin}:${PATH}" TMPDIR=${restore_signal_tmp} \
-    RESTORE_SIGNAL_NAMESPACE=grant-restore-signal RESTORE_SIGNAL_MARKER=${restore_signal_marker} \
-    RESTORE_SIGNAL_ORDER_MARKER=${restore_signal_order_marker} RESTORE_SIGNAL_ORDER_FAILURE=${restore_signal_order_failure} \
-    RESTORE_SIGNAL_LEASE_DELETED="${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" \
-    RESTORE_SIGNAL_SECRET=${restore_signal_secret} RESTORE_KUBECTL_LOG=${restore_signal_kubectl_log} RESTORE_LEASE_MODE=acquire-fail \
-    "${ROOT_DIR}/scripts/restore-full-cluster.sh" --isolated-drill --record "${pair}" \
-    --namespace grant-restore-signal --confirm-recovery-id ci-static --expected-namespace-uid restore-signal-uid \
-    >"${TMP_DIR}/restore-cleanup-lease-failure.log" 2>&1
-  restore_lease_failure_status=$?
-  set -e
-  [ "${restore_lease_failure_status}" -eq 1 ] \
-    || fail "restore lease contention exited ${restore_lease_failure_status}, expected 1"
-  if grep -q 'patch service' "${restore_signal_kubectl_log}"; then
-    fail "restore cleanup re-fenced services without acquiring the recovery lease"
-  fi
-  [ ! -e "${TMP_DIR}/restore-cleanup-signal-lease-deleted.marker" ] \
-    || fail "restore lease contention deleted another operator's lease"
-
-  if "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --record "${pair}" >/dev/null 2>&1; then
-    fail "unapproved recovery record was accepted for production restore"
-  fi
-  recovery_dry_log="${TMP_DIR}/full-cluster-recovery.log"
-  "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --record "${pair}" \
-    >/dev/null 2>"${recovery_dry_log}"
-  secret_delete_line=$(grep -n 'delete secret rauthy-restore-once' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
-  steady_checkpoint_line=$(grep -n 'checkpoint rauthy-ordinal0-restored (grant=restore, rauthy=steady)' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
-  peer_seed_guard_line=$(grep -n 'require absent rauthy-restore-once and revalidate rauthy-0 Ready before peer scale-up' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
-  steady_guard_line=$(grep -n 'ensure active lifecycle modes (grant=restore, rauthy=steady) at rauthy-ordinal0-restored' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
-  peer_scale_line=$(grep -n 'scale statefulset/rauthy --replicas=3' "${recovery_dry_log}" | head -n 1 | cut -d: -f1)
-  if ! { [ -n "${secret_delete_line}" ] && [ -n "${steady_checkpoint_line}" ] \
-    && [ -n "${peer_seed_guard_line}" ] && [ -n "${steady_guard_line}" ] && [ -n "${peer_scale_line}" ] \
-    && [ "${secret_delete_line}" -lt "${steady_checkpoint_line}" ] \
-    && [ "${steady_checkpoint_line}" -le "${peer_seed_guard_line}" ] \
-    && [ "${peer_seed_guard_line}" -lt "${steady_guard_line}" ] \
-    && [ "${steady_guard_line}" -lt "${peer_scale_line}" ]; }; then
-    fail "Rauthy peers can scale before the one-shot Secret is consumed and lifecycle is steady"
-  fi
-  if grep -q 'checkpoint rauthy-ordinal0-restored (grant=restore, rauthy=restore)' "${recovery_dry_log}"; then
-    fail "Rauthy ordinal 0 checkpoint leaves fresh peers in unauthorized restore mode"
-  fi
-  "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run --isolated-drill --release-completed --record "${pair}" >/dev/null
-
-  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${TMP_DIR}/approval-private.pem" >/dev/null 2>&1
-  openssl pkey -in "${TMP_DIR}/approval-private.pem" -pubout -out "${TMP_DIR}/approval-public.pem" >/dev/null 2>&1
-  jq '.isolatedDrill={id:"static-test",passed:true,completedAt:"2026-07-14T00:00:00Z"} |
-      .approval={passed:true,approvedAt:"2026-07-14T00:00:00Z",workflowRunId:"static-test",gitCommit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",semanticEvidenceSha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' \
-    "${pair}" >"${TMP_DIR}/approved.json"
-  jq -S -c . "${TMP_DIR}/approved.json" >"${TMP_DIR}/approved.canonical.json"
-  openssl dgst -sha256 -sign "${TMP_DIR}/approval-private.pem" -out "${TMP_DIR}/approved.sig" "${TMP_DIR}/approved.canonical.json"
-  fingerprint=$(openssl pkey -pubin -in "${TMP_DIR}/approval-public.pem" -outform DER | openssl dgst -sha256 | awk '{print $NF}')
-  RECOVERY_APPROVAL_PUBLIC_KEY_SHA256=${fingerprint} RECOVERY_OPERATOR_GIT_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run \
-    --record "${TMP_DIR}/approved.json" --approval-signature "${TMP_DIR}/approved.sig" --approval-public-key "${TMP_DIR}/approval-public.pem" >/dev/null
-  jq '.generation="tampered"' "${TMP_DIR}/approved.json" >"${TMP_DIR}/tampered.json"
-  if RECOVERY_APPROVAL_PUBLIC_KEY_SHA256=${fingerprint} RECOVERY_OPERATOR_GIT_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${ROOT_DIR}/scripts/restore-full-cluster.sh" --dry-run \
-    --record "${TMP_DIR}/tampered.json" --approval-signature "${TMP_DIR}/approved.sig" --approval-public-key "${TMP_DIR}/approval-public.pem" >/dev/null 2>&1; then
-    fail "tampered approved recovery record passed signature verification"
-  fi
-}
-
 assert_ci_local_placeholder_guard() {
   placeholder_log="${TMP_DIR}/ci-local-placeholder.log"
   if RAUTHY_IMAGE='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST' \
@@ -870,10 +668,6 @@ verify_static() {
   if grep -Eq -- '--password([ =]|$)|--from-literal=.*GHCR' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"; then
     fail "private registry credential is exposed through child argv"
   fi
-  if grep -Fq 'grant\.cypark\.dev/' "${ROOT_DIR}/scripts/restore-full-cluster.sh" \
-    || grep -Fq 'grant\.cypark\.dev/' "${ROOT_DIR}/scripts/create-recovery-pair.sh"; then
-    fail "recovery scripts use escaped-dot JSONPath for slash-containing metadata keys"
-  fi
   if grep -q 'command: \["/bin/sh", "/gate/restore-once.sh"\]' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml"; then
     fail "Rauthy cannot use the shell restore wrapper from its distroless image"
   fi
@@ -884,9 +678,9 @@ verify_static() {
   assert_ha_contract "${TMP_DIR}/base.yaml" base
   assert_ha_contract "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_ha_contract "${TMP_DIR}/ied.yaml" ied
-  if ! grep -q 'GRANT_AUTH_PROVIDER: patch-data' "${TMP_DIR}/patch-data.yaml" \
-    || ! grep -q 'GRANT_PATCH_DATA_BASE_URL: http://patch-data.patch.svc.cluster.local:8090' "${TMP_DIR}/patch-data.yaml" \
-    || ! grep -q 'GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
+  if ! grep -q 'GRANT_AUTH_PROVIDER: pocketbase' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_POCKETBASE_BASE_URL: http://patch-auth.patch.svc.cluster.local:8090' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_POCKETBASE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
     fail "Patch Data overlay configuration is incomplete"
   fi
   if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then
@@ -967,9 +761,6 @@ verify_static() {
   "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
   "${ROOT_DIR}/scripts/verify-aws-principal-helpers.sh"
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
-  assert_recovery_dry_run
-  "${ROOT_DIR}/scripts/verify-recovery-state-machine.sh"
-  "${ROOT_DIR}/scripts/verify-restore-once.sh"
 
   echo "Kubernetes HA, lifecycle, backup, and restore profiles verified"
 }
@@ -989,7 +780,7 @@ assert_live_storage() {
 wait_for_grant() {
   attempts=0
   while [ "${attempts}" -lt 60 ]; do
-    if curl -fsS "http://127.0.0.1:${GRANT_SMOKE_PORT}/healthz" >/dev/null 2>&1; then
+    if curl --max-time 4 -fsS "http://127.0.0.1:${GRANT_SMOKE_PORT}/readyz" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts + 1))
@@ -1013,9 +804,12 @@ wait_for_rauthy_proxy() {
 assert_runtime() {
   base_url="http://127.0.0.1:${GRANT_SMOKE_PORT}"
 
-  curl -fsS "${base_url}/healthz" \
+  curl --max-time 4 -fsS "${base_url}/healthz" \
+    | jq -e '.status == "ok"' >/dev/null \
+    || fail "Grant process is not healthy"
+  curl --max-time 4 -fsS "${base_url}/readyz" \
     | jq -e '.status == "ok" and .readReady == true and .writeReady == true' >/dev/null \
-    || fail "Grant health is not ready"
+    || fail "Grant database is not ready"
   curl -fsS "${base_url}/auth/v1/health" >/dev/null \
     || fail "Rauthy health proxy failed"
   curl -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_CLIENT_READ_API_KEY}" \
@@ -1027,6 +821,33 @@ assert_runtime() {
     "${base_url}/auth/v1/oidc/introspect" \
     | jq -e '.active == false' >/dev/null \
     || fail "Rauthy introspection proxy did not reject the invalid token"
+}
+
+# Each mock PATH is intentionally isolated so real verification keeps its tools.
+# shellcheck disable=SC2030,SC2031
+verify_runtime_probe_contract() {
+  mock_dir=$(mktemp -d "${TMPDIR:-/tmp}/grant-probe-contract.XXXXXX")
+  cat >"${mock_dir}/curl" <<'MOCK'
+#!/bin/sh
+for url do :; done
+case "$url" in
+  */healthz) printf '{"status":"%s"}\n' "${MOCK_HEALTH_STATUS:-ok}" ;;
+  */readyz) printf '{"status":"ok","readReady":true,"writeReady":%s}\n' "${MOCK_WRITE_READY:-true}" ;;
+  */auth/v1/oidc/introspect) printf '{"active":false}\n' ;;
+  */auth/v1/health|*/auth/v1/clients/*) printf '{}\n' ;;
+  *) exit 1 ;;
+esac
+MOCK
+  chmod +x "${mock_dir}/curl"
+  mock_path="${mock_dir}:${PATH}"
+  (export PATH="${mock_path}"; assert_runtime) || { rm -r "${mock_dir}"; fail "runtime probe rejected split health/readiness contract"; }
+  if (export PATH="${mock_path}" MOCK_WRITE_READY=false; assert_runtime) >/dev/null 2>&1; then
+    rm -r "${mock_dir}"; fail "runtime probe accepted an unavailable quorum"
+  fi
+  if (export PATH="${mock_path}" MOCK_HEALTH_STATUS=down; assert_runtime) >/dev/null 2>&1; then
+    rm -r "${mock_dir}"; fail "runtime probe accepted an unhealthy process"
+  fi
+  rm -r "${mock_dir}"
 }
 
 verify_live() {
@@ -1061,8 +882,28 @@ verify_live() {
   echo "Ephemeral Kubernetes runtime verified"
 }
 
+verify_native_static() {
+  need kubectl
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-native-kustomize.XXXXXX")
+  sh "${ROOT_DIR}/scripts/verify-rhiza-deployment.sh"
+  for overlay in ephemeral production ied; do
+    kubectl kustomize "${ROOT_DIR}/deploy/overlays/${overlay}" >"${TMP_DIR}/${overlay}.yaml"
+    assert_no_pvc_references "${TMP_DIR}/${overlay}.yaml" "${overlay}"
+    assert_ha_contract "${TMP_DIR}/${overlay}.yaml" "${overlay}"
+  done
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/patch-data" >"${TMP_DIR}/patch-data.yaml"
+  if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then fail "Patch Data native overlay retains Rauthy configuration"; fi
+  grep -q 'name: grant-rhiza-storage' "${TMP_DIR}/patch-data.yaml" || fail "Patch Data native storage is not configured"
+  sh "${ROOT_DIR}/scripts/verify-runtime-tools.sh"
+  bash "${ROOT_DIR}/scripts/verify-vind-bootstrap.sh"
+  sh "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
+  verify_runtime_probe_contract
+  echo "Native Grant and preserved Rauthy deployment profiles verified"
+}
+
 case "${MODE}" in
-  static) verify_static ;;
+  static) verify_native_static ;;
+  legacy-static) verify_static ;;
   live) verify_live ;;
   *) fail "usage: $0 [static|live]" ;;
 esac

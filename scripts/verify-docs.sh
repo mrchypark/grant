@@ -28,14 +28,14 @@ find "${ROOT_DIR}" -type f -name '*.md' \
     done
 done
 
-SCHEMA_SOURCE="${ROOT_DIR}/crates/infra/src/database/schema.rs"
+SCHEMA_SOURCE="${ROOT_DIR}/internal/grant/store_schema.sql"
 SCHEMA_DOC="${ROOT_DIR}/docs/database-schema.md"
 [ -r "${SCHEMA_SOURCE}" ] || printf 'missing canonical schema source: %s\n' "${SCHEMA_SOURCE}" >>"${FAILURES}"
 [ -r "${SCHEMA_DOC}" ] || printf 'missing schema documentation: %s\n' "${SCHEMA_DOC}" >>"${FAILURES}"
 
 if [ -r "${SCHEMA_SOURCE}" ] && [ -r "${SCHEMA_DOC}" ]; then
-  grep -q '(../crates/infra/src/database/schema.rs)' "${SCHEMA_DOC}" \
-    || printf 'docs/database-schema.md must link to ../crates/infra/src/database/schema.rs\n' >>"${FAILURES}"
+  grep -q '(../internal/grant/store_schema.sql)' "${SCHEMA_DOC}" \
+    || printf 'docs/database-schema.md must link to ../internal/grant/store_schema.sql\n' >>"${FAILURES}"
 
   sed -n 's/.*CREATE TABLE IF NOT EXISTS[[:space:]]\{1,\}\([A-Za-z0-9_]*\).*/\1/p' "${SCHEMA_SOURCE}" \
     | sort -u >"${TMP_DIR}/source-tables"

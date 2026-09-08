@@ -1,102 +1,54 @@
-# grant 런타임 모드
+# Native Rhiza runtime modes
 
-`grant`는 `hiqlite` 접근 방식을 `embedded`, `remote`, `split` 세 가지로 나눈다.
+## Health probes
 
-## 모드
+`GET /healthz` checks only whether the HTTP process is alive and returns HTTP 200
+with `{"status":"ok"}`. It does not contact storage or report database readiness.
+Use it for startup and liveness probes so loss of quorum does not cause restart loops.
 
-- `embedded`
-  - 로컬 `hiqlite` 노드만 사용한다.
-  - 개발과 단일 노드 운영용이다.
-- `remote`
-  - 로컬 상태 없이 원격 quorum cluster만 사용한다.
-- `split`
-  - 로컬 읽기용 client와 원격 quorum client를 같이 사용한다.
-  - learner sidecar는 일반 조회/authz를 로컬로 처리하고, voter는 full write/admin surface를 가진다.
+`GET /readyz` performs bounded database checks and retains the diagnostic fields
+`status`, `readReady`, `writeReady`, `runtimeMode`, and `defaultReadConsistency`.
+It returns HTTP 503 when the configured read consistency cannot be served. A
+strong-read deployment requires a successful linearizable check; a local-read
+deployment requires a successful local check. Use this endpoint for traffic readiness.
 
-## voter 와 learner
+Learner PDP readiness additionally requires its quorum fence, successful synchronization,
+and consistent local schema reads; it reports `writeReady: false` because replicas cannot write.
 
-`crates/app/src/main.rs`는 `GRANT_LOCAL_NODE_ROLE`에 따라 동작을 나눈다.
+## Configuration
 
-- `voter`
-  - 기본 public API 노드다.
-  - schema migration, initialize, write/admin 처리 가능
-- `learner`
-  - read replica 성격의 노드다.
-  - 모든 runtime mode에서 schema migration과 bootstrap/initialize를 건너뛴다.
-  - `/readyz`에서 현재 read 경로에 필요한 schema가 실제로 조회 가능한지 read-only로 확인한다.
-  - `crates/api/src/lib.rs`에서 write/admin 라우트는 `requires_voter_node`로 막는다.
+Grant uses Rhiza v0.12.3 directly. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
 
-## 관련 환경변수
+`GRANT_NODE_ID` identifies the exact native member; `POD_NAME` is its Kubernetes fallback. `GRANT_CLUSTER_MEMBERS` is a closed native JSON member list with `node_id`, `peer_url` (`quic://host:port`) and member `token`. Every voter receives the same membership. `GRANT_PEER_ADDR` is the UDP bind address. Three voters start concurrently; the old Grant Hiqlite ordinal-zero lifecycle gate is not used. Rauthy's separate lifecycle remains unchanged.
 
-```bash
-export GRANT_RUNTIME_MODE=embedded   # embedded | remote | split
-export GRANT_LOCAL_NODE_ROLE=voter   # voter | learner
-export GRANT_READ_CONSISTENCY=local  # local | strong | prefer-strong
+Single-voter local development can use a filesystem object store. Multiple voters require the shared object-store configuration: `RHIZA_OBJSTORE_PROVIDER`, `ENDPOINT`, `BUCKET`, `PREFIX`, `REGION`, `ACCESS_KEY`, `SECRET_KEY`, and optionally `SESSION_TOKEN` (all prefixed `RHIZA_OBJSTORE_`). The full native configuration can be supplied through `GRANT_RHIZA_CONFIG_JSON`. Use `RHIZA_OBJSTORE_DURABILITY=before-ack` for the provided three-voter deployment. A fresh Rhiza prefix must not overlap a legacy Hiqlite backup prefix.
 
-export GRANT_REMOTE_NODES=127.0.0.1:18100,127.0.0.1:18110
-export GRANT_REMOTE_TLS=false
-export GRANT_REMOTE_TLS_NO_VERIFY=false
-export GRANT_REMOTE_API_SECRET=AnotherSecureSecret42
-export GRANT_REMOTE_WITH_PROXY=false
-```
+Remote SQL uses a separate private listener `GRANT_RUNTIME_BIND_ADDR` with `GRANT_REMOTE_API_SECRET`; remote clients use `GRANT_REMOTE_NODES`. The secret must be at least 32 characters and distinct from both public API keys. This listener is never mounted on the public HTTP router, service, or ingress. Expose it only on a trusted private network; terminate authenticated TLS for traffic crossing hosts. The Kubernetes optional private-runtime overlay restricts ingress to labelled runtime clients. Keep external SQL callers out of the public `grant` Service.
 
-`GRANT_REMOTE_NODES`는 `host:port` 형식을 권장한다. 기존 `http://...`, `https://...` 값이 들어와도 앱에서 scheme를 제거하고 `hiqlite`에 전달한다.
+`GRANT_READ_CONSISTENCY` selects the configured read behavior. Public per-request overrides accept only `consistency=strong`; writes and authorization management guards use the strong path. Learners reject voter-only management endpoints with 503.
 
-## 읽기 일관성
+See [the compatibility inventory](porting-go-compatibility.md) for the exact supported environment mapping and [the migration guide](backup-restore.md) for existing stores. The [old Hiqlite runtime guide](history/hiqlite/runtime-modes.md) is historical documentation, not a native Rhiza configuration recipe.
 
-- `local`
-  - 로컬 SQLite 또는 로컬 learner 복제본 우선
-- `strong`
-  - quorum 강일관성 읽기
-  - write 경로가 죽어 있으면 실패
-- `prefer-strong`
-  - quorum을 우선 시도하고 실패하면 로컬로 폴백
+The isolated `scripts/verify-go-three-voter.sh` rehearsal verifies the deployment's
+`emptyDir` recovery model: after forced process termination, one voter and then
+all three voters recover the latest acknowledged state into fresh local directories
+from the same S3 archive, cluster identity and membership. It also verifies that
+quorum loss keeps `/healthz` at 200 and closes strong `/readyz` with 503; the latter
+may report `readReady: true` and `writeReady: false` because local reads still work.
+This proof uses disposable local MinIO. Production S3 permissions, network policy,
+node scheduling and resource limits still require a separate isolated deployment
+rehearsal before traffic cutover.
 
-HTTP read 계약은 더 좁다.
+### Local authority PDP
 
-- 기본값은 local read다.
-- 읽기 요청에서만 `?consistency=strong`을 붙여 quorum read를 명시적으로 요청할 수 있다.
-- `?consistency=strong`은 실패 시 실패하며, 로컬로 숨은 폴백을 하지 않는다.
-- `consistency` query는 현재 `strong`만 허용하고 다른 값은 `400`이다.
+A learner can serve the HTTP capability catalog and decision APIs as a colocated PDP. The data unit consists of an unchanged PocketBase backend, an Exposure sidecar, and one Grant learner holding a Rhiza authority replica. Exposure calls that local PDP; the backend does not call authorization APIs or evaluate policy. The Grant unit consists of the original voter and its Exposure sidecar, which calls the private voter directly for decisions and management requests; it needs no management learner. Learners publish only `/healthz`, `/readyz`, `/api/v2/http-capabilities/catalog/{providerId}` and `/api/v2/http-capabilities/decide`. Management writes, bootstrap, identity creation, auth cache persistence, and the Rauthy proxy remain voter-only.
 
-## healthz와 readyz 의미
+Each catalog or decision request first obtains a quorum-backed applied slot from the voter's private `POST /read-fence`, synchronizes its replica, then reads locally. Every SQL result must report the same applied slot at or above that fence; a changed snapshot triggers at most three attempts within a three-second deadline. PocketBase/Rauthy verification occurs once, outside retries, and only existing scoped identities are accepted. A disconnected voter fence, failed synchronization, or unstable snapshot returns unavailable; local readiness or a recent sync timestamp alone never authorizes access. Decisions already issued retain their existing short expiration.
 
-`GET /healthz`는 아래 상태를 같이 노출한다.
+Configure voters with a private `GRANT_RUNTIME_BIND_ADDR`, a distinct write-capable `GRANT_REMOTE_API_SECRET`, and a distinct `GRANT_READ_FENCE_KEY` (at least 32 bytes). Learners receive only the fence key and `GRANT_REMOTE_NODES` pointing to that private listener; they must not receive runtime write credentials, voter member tokens, or a runtime listener. The Rhiza `AdminToken` used by learners is a separate read-sync credential: the peer transport accepts it only for certified sync operations. Do not expose Rhiza's native HTTP handler with that key.
 
-- `readReady`
-  - 로컬 또는 대체 read 경로가 사용 가능한지
-- `writeReady`
-  - quorum write와 strong read 경로가 사용 가능한지
-- `runtimeMode`
-  - 현재 런타임 모드
-- `defaultReadConsistency`
-  - 기본 읽기 정책
+Use `scripts/replica-members` with private stdin JSON containing `ClusterID` and native `Members` to derive the public member array. Its output omits voter tokens. Set that array and the sync credential in `GRANT_RHIZA_REPLICA_CONFIG_JSON`; use `GRANT_LOCAL_NODE_ROLE=learner`, unique local data directories/replica IDs, and the same fixed cluster and object-store configuration. Keep `GRANT_CLUSTER_MEMBERS` containing voter tokens only on voters. The helper is a local setup tool, not a network provisioning service.
 
-`GET /readyz`는 같은 상태 body를 반환하지만, 사용할 수 있는 read 경로에서 필수 application schema를 read-only query로 확인한 경우에만 `200`을 반환한다. schema가 없거나 아직 복구/migration되지 않았으면 `503`이다. readiness 검사는 migration이나 bootstrap write를 수행하지 않는다. Kubernetes readiness와 lifecycle peer 확인은 `/readyz`를 사용하고 startup/liveness는 `/healthz`를 사용한다.
+The voter uses the management application's fixed PocketBase application context; bootstrap creates that application. Create the separate data application through the organization application API, then explicitly configure its action scope, trust or consent, and PEP binding. The data learner uses that data application's context. This uses one fixed application context per service, without a provider-to-application routing map.
 
-## 복구 보조 동작
-
-`HQL_BACKUP_RESTORE`가 설정된 상태에서 `embedded` 또는 `split` 로컬 노드를 기동하면, 앱은 `HQL_DATA_DIR/state_machine/lock`의 stale lock 정리를 시도한다.
-
-이 동작은 restore 직후 재기동 시 local lock 파일 때문에 노드 시작이 막히는 경우를 줄이기 위한 것이다.
-
-Kubernetes production에서는 Grant와 Rauthy 모두 3 voter `emptyDir` 구성이다. StatefulSet ordinal `0`, `1`, `2`는 `HQL_NODE_ID_FROM=k8s`에 의해 hiqlite node ID `1`, `2`, `3`으로 대응한다. `HQL_NODES`의 DNS 순서와 이 대응은 변경하면 안 된다.
-
-production init lifecycle gate는 다음 mode를 사용한다.
-
-- `steady`: 빈 Pod는 다른 ordinal의 direct cluster-readiness가 확인되어야 시작한다. 값이 없거나 잘못되어도 이 mode다.
-- `fresh`: local 개발 profile에서만 허용한다. production gate는 fresh bootstrap을 거부하고 승인된 전체 restore만 허용한다.
-- `restore`: ordinal 0만 시작할 수 있으며 32자 이하 lowercase DNS recovery ID가 lifecycle state와 restore authorization에서 같아야 한다. Grant shell supervisor는 원자적 `pending/completed` marker와 제한된 로컬 `/healthz`·`/readyz` 확인으로 replay를 차단한다. 같은-ID stale `pending`은 authorization이 유지된 동안 재시도하고 `completed`만 일반 시작으로 전환한다. Rauthy static launcher는 `/app/data`의 원자적 `pending/completed` 상태와 연속 hiqlite `/ready` 확인을 사용하지만, Rauthy `pending` container restart는 자동으로 재실행하지 않는다. Secret이 없어도 같은 recovery의 `completed` 상태는 일반 시작할 수 있지만, authorization과 completed 상태가 모두 없으면 fail closed한다.
-
-Lifecycle mode와 recovery ID 파일은 shell gate와 Rauthy launcher 모두 정확히 한 줄만 허용한다. 값 뒤에는 LF 또는 CRLF 하나를 선택적으로 붙일 수 있지만, 선행·후행·내부 space/tab, bare CR, 빈 값, 추가 줄은 허용하지 않는다.
-
-나머지 ordinal은 `fresh`나 `restore`에서도 ready peer를 기다린 뒤 learner로 가입하고 voter로 승격된다. schema migration과 seed는 voter 경로에서만 실행하며 learner는 voter 복구와 migration이 완료된 후 가입시킨다. 전체 복구의 partition rollout과 checkpoint는 [backup-restore.md](./backup-restore.md)를 따른다.
-
-## 현재 의존성 메모
-
-워크스페이스 루트 `Cargo.toml`은 `hiqlite`를 아래 포크 커밋으로 패치한다.
-
-- `mrchypark/hiqlite`
-- `3e2112cd140c24730a0d1493054ad007cdabc48e`
-
-이 값이 바뀌면 런타임 관련 동작 문서도 다시 검토하는 편이 안전하다.
+Management Exposure sends decisions and authorized requests directly to the private voter, never through itself. Private bootstrap and inactive-organization recovery remain direct administrative operations. Patch Auth remains the separate account service. Exposure's capability contract is generic so the same sidecar pattern can protect another PocketBase instance or another backend without adding authorization code to that backend.
