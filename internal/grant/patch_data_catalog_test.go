@@ -26,7 +26,7 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 322 || len(actions) != 121 {
+	if len(stage.Capabilities) != 323 || len(actions) != 122 {
 		t.Fatal("incomplete inventory")
 	}
 	// Reproduce the existing baseline's short action code before adding reads.

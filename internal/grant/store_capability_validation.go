@@ -159,6 +159,9 @@ func pathVariables(s string) ([]string, error) {
 	return v, nil
 }
 func validateCapability(c HttpCapability) error {
+	if err := validateBatchPolicy(c); err != nil {
+		return err
+	}
 	previous := 0
 	for _, status := range c.Response.ErrorStatuses {
 		if (status != 304 && (status < 400 || status > 599)) || status <= previous {
@@ -362,6 +365,9 @@ func fieldIdentifier(value string) bool {
 	return true
 }
 func validateGeneration(provider string, c StageHttpCapabilityGeneration) error {
+	if err := validateBatchReferences(c.Capabilities); err != nil {
+		return err
+	}
 	if !capabilityToken(provider) || c.SchemaVersion != 1 || c.Generation == 0 {
 		return fmt.Errorf("invalid generation")
 	}

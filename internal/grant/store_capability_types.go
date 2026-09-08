@@ -19,6 +19,31 @@ type HttpCapability struct {
 	ContractDigest string                   `json:"contractDigest"`
 	PathParameters []HttpPathParameter      `json:"pathParameters,omitempty"`
 	RecordScope    *HttpRecordScopePolicy   `json:"recordScope,omitempty"`
+	Batch          *HttpBatchPolicy         `json:"batch,omitempty"`
+}
+
+type HttpBatchPolicy struct {
+	Encoding             string              `json:"encoding"`
+	RequestsPointer      string              `json:"requestsPointer"`
+	MethodField          string              `json:"methodField"`
+	URLField             string              `json:"urlField"`
+	BodyField            string              `json:"bodyField"`
+	HeadersField         string              `json:"headersField"`
+	MaxOperations        uint64              `json:"maxOperations"`
+	AllowedCapabilityIDs []string            `json:"allowedCapabilityIds"`
+	Upserts              []HttpBatchUpsert   `json:"upserts,omitempty"`
+	Multipart            *HttpBatchMultipart `json:"multipart,omitempty"`
+}
+type HttpBatchUpsert struct {
+	Method             string `json:"method"`
+	PathTemplate       string `json:"pathTemplate"`
+	CreateCapabilityID string `json:"createCapabilityId"`
+	UpdateCapabilityID string `json:"updateCapabilityId"`
+	IDPointer          string `json:"idPointer"`
+}
+type HttpBatchMultipart struct {
+	PayloadField      string   `json:"payloadField"`
+	FileFieldPatterns []string `json:"fileFieldPatterns"`
 }
 type HttpRecordScopePolicy struct {
 	FilterParameter string                `json:"filterParameter"`

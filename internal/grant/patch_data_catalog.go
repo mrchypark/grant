@@ -143,6 +143,19 @@ func PatchDataCatalog(generation uint64, previous *uint64) (StageHttpCapabilityG
 	if err == nil {
 		err = validateGeneration("patch-data", stage)
 	}
+	if err != nil {
+		return stage, actions, err
+	}
+	batch, action, err := patchDataBatchCapability(stage.Capabilities)
+	if err != nil {
+		return stage, actions, err
+	}
+	stage.Capabilities = append(stage.Capabilities, batch)
+	actions = append(actions, action)
+	stage.CatalogDigest, err = HttpCapabilityCatalogDigest("patch-data", stage)
+	if err == nil {
+		err = validateGeneration("patch-data", stage)
+	}
 	return stage, actions, err
 }
 

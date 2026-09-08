@@ -115,6 +115,9 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if cap.AccessMode != "authorized" {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: public authentication capability has no authorization decision")
 	}
+	if cap.Batch == nil && (len(r.BatchChildren) != 0 || r.BatchDigest != "") {
+		return HttpCapabilityDecision{}, serviceError(403, "forbidden: unexpected batch evidence")
+	}
 	if err = validateHTTPRequestEvidence(*cap, r); err != nil {
 		return HttpCapabilityDecision{}, err
 	}
@@ -133,7 +136,12 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
-	if cap.RecordScope != nil {
+	if cap.Batch != nil {
+		allowed, reason, err = s.batchDecision(ctx, token, org, r, c)
+		if err != nil {
+			return HttpCapabilityDecision{}, err
+		}
+	} else if cap.RecordScope != nil {
 		scope, err = s.recordScopeDecision(ctx, r.ProviderID, *cap, c, r.CatalogGeneration, r.CatalogDigest, r.PEPClientID)
 		if err != nil {
 			return HttpCapabilityDecision{}, err
@@ -147,5 +155,5 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 		allowed, reason = decisions[0].Allowed, decisions[0].Reason
 	}
 	now := time.Now().UTC()
-	return HttpCapabilityDecision{Allowed: allowed, Reason: reason, ProviderID: r.ProviderID, PEPClientID: r.PEPClientID, CatalogGeneration: r.CatalogGeneration, CatalogDigest: r.CatalogDigest, CapabilityID: r.CapabilityID, CapabilityVersion: r.CapabilityVersion, ContractDigest: r.ContractDigest, ActionID: *cap.ActionID, ResourceType: r.ResourceType, ResourceID: r.ResourceID, Method: r.Method, CanonicalPath: r.CanonicalPath, CanonicalQueryDigest: r.CanonicalQueryDigest, ForwardedHeaderDigest: r.ForwardedHeaderDigest, BodyDigest: r.BodyDigest, BodyLength: r.BodyLength, ProviderCredentialDigest: r.ProviderCredentialDigest, ProviderSubject: c.ExternalSubject, ProviderAudience: c.ProviderAudience, RequestBinding: r.RequestBinding, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(5 * time.Second).Format(time.RFC3339Nano), RecordScope: scope}, nil
+	return HttpCapabilityDecision{Allowed: allowed, Reason: reason, ProviderID: r.ProviderID, PEPClientID: r.PEPClientID, CatalogGeneration: r.CatalogGeneration, CatalogDigest: r.CatalogDigest, CapabilityID: r.CapabilityID, CapabilityVersion: r.CapabilityVersion, ContractDigest: r.ContractDigest, ActionID: *cap.ActionID, ResourceType: r.ResourceType, ResourceID: r.ResourceID, Method: r.Method, CanonicalPath: r.CanonicalPath, CanonicalQueryDigest: r.CanonicalQueryDigest, ForwardedHeaderDigest: r.ForwardedHeaderDigest, BodyDigest: r.BodyDigest, BodyLength: r.BodyLength, ProviderCredentialDigest: r.ProviderCredentialDigest, ProviderSubject: c.ExternalSubject, ProviderAudience: c.ProviderAudience, RequestBinding: r.RequestBinding, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(5 * time.Second).Format(time.RFC3339Nano), RecordScope: scope, BatchDigest: r.BatchDigest}, nil
 }

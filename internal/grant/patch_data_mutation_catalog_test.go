@@ -12,7 +12,7 @@ func TestPatchDataNativeCatalogBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 322 || len(actions) != 121 {
+	if len(stage.Capabilities) != 323 || len(actions) != 122 {
 		t.Fatal("inventory", len(stage.Capabilities), len(actions))
 	}
 	collections, err := PatchDataCollections()

@@ -273,3 +273,9 @@ PocketBase identity 분리로 `user_identities.issuer`, `collection_id`와 4-par
 ### Catalog-driven record list scopes
 
 Capability canonical JSON may include a bounded record-scope policy; no separate scope table or materialized permission copy is created. Candidate resource IDs come from active `role_bindings` for the exact provider, resource type and subject organization, and every candidate passes through the existing authorization SQL with the current user and application. The evaluator additionally exposes its existing application-scope/consent intermediate for empty-list admission without changing the allow rule. Catalog, membership and authorization queries use one fenced applied slot. Constant list targets are request bindings, not collection-wide authority; scope overflow is an error, and `*` has no wildcard meaning.
+
+## 배치 권한의 canonical 관계
+
+배치 계약은 `provider_http_capability_sets.canonical_json` 내부의 `batch` 정책으로 저장하며 새 테이블은 추가하지 않는다. 정책이 참조하는 child capability는 같은 generation의 활성 mutation 계약이어야 한다. Patch Data의 배치 루트는 `patch-data.batch.execute` action과 `(patch-data, batch, patch-data)` resource tuple을 사용하고, 이를 허용해도 child 레코드/컬렉션 권한을 대신하지 않는다. 원본 body digest와 ordered child digest를 함께 응답에 결합하고, 동일한 fenced snapshot에서 루트 및 모든 child의 membership/application/role/consent를 평가한다.
+
+PUT upsert는 catalog의 명시적 create/update 계약 쌍을 참조한다. 요청 ID가 있으면 collection 생성 권한과 해당 record 수정 권한을 모두 요구하고, 없으면 생성 권한만 요구한다. 존재 여부를 미리 조회하여 권한을 선택하지 않는다. 실제 PocketBase transaction은 변경하지 않으며, 권한 실패 시 원본 배치 전체를 upstream에 보내지 않는다.

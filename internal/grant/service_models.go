@@ -96,7 +96,7 @@ type HttpCapabilityCredentialEvidence struct {
 
 type HttpCapabilityResourceEvidence struct {
 	Kind           string  `json:"kind"`
-	Name           *string `json:"name"`
+	Name           *string `json:"name,omitempty"`
 	CanonicalValue string  `json:"canonicalValue"`
 }
 
@@ -121,6 +121,30 @@ type HttpCapabilityDecisionInput struct {
 	ResourceType             string                           `json:"resourceType"`
 	ResourceID               string                           `json:"resourceId"`
 	RequestBinding           string                           `json:"requestBinding"`
+	BatchChildren            []HttpBatchChild                 `json:"batchChildren,omitempty"`
+	BatchDigest              string                           `json:"batchDigest,omitempty"`
+}
+
+// Child bodies represent semantic JSON extracted by the trusted PEP. Their
+// digest is not a claim about the provider's synthesized internal HTTP bytes.
+type HttpBatchChild struct {
+	Index                 uint64                         `json:"index"`
+	OriginalMethod        string                         `json:"originalMethod"`
+	OriginalPath          string                         `json:"originalPath"`
+	UpsertID              string                         `json:"upsertId,omitempty"`
+	CapabilityID          string                         `json:"capabilityId"`
+	CapabilityVersion     uint64                         `json:"capabilityVersion"`
+	ContractDigest        string                         `json:"contractDigest"`
+	Method                string                         `json:"method"`
+	CanonicalPath         string                         `json:"canonicalPath"`
+	CanonicalQuery        string                         `json:"canonicalQuery"`
+	CanonicalQueryDigest  string                         `json:"canonicalQueryDigest"`
+	ForwardedHeaderDigest string                         `json:"forwardedHeaderDigest"`
+	BodyDigest            string                         `json:"bodyDigest"`
+	BodyLength            uint64                         `json:"bodyLength"`
+	ResourceEvidence      HttpCapabilityResourceEvidence `json:"resourceEvidence"`
+	ResourceType          string                         `json:"resourceType"`
+	ResourceID            string                         `json:"resourceId"`
 }
 
 type HttpCapabilityDecision struct {
@@ -150,6 +174,7 @@ type HttpCapabilityDecision struct {
 	IssuedAt                 string           `json:"issuedAt"`
 	ExpiresAt                string           `json:"expiresAt"`
 	RecordScope              *HttpRecordScope `json:"recordScope,omitempty"`
+	BatchDigest              string           `json:"batchDigest,omitempty"`
 }
 type HttpRecordScope struct {
 	IDs []string `json:"ids"`
