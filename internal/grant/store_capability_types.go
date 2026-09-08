@@ -17,17 +17,42 @@ type HttpCapability struct {
 	Request        HttpRequestPolicy        `json:"request"`
 	Response       HttpResponsePolicy       `json:"response"`
 	ContractDigest string                   `json:"contractDigest"`
+	PathParameters []HttpPathParameter      `json:"pathParameters,omitempty"`
+	RecordScope    *HttpRecordScopePolicy   `json:"recordScope,omitempty"`
+}
+type HttpRecordScopePolicy struct {
+	FilterParameter string                `json:"filterParameter"`
+	RowKey          string                `json:"rowKey"`
+	Grammar         string                `json:"grammar"`
+	MaxIDs          uint64                `json:"maxIds"`
+	MaxFilterBytes  uint64                `json:"maxFilterBytes"`
+	AllowedFields   []string              `json:"allowedFields"`
+	SortParameter   string                `json:"sortParameter,omitempty"`
+	Pagination      *HttpPaginationPolicy `json:"pagination,omitempty"`
+}
+type HttpPaginationPolicy struct {
+	PageParameter      string `json:"pageParameter,omitempty"`
+	PageSizeParameter  string `json:"pageSizeParameter,omitempty"`
+	SkipTotalParameter string `json:"skipTotalParameter,omitempty"`
+}
+type HttpPathParameter struct {
+	Name     string `json:"name"`
+	Format   string `json:"format"`
+	MaxBytes uint64 `json:"maxBytes"`
 }
 type HttpQueryParameter struct {
 	Name     string `json:"name"`
 	Format   string `json:"format"`
 	Required bool   `json:"required"`
+	MaxBytes uint64 `json:"maxBytes,omitempty"`
+	Repeated bool   `json:"repeated,omitempty"`
 }
 type HttpRequestPolicy struct {
 	Body           HttpRequestBodyMode `json:"body"`
 	MaxBytes       uint64              `json:"maxBytes"`
 	ForwardHeaders []string            `json:"forwardHeaders"`
 	Authorization  string              `json:"authorization,omitempty"`
+	ContentTypes   []string            `json:"contentTypes,omitempty"`
 }
 type HttpResponsePolicy struct {
 	MaxBytes       uint64             `json:"maxBytes"`

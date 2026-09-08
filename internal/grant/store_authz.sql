@@ -163,7 +163,8 @@
                                    WHEN trusted.idx IS NOT NULL OR consent.idx IS NOT NULL THEN 1
                                    ELSE 0
                                END AS allowed,
-                               CASE WHEN trusted.idx IS NULL THEN 0 ELSE 1 END AS trusted_application
+                               CASE WHEN trusted.idx IS NULL THEN 0 ELSE 1 END AS trusted_application,
+                               CASE WHEN trusted.idx IS NOT NULL OR consent.idx IS NOT NULL THEN 1 ELSE 0 END AS application_allowed
                         FROM requested req
                         LEFT JOIN rbac_allowed rbac ON rbac.idx = req.idx
                         LEFT JOIN trusted_application_allowed trusted ON trusted.idx = req.idx

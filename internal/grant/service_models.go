@@ -124,31 +124,35 @@ type HttpCapabilityDecisionInput struct {
 }
 
 type HttpCapabilityDecision struct {
-	Allowed                  bool   `json:"allowed"`
-	Reason                   string `json:"reason"`
-	ProviderID               string `json:"providerId"`
-	PEPClientID              string `json:"pepClientId"`
-	CatalogGeneration        uint64 `json:"catalogGeneration"`
-	CatalogDigest            string `json:"catalogDigest"`
-	CapabilityID             string `json:"capabilityId"`
-	CapabilityVersion        uint64 `json:"capabilityVersion"`
-	ContractDigest           string `json:"contractDigest"`
-	ActionID                 string `json:"actionId"`
-	ResourceType             string `json:"resourceType"`
-	ResourceID               string `json:"resourceId"`
-	Method                   string `json:"method"`
-	CanonicalPath            string `json:"canonicalPath"`
-	CanonicalQueryDigest     string `json:"canonicalQueryDigest"`
-	ForwardedHeaderDigest    string `json:"forwardedHeaderDigest"`
-	BodyDigest               string `json:"bodyDigest"`
-	BodyLength               uint64 `json:"bodyLength"`
-	ProviderCredentialDigest string `json:"providerCredentialDigest"`
-	ProviderSubject          string `json:"providerSubject"`
-	ProviderAudience         string `json:"providerAudience"`
-	RequestBinding           string `json:"requestBinding"`
-	PrincipalDigest          string `json:"principalDigest"`
-	IssuedAt                 string `json:"issuedAt"`
-	ExpiresAt                string `json:"expiresAt"`
+	Allowed                  bool             `json:"allowed"`
+	Reason                   string           `json:"reason"`
+	ProviderID               string           `json:"providerId"`
+	PEPClientID              string           `json:"pepClientId"`
+	CatalogGeneration        uint64           `json:"catalogGeneration"`
+	CatalogDigest            string           `json:"catalogDigest"`
+	CapabilityID             string           `json:"capabilityId"`
+	CapabilityVersion        uint64           `json:"capabilityVersion"`
+	ContractDigest           string           `json:"contractDigest"`
+	ActionID                 string           `json:"actionId"`
+	ResourceType             string           `json:"resourceType"`
+	ResourceID               string           `json:"resourceId"`
+	Method                   string           `json:"method"`
+	CanonicalPath            string           `json:"canonicalPath"`
+	CanonicalQueryDigest     string           `json:"canonicalQueryDigest"`
+	ForwardedHeaderDigest    string           `json:"forwardedHeaderDigest"`
+	BodyDigest               string           `json:"bodyDigest"`
+	BodyLength               uint64           `json:"bodyLength"`
+	ProviderCredentialDigest string           `json:"providerCredentialDigest"`
+	ProviderSubject          string           `json:"providerSubject"`
+	ProviderAudience         string           `json:"providerAudience"`
+	RequestBinding           string           `json:"requestBinding"`
+	PrincipalDigest          string           `json:"principalDigest"`
+	IssuedAt                 string           `json:"issuedAt"`
+	ExpiresAt                string           `json:"expiresAt"`
+	RecordScope              *HttpRecordScope `json:"recordScope,omitempty"`
+}
+type HttpRecordScope struct {
+	IDs []string `json:"ids"`
 }
 
 type BackupInfo struct {
@@ -178,7 +182,10 @@ type UserActionCheck struct {
 	ApplicationID                                                          *string
 	Consistency                                                            ReadConsistency
 }
-type UserActionDecision struct{ Allowed, RBACAllowed, TrustedApplication bool }
+type UserActionDecision struct {
+	Allowed, RBACAllowed, TrustedApplication bool
+	ApplicationAllowed                       bool `json:"-"`
+}
 type AuthenticatedPrincipal struct{ UserID, OrganizationID string }
 type ExternalIdentity struct {
 	Provider, ExternalUserID, ClientID string

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"strings"
 )
 
@@ -128,7 +129,7 @@ func capabilityToken(s string) bool {
 }
 func capabilityFormat(s string) bool {
 	switch s {
-	case "pocketbaseId", "uuid", "xid", "slug", "asciiToken":
+	case "pocketbaseId", "uuid", "xid", "slug", "asciiToken", "uint", "bool":
 		return true
 	}
 	return false
@@ -158,10 +159,10 @@ func pathVariables(s string) ([]string, error) {
 	return v, nil
 }
 func validateCapability(c HttpCapability) error {
-	previous := 399
+	previous := 0
 	for _, status := range c.Response.ErrorStatuses {
-		if status < 400 || status > 599 || status <= previous {
-			return fmt.Errorf("errorStatuses must be sorted unique 400..599")
+		if (status != 304 && (status < 400 || status > 599)) || status <= previous {
+			return fmt.Errorf("errorStatuses must be sorted unique 304 or 400..599")
 		}
 		previous = status
 	}
@@ -177,13 +178,75 @@ func validateCapability(c HttpCapability) error {
 	if e != nil {
 		return e
 	}
+	if c.RecordScope != nil {
+		p := c.RecordScope
+		if c.AccessMode != "authorized" || c.Method != "GET" || c.Resource == nil || c.Resource.ID.Kind != "constant" || c.Request.Body != "none" || p.Grammar != "fexpr" || !fieldIdentifier(p.RowKey) || !fieldIdentifier(p.FilterParameter) || p.MaxIDs == 0 || p.MaxIDs > 199 || p.MaxFilterBytes == 0 || p.MaxFilterBytes > 65536 {
+			return fmt.Errorf("invalid recordScope policy")
+		}
+		previous, rowKeyFound := "", false
+		for _, field := range p.AllowedFields {
+			if !fieldIdentifier(field) || field <= previous {
+				return fmt.Errorf("invalid recordScope allowedFields")
+			}
+			rowKeyFound = rowKeyFound || field == p.RowKey
+			previous = field
+		}
+		if !rowKeyFound {
+			return fmt.Errorf("recordScope rowKey must be allowed")
+		}
+		filterFound, sortFound := false, p.SortParameter == ""
+		if p.SortParameter != "" && (!fieldIdentifier(p.SortParameter) || p.SortParameter == p.FilterParameter) {
+			return fmt.Errorf("invalid recordScope sortParameter")
+		}
+		roles := map[string]string{p.FilterParameter: "text"}
+		if p.SortParameter != "" {
+			roles[p.SortParameter] = "text"
+		}
+		if p.Pagination != nil {
+			for _, role := range []struct{ name, format string }{{p.Pagination.PageParameter, "uint"}, {p.Pagination.PageSizeParameter, "uint"}, {p.Pagination.SkipTotalParameter, "bool"}} {
+				if role.name == "" {
+					continue
+				}
+				if !fieldIdentifier(role.name) || roles[role.name] != "" {
+					return fmt.Errorf("ambiguous pagination parameter")
+				}
+				roles[role.name] = role.format
+			}
+		}
+		for _, parameter := range c.Query.Parameters {
+			if expected, ok := roles[parameter.Name]; !ok || parameter.Format != expected || parameter.Repeated {
+				return fmt.Errorf("recordScope query lacks a safe declared role")
+			}
+			delete(roles, parameter.Name)
+			if parameter.Name == p.FilterParameter {
+				filterFound = parameter.Format == "text" && !parameter.Repeated && !parameter.Required
+			}
+			if parameter.Name == p.SortParameter {
+				sortFound = parameter.Format == "text" && !parameter.Repeated && !parameter.Required
+			}
+		}
+		if c.Query.Mode != "exact" || !filterFound || !sortFound || len(roles) != 0 {
+			return fmt.Errorf("recordScope query policies are missing or ambiguous")
+		}
+	}
+	previousName := ""
+	for _, p := range c.PathParameters {
+		found := false
+		for _, name := range vars {
+			found = found || name == p.Name
+		}
+		if !found || p.Name <= previousName || p.Format != "utf8Segment" || p.MaxBytes == 0 || p.MaxBytes > 4096 {
+			return fmt.Errorf("invalid path parameter policy")
+		}
+		previousName = p.Name
+	}
 	if c.Query.Mode == "exact" {
 		if len(c.Query.Parameters) == 0 {
 			return fmt.Errorf("empty exact query policy")
 		}
 		prev := ""
 		for _, p := range c.Query.Parameters {
-			if p.Name <= prev || !capabilityToken(p.Name) || !capabilityFormat(p.Format) {
+			if p.Name <= prev || !capabilityToken(p.Name) || (!capabilityFormat(p.Format) && p.Format != "text") || (p.Format == "text" && (p.MaxBytes == 0 || p.MaxBytes > 4096)) || (p.Format != "text" && p.MaxBytes != 0) {
 				return fmt.Errorf("invalid query parameter")
 			}
 			prev = p.Name
@@ -194,13 +257,33 @@ func validateCapability(c HttpCapability) error {
 	if (c.Request.Authorization != "" && c.Request.Authorization != "forward-user" && c.Request.Authorization != "service-token") || (c.Request.Authorization == "service-token" && c.AccessMode != "authorized") {
 		return fmt.Errorf("invalid request authorization policy")
 	}
-	if (c.Request.Body == "none" && c.Request.MaxBytes != 0) || (c.Request.Body == "json" && c.Request.MaxBytes == 0) || (c.Request.Body != "none" && c.Request.Body != "json") || c.Response.MaxBytes == 0 || c.Response.Redirects != "deny" {
+	if (c.Request.Body == "none" && c.Request.MaxBytes != 0) || (c.Request.Body != "none" && c.Request.MaxBytes == 0) || (c.Request.Body != "none" && c.Request.Body != "json" && c.Request.Body != "opaque" && c.Request.Body != "multipart") || c.Response.MaxBytes == 0 || c.Response.Redirects != "deny" {
 		return fmt.Errorf("invalid body/response policy")
+	}
+	priorType := ""
+	for _, contentType := range c.Request.ContentTypes {
+		mediaType, params, err := mime.ParseMediaType(contentType)
+		if err != nil || mediaType != contentType || len(params) != 0 || contentType <= priorType || (c.Request.Body == "multipart" && contentType != "multipart/form-data") {
+			return fmt.Errorf("invalid request contentTypes")
+		}
+		priorType = contentType
+	}
+	if ((c.Request.Body == "opaque" || c.Request.Body == "multipart") && len(c.Request.ContentTypes) == 0) || (c.Request.Body == "none" && len(c.Request.ContentTypes) != 0) {
+		return fmt.Errorf("body mode requires explicit contentTypes")
+	}
+	if len(c.Request.ContentTypes) > 0 {
+		found := false
+		for _, header := range c.Request.ForwardHeaders {
+			found = found || header == "content-type"
+		}
+		if !found {
+			return fmt.Errorf("contentTypes requires forwarding the bound content-type header")
+		}
 	}
 	for _, item := range []struct {
 		headers []string
 		allow   string
-	}{{c.Request.ForwardHeaders, "|accept|content-type|if-match|if-none-match|x-organization-id|"}, {c.Response.ForwardHeaders, "|cache-control|content-type|etag|last-modified|"}} {
+	}{{c.Request.ForwardHeaders, "|accept|content-type|if-match|if-none-match|if-modified-since|if-unmodified-since|if-range|range|x-organization-id|"}, {c.Response.ForwardHeaders, "|accept-ranges|cache-control|content-disposition|content-length|content-range|content-type|etag|last-modified|"}} {
 		prev := ""
 		for _, h := range item.headers {
 			if h <= prev || !strings.Contains(item.allow, "|"+h+"|") {
@@ -232,12 +315,12 @@ func validateCapability(c HttpCapability) error {
 				return fmt.Errorf("path extractor mismatch")
 			}
 		case "queryScalar":
-			if len(vars) > 0 || c.Query.Mode != "exact" {
+			if c.Query.Mode != "exact" {
 				return fmt.Errorf("query extractor mismatch")
 			}
 			found := false
 			for _, p := range c.Query.Parameters {
-				if p.Name == r.Name && p.Format == r.Format && p.Required {
+				if p.Name == r.Name && p.Format == r.Format && p.Required && !p.Repeated {
 					found = true
 				}
 			}
@@ -245,11 +328,11 @@ func validateCapability(c HttpCapability) error {
 				return fmt.Errorf("query extractor missing required parameter")
 			}
 		case "jsonPointer":
-			if len(vars) > 0 || c.Request.Body != "json" || !strings.HasPrefix(r.Pointer, "/") || strings.Contains(r.Pointer, "//") {
+			if c.Request.Body != "json" || !strings.HasPrefix(r.Pointer, "/") || strings.Contains(r.Pointer, "//") {
 				return fmt.Errorf("invalid JSON extractor")
 			}
 		case "constant":
-			if len(vars) > 0 || !capabilityToken(r.Value) {
+			if !capabilityToken(r.Value) {
 				return fmt.Errorf("invalid constant extractor")
 			}
 		default:
@@ -266,6 +349,17 @@ func validateCapability(c HttpCapability) error {
 		return fmt.Errorf("contractDigest mismatch")
 	}
 	return nil
+}
+func fieldIdentifier(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for i, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (i > 0 && r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 func validateGeneration(provider string, c StageHttpCapabilityGeneration) error {
 	if !capabilityToken(provider) || c.SchemaVersion != 1 || c.Generation == 0 {

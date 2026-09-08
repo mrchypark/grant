@@ -191,10 +191,16 @@ func (s *Store) Query(ctx context.Context, consistency, sql string, args ...any)
 }
 func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...any) (rhiza.QueryResponse, error) {
 	if scope := readScope(ctx); scope != nil {
-		if s.replica == nil {
-			return rhiza.QueryResponse{}, fmt.Errorf("read replica required")
+		var result rhiza.QueryResponse
+		var e error
+		req := rhiza.QueryRequest{SQL: sql, Args: sqlArgs(args), Consistency: rhiza.ConsistencyLocal}
+		if s.replica != nil {
+			result, e = s.replica.Query(ctx, req)
+		} else if s.db != nil {
+			result, e = s.db.Query(ctx, req)
+		} else {
+			return result, fmt.Errorf("local authority store required")
 		}
-		result, e := s.replica.Query(ctx, rhiza.QueryRequest{SQL: sql, Args: sqlArgs(args), Consistency: rhiza.ConsistencyLocal})
 		if e != nil {
 			return result, e
 		}

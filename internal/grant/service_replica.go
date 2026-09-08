@@ -36,9 +36,15 @@ func localReplicaRead[T any](ctx context.Context, s *Service, read func(context.
 	if e != nil {
 		return zero, serviceError(503, "unavailable: replica quorum fence failed")
 	}
+	return readAtFence(ctx, s, fence, read)
+}
+func readAtFence[T any](ctx context.Context, s *Service, fence uint64, read func(context.Context) (T, error)) (T, error) {
+	var zero T
 	for attempt := 0; attempt < 3; attempt++ {
-		if e = s.store.catchUpFence(ctx, fence); e != nil {
-			return zero, serviceError(503, "unavailable: replica has not reached quorum fence")
+		if s.store.replica != nil {
+			if e := s.store.catchUpFence(ctx, fence); e != nil {
+				return zero, serviceError(503, "unavailable: replica has not reached quorum fence")
+			}
 		}
 		scope := &replicaRead{fence: fence}
 		readCtx := context.WithValue(ctx, replicaReadKey{}, scope)
@@ -74,7 +80,10 @@ func (s *Store) readFence(ctx context.Context) (uint64, error) {
 	if len(s.cfg.Database.ReadFenceKey) < 32 || len(s.cfg.Database.RemoteNodes) == 0 {
 		return 0, fmt.Errorf("replica fence transport is not configured")
 	}
-	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	defer transport.CloseIdleConnections()
+	client := http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.Database.RemoteNodes[0]+"/read-fence", nil)
 	if e != nil {
 		return 0, e

@@ -2,10 +2,12 @@ package grant
 
 import (
 	"context"
+	"errors"
 	"github.com/mrchypark/rhiza"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +133,21 @@ func TestReadFenceRejectsMalformedResponses(t *testing.T) {
 			t.Errorf("accepted %s", body)
 		}
 		server.Close()
+	}
+}
+
+func TestReadFenceNeverUsesEnvironmentProxy(t *testing.T) {
+	original := http.DefaultTransport
+	defer func() { http.DefaultTransport = original }()
+	called := false
+	transport := original.(*http.Transport).Clone()
+	transport.Proxy = func(*http.Request) (*url.URL, error) { called = true; return nil, errors.New("unexpected proxy") }
+	http.DefaultTransport = transport
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"appliedSlot":3}`)) }))
+	defer server.Close()
+	store := Store{cfg: Config{Database: DatabaseConfig{ReadFenceKey: strings.Repeat("f", 40), RemoteNodes: []string{server.URL}}}}
+	slot, e := store.readFence(context.Background())
+	if e != nil || slot != 3 || called {
+		t.Fatalf("slot=%d proxy=%v err=%v", slot, called, e)
 	}
 }

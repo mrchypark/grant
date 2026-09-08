@@ -3,7 +3,10 @@ package grant
 import (
 	"crypto/sha256"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func sha256Text(v string) string { return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(v))) }
@@ -23,6 +26,11 @@ func scalarFormat(format, v string) error {
 	valid := false
 	alpha := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	switch format {
+	case "uint":
+		n, err := strconv.ParseUint(v, 10, 32)
+		valid = err == nil && strconv.FormatUint(n, 10) == v
+	case "bool":
+		valid = v == "true" || v == "false"
 	case "pocketbaseId":
 		valid = len(v) == 15 && strings.Trim(v, alpha) == ""
 	case "uuid":
@@ -57,22 +65,32 @@ func canonicalQuery(policy HttpQueryPolicy, query string) (map[string]string, er
 	prior := ""
 	if query != "" {
 		for _, pair := range strings.Split(query, "&") {
-			key, v, ok := strings.Cut(pair, "=")
+			rawKey, rawValue, ok := strings.Cut(pair, "=")
 			if !ok {
 				return nil, serviceError(400, "canonicalQuery contains an invalid pair")
 			}
-			if key == "" || strings.ContainsAny(pair, "%;") {
+			key, keyErr := url.QueryUnescape(rawKey)
+			v, valueErr := url.QueryUnescape(rawValue)
+			if key == "" || keyErr != nil || valueErr != nil || queryEscape(key) != rawKey || queryEscape(v) != rawValue {
 				return nil, serviceError(400, "canonicalQuery is not canonical")
 			}
-			if prior != "" && prior >= key {
-				return nil, serviceError(400, "canonicalQuery keys must be unique and sorted")
+			if prior != "" && prior > key {
+				return nil, serviceError(400, "canonicalQuery keys must be sorted")
 			}
-			prior = key
 			found := false
 			for _, p := range policy.Parameters {
 				if p.Name == key {
 					found = true
-					if err := scalarFormat(p.Format, v); err != nil {
+					if prior == key && !p.Repeated {
+						return nil, serviceError(400, "query parameter cannot repeat")
+					}
+					var err error
+					if p.Format == "text" {
+						err = boundedUTF8(v, p.MaxBytes)
+					} else {
+						err = scalarFormat(p.Format, v)
+					}
+					if err != nil {
 						return nil, err
 					}
 					break
@@ -82,6 +100,7 @@ func canonicalQuery(policy HttpQueryPolicy, query string) (map[string]string, er
 				return nil, serviceError(403, "forbidden: query key is not allowed")
 			}
 			values[key] = v
+			prior = key
 		}
 	}
 	for _, p := range policy.Parameters {
@@ -91,8 +110,23 @@ func canonicalQuery(policy HttpQueryPolicy, query string) (map[string]string, er
 	}
 	return values, nil
 }
+func queryEscape(value string) string { return strings.ReplaceAll(url.QueryEscape(value), "+", "%20") }
+func boundedUTF8(value string, max uint64) error {
+	if max == 0 || uint64(len(value)) > max || !utf8.ValidString(value) {
+		return serviceError(400, "text value exceeds bounds or is invalid UTF-8")
+	}
+	for _, r := range value {
+		if r < 32 || r == 127 {
+			return serviceError(400, "text value contains control characters")
+		}
+	}
+	return nil
+}
 func matchPath(template, path string) (map[string]string, error) {
-	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "%\\") || strings.Contains(path, "//") {
+	return matchPolicyPath(template, path, nil)
+}
+func matchPolicyPath(template, path string, parameters []HttpPathParameter) (map[string]string, error) {
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\\") || strings.Contains(path, "//") {
 		return nil, serviceError(400, "canonicalPath is not canonical")
 	}
 	for _, b := range []byte(path) {
@@ -108,18 +142,37 @@ func matchPath(template, path string) (map[string]string, error) {
 	for i, w := range want {
 		v := got[i]
 		if strings.HasPrefix(w, "{") && strings.HasSuffix(w, "}") {
+			name := w[1 : len(w)-1]
+			var policy *HttpPathParameter
+			for i := range parameters {
+				if parameters[i].Name == name {
+					policy = &parameters[i]
+					break
+				}
+			}
+			if policy != nil {
+				decoded, err := url.PathUnescape(v)
+				if err != nil || strings.ContainsAny(decoded, "/\\%") {
+					return nil, serviceError(400, "invalid encoded path segment")
+				}
+				if err = boundedUTF8(decoded, policy.MaxBytes); err != nil {
+					return nil, err
+				}
+				v = decoded
+			} else if strings.Contains(v, "%") {
+				return nil, serviceError(400, "encoded path segment is not declared")
+			}
 			if v == "" || v == "." || v == ".." {
 				return nil, serviceError(400, "canonicalPath contains an invalid segment")
 			}
-			if err := scalarFormat("asciiToken", v); err != nil {
+			if err := scalarFormat("asciiToken", v); policy == nil && err != nil {
 				return nil, err
 			}
-			name := w[1 : len(w)-1]
 			if _, duplicate := out[name]; duplicate {
 				return nil, serviceError(400, "duplicate path variable")
 			}
 			out[name] = v
-		} else if w != v {
+		} else if w != v || strings.Contains(v, "%") {
 			return nil, serviceError(403, "forbidden: HTTP path does not match capability")
 		}
 	}
@@ -147,7 +200,7 @@ func validateHTTPRequestEvidence(c HttpCapability, r HttpCapabilityDecisionInput
 	if c.Request.Body == "none" && (r.BodyLength != 0 || r.BodyDigest != sha256Text("")) {
 		return serviceError(403, "forbidden: bodyless request policy mismatch")
 	}
-	if c.Request.Body == "json" && r.BodyLength > c.Request.MaxBytes {
+	if c.Request.Body != "none" && r.BodyLength > c.Request.MaxBytes {
 		return serviceError(403, "forbidden: request body exceeds capability limit")
 	}
 	if len(c.Request.ForwardHeaders) == 0 && r.ForwardedHeaderDigest != sha256Text("") {
@@ -171,7 +224,7 @@ func validateHTTPRequestEvidence(c HttpCapability, r HttpCapabilityDecisionInput
 	if r.ResourceType != c.Resource.ResourceType {
 		return serviceError(403, "forbidden: resource type mismatch")
 	}
-	captures, err := matchPath(c.PathTemplate, r.CanonicalPath)
+	captures, err := matchPolicyPath(c.PathTemplate, r.CanonicalPath, c.PathParameters)
 	if err != nil {
 		return err
 	}

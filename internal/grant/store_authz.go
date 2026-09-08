@@ -25,7 +25,7 @@ func (s *Store) evaluateUserActions(ctx context.Context, checks []UserActionChec
 		if len(rows) != 1 {
 			return nil, fmt.Errorf("authorization query did not return exactly one decision")
 		}
-		out = append(out, UserActionDecision{Allowed: rowInt(rows[0], "allowed") != 0, RBACAllowed: rowInt(rows[0], "rbac_allowed") != 0, TrustedApplication: rowInt(rows[0], "trusted_application") != 0})
+		out = append(out, UserActionDecision{Allowed: rowInt(rows[0], "allowed") != 0, RBACAllowed: rowInt(rows[0], "rbac_allowed") != 0, TrustedApplication: rowInt(rows[0], "trusted_application") != 0, ApplicationAllowed: rowInt(rows[0], "application_allowed") != 0})
 	}
 	return out, nil
 }

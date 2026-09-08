@@ -254,3 +254,7 @@ and object-store prefixes are preserved. See [backup-restore.md](backup-restore.
 for the preparatory command and the distinction from offline single-voter restore.
 
 PocketBase identity 분리로 `user_identities.issuer`, `collection_id`와 4-part unique key가 추가됐다. V1 authority import의 `users`는 `issuer`, `collectionId`를 필수로 전달하며 canonical user digest frame에도 포함한다. 내부 `userId` 및 membership/binding 참조는 바꾸지 않는다. 인증을 통해 생성한 identity와 import identity는 이 namespace가 정확히 같을 때만 같은 사용자를 가리킨다. 기존 `(patch-data, raw ID)`를 자동 재연결하지 않으며 기존 DB/backup은 schema checksum 변경으로 거부한다. 버전 alias나 자동 마이그레이션은 없고 실제 데이터 삭제는 수행하지 않았다.
+
+### Catalog-driven record list scopes
+
+Capability canonical JSON may include a bounded record-scope policy; no separate scope table or materialized permission copy is created. Candidate resource IDs come from active `role_bindings` for the exact provider, resource type and subject organization, and every candidate passes through the existing authorization SQL with the current user and application. The evaluator additionally exposes its existing application-scope/consent intermediate for empty-list admission without changing the allow rule. Catalog, membership and authorization queries use one fenced applied slot. Constant list targets are request bindings, not collection-wide authority; scope overflow is an error, and `*` has no wildcard meaning.
