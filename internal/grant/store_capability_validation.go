@@ -178,6 +178,9 @@ func validateCapability(c HttpCapability) error {
 	} else if c.Query.Mode != "none" || len(c.Query.Parameters) != 0 {
 		return fmt.Errorf("invalid query policy")
 	}
+	if (c.Request.Authorization != "" && c.Request.Authorization != "forward-user" && c.Request.Authorization != "service-token") || (c.Request.Authorization == "service-token" && c.AccessMode != "authorized") {
+		return fmt.Errorf("invalid request authorization policy")
+	}
 	if (c.Request.Body == "none" && c.Request.MaxBytes != 0) || (c.Request.Body == "json" && c.Request.MaxBytes == 0) || (c.Request.Body != "none" && c.Request.Body != "json") || c.Response.MaxBytes == 0 || c.Response.Redirects != "deny" {
 		return fmt.Errorf("invalid body/response policy")
 	}

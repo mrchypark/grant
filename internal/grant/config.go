@@ -24,11 +24,11 @@ type RauthyConfig struct {
 	BaseURL, IntrospectPath, UserinfoPath, ClientID, ClientSecret, ClientReadAPIKey string
 	CacheTTLSeconds                                                                 uint64
 }
-type PatchDataConfig struct{ BaseURL, ExposureApplicationID string }
+type PocketBaseConfig struct{ BaseURL, Collection, ApplicationID string }
 type AuthConfig struct {
 	ProviderMode string
 	Rauthy       RauthyConfig
-	PatchData    *PatchDataConfig
+	PocketBase   *PocketBaseConfig
 }
 type DatabaseConfig struct {
 	ClusterRestoreSnapshot                                                                                             string
@@ -69,13 +69,17 @@ func ConfigFromEnv() (Config, error) {
 		if c.Auth.Rauthy.ClientID == "" || c.Auth.Rauthy.ClientSecret == "" || c.Auth.Rauthy.ClientReadAPIKey == "" {
 			return c, fmt.Errorf("Rauthy client ID, client secret and client read API key are required")
 		}
-	case "patch-data":
-		p := &PatchDataConfig{BaseURL: os.Getenv("GRANT_PATCH_DATA_BASE_URL"), ExposureApplicationID: os.Getenv("GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID")}
+	case "pocketbase":
+		p := &PocketBaseConfig{BaseURL: os.Getenv("GRANT_POCKETBASE_BASE_URL"), Collection: envDefault("GRANT_POCKETBASE_COLLECTION", "users"), ApplicationID: os.Getenv("GRANT_POCKETBASE_APPLICATION_ID")}
 		u, e := url.Parse(p.BaseURL)
-		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || p.ExposureApplicationID == "" {
-			return c, fmt.Errorf("invalid Patch Data origin/application configuration")
+		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || p.ApplicationID == "" {
+			return c, fmt.Errorf("invalid PocketBase origin/application configuration")
 		}
-		c.Auth.PatchData = p
+		p.BaseURL, e = canonicalPocketBaseOrigin(p.BaseURL)
+		if e != nil || !pocketBaseID(p.Collection) {
+			return c, fmt.Errorf("invalid PocketBase origin/collection configuration")
+		}
+		c.Auth.PocketBase = p
 	default:
 		return c, fmt.Errorf("invalid GRANT_AUTH_PROVIDER")
 	}

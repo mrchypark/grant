@@ -6,7 +6,7 @@ func (s *Service) BootstrapRauthyOwner(ctx context.Context, token string) (Authe
 	if s.AuthProviderMode() != "rauthy" {
 		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: Rauthy owner bootstrap is unavailable for the configured auth provider")
 	}
-	i, err := s.externalIdentity(ctx, token, "")
+	i, err := s.externalIdentity(ctx, token)
 	if err != nil {
 		return AuthenticatedPrincipal{}, err
 	}
@@ -20,20 +20,20 @@ func (s *Service) BootstrapRauthyOwner(ctx context.Context, token string) (Authe
 	return AuthenticatedPrincipal{UserID: u.ID, OrganizationID: s.cfg.Security.BootstrapUserID}, nil
 }
 func (s *Service) BootstrapExternalOwner(ctx context.Context, token, org string) (AuthenticatedPrincipal, error) {
-	if s.AuthProviderMode() != "patch-data" {
+	if s.AuthProviderMode() != "pocketbase" {
 		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: external owner bootstrap is unavailable for Rauthy")
 	}
 	if org == "" {
-		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: Patch Data organization selection is required")
+		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: PocketBase organization selection is required")
 	}
-	i, err := s.externalIdentity(ctx, token, org)
+	i, err := s.externalIdentity(ctx, token)
 	if err != nil {
 		return AuthenticatedPrincipal{}, err
 	}
 	if !i.Active {
 		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: external user is inactive")
 	}
-	v, err := s.store.BootstrapExternalOwnerAtomic(ctx, ExternalOwnerBootstrapCommand{Identity: ExternalIdentityMaterialization{Provider: i.Provider, ExternalUserID: i.ExternalUserID, Email: i.Email, DisplayName: i.DisplayName}, OrganizationID: org, ApplicationID: s.cfg.Auth.PatchData.ExposureApplicationID})
+	v, err := s.store.BootstrapExternalOwnerAtomic(ctx, ExternalOwnerBootstrapCommand{Identity: ExternalIdentityMaterialization{Provider: i.Provider, Issuer: i.Issuer, CollectionID: i.CollectionID, ExternalUserID: i.ExternalUserID, Email: i.Email, DisplayName: i.DisplayName}, OrganizationID: org, ApplicationID: s.cfg.Auth.PocketBase.ApplicationID})
 	return AuthenticatedPrincipal{UserID: v.UserID, OrganizationID: v.OrganizationID}, err
 }
 func (s *Service) TriggerBackup(ctx context.Context) error { return s.store.TriggerBackup(ctx) }

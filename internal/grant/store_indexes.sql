@@ -3,7 +3,7 @@
                 CREATE INDEX IF NOT EXISTS idx_organization_party_links_party
                     ON organization_party_links (party_id, relation_type);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_identities_provider_external
-                    ON user_identities (provider, external_user_id);
+                    ON user_identities (provider, issuer, collection_id, external_user_id);
                 CREATE INDEX IF NOT EXISTS idx_auth_identity_cache_expires_at
                     ON auth_identity_cache (expires_at);
                 DROP INDEX IF EXISTS idx_applications_rauthy_client_id_unique;

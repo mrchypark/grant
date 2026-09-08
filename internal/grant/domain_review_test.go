@@ -32,9 +32,9 @@ func TestRedirectURLFrozenNormalization(t *testing.T) {
 	}
 }
 
-func TestPatchDataRequiredIdentityNullIsUpstreamFailure(t *testing.T) {
-	for _, raw := range []string{`{"id":null,"email":"u@example.com","verified":true}`, `{"id":"u","email":null,"verified":true}`, `{"id":"u","email":"u@example.com","verified":null}`} {
-		var record patchRecord
+func TestPocketBaseRequiredIdentityNullIsUpstreamFailure(t *testing.T) {
+	for _, raw := range []string{`{"id":null,"collectionId":"users_id","collectionName":"users"}`, `{"id":"u","collectionId":null,"collectionName":"users"}`, `{"id":"u","collectionId":"users_id","collectionName":null}`} {
+		var record pocketBaseRecord
 		if err := json.Unmarshal([]byte(raw), &record); err == nil || ErrorStatus(err) != 503 {
 			t.Fatal(raw, err)
 		}

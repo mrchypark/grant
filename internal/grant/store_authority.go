@@ -22,13 +22,15 @@ func validatePatchImport(c PatchDataAuthorityImport) error {
 	users, exts, orgs, pairs, active := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	prev := ""
 	for _, u := range c.Users {
-		key := u.UserID + "\x00" + u.ExternalUserID
-		if strictToken(u.UserID, 255) != nil || strictToken(u.ExternalUserID, 255) != nil || strictToken(u.DisplayName, 255) != nil || (u.Email != nil && strictToken(*u.Email, 320) != nil) || key <= prev || users[u.UserID] || exts[u.ExternalUserID] {
+		key := u.UserID + "\x00" + u.Issuer + "\x00" + u.CollectionID + "\x00" + u.ExternalUserID
+		externalKey := pocketBaseSubject(u.Issuer, u.CollectionID, u.ExternalUserID)
+		origin, originErr := canonicalPocketBaseOrigin(u.Issuer)
+		if originErr != nil || origin != u.Issuer || !pocketBaseID(u.CollectionID) || !pocketBaseID(u.ExternalUserID) || strictToken(u.UserID, 255) != nil || strictToken(u.DisplayName, 255) != nil || (u.Email != nil && strictToken(*u.Email, 320) != nil) || key <= prev || users[u.UserID] || exts[externalKey] {
 			return fmt.Errorf("users must be valid sorted unique identities")
 		}
 		prev = key
 		users[u.UserID] = true
-		exts[u.ExternalUserID] = true
+		exts[externalKey] = true
 	}
 	prev = ""
 	for _, o := range c.Organizations {
@@ -122,14 +124,14 @@ func (s *Store) ImportPatchDataAuthority(ctx context.Context, c PatchDataAuthori
 	stageID := strings.TrimPrefix(digestBytes(raw), "sha256:")
 	var identities []map[string]any
 	for _, u := range c.Users {
-		h := sha256.Sum256([]byte(u.ExternalUserID))
-		identities = append(identities, map[string]any{"identityId": "identity-patch-data-" + hex.EncodeToString(h[:]), "userId": u.UserID, "externalUserId": u.ExternalUserID, "email": u.Email, "displayName": u.DisplayName})
+		h := sha256.Sum256([]byte(pocketBaseSubject(u.Issuer, u.CollectionID, u.ExternalUserID)))
+		identities = append(identities, map[string]any{"identityId": "identity-pocketbase-" + hex.EncodeToString(h[:]), "userId": u.UserID, "issuer": u.Issuer, "collectionId": u.CollectionID, "externalUserId": u.ExternalUserID, "email": u.Email, "displayName": u.DisplayName})
 	}
 	now := nowString()
 	ss := []Statement{assertion("SELECT 1 WHERE (? IS NULL AND NOT EXISTS(SELECT 1 FROM patch_data_authority_imports WHERE provider_id='patch-data')) OR EXISTS(SELECT 1 FROM patch_data_authority_imports WHERE provider_id='patch-data' AND generation=?)", c.ExpectedPreviousGeneration, c.ExpectedPreviousGeneration),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM group_memberships gm JOIN patch_data_authority_import_entities e ON e.entity_type='membership' AND e.entity_id=gm.organization_membership_id) AND NOT EXISTS(SELECT 1 FROM actions WHERE (id='patch-data.plant.read' AND (provider_id<>'patch-data' OR code<>'patch-data.plant.read')) OR (provider_id='patch-data' AND code='patch-data.plant.read' AND id<>'patch-data.plant.read')) AND NOT EXISTS(SELECT 1 FROM roles WHERE (id='role-patch-data-plant-reader' AND (organization_id IS NOT NULL OR code<>'role-patch-data-plant-reader')) OR (organization_id IS NULL AND code='role-patch-data-plant-reader' AND id<>'role-patch-data-plant-reader'))"),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM " + stageRowsSQL(stageID, "users") + " j JOIN users u ON u.id=j.value->>'userId' WHERE NOT EXISTS(SELECT 1 FROM patch_data_authority_import_entities e WHERE e.entity_type='user' AND e.entity_id=u.id))"),
-		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM " + stageRowsSQL(stageID, "identities") + " j JOIN user_identities i ON (i.provider='patch-data' AND i.external_user_id=j.value->>'externalUserId') OR i.id=j.value->>'identityId' WHERE i.provider<>'patch-data' OR i.external_user_id<>j.value->>'externalUserId' OR i.user_id<>j.value->>'userId')"),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM " + stageRowsSQL(stageID, "identities") + " j JOIN user_identities i ON (i.provider='pocketbase' AND i.issuer=j.value->>'issuer' AND i.collection_id=j.value->>'collectionId' AND i.external_user_id=j.value->>'externalUserId') OR i.id=j.value->>'identityId' WHERE i.provider<>'pocketbase' OR i.issuer<>j.value->>'issuer' OR i.collection_id<>j.value->>'collectionId' OR i.external_user_id<>j.value->>'externalUserId' OR i.user_id<>j.value->>'userId')"),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM " + stageRowsSQL(stageID, "organizations") + " j JOIN organizations o ON o.id=j.value->>'organizationId' WHERE o.business_no IS NOT NULL OR NOT EXISTS(SELECT 1 FROM patch_data_authority_import_entities e WHERE e.entity_type='organization' AND e.entity_id=o.id))"),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM " + stageRowsSQL(stageID, "memberships") + " j JOIN organization_memberships m ON m.id=j.value->>'membershipId' OR (m.organization_id=j.value->>'organizationId' AND m.user_id=j.value->>'userId') WHERE NOT EXISTS(SELECT 1 FROM patch_data_authority_import_entities e WHERE e.entity_type='membership' AND e.entity_id=m.id))"),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM " + stageRowsSQL(stageID, "plantBindings") + " j JOIN role_bindings b ON b.id=j.value->>'bindingId' WHERE NOT EXISTS(SELECT 1 FROM patch_data_authority_import_entities e WHERE e.entity_type='plant_binding' AND e.entity_id=b.id))"),
@@ -140,7 +142,7 @@ func (s *Store) ImportPatchDataAuthority(ctx context.Context, c PatchDataAuthori
 		{SQL: "INSERT INTO roles(id,organization_id,code,name,created_at,updated_at) VALUES('role-patch-data-plant-reader',NULL,'role-patch-data-plant-reader','Patch Data plant reader',?,?) ON CONFLICT(id) DO NOTHING", Args: []any{now, now}},
 		{SQL: "INSERT INTO role_actions(role_id,action_id) VALUES('role-patch-data-plant-reader','patch-data.plant.read') ON CONFLICT DO NOTHING"},
 		{SQL: "INSERT INTO users(id,email,display_name,active,created_at) SELECT value->>'userId',value->>'email',value->>'displayName',value->>'active',? FROM " + stageRowsSQL(stageID, "users") + " WHERE 1 ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,active=excluded.active", Args: []any{now}},
-		{SQL: "INSERT INTO user_identities(id,user_id,provider,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) SELECT value->>'identityId',value->>'userId','patch-data',value->>'externalUserId',value->>'email',value->>'displayName',?,?,? FROM " + stageRowsSQL(stageID, "identities") + " WHERE 1 ON CONFLICT(id) DO UPDATE SET email_snapshot=excluded.email_snapshot,display_name_snapshot=excluded.display_name_snapshot,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at", Args: []any{now, now, now}},
+		{SQL: "INSERT INTO user_identities(id,user_id,provider,issuer,collection_id,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) SELECT value->>'identityId',value->>'userId','pocketbase',value->>'issuer',value->>'collectionId',value->>'externalUserId',value->>'email',value->>'displayName',?,?,? FROM " + stageRowsSQL(stageID, "identities") + " WHERE 1 ON CONFLICT(id) DO UPDATE SET email_snapshot=excluded.email_snapshot,display_name_snapshot=excluded.display_name_snapshot,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at", Args: []any{now, now, now}},
 		{SQL: "INSERT INTO organizations(id,name,inactivated_at,created_at,updated_at) SELECT value->>'organizationId',value->>'name',CASE WHEN value->>'active'=1 THEN NULL ELSE ? END,?,? FROM " + stageRowsSQL(stageID, "organizations") + " WHERE 1 ON CONFLICT(id) DO UPDATE SET name=excluded.name,inactivated_at=excluded.inactivated_at,updated_at=excluded.updated_at", Args: []any{now, now, now}},
 		{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) SELECT value->>'membershipId',value->>'organizationId',value->>'userId',value->>'role',value->>'status',?,? FROM " + stageRowsSQL(stageID, "memberships"), Args: []any{now, now}},
 		{SQL: "INSERT INTO organization_hierarchy_edges(source_provider,parent_organization_id,child_organization_id,source_generation,created_at) SELECT 'patch-data',value->>'parentOrganizationId',value->>'childOrganizationId',?,? FROM " + stageRowsSQL(stageID, "hierarchyEdges"), Args: []any{c.Generation, now}},

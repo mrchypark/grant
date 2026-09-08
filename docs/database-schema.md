@@ -34,11 +34,11 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. 런타임 provider는 `rauthy` 또는 `patch-data`이며, `(provider, external_user_id)`는 unique index로 관리한다. Patch Data materialization은 이 provider-qualified key로만 새 local user를 만들며 email이나 bare external id로 기존 user를 연결하지 않는다. 최초 master-authorized external-owner bootstrap만 Patch Data `organizations` relation에서 선택 조직 하나를 검증해 같은 트랜잭션에서 owner membership/binding과 서버 설정 고정 exposure application을 만든다. 정상 요청의 membership과 권한은 Grant local row만 권위다.
+외부 인증 공급자와 내부 사용자 매핑. unique key는 `(provider, issuer, collection_id, external_user_id)`다. PocketBase는 `provider=pocketbase`, 설정된 canonical origin인 `issuer`, auth-refresh로 검증한 `collection_id`와 raw record ID를 모두 사용한다. Rauthy는 기존 subject 의미를 유지하고 issuer/collection은 빈 문자열이다. CHECK 제약은 PocketBase의 두 namespace 값이 모두 있어야 하고 다른 provider에서는 모두 비어 있어야 함을 보장한다. 같은 raw ID가 다른 issuer나 collection에 있어도 별도 사용자이며 이메일로 자동 연결하지 않는다. 명시적 master external-owner bootstrap만 선택 조직의 owner membership/binding과 고정 application을 원자 생성한다. 인증 응답의 organizations relation은 사용하지 않는다. 정상 소속·권한의 권위는 Grant local row다.
 
 ### `auth_identity_cache`
 
-외부 토큰 introspection 캐시. Rauthy bearer token 확인 결과와 `client_id`를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다. Patch Data는 이 cache를 사용하지 않고 매 요청 auth-refresh한다. 과거처럼 client 정보가 없는 cache row는 application authz에 사용하지 않는다.
+외부 토큰 introspection 캐시. Rauthy bearer token 확인 결과와 `client_id`를 저장하며, `token_hash`가 PK이고 `expires_at` 기준으로 만료된다. PocketBase는 이 cache를 사용하지 않고 매 요청 auth-refresh한다. 과거처럼 client 정보가 없는 cache row는 application authz에 사용하지 않는다.
 
 ### `parties`
 
@@ -250,3 +250,5 @@ all restored table digests match. Interrupted staging or activation can retry th
 admission; it cannot select another snapshot or target identity. Existing source data
 and object-store prefixes are preserved. See [backup-restore.md](backup-restore.md)
 for the preparatory command and the distinction from offline single-voter restore.
+
+PocketBase identity 분리로 `user_identities.issuer`, `collection_id`와 4-part unique key가 추가됐다. V1 authority import의 `users`는 `issuer`, `collectionId`를 필수로 전달하며 canonical user digest frame에도 포함한다. 내부 `userId` 및 membership/binding 참조는 바꾸지 않는다. 인증을 통해 생성한 identity와 import identity는 이 namespace가 정확히 같을 때만 같은 사용자를 가리킨다. 기존 `(patch-data, raw ID)`를 자동 재연결하지 않으며 기존 DB/backup은 schema checksum 변경으로 거부한다. 버전 alias나 자동 마이그레이션은 없고 실제 데이터 삭제는 수행하지 않았다.

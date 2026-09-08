@@ -14,7 +14,7 @@ func (s *Service) AuthenticateRequestForInactiveOrganization(ctx context.Context
 	if err != nil {
 		return AuthenticatedPrincipal{}, err
 	}
-	if i.Provider == "patch-data" {
+	if i.Provider == "pocketbase" {
 		c = ReadStrong
 	}
 	u, err := s.localIdentity(ctx, i, c)

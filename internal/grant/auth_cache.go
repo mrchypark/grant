@@ -51,7 +51,7 @@ func (s *Service) cacheIdentity(key string, v cachedIdentity) {
 }
 func (s *Service) resolveExternalIdentity(ctx context.Context, authorization string, c ReadConsistency) (ExternalIdentity, error) {
 	if s.AuthProviderMode() != "rauthy" || s.store == nil {
-		return s.externalIdentity(ctx, authorization, "")
+		return s.externalIdentity(ctx, authorization)
 	}
 	token, bearerErr := rauthyBearer(authorization)
 	if bearerErr != nil {
@@ -77,7 +77,7 @@ func (s *Service) resolveExternalIdentity(ctx context.Context, authorization str
 			return i, nil
 		}
 	}
-	identity, err := s.externalIdentity(ctx, authorization, "")
+	identity, err := s.externalIdentity(ctx, authorization)
 	if err != nil {
 		return ExternalIdentity{}, err
 	}

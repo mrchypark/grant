@@ -17,7 +17,7 @@ func TestAuthorityImportMoreThan64EntitiesAtomic(t *testing.T) {
 	c := PatchDataAuthorityImport{ManifestVersion: "grant.patch-data-authority.v1", Generation: "g1", LedgerDigest: strings.Repeat("a", 64), Organizations: []PatchDataImportedOrganization{{OrganizationID: "org", Name: "Org", Active: true}}}
 	for i := 0; i < 100; i++ {
 		id := fmt.Sprintf("u%03d", i)
-		c.Users = append(c.Users, PatchDataImportedUser{UserID: id, ExternalUserID: id, DisplayName: id, Active: true})
+		c.Users = append(c.Users, PatchDataImportedUser{Issuer: "http://127.0.0.1:18091", CollectionID: "_pb_users_auth_", UserID: id, ExternalUserID: id, DisplayName: id, Active: true})
 		c.Memberships = append(c.Memberships, PatchDataImportedMembership{MembershipID: id, OrganizationID: "org", UserID: id, Role: "member", Status: "active"})
 	}
 	c.ManifestDigest = PatchDataManifestDigest(c)
@@ -35,7 +35,7 @@ func TestAuthorityImportMoreThan64EntitiesAtomic(t *testing.T) {
 	g := c.Generation
 	c.Generation = "g2"
 	c.ExpectedPreviousGeneration = &g
-	c.Users = append([]PatchDataImportedUser{{UserID: "native", ExternalUserID: "native", DisplayName: "Overwrite", Active: true}}, c.Users...)
+	c.Users = append([]PatchDataImportedUser{{Issuer: "http://127.0.0.1:18091", CollectionID: "_pb_users_auth_", UserID: "native", ExternalUserID: "native", DisplayName: "Overwrite", Active: true}}, c.Users...)
 	c.ManifestDigest = PatchDataManifestDigest(c)
 	if _, e = s.ImportPatchDataAuthority(ctx, c); e == nil {
 		t.Fatal("native collision must roll back")
@@ -57,7 +57,7 @@ func TestStagingRetryImmutabilityAndReplayDrift(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer s.Close()
-	c := PatchDataAuthorityImport{ManifestVersion: "grant.patch-data-authority.v1", Generation: "null", LedgerDigest: strings.Repeat("a", 64), Users: []PatchDataImportedUser{{UserID: "user", ExternalUserID: "subject", DisplayName: "User", Active: true}}}
+	c := PatchDataAuthorityImport{ManifestVersion: "grant.patch-data-authority.v1", Generation: "null", LedgerDigest: strings.Repeat("a", 64), Users: []PatchDataImportedUser{{Issuer: "http://127.0.0.1:18091", CollectionID: "_pb_users_auth_", UserID: "user", ExternalUserID: "subject", DisplayName: "User", Active: true}}}
 	c.ManifestDigest = PatchDataManifestDigest(c)
 	if e = s.stageImport(ctx, "stage", c, nil); e != nil {
 		t.Fatal(e)

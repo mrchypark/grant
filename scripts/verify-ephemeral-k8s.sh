@@ -678,9 +678,9 @@ verify_static() {
   assert_ha_contract "${TMP_DIR}/base.yaml" base
   assert_ha_contract "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_ha_contract "${TMP_DIR}/ied.yaml" ied
-  if ! grep -q 'GRANT_AUTH_PROVIDER: patch-data' "${TMP_DIR}/patch-data.yaml" \
-    || ! grep -q 'GRANT_PATCH_DATA_BASE_URL: http://patch-data.patch.svc.cluster.local:8090' "${TMP_DIR}/patch-data.yaml" \
-    || ! grep -q 'GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
+  if ! grep -q 'GRANT_AUTH_PROVIDER: pocketbase' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_POCKETBASE_BASE_URL: http://patch-auth.patch.svc.cluster.local:8090' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_POCKETBASE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
     fail "Patch Data overlay configuration is incomplete"
   fi
   if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then

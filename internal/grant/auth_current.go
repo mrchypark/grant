@@ -17,8 +17,8 @@ func (s *Service) localIdentity(ctx context.Context, identity ExternalIdentity, 
 	if c == ReadStrong || c == ReadPreferStrong {
 		var u User
 		var err error
-		if identity.Provider == "patch-data" {
-			u, err = s.store.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
+		if identity.Provider == "pocketbase" {
+			u, err = s.store.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
 		} else {
 			u, err = s.store.ResolveOrCreateUserIdentityWithConsistency(ctx, identity.Provider, identity.ExternalUserID, identity.Email, identity.DisplayName, c)
 		}
@@ -27,7 +27,7 @@ func (s *Service) localIdentity(ctx context.Context, identity ExternalIdentity, 
 		}
 		return u, err
 	}
-	u, err := s.store.ResolveExistingUserIdentityWithConsistency(ctx, identity.Provider, identity.ExternalUserID, c)
+	u, err := s.store.resolveScopedIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID}, c)
 	if err != nil {
 		return User{}, err
 	}
@@ -90,7 +90,7 @@ func (s *Service) CurrentUser(ctx context.Context, token, organization string, c
 			return CurrentUserView{}, serviceError(403, fmt.Sprintf("forbidden: rauthy user %s is not an active member of organization %s", identity.ExternalUserID, organization))
 		}
 	}
-	return CurrentUserView{Provider: identity.Provider, ExternalUserID: identity.ExternalUserID, User: user, Organizations: orgs, ActiveOrganizationID: active}, nil
+	return CurrentUserView{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, User: user, Organizations: orgs, ActiveOrganizationID: active}, nil
 }
 func (s *Service) MaterializeCurrentUser(ctx context.Context, token, org string) (MaterializedUserView, error) {
 	if org == "" {
@@ -100,7 +100,7 @@ func (s *Service) MaterializeCurrentUser(ctx context.Context, token, org string)
 	if err != nil {
 		return MaterializedUserView{}, err
 	}
-	user, err := s.store.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
+	user, err := s.store.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
 	if err != nil {
 		return MaterializedUserView{}, serviceError(403, "forbidden: identity materialization failed")
 	}

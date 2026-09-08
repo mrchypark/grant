@@ -9,12 +9,15 @@
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     provider TEXT NOT NULL,
+                    issuer TEXT NOT NULL DEFAULT '',
+                    collection_id TEXT NOT NULL DEFAULT '',
                     external_user_id TEXT NOT NULL,
                     email_snapshot TEXT,
                     display_name_snapshot TEXT,
                     last_seen_at TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    CHECK ((issuer = '' AND collection_id = '' AND provider <> 'pocketbase') OR (issuer <> '' AND collection_id <> '' AND provider = 'pocketbase'))
                 );
                 CREATE TABLE IF NOT EXISTS auth_identity_cache (
                     token_hash TEXT PRIMARY KEY,

@@ -101,7 +101,7 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" {
 			q.bearer, err = bearerToken(r)
 			if err == nil {
-				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || (auth == "inactive" && s.service.AuthProviderMode() == "patch-data"))
+				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || (auth == "inactive" && s.service.AuthProviderMode() == "pocketbase"))
 			}
 			if err != nil {
 				writeError(w, err)
@@ -116,7 +116,7 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 					q.consistency = "strong"
 				}
 				if auth == "inactive" {
-					if s.service.AuthProviderMode() == "patch-data" && q.org != r.PathValue("organizationId") {
+					if s.service.AuthProviderMode() == "pocketbase" && q.org != r.PathValue("organizationId") {
 						writeError(w, failure(403, "forbidden: organization path does not match selected organization"))
 						return
 					}

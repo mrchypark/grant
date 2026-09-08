@@ -158,6 +158,8 @@ type BackupInfo struct {
 }
 
 type CurrentUserView struct {
+	Issuer               string         `json:"issuer,omitempty"`
+	CollectionID         string         `json:"collectionId,omitempty"`
 	Provider             string         `json:"provider"`
 	ExternalUserID       string         `json:"externalUserId"`
 	User                 User           `json:"user"`
@@ -180,8 +182,8 @@ type UserActionDecision struct{ Allowed, RBACAllowed, TrustedApplication bool }
 type AuthenticatedPrincipal struct{ UserID, OrganizationID string }
 type ExternalIdentity struct {
 	Provider, ExternalUserID, ClientID string
+	Issuer, CollectionID               string
 	Email                              *string
 	DisplayName                        string
 	Active                             bool
-	OrganizationID                     *string
 }

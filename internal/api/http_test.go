@@ -12,7 +12,7 @@ import (
 )
 
 func testServer() *Server {
-	return New(grant.NewService(grant.Config{Security: grant.SecurityConfig{MasterKey: "master-secret", AppAuthKey: "app-secret"}, Auth: grant.AuthConfig{ProviderMode: "patch-data"}}, nil), false)
+	return New(grant.NewService(grant.Config{Security: grant.SecurityConfig{MasterKey: "master-secret", AppAuthKey: "app-secret"}, Auth: grant.AuthConfig{ProviderMode: "pocketbase"}}, nil), false)
 }
 func TestCredentialFailures(t *testing.T) {
 	s := testServer()
@@ -88,7 +88,7 @@ func TestLearnerWriteIsUnavailable(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
-func TestProxyUnavailableForPatchData(t *testing.T) {
+func TestProxyUnavailableForPocketBase(t *testing.T) {
 	s := testServer()
 	r := httptest.NewRequest("GET", "/auth/v1/oidc/authorize", nil)
 	w := httptest.NewRecorder()
@@ -225,7 +225,7 @@ func TestMalformedMutationDoesNotAuthenticate(t *testing.T) {
 	hits := 0
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++; w.WriteHeader(500) }))
 	defer up.Close()
-	s := New(grant.NewService(grant.Config{Auth: grant.AuthConfig{ProviderMode: "patch-data", PatchData: &grant.PatchDataConfig{BaseURL: up.URL}}}, nil), false)
+	s := New(grant.NewService(grant.Config{Auth: grant.AuthConfig{ProviderMode: "pocketbase", PocketBase: &grant.PocketBaseConfig{BaseURL: up.URL}}}, nil), false)
 	for _, tc := range []struct {
 		raw  string
 		want int
@@ -244,7 +244,7 @@ func TestMalformedMutationDoesNotAuthenticate(t *testing.T) {
 		t.Fatalf("malformed body performed %d identity requests", hits)
 	}
 }
-func TestInactivePatchDataSelectionBoundary(t *testing.T) {
+func TestInactivePocketBaseSelectionBoundary(t *testing.T) {
 	s := testServer()
 	for _, tc := range []struct {
 		org  string

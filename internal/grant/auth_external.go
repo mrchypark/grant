@@ -4,20 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	whatwg "github.com/nlnwa/whatwg-url/url"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
-	"unicode"
 )
 
-func (s *Service) externalIdentity(ctx context.Context, authorization, bootstrapOrganization string) (ExternalIdentity, error) {
+func (s *Service) externalIdentity(ctx context.Context, authorization string) (ExternalIdentity, error) {
 	if strings.TrimSpace(authorization) == "" {
 		return ExternalIdentity{}, serviceError(401, "unauthorized: missing bearer token")
 	}
-	if s.cfg.Auth.ProviderMode == "patch-data" {
-		return s.patchDataIdentity(ctx, authorization, bootstrapOrganization)
+	if s.cfg.Auth.ProviderMode == "pocketbase" {
+		return s.pocketBaseIdentity(ctx, authorization)
 	}
 	return s.rauthyIdentity(ctx, authorization)
 }
@@ -133,129 +133,122 @@ func ptrValue(value *string) string {
 	return *value
 }
 
-type patchRecord struct {
-	ID, Email, Name string
-	Verified        bool
-	Organizations   []json.RawMessage
+type pocketBaseRecord struct {
+	ID             string `json:"id"`
+	CollectionID   string `json:"collectionId"`
+	CollectionName string `json:"collectionName"`
+	Email          string `json:"email"`
+	Verified       bool   `json:"verified"`
+	Name           string `json:"name"`
+	Username       string `json:"username"`
 }
 
-func (p *patchRecord) UnmarshalJSON(data []byte) error {
+func (p *pocketBaseRecord) UnmarshalJSON(data []byte) error {
+	type record pocketBaseRecord
 	d := json.NewDecoder(bytes.NewReader(data))
-	token, err := d.Token()
-	if err != nil || token != json.Delim('{') {
-		return serviceError(503, "invalid record")
+	t, err := d.Token()
+	if err != nil || t != json.Delim('{') {
+		return serviceError(503, "invalid PocketBase record")
 	}
 	seen := map[string]bool{}
+	fields := map[string]json.RawMessage{}
 	for d.More() {
-		keyToken, err := d.Token()
+		k, err := d.Token()
 		if err != nil {
 			return err
 		}
-		key := keyToken.(string)
-		if key == "name" {
-			key = "displayName"
-		}
+		key := k.(string)
 		var raw json.RawMessage
 		if err = d.Decode(&raw); err != nil {
 			return err
 		}
-		if key == "organizations" {
-			p.Organizations = append(p.Organizations, raw)
-			continue
+		if seen[key] {
+			return serviceError(503, "duplicate PocketBase record field")
 		}
-		switch key {
-		case "id", "email", "verified", "displayName":
-			if key != "displayName" && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-				return serviceError(503, "null required identity field")
-			}
-			if seen[key] {
-				return serviceError(503, "duplicate identity field")
-			}
-			seen[key] = true
-			var target any
-			switch key {
-			case "id":
-				target = &p.ID
-			case "email":
-				target = &p.Email
-			case "verified":
-				target = &p.Verified
-			case "displayName":
-				target = &p.Name
-			}
-			if err = json.Unmarshal(raw, target); err != nil {
-				return err
-			}
-		}
+		seen[key] = true
+		fields[key] = raw
 	}
 	if _, err = d.Token(); err != nil {
 		return err
 	}
-	for _, key := range []string{"id", "email", "verified"} {
-		if !seen[key] {
-			return serviceError(503, "missing identity field")
+	for _, k := range []string{"id", "collectionId", "collectionName"} {
+		if !seen[k] || bytes.Equal(bytes.TrimSpace(fields[k]), []byte("null")) {
+			return serviceError(503, "missing PocketBase identity field")
 		}
 	}
+	var value record
+	if err = json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*p = pocketBaseRecord(value)
 	return nil
 }
-func (s *Service) patchDataIdentity(ctx context.Context, authorization, bootstrapOrg string) (ExternalIdentity, error) {
-	cfg := s.cfg.Auth.PatchData
-	if cfg == nil {
-		return ExternalIdentity{}, serviceError(503, "unavailable: Patch Data is not configured")
+
+func pocketBaseID(value string) bool {
+	if value == "" || len(value) > 255 {
+		return false
 	}
-	req, err := http.NewRequest("POST", strings.TrimRight(cfg.BaseURL, "/")+"/api/collections/users/auth-refresh", nil)
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+func canonicalPocketBaseOrigin(value string) (string, error) {
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", serviceError(400, "invalid PocketBase issuer origin")
+	}
+	parsed, err := whatwg.Parse(value)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(parsed.Href(false), "/"), nil
+}
+func pocketBaseSubject(issuer, collection, id string) string {
+	return "pocketbase:" + issuer + "/" + collection + "/" + id
+}
+func (s *Service) pocketBaseIdentity(ctx context.Context, authorization string) (ExternalIdentity, error) {
+	cfg := s.cfg.Auth.PocketBase
+	if cfg == nil {
+		return ExternalIdentity{}, serviceError(503, "PocketBase is not configured")
+	}
+	issuer, err := canonicalPocketBaseOrigin(cfg.BaseURL)
+	collection := cfg.Collection
+	if collection == "" {
+		collection = "users"
+	}
+	if err != nil || !pocketBaseID(collection) {
+		return ExternalIdentity{}, serviceError(503, "invalid PocketBase configuration")
+	}
+	req, err := http.NewRequest("POST", issuer+"/api/collections/"+collection+"/auth-refresh", nil)
 	if err != nil {
 		return ExternalIdentity{}, err
 	}
 	req.Header.Set("Authorization", authorization)
 	var payload struct {
-		Token  string       `json:"token"`
-		Record *patchRecord `json:"record"`
+		Token  string            `json:"token"`
+		Record *pocketBaseRecord `json:"record"`
 	}
-	if err = s.authJSON(ctx, req, &payload, "Patch Data"); err != nil {
+	if err = s.authJSON(ctx, req, &payload, "PocketBase"); err != nil {
 		return ExternalIdentity{}, err
-	}
-	if strings.TrimSpace(payload.Token) == "" || payload.Record == nil {
-		return ExternalIdentity{}, serviceError(503, "unavailable: Patch Data auth refresh response was invalid")
 	}
 	r := payload.Record
-	if !r.Verified {
-		return ExternalIdentity{}, serviceError(403, "forbidden: Patch Data email is not verified")
+	if strings.TrimSpace(payload.Token) == "" || r == nil || !pocketBaseID(r.ID) || !pocketBaseID(r.CollectionID) || r.CollectionName != collection {
+		return ExternalIdentity{}, serviceError(503, "invalid PocketBase verified identity")
 	}
-	id, err := required("Patch Data user id", r.ID)
-	if err != nil {
-		return ExternalIdentity{}, err
-	}
-	email := strings.ToLower(strings.TrimSpace(r.Email))
-	if email == "" || !strings.Contains(email, "@") {
-		return ExternalIdentity{}, serviceError(401, "unauthorized: invalid email")
+	var email *string
+	if r.Verified && strings.Contains(r.Email, "@") {
+		v := strings.ToLower(strings.TrimSpace(r.Email))
+		email = &v
 	}
 	name := strings.TrimSpace(r.Name)
 	if name == "" {
-		name = "Patch Data User"
+		name = strings.TrimSpace(r.Username)
 	}
-	identity := ExternalIdentity{Provider: "patch-data", ExternalUserID: id, ClientID: cfg.ExposureApplicationID, Email: &email, DisplayName: name, Active: true}
-	if bootstrapOrg != "" {
-		if len(r.Organizations) != 1 {
-			return ExternalIdentity{}, serviceError(503, "unavailable: Patch Data auth refresh response was invalid")
-		}
-		var orgs []string
-		if err = json.Unmarshal(r.Organizations[0], &orgs); err != nil || len(orgs) > 100 {
-			return ExternalIdentity{}, serviceError(503, "unavailable: Patch Data auth refresh response was invalid")
-		}
-		found := false
-		for _, org := range orgs {
-			if org == "" || len(org) > 255 || org != strings.TrimSpace(org) || strings.IndexFunc(org, unicode.IsControl) >= 0 {
-				return ExternalIdentity{}, serviceError(503, "unavailable: Patch Data auth refresh response was invalid")
-			}
-			if org == bootstrapOrg {
-				found = true
-			}
-		}
-		if !found {
-			return ExternalIdentity{}, serviceError(403, "forbidden: Patch Data user is not a member of the requested organization")
-		}
-		identity.OrganizationID = &bootstrapOrg
+	if name == "" {
+		name = r.ID
 	}
-	return identity, nil
+	return ExternalIdentity{Provider: "pocketbase", Issuer: issuer, CollectionID: r.CollectionID, ExternalUserID: r.ID, ClientID: cfg.ApplicationID, Email: email, DisplayName: name, Active: true}, nil
 }

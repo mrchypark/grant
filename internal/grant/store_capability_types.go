@@ -27,6 +27,7 @@ type HttpRequestPolicy struct {
 	Body           HttpRequestBodyMode `json:"body"`
 	MaxBytes       uint64              `json:"maxBytes"`
 	ForwardHeaders []string            `json:"forwardHeaders"`
+	Authorization  string              `json:"authorization,omitempty"`
 }
 type HttpResponsePolicy struct {
 	MaxBytes       uint64             `json:"maxBytes"`

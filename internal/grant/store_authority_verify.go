@@ -22,7 +22,7 @@ func (s *Store) verifyAuthorityImport(ctx context.Context, c PatchDataAuthorityI
 		return e
 	}
 	for _, u := range c.Users {
-		if e := check("SELECT 1 FROM users u JOIN user_identities ui ON ui.user_id=u.id WHERE u.id=? AND u.email IS ? AND u.display_name=? AND u.active=? AND ui.provider='patch-data' AND ui.external_user_id=? AND EXISTS(SELECT 1 FROM patch_data_authority_import_entities e WHERE e.entity_type='user' AND e.entity_id=u.id AND e.source_generation=?)", u.UserID, u.Email, u.DisplayName, u.Active, u.ExternalUserID, c.Generation); e != nil {
+		if e := check("SELECT 1 FROM users u JOIN user_identities ui ON ui.user_id=u.id WHERE u.id=? AND u.email IS ? AND u.display_name=? AND u.active=? AND ui.provider='pocketbase' AND ui.issuer=? AND ui.collection_id=? AND ui.external_user_id=? AND EXISTS(SELECT 1 FROM patch_data_authority_import_entities e WHERE e.entity_type='user' AND e.entity_id=u.id AND e.source_generation=?)", u.UserID, u.Email, u.DisplayName, u.Active, u.Issuer, u.CollectionID, u.ExternalUserID, c.Generation); e != nil {
 			return e
 		}
 	}

@@ -34,7 +34,7 @@ func PatchDataManifestDigest(c PatchDataAuthorityImport) string {
 	}
 	f(c.ManifestVersion, c.Generation, c.LedgerDigest)
 	for _, u := range c.Users {
-		f("user", u.UserID, u.ExternalUserID)
+		f("user", u.UserID, u.Issuer, u.CollectionID, u.ExternalUserID)
 		if u.Email == nil {
 			h.Write([]byte{0})
 		} else {

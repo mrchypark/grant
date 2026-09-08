@@ -16,9 +16,9 @@ patches:
       metadata:
         name: grant-config
       data:
-        GRANT_AUTH_PROVIDER: patch-data
-        GRANT_PATCH_DATA_BASE_URL: http://patch-data.patch.svc.cluster.local:8090
-        GRANT_PATCH_DATA_EXPOSURE_APPLICATION_ID: patch-data-exposure
+        GRANT_AUTH_PROVIDER: pocketbase
+        GRANT_POCKETBASE_BASE_URL: http://patch-auth.patch.svc.cluster.local:8090
+        GRANT_POCKETBASE_APPLICATION_ID: patch-data-exposure
         GRANT_RAUTHY_BASE_URL: null
         GRANT_RAUTHY_INTROSPECT_PATH: null
         GRANT_RAUTHY_USERINFO_PATH: null

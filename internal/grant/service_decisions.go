@@ -24,13 +24,13 @@ func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, to
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is inactive")
 	}
 	var a Application
-	if s.AuthProviderMode() == "patch-data" {
-		a, err = s.store.GetApplicationWithConsistency(ctx, s.cfg.Auth.PatchData.ExposureApplicationID, ReadStrong)
+	if s.AuthProviderMode() == "pocketbase" {
+		a, err = s.store.GetApplicationWithConsistency(ctx, s.cfg.Auth.PocketBase.ApplicationID, ReadStrong)
 		if err != nil {
-			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured Patch Data exposure application is not ready")
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured PocketBase application is not ready")
 		}
 		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
-			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured Patch Data exposure application is not active for this organization")
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured PocketBase application is not active for this organization")
 		}
 	} else {
 		rows, e := serviceRows[Application](ctx, s, ReadStrong, "SELECT * FROM applications WHERE rauthy_client_id=? AND organization_id=? AND active=1 AND provisioning_status='ready'", identity.ClientID, org)
@@ -42,7 +42,11 @@ func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, to
 		}
 		a = rows[0]
 	}
-	return applicationAuthorizationContext{u.ID, org, a.ID, identity.ExternalUserID, identity.ClientID}, nil
+	subject := identity.ExternalUserID
+	if identity.Provider == "pocketbase" {
+		subject = pocketBaseSubject(identity.Issuer, identity.CollectionID, identity.ExternalUserID)
+	}
+	return applicationAuthorizationContext{u.ID, org, a.ID, subject, identity.ClientID}, nil
 }
 func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org string, checks []ApplicationAuthorizationCheck) ([]AuthorizationDecision, error) {
 	c, err := s.resolveApplicationAuthorizationContext(ctx, token, org)

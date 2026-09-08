@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-func TestPatchDataOpaqueRefreshBoundary(t *testing.T) {
+func TestPocketBaseOpaqueRefreshBoundary(t *testing.T) {
 	var calls atomic.Int32
-	payload := `{"token":"refreshed","record":{"id":"external","email":"USER@EXAMPLE.TEST","verified":true,"name":"Name","organizations":{"untrusted":"opaque"}}}`
+	payload := `{"token":"refreshed","record":{"id":"external","collectionId":"_pb_users_auth_","collectionName":"users","email":"USER@EXAMPLE.TEST","verified":true,"name":"Name","organizations":{"untrusted":"opaque"}}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		if r.URL.Path != "/api/collections/users/auth-refresh" || r.Method != "POST" || r.Header.Get("Authorization") != "opaque token" {
@@ -23,25 +23,25 @@ func TestPatchDataOpaqueRefreshBoundary(t *testing.T) {
 		fmt.Fprint(w, payload)
 	}))
 	defer upstream.Close()
-	s := NewService(Config{Auth: AuthConfig{ProviderMode: "patch-data", PatchData: &PatchDataConfig{BaseURL: upstream.URL, ExposureApplicationID: "app"}}}, nil)
+	s := NewService(Config{Auth: AuthConfig{ProviderMode: "pocketbase", PocketBase: &PocketBaseConfig{BaseURL: upstream.URL, ApplicationID: "app"}}}, nil)
 	for i := 0; i < 2; i++ {
-		identity, err := s.externalIdentity(context.Background(), "opaque token", "")
-		if err != nil || identity.ExternalUserID != "external" || ptrValue(identity.Email) != "user@example.test" || identity.OrganizationID != nil {
+		identity, err := s.externalIdentity(context.Background(), "opaque token")
+		if err != nil || identity.ExternalUserID != "external" || ptrValue(identity.Email) != "user@example.test" {
 			t.Fatalf("identity=%+v err=%v", identity, err)
 		}
 	}
 	if calls.Load() != 2 {
-		t.Fatal("Patch Data token was cached")
+		t.Fatal("PocketBase token was cached")
 	}
-	if _, err := s.externalIdentity(context.Background(), "opaque token", "org"); err == nil {
-		t.Fatal("bootstrap accepted malformed organizations")
+	if _, err := s.externalIdentity(context.Background(), "opaque token"); err != nil {
+		t.Fatal("authentication depended on domain organization claims", err)
 	}
 	payload = `{"token":"ok","record":{"id":"a","id":"b","email":"x@y","verified":true}}`
-	if _, err := s.externalIdentity(context.Background(), "opaque token", ""); err == nil || ErrorStatus(err) != 503 {
+	if _, err := s.externalIdentity(context.Background(), "opaque token"); err == nil || ErrorStatus(err) != 503 {
 		t.Fatal("duplicate identity accepted", err)
 	}
 	payload = strings.Repeat("x", 65537)
-	if _, err := s.externalIdentity(context.Background(), "opaque token", ""); err == nil || ErrorStatus(err) != 503 {
+	if _, err := s.externalIdentity(context.Background(), "opaque token"); err == nil || ErrorStatus(err) != 503 {
 		t.Fatal("oversized response accepted", err)
 	}
 }
@@ -72,19 +72,19 @@ func TestRauthyIntrospectionAndUserinfoBinding(t *testing.T) {
 	defer upstream.Close()
 	cfg := Config{Auth: AuthConfig{ProviderMode: "rauthy", Rauthy: RauthyConfig{BaseURL: upstream.URL, IntrospectPath: "/introspect", UserinfoPath: "/userinfo", ClientID: "client", ClientSecret: "secret", CacheTTLSeconds: 10}}}
 	s := NewService(cfg, nil)
-	i, err := s.externalIdentity(context.Background(), "Bearer raw", "")
+	i, err := s.externalIdentity(context.Background(), "Bearer raw")
 	if err != nil || i.Email != nil || i.ClientID != "app" {
 		t.Fatal(i, err)
 	}
-	if _, err = s.externalIdentity(context.Background(), "bearer raw", ""); err != nil || calls.Load() != 2 {
+	if _, err = s.externalIdentity(context.Background(), "bearer raw"); err != nil || calls.Load() != 2 {
 		t.Fatal("bounded cache failed", err, calls.Load())
 	}
 	subject = "other"
 	s = NewService(cfg, nil)
-	if _, err = s.externalIdentity(context.Background(), "Bearer raw", ""); err == nil || ErrorStatus(err) != 401 {
+	if _, err = s.externalIdentity(context.Background(), "Bearer raw"); err == nil || ErrorStatus(err) != 401 {
 		t.Fatal("mismatched userinfo accepted", err)
 	}
-	if _, err = s.externalIdentity(context.Background(), "raw", ""); err == nil {
+	if _, err = s.externalIdentity(context.Background(), "raw"); err == nil {
 		t.Fatal("Rauthy accepted missing bearer scheme")
 	}
 }

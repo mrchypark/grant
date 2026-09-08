@@ -7,6 +7,8 @@ type PatchDataHierarchyEdge struct {
 type PatchDataImportedUser struct {
 	UserID         string  `json:"userId"`
 	ExternalUserID string  `json:"externalUserId"`
+	Issuer         string  `json:"issuer"`
+	CollectionID   string  `json:"collectionId"`
 	Email          *string `json:"email"`
 	DisplayName    string  `json:"displayName"`
 	Active         bool    `json:"active"`
