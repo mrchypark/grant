@@ -1,13 +1,13 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 dockerfile=${1:-"$root/Dockerfile"}
 
 verify() {
   file=$1
-  grep -F -- '--bin grant-patch-data-authority-snapshot' "$file" >/dev/null &&
-  grep -F -- '/workspace/target/release/grant-patch-data-authority-snapshot' "$file" >/dev/null &&
+  grep -F -- './cmd/grant-patch-data-authority-snapshot' "$file" >/dev/null &&
+  grep -F -- '/workspace/grant-patch-data-authority-snapshot' "$file" >/dev/null &&
   grep -F -- '/usr/local/bin/grant-patch-data-authority-snapshot' "$file" >/dev/null &&
   grep -F -- 'ENTRYPOINT ["/usr/local/bin/grant"]' "$file" >/dev/null
 }

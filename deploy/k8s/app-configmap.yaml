@@ -8,10 +8,8 @@ data:
   GRANT_RAUTHY_INTROSPECT_PATH: "/auth/v1/oidc/introspect"
   GRANT_RAUTHY_USERINFO_PATH: "/auth/v1/oidc/userinfo"
   GRANT_RAUTHY_CACHE_TTL_SECONDS: "45"
-  HQL_NODES: |
-    1 grant-voter-0.grant-headless:8100 grant-voter-0.grant-headless:8200
-    2 grant-voter-1.grant-headless:8100 grant-voter-1.grant-headless:8200
-    3 grant-voter-2.grant-headless:8100 grant-voter-2.grant-headless:8200
-  HQL_LISTEN_ADDR_API: "0.0.0.0"
-  HQL_LISTEN_ADDR_RAFT: "0.0.0.0"
-  HQL_DATA_DIR: "/var/lib/grant/hiqlite"
+  GRANT_CLUSTER_ID: "grant"
+  GRANT_PEER_ADDR: "0.0.0.0:8100"
+  GRANT_DATA_DIR: "/var/lib/grant/rhiza"
+  GRANT_BACKUP_DIR: "/var/lib/grant/backups"
+  RHIZA_OBJSTORE_DURABILITY: "before-ack"

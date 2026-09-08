@@ -250,7 +250,7 @@ run_materialize() {
     AWS_SECRET_ACCESS_KEY=${SECRET_SENTINEL} \
     MOCK_CASE=${mock_case} \
     "${ROOT_DIR}/scripts/materialize-s3-restore.sh" \
-    grant test-bucket source-key source-version \
+    rauthy test-bucket source-key source-version \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     recovery-test "${RETAIN_UNTIL}" \
     arn:aws:iam::111111111111:role/materializer "${TMP_DIR}/materialized.tsv"
@@ -290,7 +290,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   POLICY_SOURCE_SHA=$(shasum -a 256 "${TMP_DIR}/policy-source.enc" | awk '{print $1}')
 fi
-POLICY_TARGET_KEY="restore/grant/recovery-test/${POLICY_SOURCE_SHA}.enc"
+POLICY_TARGET_KEY="restore/rauthy/recovery-test/${POLICY_SOURCE_SHA}.enc"
 POLICY_TARGET_ARN="arn:aws:s3:::test-bucket/${POLICY_TARGET_KEY}"
 POLICY_WRITER='arn:aws:iam::111111111111:role/materializer'
 
@@ -305,7 +305,7 @@ run_policy_materialize() {
     MOCK_STATE_DIR=${policy_state_dir} \
     MOCK_SOURCE_CONTENT=${POLICY_SOURCE_CONTENT} \
     "${ROOT_DIR}/scripts/materialize-s3-restore.sh" \
-    grant test-bucket source-key source-version \
+    rauthy test-bucket source-key source-version \
     "${POLICY_SOURCE_SHA}" recovery-test "${RETAIN_UNTIL}" \
     "${POLICY_WRITER}" "${policy_state_dir}/materialized.tsv"
 }
@@ -342,14 +342,14 @@ for policy_case in policy-single-object policy-array policy-missing policy-null 
   jq -e --arg resource "${POLICY_TARGET_ARN}" --arg writer "${POLICY_WRITER}" '
     .Version == "2012-10-17" and (.Statement | type) == "array" and
     .Statement[-2] == {
-      Sid:"GrantRecoveryImmutable-grant-recovery-test",
+      Sid:"GrantRecoveryImmutable-rauthy-recovery-test",
       Effect:"Deny",
       Principal:"*",
       Action:["s3:PutObject","s3:DeleteObject","s3:DeleteObjectVersion"],
       Resource:$resource
     } and
     .Statement[-1] == {
-      Sid:"GrantRecoveryWriterReadDeny-grant-recovery-test",
+      Sid:"GrantRecoveryWriterReadDeny-rauthy-recovery-test",
       Effect:"Deny",
       Principal:{AWS:$writer},
       Action:["s3:GetObject","s3:GetObjectVersion"],

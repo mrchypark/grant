@@ -37,6 +37,11 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+if [ "${DRY_RUN}" -eq 0 ]; then
+  echo 'Grant Hiqlite full-cluster recovery is retired in this native Rhiza checkout; use the preserved legacy checkout for legacy Grant recovery. For native recovery see docs/backup-restore.md.' >&2
+  exit 2
+fi
+
 [ -n "${RECORD}" ] && [ -r "${RECORD}" ] || { echo "readable --record is required" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "missing command: jq" >&2; exit 1; }
 command -v mktemp >/dev/null 2>&1 || { echo "missing command: mktemp" >&2; exit 1; }

@@ -1061,8 +1061,27 @@ verify_live() {
   echo "Ephemeral Kubernetes runtime verified"
 }
 
+verify_native_static() {
+  need kubectl
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-native-kustomize.XXXXXX")
+  sh "${ROOT_DIR}/scripts/verify-rhiza-deployment.sh"
+  for overlay in ephemeral production ied; do
+    kubectl kustomize "${ROOT_DIR}/deploy/overlays/${overlay}" >"${TMP_DIR}/${overlay}.yaml"
+    assert_no_pvc_references "${TMP_DIR}/${overlay}.yaml" "${overlay}"
+    assert_ha_contract "${TMP_DIR}/${overlay}.yaml" "${overlay}"
+  done
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/patch-data" >"${TMP_DIR}/patch-data.yaml"
+  if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then fail "Patch Data native overlay retains Rauthy configuration"; fi
+  grep -q 'name: grant-rhiza-storage' "${TMP_DIR}/patch-data.yaml" || fail "Patch Data native storage is not configured"
+  sh "${ROOT_DIR}/scripts/verify-runtime-tools.sh"
+  bash "${ROOT_DIR}/scripts/verify-vind-bootstrap.sh"
+  sh "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
+  echo "Native Grant and preserved Rauthy deployment profiles verified"
+}
+
 case "${MODE}" in
-  static) verify_static ;;
+  static) verify_native_static ;;
+  legacy-static) verify_static ;;
   live) verify_live ;;
   *) fail "usage: $0 [static|live]" ;;
 esac

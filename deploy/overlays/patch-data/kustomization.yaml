@@ -49,6 +49,8 @@ patches:
                 envFrom:
                   - configMapRef:
                       name: grant-config
+                  - secretRef:
+                      name: grant-rhiza-storage
                 env:
                   - name: GRANT_RAUTHY_CLIENT_ID
                     $patch: delete
@@ -64,26 +66,6 @@ patches:
                       secretKeyRef:
                         name: grant-secrets
                         key: GRANT_APP_AUTH_KEY
-                  - name: HQL_SECRET_RAFT
-                    valueFrom:
-                      secretKeyRef:
-                        name: grant-secrets
-                        key: HQL_SECRET_RAFT
-                  - name: HQL_SECRET_API
-                    valueFrom:
-                      secretKeyRef:
-                        name: grant-secrets
-                        key: HQL_SECRET_API
-                  - name: ENC_KEYS
-                    valueFrom:
-                      secretKeyRef:
-                        name: grant-secrets
-                        key: ENC_KEYS
-                  - name: ENC_KEY_ACTIVE
-                    valueFrom:
-                      secretKeyRef:
-                        name: grant-secrets
-                        key: ENC_KEY_ACTIVE
   - target:
       kind: ConfigMap
       name: rauthy-bootstrap-renderer

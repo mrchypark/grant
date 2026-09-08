@@ -518,7 +518,7 @@ bearer와 application consent가 필요한 호출만 application-authz를 사용
 
 ## 14. 평가 구현
 
-현재 `crates/infra/src/database/authz.rs`의 active user/provider/org/membership과 exact binding SQL을 유지한다. field-aware check는 boolean 집계 전에 matching `role_id + action_id`를 보존한다.
+현재 [crates/infra/src/database/authz.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/authz.rs)의 active user/provider/org/membership과 exact binding SQL을 유지한다. field-aware check는 boolean 집계 전에 matching `role_id + action_id`를 보존한다.
 
 field view lookup key:
 
@@ -651,22 +651,22 @@ enforcement를 끄고 field-unaware serialization으로 돌아가면 안 된다.
 
 ### Domain/DB
 
-- `crates/domain/src/lib.rs`: `FieldViewMode`, pointer normalization과 공통 limit
-- `crates/infra/src/database/schema.rs`: policy/audit-outbox table, index, readiness
-- `crates/infra/src/database/rows.rs`: positive row conversion과 unknown-mode error
-- `crates/infra/src/database/roles.rs`: admin replace/list, audit-outbox atomic insert와 cleanup
-- `crates/infra/src/database/catalog.rs`: provider action cleanup
-- `crates/infra/src/database/authz.rs`: matching role과 bulk field view 조회
-- `crates/infra/src/database/mod.rs`: field-aware check/result 구조와 candidate role limit
+- [crates/domain/src/lib.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/domain/src/lib.rs): `FieldViewMode`, pointer normalization과 공통 limit
+- [crates/infra/src/database/schema.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/schema.rs): policy/audit-outbox table, index, readiness
+- [crates/infra/src/database/rows.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/rows.rs): positive row conversion과 unknown-mode error
+- [crates/infra/src/database/roles.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/roles.rs): admin replace/list, audit-outbox atomic insert와 cleanup
+- [crates/infra/src/database/catalog.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/catalog.rs): provider action cleanup
+- [crates/infra/src/database/authz.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/authz.rs): matching role과 bulk field view 조회
+- [crates/infra/src/database/mod.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/database/mod.rs): field-aware check/result 구조와 candidate role limit
 
 ### Service/API
 
-- `crates/infra/src/service.rs`: 범용 scope/pointer validation, role merge, idempotent admin auth, strong read
-- `crates/api/src/dto.rs`: optional `view`, response `fieldViews`, admin DTO
-- `crates/api/src/mappers.rs`: RFC 6901 normalization과 mapping
-- `crates/api/src/authz.rs`: trusted/application check와 batch만 확장
-- `crates/api/src/handlers.rs`: admin GET/PUT
-- `crates/api/src/lib.rs`: voter write와 learner read route
+- [crates/infra/src/service.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/infra/src/service.rs): 범용 scope/pointer validation, role merge, idempotent admin auth, strong read
+- [crates/api/src/dto.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/dto.rs): optional `view`, response `fieldViews`, admin DTO
+- [crates/api/src/mappers.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/mappers.rs): RFC 6901 normalization과 mapping
+- [crates/api/src/authz.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/authz.rs): trusted/application check와 batch만 확장
+- [crates/api/src/handlers.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/handlers.rs): admin GET/PUT
+- [crates/api/src/lib.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/lib.rs): voter write와 learner read route
 
 provider-specific tuple 관계와 fixed-envelope validation은 Grant 코어/registry가 아니라 소비자 codebase의 adapter 경계에 격리한다.
 

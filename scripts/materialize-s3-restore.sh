@@ -14,6 +14,10 @@ if [ "$#" -ne 9 ]; then
 fi
 
 WORKLOAD=$1
+if [ "${WORKLOAD}" = grant ] && [ "${DRY_RUN}" -eq 0 ]; then
+  echo 'Grant Hiqlite S3 materialization is retired in this native Rhiza checkout; use the preserved legacy checkout for legacy Grant recovery. Rauthy materialization remains supported.' >&2
+  exit 2
+fi
 BUCKET=$2
 SOURCE_KEY=$3
 SOURCE_VERSION=$4

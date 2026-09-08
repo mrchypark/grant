@@ -1,5 +1,6 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
+namespace: grant
 resources:
   - ../../k8s
+  - rhiza-object-store.yaml

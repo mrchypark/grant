@@ -182,7 +182,7 @@ importer는 absent row를 만들거나 `patch_data_authority_import_entities`가
 producer는 digest encoding을 재구현하지 않고 repository-native tool을 사용한다. 입력 JSON은 API manifest와 같은 strict shape이며 계산 전 `manifestDigest`는 생략하거나 임의 값이어도 된다. 출력된 lowercase hex를 최종 `manifestDigest`에 넣은 뒤 같은 JSON을 import API로 전송한다.
 
 ```sh
-cargo run --quiet -p grant --bin grant-patch-data-manifest-digest < manifest.json
+go run ./cmd/grant-patch-data-manifest-digest < manifest.json
 ```
 
 The published Grant runtime image also contains the reviewed authority snapshot

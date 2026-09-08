@@ -19,6 +19,11 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+if [ "${DRY_RUN}" -eq 0 ]; then
+  echo 'Grant Hiqlite recovery-pair creation is retired in this native Rhiza checkout; use the preserved legacy checkout for legacy Grant recovery. Rauthy-only materialization remains supported.' >&2
+  exit 2
+fi
+
 require_var() {
   eval "value=\${$1:-}"
   [ -n "${value}" ] || { echo "required environment variable is missing: $1" >&2; exit 2; }

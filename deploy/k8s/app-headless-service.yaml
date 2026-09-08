@@ -5,16 +5,7 @@ metadata:
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
-  selector:
-    app: grant
-    role: voter
+  selector: {app: grant, role: voter}
   ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-    - name: raft
-      port: 8100
-      targetPort: 8100
-    - name: hiq-api
-      port: 8200
-      targetPort: 8200
+    - {name: http, port: 8080, targetPort: 8080, protocol: TCP}
+    - {name: peer, port: 8100, targetPort: 8100, protocol: UDP}

@@ -1,6 +1,6 @@
 # Database Schema
 
-이 문서는 현재 [`crates/infra/src/database/mod.rs`](../crates/infra/src/database/mod.rs)와 [`schema.rs`](../crates/infra/src/database/schema.rs) 기준의 실제 스키마를 설명한다.
+이 문서는 현재 [`internal/grant/store_schema.sql`](../internal/grant/store_schema.sql)을 기준으로 실제 스키마를 설명한다.
 
 ## 프로젝트 경계
 
@@ -16,7 +16,7 @@
 - 공동인증서 credential, 저장 인증서, gateway challenge, crawl task token은 `cert-data` 경계라 이 repo에서 제거한다.
 - 권한 원본은 `role_bindings`다. plant/asset 전개 cache였던 `effective_*` 테이블은 cert-data 분리와 함께 제거한다.
 - `service_providers`가 compos 같은 외부 서비스와 grant 자체의 action catalog 경계를 선언한다.
-- SQLite/hiqlite 위에서 앱 레벨 무결성과 권한 전개를 사용하므로, 현재 스키마는 물리 FK를 거의 두지 않는다.
+- Rhiza의 SQLite materializer 위에서 애플리케이션이 무결성과 권한 전개를 관리하며, 필요한 관계에는 물리 FK를 사용한다.
 
 ### 1차 단순 배포 기준
 
@@ -206,3 +206,44 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 - `role_bindings.resource_type`은 `provider_id`와 함께 해석한다. `grant/organization`만 grant가 직접 존재 검증하고, 외부 provider resource는 해당 서비스가 후보 목록을 넘긴 뒤 `/api/v1/authz/filter`로 걸러야 한다.
 - coarse readiness는 core authorization schema만 확인한다. 보존 field table의 존재, 누락, shape는 readiness 조건이 아니고 활성 row 여부는 별도 startup compatibility 검사에서 fail closed한다.
 - field 정책이 활성화됐던 migrated DB는 coarse 바이너리가 자동 정리하지 않는다. 배포 전에 별도의 forward migration 또는 검증된 restore 계획이 필요하다.
+
+## Go/Rhiza storage port
+
+The Go runtime's canonical schema is [store_schema.sql](../internal/grant/store_schema.sql),
+with indexes in [store_indexes.sql](../internal/grant/store_indexes.sql). Rhiza v0.12.3
+applies the two named migrations through its replicated migration ledger. Existing
+Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
+export/restore procedure in [backup-restore.md](backup-restore.md).
+
+`grant_import_payloads(import_id, kind, ordinal, payload)` is internal immutable staging
+for Patch Data authority imports. Its composite primary key identifies a staged input
+chunk; it is not queried by any authorization evaluator. Batches stay below Rhiza's
+128 KiB certified-command bound. Only the final replicated transaction checks the prior
+generation, validates canonical ownership, replaces canonical rows and provenance,
+updates the receipt, and removes that import's staged chunks. A failed final transaction
+leaves all canonical authority unchanged. Interrupted staging can leave unreferenced
+chunks; the import ID binds the full input digest and retrying requires byte-identical
+chunk payloads. A different payload cannot overwrite an existing staged chunk.
+This table is excluded from logical application backups because it is not authoritative.
+
+Application-consent assertion rows are temporary transaction checks. The Go mutation
+boundary removes successful assertion rows in the same transaction. Failed assertions
+roll back the mutation, its receipt, and all assertion inserts.
+
+Logical snapshots contain the complete canonical table/column inventory, per-table row
+counts and SHA-256 digests. Restore writes only a new, isolated directory. A pending
+restore marker blocks normal startup until all table digests match and a verified
+cutover marker has been written. The original Hiqlite database and export are retained.
+
+Fresh multi-voter logical restore uses an explicit, previously empty S3 prefix and a
+new target cluster identity. `grant_restore_activation(id, snapshot_digest, cluster_id,
+activated_at)` is an internal replicated admission receipt (migration 3), excluded
+from application snapshots. Every configured voter must acknowledge the same prepared
+source snapshot and member set before opening Rhiza. An immutable local admission
+marker prevents reuse of an occupied data directory. Canonical tables are restored
+with a single transaction, including an empty-target assertion and the activation
+receipt; staged input never affects authorization reads. Startup returns only after
+all restored table digests match. Interrupted staging or activation can retry the same
+admission; it cannot select another snapshot or target identity. Existing source data
+and object-store prefixes are preserved. See [backup-restore.md](backup-restore.md)
+for the preparatory command and the distinction from offline single-voter restore.
