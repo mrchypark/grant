@@ -1,8 +1,9 @@
 # Go deployment verification — 2026-09-08
 
-**Status: local verification passed; no production rollout performed.** The work
-is on `porting-go`, based on `d2e5edf`. The operational fixes described below are
-verified in the working tree; their final source commit is pending.
+**Status: native AMD64 container and disposable Kubernetes CI verification
+passed; no production rollout performed.** The work is on `porting-go`, based
+on `d2e5edf`. The final verified revision is `011b0cd`; its application
+implementation is unchanged from the operational fixes in `8e3a436`.
 
 ## Findings corrected and reviewed
 
@@ -18,6 +19,10 @@ verified in the working tree; their final source commit is pending.
 
 Independent reviewers confirmed the health API, consistency/deadline behavior,
 public/private Service boundary, and the rendered-overlay verification checks.
+CI regressions were also corrected: a stray script-list entry, an unsupported
+fixture provider name (now `filesystem`), and stale readiness assertions against
+`/healthz`. Regression checks retain separate process-health and database-ready
+requirements, including rejection when quorum is unavailable.
 
 ## Executed verification
 
@@ -27,6 +32,21 @@ The following passed after the operational fixes:
 - `scripts/verify-go-cli-contract.sh`, `scripts/verify-docs.sh`, and
   `scripts/verify-rhiza-deployment.sh`.
 - `git diff --check` and focused independent liveness/readiness tests.
+
+[CI run 34210691940](https://github.com/Conalog/grant/actions/runs/34210691940)
+at `011b0cd` completed successfully: both `go-verification` and `local-bootstrap`
+passed; publication jobs were skipped. Native AMD64 container verification
+covered startup, strong readiness, authenticated write/read and unauthenticated
+rejection under UID 10001, a read-only root filesystem, dropped capabilities,
+512 MiB memory and one CPU. The smoke rejects emulated Docker architectures.
+Its local Docker image ID was
+`sha256:80d0e0b2224637dfbdd67835bae2a001530b19b1e902535a4182858b4dfe6b4f`;
+this is verification provenance, not a published registry digest.
+
+The disposable Kubernetes run successfully rolled out three Grant and three
+Rauthy replicas and passed runtime, readiness, authentication-proxy and Rauthy
+pod-replacement checks.
+These are CI-cluster results, not a deployment to IED or production.
 
 The local `scripts/verify-go-three-voter.sh` run **`v2d405`** exited successfully.
 It used native Go processes and disposable MinIO and verified:
@@ -41,7 +61,7 @@ It used native Go processes and disposable MinIO and verified:
    closed readiness before all voters opt in, rejection of conflicting target
    admission, and restored-cluster quorum recovery.
 
-These results establish local behavior. They do not verify the target cluster's
+These results establish local and CI behavior. They do not verify the target cluster's
 CNI, Kubernetes probes, production S3 credentials/policies, resource limits,
 authentication ingress, or traffic cutover.
 
@@ -59,14 +79,10 @@ An exact target has not been selected, and no live rollout has occurred. Before
 claiming deployment verification complete:
 
 1. Confirm the cluster and isolated namespace, preserving existing workloads.
-2. Commit the verified fixes and publish an **amd64** image from that exact
-   revision; pin its immutable registry digest.
+2. Publish an image from the exact verified revision and pin its immutable
+   registry digest.
 3. Apply a disposable instance of the production overlay with separate storage
    identity, then verify scheduling, probes, three-voter membership and quorum.
 4. Verify real authentication, negative authorization, TLS and ingress behavior.
 5. Exercise recovery with the target object store and credentials, confirm
    rollback/cutover boundaries, and only then consider traffic changes.
-
-The earlier local Docker build and startup smoke used Linux/arm64 and predates
-these operational fixes. It is not evidence that the final amd64 production
-image has been built or deployed.
