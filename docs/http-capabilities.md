@@ -1,5 +1,7 @@
 # Provider HTTP capabilities
 
+Current support is limited to internal service Providers deployed directly in Kubernetes (K8s). External Application integration is deferred to the [external application roadmap](external-application-roadmap.md). The contracts below remain unchanged and do not constitute an external onboarding or credential-distribution procedure.
+
 Grant stores authorization-significant HTTP contracts; it does not proxy provider traffic and never stores an upstream origin.
 
 The Phase A API is inactive by default:
