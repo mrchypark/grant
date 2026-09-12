@@ -1,0 +1,21 @@
+{
+  "generation": 1,
+  "registeredRoutes": 369,
+  "catalogUniqueActions": 138,
+  "appRegisteredActionRows": 138,
+  "missingFromApp": [],
+  "extraAppActions": [],
+  "nonGrantable": [],
+  "examples": [
+    {
+      "id": "patch-data.files.file.read",
+      "providerId": "patch-data",
+      "code": "files.file.read"
+    },
+    {
+      "id": "patch-data.plant.read",
+      "providerId": "patch-data",
+      "code": "plant.read"
+    }
+  ]
+}
