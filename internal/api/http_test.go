@@ -305,3 +305,66 @@ func TestLearnerOnlyPublishesPDP(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistrationReadsCredentialAndLearnerBoundaries(t *testing.T) {
+	paths := []string{"/api/v1/admin/providers/patch-data/actions", "/api/v1/admin/providers/patch-data/http-capability-active", "/api/v1/orgs/owner/providers/patch-data/actions"}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			s := testServer()
+			for _, header := range []string{"", "X-Grant-App-Auth-Key"} {
+				r := httptest.NewRequest("GET", path, nil)
+				r.Header.Set("X-Organization-ID", "owner")
+				if header != "" {
+					r.Header.Set(header, "app-secret")
+				}
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, r)
+				if w.Code != 401 {
+					t.Fatalf("missing required credential: %d %s", w.Code, w.Body.String())
+				}
+			}
+			s.learner = true
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+			if w.Code != 503 {
+				t.Fatalf("learner accepted voter read: %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestRegistrationAdminReadbackHTTP(t *testing.T) {
+	ctx := context.Background()
+	cfg := grant.Config{Security: grant.SecurityConfig{MasterKey: "master-secret"}, Database: grant.DatabaseConfig{DataDir: t.TempDir()}}
+	store, err := grant.OpenStore(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err = store.EnsureBootstrapData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	service := grant.NewService(cfg, store)
+	if _, err = service.UpsertServiceProviderAdmin(ctx, grant.ServiceProvider{ID: "empty", Name: "Empty", Active: false}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(service, false)
+	for _, tc := range []struct {
+		path   string
+		status int
+		body   string
+	}{
+		{"/api/v1/admin/providers/empty/actions", 200, "[]"},
+		{"/api/v1/admin/providers/missing/actions", 404, "service provider not found"},
+		{"/api/v1/admin/providers/empty/http-capability-active", 404, "HTTP capability catalog not active"},
+		{"/api/v1/admin/providers/missing/http-capability-active", 404, "service provider not found"},
+	} {
+		r := httptest.NewRequest("GET", tc.path, nil)
+		r.Header.Set("X-Grant-Master-Key", "master-secret")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.body) {
+			t.Fatalf("%s: %d %s", tc.path, w.Code, w.Body.String())
+		}
+	}
+}

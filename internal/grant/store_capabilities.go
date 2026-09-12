@@ -146,6 +146,12 @@ func (s *Store) ActivateHttpCapabilityGeneration(ctx context.Context, p, actor s
 	ss := []Statement{assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM provider_http_capability_sets WHERE provider_id=? AND generation=? AND catalog_digest=?) AND ((? IS NULL AND NOT EXISTS(SELECT 1 FROM provider_http_capability_active WHERE provider_id=?)) OR EXISTS(SELECT 1 FROM provider_http_capability_active WHERE provider_id=? AND generation=? AND catalog_digest=?)) AND EXISTS(SELECT 1 FROM provider_pep_clients pc JOIN applications a ON a.id=pc.application_id WHERE pc.provider_id=? AND pc.pep_client_id=? AND pc.lifecycle='active' AND pc.valid_until IS ? AND (pc.valid_until IS NULL OR pc.valid_until>?) AND a.active=1 AND a.provisioning_status='ready')", p, p, in.TargetGeneration, in.TargetCatalogDigest, in.ExpectedGeneration, p, p, in.ExpectedGeneration, in.ExpectedCatalogDigest, p, pep.PepClientID, pep.ValidUntil, cutoff),
 		{SQL: "INSERT INTO provider_http_capability_activations(activation_receipt_id,provider_id,activation_sequence,from_generation,to_generation,catalog_digest,activated_at,activated_by) SELECT ?,?,COALESCE((SELECT MAX(activation_sequence) FROM provider_http_capability_activations WHERE provider_id=?),0)+1,(SELECT generation FROM provider_http_capability_active WHERE provider_id=?),?,?,?,?", Args: []any{receipt, p, p, p, in.TargetGeneration, in.TargetCatalogDigest, cutoff, actor}},
 		{SQL: "INSERT INTO provider_http_capability_active(provider_id,generation,catalog_digest,activated_at,activated_by) VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET generation=excluded.generation,catalog_digest=excluded.catalog_digest,activated_at=excluded.activated_at,activated_by=excluded.activated_by", Args: []any{p, in.TargetGeneration, in.TargetCatalogDigest, cutoff, actor}}}
+	// Staged generations may outlive their action registrations. Check all
+	// capability and response-graph references in the activation transaction.
+	ss = append([]Statement{assertion(`SELECT 1 FROM provider_http_capability_sets s
+ WHERE provider_id=? AND generation=? AND NOT EXISTS
+ (SELECT 1 FROM json_tree(s.canonical_json) ref WHERE ref.key='actionId' AND ref.value IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.id=ref.value AND a.provider_id=s.provider_id))`, p, in.TargetGeneration)}, ss...)
 	if e = s.Transaction(ctx, ss); e != nil {
 		return out, capabilityWriteError(e)
 	}
@@ -154,6 +160,39 @@ func (s *Store) ActivateHttpCapabilityGeneration(ctx context.Context, p, actor s
 		return out, e
 	}
 	return decodeRow[HttpCapabilityActivation](r[0])
+}
+func (s *Store) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, p string) (AdminHttpCapabilityCatalog, error) {
+	var out AdminHttpCapabilityCatalog
+	rows, err := s.Query(ctx, ReadStrong, `WITH RECURSIVE catalog AS (
+ SELECT s.canonical_json,a.catalog_digest,a.activated_at,a.activated_by
+ FROM provider_http_capability_active a JOIN provider_http_capability_sets s
+ ON s.provider_id=a.provider_id AND s.generation=a.generation AND s.catalog_digest=a.catalog_digest
+ WHERE a.provider_id=?), chunks(payload,remaining,catalog_digest,activated_at,activated_by,ordinal) AS (
+ SELECT substr(canonical_json,1,60000),substr(canonical_json,60001),catalog_digest,activated_at,activated_by,0 FROM catalog
+ UNION ALL SELECT substr(remaining,1,60000),substr(remaining,60001),catalog_digest,activated_at,activated_by,ordinal+1 FROM chunks WHERE remaining<>'')
+ SELECT payload,catalog_digest,activated_at,activated_by FROM chunks ORDER BY ordinal`, p)
+	if err != nil {
+		return out, err
+	}
+	if len(rows) == 0 {
+		providers, err := s.Query(ctx, ReadStrong, "SELECT id FROM service_providers WHERE id=?", p)
+		if err != nil {
+			return out, err
+		}
+		if len(providers) == 0 {
+			return out, serviceError(404, "service provider not found")
+		}
+		return out, serviceError(404, "HTTP capability catalog not active")
+	}
+	var canonical strings.Builder
+	for _, row := range rows {
+		canonical.WriteString(rowString(row, "payload"))
+	}
+	var v canonicalGeneration
+	if err = json.Unmarshal([]byte(canonical.String()), &v); err != nil {
+		return out, err
+	}
+	return AdminHttpCapabilityCatalog{SchemaVersion: 1, ProviderID: p, Generation: v.Generation, CatalogDigest: rowString(rows[0], "catalog_digest"), ActivatedAt: rowString(rows[0], "activated_at"), ActivatedBy: rowString(rows[0], "activated_by"), CapabilityCount: len(v.Capabilities), ResponseResourceCount: len(v.ResponseResources), Capabilities: v.Capabilities, ResponseResources: v.ResponseResources}, nil
 }
 func (s *Store) ActiveHttpCapabilityCatalog(ctx context.Context, p, pepID string) (ActiveHttpCapabilityCatalog, error) {
 	var out ActiveHttpCapabilityCatalog

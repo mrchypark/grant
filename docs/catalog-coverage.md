@@ -1,5 +1,7 @@
 # HTTP capability catalog coverage
 
+Current support is limited to internal service Providers deployed directly in Kubernetes (K8s). External Application integration remains a [design and roadmap](external-application-roadmap.md); the transport support below does not imply support for externally operated Providers or Exposure deployments.
+
 Scope: Grant and Exposure with the reconciled Patch Data `8155f8a` business schema and Patch Auth `bc973ff` security extraction; native API reference is PocketBase 0.40.3. The two PocketBase services remain on work branches. Route transport support does not by itself establish authority over the returned business records.
 
 ## Runtime coverage

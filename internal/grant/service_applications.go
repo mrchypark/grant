@@ -148,7 +148,7 @@ func (s *Service) ReplaceApplicationActionsAuthorized(ctx context.Context, user,
 		ids = append(ids, x)
 	}
 	j, _ := jsonString(ids)
-	invalid, err := s.store.Query(ctx, ReadStrong, "SELECT j.value AS id FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM actions a WHERE a.id=j.value AND a.grantable_to_applications=1) LIMIT 1", j)
+	invalid, err := s.store.Query(ctx, ReadStrong, "SELECT j.value AS id FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM actions a JOIN service_providers p ON p.id=a.provider_id AND p.active=1 WHERE a.id=j.value AND a.grantable_to_applications=1) LIMIT 1", j)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,8 @@ DELETE /api/v1/orgs/{organizationId}/groups/{groupId}
 DELETE /api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}
 GET /api/v1/admin/backups
 GET /api/v1/admin/backups/s3
+GET /api/v1/admin/providers/{providerId}/actions
+GET /api/v1/admin/providers/{providerId}/http-capability-active
 GET /api/v1/me
 GET /api/v1/orgs/{organizationId}/agreements
 GET /api/v1/orgs/{organizationId}/agreements/{agreementId}
@@ -18,6 +20,7 @@ GET /api/v1/orgs/{organizationId}/bindings
 GET /api/v1/orgs/{organizationId}/groups
 GET /api/v1/orgs/{organizationId}/groups/{groupId}
 GET /api/v1/orgs/{organizationId}/groups/{groupId}/members
+GET /api/v1/orgs/{organizationId}/providers/{providerId}/actions
 GET /api/v1/orgs/{organizationId}/roles
 GET /api/v1/providers
 GET /api/v2/http-capabilities/catalog/{providerId}

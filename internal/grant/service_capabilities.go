@@ -34,6 +34,9 @@ func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provid
 func (s *Service) ActivateHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v ActivateHttpCapabilityGeneration) (HttpCapabilityActivation, error) {
 	return s.store.ActivateHttpCapabilityGeneration(ctx, provider, "grant-master", v)
 }
+func (s *Service) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, provider string) (AdminHttpCapabilityCatalog, error) {
+	return s.store.ActiveHttpCapabilityCatalogAdmin(ctx, provider)
+}
 func (s *Service) SetProviderPepClientAdmin(ctx context.Context, provider, pep string, v UpsertProviderPepClient) (ProviderPepClient, error) {
 	return s.store.UpsertProviderPepClient(ctx, provider, pep, "grant-master", v)
 }

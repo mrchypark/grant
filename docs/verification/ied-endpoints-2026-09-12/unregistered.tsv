@@ -1,0 +1,9 @@
+method	path	status
+GET	/api/health	404
+GET	/api/settings	404
+GET	/api/collections	404
+GET	/api/collections/users/auth-with-password	404
+GET	/api/realtime	404
+GET	/api/internal/exposure/v1/plants	404
+GET	/api/developer/devicelogs	404
+POST	/api/collections/users/auth-with-password	404

@@ -2,7 +2,7 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The current HTTP boundary has 47 distinct paths and 60 method registrations. The three Exposure-specific paths and V2 authority snapshot receiving path are retired and return 404. GET registrations also accept HEAD.
+The current HTTP boundary has 48 distinct paths and 63 method registrations, including three internal registration-management reads. The three Exposure-specific paths and V2 authority snapshot receiving path are retired and return 404. GET registrations also accept HEAD.
 
 ## Method, path, authorization and node role
 
@@ -10,6 +10,7 @@ The current HTTP boundary has 47 distinct paths and 60 method registrations. The
 |---|---|---|---|---|
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-generations` | master | true | 201 |
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
+| GET | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
 | PUT | `/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}` | master | true | 200 |
 | GET | `/api/v2/http-capabilities/catalog/{providerId}` | app | false | 200 |
 | POST | `/api/v2/http-capabilities/decide` | application | false | 200 |
@@ -19,6 +20,8 @@ The current HTTP boundary has 47 distinct paths and 60 method registrations. The
 | GET | `/api/v1/providers` |  | false | 200 |
 | POST | `/api/v1/admin/providers` | master | true | 201 |
 | PUT | `/api/v1/admin/providers/{providerId}/actions` | master | true | 200 |
+| GET | `/api/v1/admin/providers/{providerId}/actions` | master | true | 200 |
+| GET | `/api/v1/orgs/{organizationId}/providers/{providerId}/actions` | user | true | 200 |
 | GET | `/api/v1/orgs/{organizationId}/apps` | user | false | 200 |
 | POST | `/api/v1/orgs/{organizationId}/apps` | user | true | 201 |
 | GET | `/api/v1/orgs/{organizationId}/apps/{applicationId}` | user | false | 200 |
@@ -69,7 +72,7 @@ The current HTTP boundary has 47 distinct paths and 60 method registrations. The
 | ANY | `/auth/v1` | Rauthy mode only | false | upstream status |
 | ANY | `/auth/v1/{*rauthyPath}` | Rauthy mode only | false | upstream status |
 
-There are 60 method registrations across 47 distinct paths. The current fixture excludes the three retired Exposure routes and the receipt-only V2 authority snapshot receiver. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`. V1 authority import remains supported; removed APIs have no aliases or redirects.
+There are 63 method registrations across 48 distinct paths. The current fixture excludes the three retired Exposure routes and the receipt-only V2 authority snapshot receiver. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`. V1 authority import remains supported; removed APIs have no aliases or redirects. The three new voter-only GET contracts, response fields, error states and lifecycle constraints are documented in [registration API management](registration-api-management.md); they do not imply new Exposure publication or external onboarding support.
 
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 
