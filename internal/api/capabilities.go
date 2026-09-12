@@ -3,6 +3,9 @@ package api
 import "github.com/Conalog/grant/internal/grant"
 
 func (s *Server) capabilityRoutes() {
+	s.route("GET", "/api/v1/admin/providers/{providerId}/http-capability-active", "master", true, 200, func(r *request) (any, error) {
+		return s.service.ActiveHttpCapabilityCatalogAdmin(r.Context(), r.PathValue("providerId"))
+	})
 	s.route("POST", "/api/v1/admin/providers/{providerId}/http-capability-generations", "master", true, 201, body(true, func(r *request, v grant.StageHttpCapabilityGeneration) (any, error) {
 		return s.service.StageHttpCapabilityGenerationAdmin(r.Context(), r.PathValue("providerId"), v)
 	}))

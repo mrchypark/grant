@@ -158,6 +158,16 @@ PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, 
 
 ## 주요 릴레이션
 
+### Provider 액션 lifecycle 정리
+
+내부 등록 API의 lifecycle 의미는 다음과 같다. 물리적 테이블·컬럼·인덱스나 canonical key는 변경하지 않는다. 구현·검증 상태는 [등록 API 관리](registration-api-management.md)를 따른다.
+
+- 활성 `provider_http_capability_sets`의 catalog가 참조하는 액션은 Provider 액션 전체 교체로 삭제할 수 없다. 해당 참조가 없는 catalog를 먼저 활성화해야 하며, 활성화 시 현재 액션 레지스트리와의 참조도 다시 검증한다.
+- `actions.grantable_to_applications`를 false로 변경하면 해당 액션의 `application_actions`와 `application_grant_actions` 연결을 제거한다. `role_actions` 연결은 유지한다. 액션 자체를 삭제할 때의 기존 역할·앱·동의 연결 정리와는 구분한다.
+- Application의 액션 선택은 활성 Provider의 앱 부여 가능 액션만 허용한다. 조직별 후보 조회도 같은 조건을 사용하며, 후보에 나타나는 사실은 사용자 RBAC나 리소스 binding을 대신하지 않는다.
+
+이 구조의 이유는 catalog가 사라진 액션을 계속 참조하지 않도록 하고, 앱에 대한 부여 중단이 과거 동의로 되살아나지 않도록 하기 위해서다. 역할 자체의 권한 정의와 앱이 사용할 수 있는 권한을 구분하므로 앱 부여 가능 여부만 변경했을 때 역할 연결은 보존한다.
+
 - Patch Data의 42개 컬렉션 읽기 카탈로그는 기존 `role_bindings.(provider_id, resource_type, resource_id)`와 `role_actions.action_id`를 사용한다. `provider_id`는 `patch-data`, resource type은 컬렉션 이름이며 `plants`만 기존 `plant`를 유지한다. action ID는 `patch-data.<resource_type>.read`다. 컬렉션 이름과 PocketBase ID 경로는 동일한 canonical tuple을 사용하고 resource ID는 응답 레코드의 `id`다.
 - 뷰도 독립된 resource type을 사용한다. 원본과 뷰의 레코드 ID가 같거나 업무 relation이 연결되어 있어도 권한을 전파하지 않는다. 조직 및 발전소 권한 import가 새 컬렉션의 binding을 자동 생성하지 않는다. 스키마 DDL과 기존 canonical key의 의미는 변경하지 않는다.
 

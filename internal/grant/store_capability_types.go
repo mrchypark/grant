@@ -167,6 +167,20 @@ type ActiveHttpCapabilityCatalog struct {
 	IssuedAt          string                 `json:"issuedAt"`
 	ExpiresAt         string                 `json:"expiresAt"`
 }
+
+// AdminHttpCapabilityCatalog is durable registry state, without a PEP lease.
+type AdminHttpCapabilityCatalog struct {
+	SchemaVersion         uint64                 `json:"schemaVersion"`
+	ProviderID            string                 `json:"providerId"`
+	Generation            uint64                 `json:"generation"`
+	CatalogDigest         string                 `json:"catalogDigest"`
+	ActivatedAt           string                 `json:"activatedAt"`
+	ActivatedBy           string                 `json:"activatedBy"`
+	CapabilityCount       int                    `json:"capabilityCount"`
+	ResponseResourceCount int                    `json:"responseResourceCount"`
+	Capabilities          []HttpCapability       `json:"capabilities"`
+	ResponseResources     []HttpResponseResource `json:"responseResources,omitempty"`
+}
 type HttpCapabilityAccessMode = string
 type HttpRequestBodyMode = string
 type HttpRedirectPolicy = string

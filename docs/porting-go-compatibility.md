@@ -14,7 +14,7 @@ The reference has **51 distinct HTTP paths**, **60 router registrations** (30 sh
 
 ## HTTP paths in the reference
 
-This section is historical: it records the original Rust baseline, not the current route inventory. The current API has 47 paths and 60 method registrations after retiring the three Exposure endpoints and the receipt-only V2 authority snapshot receiver. These paths return 404; generic HTTP capabilities and V1 authority imports remain supported. See the current [HTTP contract](porting-go-http-contract.md).
+This section is historical: it records the original Rust baseline, not the current route inventory. The current API has 48 paths and 63 method registrations after retiring the three Exposure endpoints and the receipt-only V2 authority snapshot receiver, and adding three internal registration-management reads. The retired paths return 404; generic HTTP capabilities and V1 authority imports remain supported. See the current [HTTP contract](porting-go-http-contract.md) and [registration workflow](registration-api-management.md).
 
 The following is extracted from [crates/api/src/lib.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/lib.rs); management/shared overlap is intentional. Learner writes must fail with HTTP 503 and `endpoint requires voter node`.
 
