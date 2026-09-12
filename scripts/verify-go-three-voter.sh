@@ -23,7 +23,7 @@ trap cleanup EXIT HUP INT TERM
 (cd "$root" && CGO_ENABLED=0 go build -o "$task_dir/grant" ./cmd/grant)
 docker run -d --name "$container" -p 127.0.0.1::9000 \
   -e MINIO_ROOT_USER=local-grant -e MINIO_ROOT_PASSWORD=local-grant-storage-secret \
-  minio/minio:RELEASE.2025-09-07T16-13-09Z server /data >/dev/null
+  quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data >/dev/null
 s3_port=$(docker inspect "$container" | jq -r '.[0].NetworkSettings.Ports["9000/tcp"][0].HostPort // empty')
 case "$s3_port" in ''|*[!0-9]*) echo 'local Docker did not report a numeric published S3 port' >&2; exit 1 ;; esac
 # Dory reports wildcard binding despite the loopback publish request; its
