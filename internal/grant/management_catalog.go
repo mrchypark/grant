@@ -155,7 +155,7 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 			PathTemplate: route.Path,
 			ActionID:     &actionID,
 			Resource:     &resource,
-			Query:        HttpQueryPolicy{Mode: "none"},
+			Query:        getReadQuery(route.Method),
 			Request:      buildManagementRequest(route),
 			Response: HttpResponsePolicy{
 				MaxBytes:       4 << 20,
@@ -198,9 +198,23 @@ func buildManagementResource(route ManagementRoute) HttpCapabilityResource {
 		return HttpCapabilityResource{ResourceType: "platform", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}}
 	}
 	if strings.Contains(route.Path, "{organizationId}") {
-		return HttpCapabilityResource{ResourceType: "organization", ID: HttpResourceExtractor{Kind: "pathSegment", Name: "organizationId", Format: "slug"}}
+		return HttpCapabilityResource{ResourceType: "organization", ID: HttpResourceExtractor{Kind: "pathSegment", Name: "organizationId", Format: "asciiToken"}}
 	}
 	return HttpCapabilityResource{ResourceType: "service", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}}
+}
+
+// getReadQuery returns the query policy for GET routes that support the
+// readConsistency parameter, or the zero value for non-GET routes.
+func getReadQuery(method string) HttpQueryPolicy {
+	if method != "GET" {
+		return HttpQueryPolicy{Mode: "none"}
+	}
+	return HttpQueryPolicy{
+		Mode: "exact",
+		Parameters: []HttpQueryParameter{
+			{Name: "consistency", Format: "text", MaxBytes: 32},
+		},
+	}
 }
 
 // buildManagementRequest returns the request policy for a management route.

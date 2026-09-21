@@ -131,8 +131,28 @@ Routes declare one of three resource types:
 | Resource type | Condition | ID extractor |
 |---------------|-----------|--------------|
 | `platform` | Platform routes (`Platform: true`) | `constant`, value `grant` |
-| `organization` | Routes containing `{organizationId}` | `pathSegment`, name `organizationId`, format `slug` |
+| `organization` | Routes containing `{organizationId}` | `pathSegment`, name `organizationId`, format `asciiToken` |
 | `service` | All other routes (me, providers) | `constant`, value `grant` |
+
+### organization ID format
+
+The `asciiToken` format accepts: `A-Z`, `a-z`, `0-9`, `.`, `-`, `_`,
+`:` — maximum 256 bytes. This preserves existing transport identifiers
+such as `Ops_1` and `tenant.EU:42`. Path segment validation applies the
+same `asciiToken` bounds at the transport layer; encoded segments are
+not permitted unless declared as path parameters.
+
+## Query policies
+
+GET routes use `mode: exact` with a single optional parameter:
+
+| Parameter | Format | MaxBytes | Required |
+|-----------|--------|----------|----------|
+| `consistency` | `text` | 32 | false |
+
+The `consistency` parameter accepts any case/whitespace variant of the
+backend value (e.g. `strong`, ` Strong `, `STRONG`). Non-GET routes
+(mutations) use `mode: none` — query strings are rejected.
 
 ## Request and response policies
 
