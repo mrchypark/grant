@@ -32,13 +32,13 @@ func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provid
 	return s.store.StageHttpCapabilityGeneration(ctx, provider, v)
 }
 func (s *Service) ActivateHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v ActivateHttpCapabilityGeneration) (HttpCapabilityActivation, error) {
-	return s.store.ActivateHttpCapabilityGeneration(ctx, provider, "grant-master", v)
+	return s.store.ActivateHttpCapabilityGeneration(ctx, provider, ManagementActorFromContext(ctx), v)
 }
 func (s *Service) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, provider string) (AdminHttpCapabilityCatalog, error) {
 	return s.store.ActiveHttpCapabilityCatalogAdmin(ctx, provider)
 }
 func (s *Service) SetProviderPepClientAdmin(ctx context.Context, provider, pep string, v UpsertProviderPepClient) (ProviderPepClient, error) {
-	return s.store.UpsertProviderPepClient(ctx, provider, pep, "grant-master", v)
+	return s.store.UpsertProviderPepClient(ctx, provider, pep, ManagementActorFromContext(ctx), v)
 }
 func (s *Service) configuredPEP(ctx context.Context, provider string) (ProviderPepClient, error) {
 	app := s.cfg.Security.HTTPCapabilityPEPApplicationID
@@ -150,7 +150,11 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
-	if r.ResponseDigest != "" {
+	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
+	if r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
+		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID) {
+		allowed, reason = false, "platform_management_organization_required"
+	} else if r.ResponseDigest != "" {
 		allowed, reason, err = s.responseDecision(ctx, token, org, r, c)
 		if err != nil {
 			return HttpCapabilityDecision{}, err
@@ -168,6 +172,33 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			return HttpCapabilityDecision{}, err
 		}
 		allowed, reason = true, "record_scope"
+	} else if managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath) {
+		decisions, e := s.store.evaluateUserActions(ctx, []UserActionCheck{{
+			UserID: c.UserID, OrganizationID: c.OrganizationID, ProviderID: r.ProviderID,
+			ResourceType: "organization", ResourceID: org, ActionID: *cap.ActionID,
+			ApplicationID: &c.ApplicationID, Consistency: ReadStrong,
+		}}, true)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "management_reactivation"
+	} else if managementMaterializeCapability(r.ProviderID, *cap) {
+		// Materialize endpoint: auth-only materialization for self-enrollment.
+		// Requires active org/provider and explicit application_actions admission
+		// but no membership/role/consent because it only materializes self and
+		// returns membershipStatus none.
+		rows, e := serviceRows[struct{}](ctx, s, ReadStrong,
+			`SELECT 1
+			 FROM application_actions aa
+			 JOIN actions a ON a.id = aa.action_id AND a.provider_id = ? AND a.grantable_to_applications = 1
+			 JOIN service_providers sp ON sp.id = a.provider_id AND sp.active = 1
+			 JOIN organizations org ON org.id = ? AND org.inactivated_at IS NULL
+			 WHERE aa.application_id = ? AND aa.action_id = ?`,
+			r.ProviderID, c.OrganizationID, c.ApplicationID, *cap.ActionID)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		allowed, reason = len(rows) == 1, "management_materialize"
 	} else {
 		decisions, err := s.evaluateAuthorizations(ctx, []AuthorizationCheck{{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: *cap.ActionID, Resource: AuthorizationResource{ProviderID: r.ProviderID, ResourceType: cap.Resource.ResourceType, ID: r.ResourceID}}}, ReadStrong, &c.ApplicationID)
 		if err != nil {

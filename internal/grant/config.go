@@ -19,7 +19,7 @@ const (
 )
 
 type ServerConfig struct{ BindAddr string }
-type SecurityConfig struct{ MasterKey, AppAuthKey, HTTPCapabilityPEPApplicationID, BootstrapUserID, BootstrapUserName string }
+type SecurityConfig struct{ MasterKey, AppAuthKey, HTTPCapabilityPEPApplicationID, ManagementOrganizationID, BootstrapUserID, BootstrapUserName string }
 type RauthyConfig struct {
 	BaseURL, IntrospectPath, UserinfoPath, ClientID, ClientSecret, ClientReadAPIKey string
 	CacheTTLSeconds                                                                 uint64
@@ -53,7 +53,7 @@ func envDefault(k, v string) string {
 	return v
 }
 func ConfigFromEnv() (Config, error) {
-	c := Config{Server: ServerConfig{BindAddr: envDefault("GRANT_BIND_ADDR", "0.0.0.0:8080")}, Security: SecurityConfig{MasterKey: envDefault("GRANT_MASTER_KEY", "dev-only-master-key"), AppAuthKey: os.Getenv("GRANT_APP_AUTH_KEY"), HTTPCapabilityPEPApplicationID: strings.TrimSpace(os.Getenv("GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID")), BootstrapUserID: envDefault("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"), BootstrapUserName: envDefault("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant")}}
+	c := Config{Server: ServerConfig{BindAddr: envDefault("GRANT_BIND_ADDR", "0.0.0.0:8080")}, Security: SecurityConfig{MasterKey: envDefault("GRANT_MASTER_KEY", "dev-only-master-key"), AppAuthKey: os.Getenv("GRANT_APP_AUTH_KEY"), HTTPCapabilityPEPApplicationID: strings.TrimSpace(os.Getenv("GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID")), ManagementOrganizationID: strings.TrimSpace(os.Getenv("GRANT_MANAGEMENT_ORGANIZATION_ID")), BootstrapUserID: envDefault("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"), BootstrapUserName: envDefault("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant")}}
 	if c.Security.AppAuthKey == "" || c.Security.AppAuthKey == c.Security.MasterKey {
 		return c, fmt.Errorf("GRANT_APP_AUTH_KEY is required and must differ from GRANT_MASTER_KEY")
 	}

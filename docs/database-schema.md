@@ -299,3 +299,32 @@ Patch Data 그래프는 고정 schema snapshot의 42개 컬렉션과 공개 rela
 ### 최신 business schema 통합
 
 Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 목록은 base 31개와 view 11개다. 이 중 `rsd_command_tasks`는 native API rule이 업무 상태 전이를 제한하므로 superuser 경로에서 쓰기를 허용하지 않는다. manifest의 `readOnly`가 CRUD 및 batch upsert 생성을 막으며 조회 권한만 등록한다. 나머지 base 30개의 전체 레코드 변경 권한은 기존 의미를 유지한다. MFA challenge/send-window 두 컬렉션은 Patch Auth 내부 상태로 분리하여 사업 리소스 graph에 포함하지 않는다.
+
+### 플랫폼 관리 인증과 권한 관계
+
+`X-Grant-Master-Key` 헤더가 없을 때 플랫폼 관리 라우트에서 bearer 토큰으로 대체 인증이 가능하다. `GRANT_MANAGEMENT_ORGANIZATION_ID` 환경 변수로 설정된 신뢰된 운영 조직만이 이 경로를 사용할 수 있다. 미설정 시 bearer 관리는 비활성화된다.
+
+**인증 흐름:**
+
+1. `X-Grant-Master-Key`가 유효하면 기존 master 인증이 적용된다. 잘못된 값은 bearer로 전환되지 않고 401을 반환한다.
+2. 기존 master 인증 라우트에서 헤더가 없으면 `LookupManagementRoute(method, path)`로 등록된 플랫폼 라우트인지 확인한다. bootstrap처럼 등록되지 않은 master 라우트는 401을 반환한다. 일반 사용자 라우트의 인증 방식은 그대로 유지한다.
+3. 플랫폼 라우트이면 bearer 토큰과 `X-Organization-ID` 헤더를 추출하여 `AuthorizePlatformManagement`를 호출한다.
+
+**`AuthorizePlatformManagement(ctx, token, org, actionCode)` 검증:**
+
+- `ManagementOrganizationID`가 설정되어 있어야 한다 (없으면 503).
+- 요청 `org`가 설정된 관리 조직과 정확히 일치해야 한다 (불일치 시 403).
+- `Authenticate`로 토큰의 외부 주체가 활성 사용자이고 관리 조직의 활성 구성원인지 확인한다.
+- `CheckApplicationAuthorizations`로 토큰에 연결된 애플리케이션의 허용 액션과 사용자 역할을 확인한다. 신뢰된 앱은 명시적 동의를 생략하며, 그 외 앱에는 해당 액션에 대한 활성 사용자 동의가 필요하다.
+
+**릴레이션:** 기존 `actions` → `role_actions` → `role_bindings` 관계로 세부 관리 권한을 등록한다. 플랫폼 API는 `(grant-management, platform, grant)`, 조직 API는 `(grant-management, organization, 조직 ID)`, 사용자 정보와 provider 목록은 `(grant-management, service, grant)` 리소스를 사용한다. `application_actions`와 신뢰 설정 또는 `application_grants`·`application_grant_actions`가 앱의 사용 범위를 추가로 제한한다. 새 테이블이나 컬럼은 없다.
+
+**구조의 이유:** 리소스 유형으로 관리 범위를 구분하고, 설정으로 지정한 운영 조직인지도 별도로 검사한다. 다른 조직이 같은 플랫폼 리소스에 역할을 연결해도 이 조직 검사를 통과하지 못한다. 운영 조직의 역할 관리자는 플랫폼 권한을 부여할 수 있으므로 해당 조직은 운영자 전용으로 관리해야 한다.
+
+**기존 관리 권한 이전:** `grant-management.manage` 정의를 보존하는 것은 이전 카탈로그의 운영·롤백을 위한 것이며 새 액션으로 권한을 전개하지 않는다. 이전 세 그룹 경로를 계속 허용하려면 활성화 전에 해당 역할의 `role_actions`, 앱의 `application_actions`, 비신뢰 앱 사용자의 `application_grant_actions`에 `grant-management.groups.read`, `.groups.create`, `.groups.delete`를 명시적으로 추가해야 한다. 기존 조직 리소스 바인딩은 재사용한다. 동의는 사용자 동의 API로 갱신하며, 이전 `manage` 권한을 전체 48개 관리 권한으로 자동 확대하지 않는다. 이 데이터 이전이 완료되지 않으면 이전 카탈로그를 유지한다.
+
+**가입 전 본인 식별:** `POST /api/v1/me/materialize`는 조직 가입 전에 로컬 사용자 ID를 확보하는 경로다. 이 경로의 정확한 capability에 한해 사용자 인증, 활성 사용자·앱·조직·provider, 앱의 `grant-management.user.materialize` 액션 등록을 검사하되 멤버십·역할·동의는 요구하지 않는다. 이 요청은 본인 identity만 등록하며 멤버십이나 역할, 앱 동의를 생성하지 않는다. 가입하지 않은 사용자는 `membershipStatus: none`을 받고, 다른 관리 경로는 계속 일반 권한 검사를 받는다. 이 예외에는 본문 없는 `forward-user` 요청만 해당한다. 새 테이블이나 컬럼은 없다.
+
+**Actor attribution:** bearer 경로에서 `WithManagementActor(ctx, userID)`로 컨텍스트에 인증된 사용자 ID를 저장한다. 마스터 경로에서는 `"grant-master"`가 기본값으로 유지된다. `ActivateHttpCapabilityGenerationAdmin`과 `SetProviderPepClientAdmin`은 `ManagementActorFromContext(ctx)`를 사용하여 기록된 actor를 결정한다.
+
+**비활성 조직 재활성화 PDP 경로:** `POST /api/v1/orgs/{organizationId}/reactivate`만 조직 활성 상태 검사를 예외 처리한다. `managementReactivationCapability`와 SQL은 정확한 `grant-management.organization.reactivate` 액션, 자기 조직 리소스, 일치하는 조직 경로를 요구한다. 앱 ID를 유지하므로 역할·앱 허용 액션·신뢰 또는 동의 검사는 계속 적용된다. 원본 API는 별도로 `organization.permission.manage` 권한을 확인한다. 일반 관리 요청은 비활성 조직에서 계속 거절하며, 예외 경로에는 `recordScope`, `batch`, `responseAuthorization`를 사용할 수 없다.
