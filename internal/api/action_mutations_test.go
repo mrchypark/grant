@@ -1,11 +1,54 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Conalog/grant/internal/grant"
 )
+
+func TestPrivateMigrationValidationStatus(t *testing.T) {
+	s := managementTestServer(t)
+	var manifest grant.PatchDataAuthorityImport
+	if err := json.Unmarshal([]byte(`{"manifestVersion":"grant.patch-data-authority.v1","generation":"validation-test","users":[],"organizations":[],"memberships":[],"hierarchyEdges":[],"plantBindings":[],"applicationAssignments":[]}`), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.LedgerDigest = strings.Repeat("a", 64)
+	manifest.ManifestDigest = grant.PatchDataManifestDigest(manifest)
+	call := func(value grant.PatchDataAuthorityImport, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest("POST", "/ops/migrations/patch-data-authority", bytes.NewReader(payload))
+		r.Header.Set("X-Grant-Master-Key", "master-secret")
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("got %d want %d: %s", w.Code, want, w.Body.String())
+		}
+		return w
+	}
+	bad := manifest
+	bad.ManifestVersion = "invalid"
+	call(bad, 400)
+	bad = manifest
+	bad.ManifestDigest = strings.Repeat("b", 64)
+	call(bad, 400)
+	first := call(manifest, 200)
+	if !strings.Contains(first.Body.String(), `"applied":true`) {
+		t.Fatalf("valid import not applied after validation failures: %s", first.Body.String())
+	}
+	repeat := call(manifest, 200)
+	if !strings.Contains(repeat.Body.String(), `"applied":false`) {
+		t.Fatalf("valid import not idempotent: %s", repeat.Body.String())
+	}
+}
 
 func TestProviderActionHTTPPreconditionsAndPatch(t *testing.T) {
 	s := managementTestServer(t)
