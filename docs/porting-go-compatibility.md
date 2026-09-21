@@ -25,7 +25,7 @@ The following is extracted from [crates/api/src/lib.rs](https://github.com/Conal
 | voter | `/api/v1/admin/providers/{providerId}/actions` |
 | voter | `/api/v1/admin/providers/{providerId}/http-capability-generations` |
 | voter | `/api/v1/admin/providers/{providerId}/http-capability-active` |
-| voter | `/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}` |
+| voter | `/ops/providers/{providerId}/enforcers/{pepClientId}` |
 | voter | `/api/v1/orgs/{organizationId}/apps` |
 | voter | `/api/v1/orgs/{organizationId}/apps/{applicationId}/actions` |
 | voter | `/api/v1/orgs/{organizationId}/apps/{applicationId}/consent` |
@@ -44,11 +44,9 @@ The following is extracted from [crates/api/src/lib.rs](https://github.com/Conal
 | voter | `/api/v1/orgs/{organizationId}/bindings/{bindingId}` |
 | voter | `/api/v1/orgs/{organizationId}/deactivate` |
 | voter | `/api/v1/orgs/{organizationId}/reactivate` |
-| voter | `/api/v1/admin/backups` |
-| voter | `/api/v1/admin/backups/s3` |
-| voter | `/api/v1/admin/bootstrap/rauthy-owner` |
-| voter | `/api/v1/admin/bootstrap/external-owner` |
-| voter | `/api/v1/admin/imports/patch-data-authority` |
+| voter | `/ops/backups` |
+| voter | `/api/v1/admin/bootstrap/owner` |
+| voter | `/ops/migrations/patch-data-authority` |
 | voter | `/api/v2/admin/imports/authority-snapshots` |
 | shared | `/healthz` |
 | shared | `/readyz` |

@@ -40,7 +40,9 @@ Verify restored authority, generation/replay behavior and negative authorization
 
 ## Native backups
 
-The master-key-protected `POST /api/v1/admin/backups` produces a consistent logical snapshot. `GET /api/v1/admin/backups` lists local artifacts; `GET /api/v1/admin/backups/s3` lists S3 artifacts when S3 is configured. Logical snapshots preserve the canonical application schema, table data and generation/provenance history. These JSON artifacts are different from Hiqlite encrypted SQLite backups.
+The private master-key-protected `POST /ops/backups` produces a consistent logical snapshot. `GET /ops/backups` returns `scope: "logical-snapshots"` and an `items` array whose entries identify `storage: "local"` or `"s3"`. The service selects configured storage; callers do not select an S3 endpoint. Neither route is published through management Exposure. Logical snapshots preserve the canonical application schema, table data and generation/provenance history.
+
+On IED, native GCS durability/checkpoints remain the persistence mechanism. This logical export API writes a local JSON snapshot (and uploads it only when the existing S3 adapter is configured); it does not list or verify native GCS checkpoints. A successful empty list is not evidence of a durable GCS backup. With NoPVC, local exports must be copied off the Pod before replacement. No MinIO is required.
 
 `GRANT_BACKUP_DIR` sets the local artifact directory. S3 backups use the configured Rhiza bucket under the `grant-backups/` subdirectory of its prefix. Use bucket retention/access controls appropriate to operational recovery. A native backup can be restored with the explicit `migrate-restore` command into a new isolated destination.
 

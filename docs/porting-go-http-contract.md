@@ -2,7 +2,7 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The current HTTP boundary has 48 distinct paths and 63 method registrations, including three internal registration-management reads. The three Exposure-specific paths and V2 authority snapshot receiving path are retired and return 404. GET registrations also accept HEAD.
+The current HTTP boundary has 49 distinct paths and 69 method registrations, including three internal registration-management reads. The three Exposure-specific paths and V2 authority snapshot receiving path are retired and return 404. GET registrations also accept HEAD.
 
 ## Method, path, authorization and node role
 
@@ -11,10 +11,10 @@ The current HTTP boundary has 48 distinct paths and 63 method registrations, inc
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-generations` | master | true | 201 |
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
 | GET | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
-| PUT | `/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}` | master | true | 200 |
+| PUT | `/ops/providers/{providerId}/enforcers/{pepClientId}` | master | true | 200 |
 | GET | `/api/v2/http-capabilities/catalog/{providerId}` | app | false | 200 |
 | POST | `/api/v2/http-capabilities/decide` | application | false | 200 |
-| POST | `/api/v1/admin/imports/patch-data-authority` | master | true | 200 |
+| POST | `/ops/migrations/patch-data-authority` | master | true | 200 |
 | GET | `/api/v1/me` | bearer | false | 200 |
 | POST | `/api/v1/me/materialize` | bearer | true | 200 |
 | GET | `/api/v1/providers` |  | false | 200 |
@@ -55,11 +55,9 @@ The current HTTP boundary has 48 distinct paths and 63 method registrations, inc
 | DELETE | `/api/v1/orgs/{organizationId}/bindings/{bindingId}` | user | true | 204 |
 | POST | `/api/v1/orgs/{organizationId}/deactivate` | user | true | 200 |
 | POST | `/api/v1/orgs/{organizationId}/reactivate` | inactive | true | 200 |
-| POST | `/api/v1/admin/bootstrap/rauthy-owner` | master | true | 201 |
-| POST | `/api/v1/admin/bootstrap/external-owner` | master | true | 201 |
-| POST | `/api/v1/admin/backups` | master | true | 202 |
-| GET | `/api/v1/admin/backups` | master | true | 200 |
-| GET | `/api/v1/admin/backups/s3` | master | true | 200 |
+| POST | `/api/v1/admin/bootstrap/owner` | master | true | 201 |
+| POST | `/ops/backups` | master | true | 202 |
+| GET | `/ops/backups` | master | true | 200 |
 | POST | `/api/v1/authz/check` | master | false | 200 |
 | POST | `/api/v1/authz/batch-check` | master | false | 200 |
 | POST | `/api/v1/authz/filter` | master | false | 200 |
@@ -72,7 +70,7 @@ The current HTTP boundary has 48 distinct paths and 63 method registrations, inc
 | ANY | `/auth/v1` | Rauthy mode only | false | upstream status |
 | ANY | `/auth/v1/{*rauthyPath}` | Rauthy mode only | false | upstream status |
 
-There are 63 method registrations across 48 distinct paths. The current fixture excludes the three retired Exposure routes and the receipt-only V2 authority snapshot receiver. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`. V1 authority import remains supported; removed APIs have no aliases or redirects. The three new voter-only GET contracts, response fields, error states and lifecycle constraints are documented in [registration API management](registration-api-management.md); they do not imply new Exposure publication or external onboarding support.
+There are 69 method registrations across 49 distinct paths. The current fixture excludes the three retired Exposure routes and the receipt-only V2 authority snapshot receiver. Provider operations use the generic HTTP capability catalog and `/api/v2/http-capabilities/decide`. V1 authority import remains supported; removed APIs have no aliases or redirects. The three new voter-only GET contracts, response fields, error states and lifecycle constraints are documented in [registration API management](registration-api-management.md); they do not imply new Exposure publication or external onboarding support.
 
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 
@@ -83,3 +81,29 @@ All six authorization routes reject any present `resource.view` value, including
 The Rauthy proxy preserves the original method, path/query and repeated response headers, does not follow redirects, and returns generic 502/504 errors without upstream transport details. Patch Data mode returns 404 for the proxy. `/auth` remains the 307 redirect to `/auth/v1`.
 
 The raw SQL transport is a distinct private listener and has no public router registration. The native cluster member transport uses UDP QUIC and does not share the API port.
+
+## Granular action mutations and preconditions
+
+| Method | Path | Authentication | Voter only | Success |
+|---|---|---|---|---|
+| POST | `/api/v1/admin/providers/{providerId}/actions` | master or authorized platform bearer | true | 201 |
+| PATCH | `/api/v1/admin/providers/{providerId}/actions/{actionId}` | master or authorized platform bearer | true | 200 |
+| DELETE | `/api/v1/admin/providers/{providerId}/actions/{actionId}` | master or authorized platform bearer | true | 204 |
+| GET | `/api/v1/orgs/{organizationId}/roles/{roleId}/actions` | user | true | 200 |
+| PUT | `/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}` | user | true | 204 |
+| DELETE | `/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}` | user | true | 204 |
+| PUT | `/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` | user | true | 204 |
+| DELETE | `/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` | user | true | 204 |
+
+Action-set GETs and consent GET return a strong ETag. Replacement PUTs require
+that ETag in `If-Match`; first consent creation requires `If-None-Match: *`.
+Missing conditions return 428; stale conditions return 412 without changing
+canonical rows. Link PUT/DELETE is bodyless and idempotent. PATCH changes only
+supplied metadata; nullable text may be cleared with null. Immutable IDs/codes
+and unknown fields are rejected. Full sets retain their replacement semantics.
+
+The bootstrap route requires both master key and a configured-provider Bearer
+with an explicit `X-Organization-ID`. It creates no Application. `/ops/*` and
+bootstrap never accept platform-bearer fallback and are absent from the
+management catalog. The old provider-specific bootstrap, admin backup/S3,
+admin import and pep-clients paths return 404 without aliases.

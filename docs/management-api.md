@@ -21,29 +21,32 @@ The catalog covers:
   and provider listing.
 - **Organization management** (`/api/v1/orgs/{organizationId}/...`):
   applications, groups, members, agreements, roles, bindings, and
-  organization lifecycle (deactivate/reactivate).
-- **Admin routes** (`/api/v1/admin/...`): providers, provider actions,
-  capability catalog staging/activation, PEP client configuration,
-  application trust and provisioning verification, user activation,
-  import, and backup management.
+  organization lifecycle (deactivate/reactivate). Includes fine-grained
+  per-action membership for roles and applications.
+- **Admin routes** (`/api/v1/admin/...`): providers, provider actions
+  (replace, create, update, delete), capability catalog staging/activation,
+  application trust and provisioning verification, user activation.
 
 ## Explicit exclusions
 
 The following routes are intentionally excluded from the management
-catalog. They are internal, infrastructure, or authorization endpoints
+catalog. They are private, infrastructure, or authorization endpoints
 that do not participate in the management grant model:
 
-- `POST /api/v1/admin/bootstrap/rauthy-owner`
-- `POST /api/v1/admin/bootstrap/external-owner`
+- `POST /api/v1/admin/bootstrap/owner` (unified provider-neutral bootstrap)
+- `POST /ops/backups`, `GET /ops/backups` (private backup ops)
+- `PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (private enforcer registration)
+- `POST /ops/migrations/patch-data-authority` (private import)
 - `POST /api/v1/authz/check`, `batch-check`, `filter`
 - `POST /api/v1/application-authz/check`, `batch-check`, `filter`
 - `GET /api/v2/http-capabilities/catalog/{providerId}`
 - `POST /api/v2/http-capabilities/decide`
 
-Bootstrap, authorization, health, and runtime-private routes are never
-part of the management catalog. They operate outside the grant model
-and are protected by their own authentication and authorization
-mechanisms.
+Bootstrap, authorization, health, backup, import, enforcer registration,
+and runtime-private routes are never part of the management catalog.
+They operate outside the grant model and are protected by master-key
+or network policy. Bootstrap is provider-neutral and does not create
+applications automatically.
 
 ## Security model
 
@@ -97,10 +100,17 @@ apply at the PDP; the backend also requires its core management permission.
 
 ### Private routes
 
-Bootstrap, authz, health, and runtime routes are private to the
-cluster. They are never part of the management catalog and are
-protected according to each endpoint's own key, token, and network policy.
-Health probes do not require a management permission.
+Bootstrap, authz, health, backup, import, enforcer registration,
+and runtime routes are private to the cluster. They are never part
+of the management catalog and are protected by master-key or network
+policy. Health probes do not require a management permission.
+
+- Bootstrap (`POST /api/v1/admin/bootstrap/owner`): provider-neutral,
+  does not create applications automatically.
+- Backups (`/ops/backups`): private operational endpoint.
+- Import (`/ops/migrations/patch-data-authority`): private migration endpoint.
+- Enforcer registration (`/ops/providers/{providerId}/enforcers/{pepClientId}`):
+  private PEP binding endpoint.
 
 ## Registry structure
 
@@ -108,7 +118,7 @@ Each route entry contains:
 
 | Field | Description |
 |-------|-------------|
-| `Method` | HTTP method (GET, POST, PUT, DELETE). |
+| `Method` | HTTP method (GET, POST, PUT, PATCH, DELETE). |
 | `Path` | Go 1.22+ ServeMux path template. |
 | `ActionCode` | Canonical action code (e.g. `applications.read`). |
 | `Platform` | True for admin-only `/api/v1/admin/` routes. |
@@ -157,15 +167,21 @@ backend value (e.g. `strong`, ` Strong `, `STRONG`). Non-GET routes
 
 ## Request and response policies
 
-- **Body routes** (POST/PUT with JSON body): `body: json`,
+- **Body routes** (POST/PUT/PATCH with JSON body): `body: json`,
   `maxBytes: 2097152` (2 MiB), `contentTypes: ["application/json"]`.
 - **Bodyless routes** (GET, DELETE, bodyless POST/PUT):
   `body: none`, `maxBytes: 0`.
 - **Forward headers**: every route forwards `x-organization-id`.
   JSON body routes additionally forward `content-type`.
+- **Concurrency control**: action-set replacement and consent PUT forward
+  `if-match`; consent PUT also forwards `if-none-match`. The matching GET
+  returns `etag`. Missing preconditions return `428`; stale values return
+  `412`. Every response contract permits these statuses and forwards `etag`.
+  Individual link PUT/DELETE and metadata PATCH do not require a set ETag.
 - **Authorization**: all routes use `forward-user`.
 - **Response**: `maxBytes: 4194304` (4 MiB), `redirects: deny`,
   `errorStatuses: [400, 401, 403, 404, 409, 422, 500, 503]`.
+  Guarded mutations additionally include `412, 428`.
 
 ## Generation and digest
 
@@ -232,15 +248,15 @@ Before activating the new catalog, migrate those existing grants to exactly:
 - `grant-management.groups.create`
 - `grant-management.groups.delete`
 
-Use `PUT /orgs/{organizationId}/roles/{roleId}/actions` and
-`PUT /orgs/{organizationId}/apps/{applicationId}/actions` (both under `/api/v1`)
-to add the three actions to each affected role and admitted application while
-preserving its other actions, including `manage` for rollback. Existing
+Use `PUT /orgs/{organizationId}/roles/{roleId}/actions/{actionId}` and
+`PUT /orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` (both under `/api/v1`)
+to add each action while preserving the other actions, including `manage` for rollback. Existing
 organization resource bindings can be reused. Trusted apps must temporarily
 leave trusted mode to change their action set, then have trust explicitly
 restored by the operator. For non-trusted apps, each affected user must update
 their consent through `PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/consent`,
-preserving their other consented actions. Do not fabricate consent or set trust
+preserving their other consented actions and supplying the current GET ETag as
+`If-Match` (or `If-None-Match: *` for first consent). Do not fabricate consent or set trust
 merely to bypass this step.
 
 Register definitions and stage the catalog while the old generation remains
@@ -249,7 +265,7 @@ principals, then activate using the expected old generation/digest. If any
 required role, app admission, or consent is missing, keep the old generation
 active. Retaining only `manage` will deny the new routes. This is an explicit
 operator data migration, not a startup migration or an authorization fallback.
-Never expand a legacy group grant into all 48 management actions; additional
+Never expand a legacy group grant into all management actions; additional
 administration rights require a separate reviewed grant.
 
 For additional explicitly granted management capabilities:
