@@ -71,7 +71,7 @@ func (s *Store) ReplaceApplicationActions(ctx context.Context, id string, ids []
 		{SQL: "INSERT INTO application_actions(application_id,action_id) SELECT ?,j.value FROM json_each(?) j JOIN actions a ON a.id=j.value JOIN service_providers p ON p.id=a.provider_id AND p.active=1 WHERE a.grantable_to_applications=1", Args: []any{id, j}, ExpectedRowsAffected: &n},
 		{SQL: "DELETE FROM application_grant_actions WHERE application_grant_id IN(SELECT id FROM application_grants WHERE application_id=?) AND action_id NOT IN(SELECT action_id FROM application_actions WHERE application_id=?)", Args: []any{id, id}},
 	}
-	if e = s.Transaction(ctx, ss); e != nil {
+	if e = s.actionTransaction(ctx, ss); e != nil {
 		return nil, e
 	}
 	return s.ListApplicationActionsWithConsistency(ctx, id, ReadStrong)

@@ -36,7 +36,7 @@ func (s *Store) ReplaceActiveApplicationConsent(ctx context.Context, g Applicati
 		{SQL: "DELETE FROM application_grant_actions WHERE application_grant_id=(SELECT id FROM application_grants WHERE user_id=? AND application_id=? AND organization_id=? AND status='active')", Args: []any{g.UserID, g.ApplicationID, g.OrganizationID}},
 		{SQL: "INSERT INTO application_grant_actions(application_grant_id,action_id) SELECT g.id,j.value FROM json_each(?) j JOIN application_grants g ON g.user_id=? AND g.application_id=? AND g.organization_id=? AND g.status='active' JOIN application_actions a ON a.application_id=g.application_id AND a.action_id=j.value", Args: []any{j, g.UserID, g.ApplicationID, g.OrganizationID}, ExpectedRowsAffected: func() *int64 { n := int64(len(ids)); return &n }()},
 	}
-	if e = s.Transaction(ctx, stmts); e != nil {
+	if e = s.actionTransaction(ctx, stmts); e != nil {
 		return ApplicationGrant{}, e
 	}
 	r, e := s.FindActiveApplicationConsentWithConsistency(ctx, g.UserID, g.ApplicationID, g.OrganizationID, ReadStrong)
