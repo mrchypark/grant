@@ -99,7 +99,27 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 			return
 		}
 		if auth == "master" {
-			err = requireKey(r, "x-grant-master-key", s.service.Config().Security.MasterKey, "master key")
+			if len(r.Header.Values("X-Grant-Master-Key")) > 0 {
+				err = requireKey(r, "x-grant-master-key", s.service.Config().Security.MasterKey, "master key")
+			} else if route, ok := grant.LookupManagementRoute(method, path); ok && route.Platform {
+				q.bearer, err = bearerToken(r)
+				if err == nil && q.bearer == "" {
+					err = failure(401, "unauthorized: missing bearer token")
+				}
+				if err == nil {
+					q.org, err = header(r, "x-organization-id", true)
+				}
+				if err == nil {
+					var actor string
+					actor, err = s.service.AuthorizePlatformManagement(r.Context(), q.bearer, q.org, route.ActionCode)
+					if err == nil {
+						r = r.WithContext(grant.WithManagementActor(r.Context(), actor))
+						q.Request = r
+					}
+				}
+			} else {
+				err = failure(401, "unauthorized: missing x-grant-master-key header")
+			}
 		}
 		if auth == "app" || auth == "application" {
 			err = requireKey(r, "x-grant-app-auth-key", s.service.Config().Security.AppAuthKey, "application authorization key")

@@ -25,6 +25,13 @@
                                     AND req.resource_id = req.organization_id
                                     AND req.action_id = 'organization.permission.manage'
                                 )
+                                OR (
+                                    req.allow_inactive_self_reactivation = 1
+                                    AND req.provider_id = 'grant-management'
+                                    AND req.action_id = 'grant-management.organization.reactivate'
+                                    AND req.resource_type = 'organization'
+                                    AND req.resource_id = req.organization_id
+                                )
                             )
                             AND (
                                 req.provider_id <> 'grant'

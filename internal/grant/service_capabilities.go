@@ -32,13 +32,13 @@ func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provid
 	return s.store.StageHttpCapabilityGeneration(ctx, provider, v)
 }
 func (s *Service) ActivateHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v ActivateHttpCapabilityGeneration) (HttpCapabilityActivation, error) {
-	return s.store.ActivateHttpCapabilityGeneration(ctx, provider, "grant-master", v)
+	return s.store.ActivateHttpCapabilityGeneration(ctx, provider, ManagementActorFromContext(ctx), v)
 }
 func (s *Service) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, provider string) (AdminHttpCapabilityCatalog, error) {
 	return s.store.ActiveHttpCapabilityCatalogAdmin(ctx, provider)
 }
 func (s *Service) SetProviderPepClientAdmin(ctx context.Context, provider, pep string, v UpsertProviderPepClient) (ProviderPepClient, error) {
-	return s.store.UpsertProviderPepClient(ctx, provider, pep, "grant-master", v)
+	return s.store.UpsertProviderPepClient(ctx, provider, pep, ManagementActorFromContext(ctx), v)
 }
 func (s *Service) configuredPEP(ctx context.Context, provider string) (ProviderPepClient, error) {
 	app := s.cfg.Security.HTTPCapabilityPEPApplicationID
@@ -150,7 +150,11 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
-	if r.ResponseDigest != "" {
+	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
+	if r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
+		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID) {
+		allowed, reason = false, "platform_management_organization_required"
+	} else if r.ResponseDigest != "" {
 		allowed, reason, err = s.responseDecision(ctx, token, org, r, c)
 		if err != nil {
 			return HttpCapabilityDecision{}, err
@@ -168,6 +172,16 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			return HttpCapabilityDecision{}, err
 		}
 		allowed, reason = true, "record_scope"
+	} else if managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath) {
+		decisions, e := s.store.evaluateUserActions(ctx, []UserActionCheck{{
+			UserID: c.UserID, OrganizationID: c.OrganizationID, ProviderID: r.ProviderID,
+			ResourceType: "organization", ResourceID: org, ActionID: *cap.ActionID,
+			ApplicationID: &c.ApplicationID, Consistency: ReadStrong,
+		}}, true)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "management_reactivation"
 	} else {
 		decisions, err := s.evaluateAuthorizations(ctx, []AuthorizationCheck{{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: *cap.ActionID, Resource: AuthorizationResource{ProviderID: r.ProviderID, ResourceType: cap.Resource.ResourceType, ID: r.ResourceID}}}, ReadStrong, &c.ApplicationID)
 		if err != nil {
