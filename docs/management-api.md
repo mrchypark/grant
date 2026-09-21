@@ -121,8 +121,9 @@ example, `applications.read` becomes `grant-management.applications.read`.
 Every action is `GrantableToApplications: true` and uses `RiskLevel: high`.
 
 A deprecated legacy `manage` action (`grant-management.manage`) is
-retained for backwards catalog compatibility. No registered routes use
-this action code.
+retained so the old catalog can remain active during migration or rollback.
+No new registered routes use this action code, and retaining it does not
+authorize the new routes.
 
 ## Resource types
 
@@ -190,7 +191,9 @@ payload or the action definitions for review.
 3. POST the stage payload to
    `POST /api/v1/admin/providers/grant-management/http-capability-generations`.
 4. Verify the staged generation digest matches the expected value.
-5. Activate with
+5. Complete the role, application and consent migration below, and verify the
+   intended principals can authorize the new exact actions.
+6. Activate with
    `POST /api/v1/admin/providers/grant-management/http-capability-active`,
    providing `targetGeneration` and `targetCatalogDigest`.
 
@@ -202,8 +205,8 @@ unintended catalog switches.
 
 The deprecated `grant-management.manage` action is included in the
 action definitions output (`-actions` flag). When replacing provider
-actions, include the legacy action to preserve backwards compatibility
-with existing bindings that reference it:
+actions, include the legacy action to preserve existing role/app/consent rows
+while the old catalog is active. This does not translate their permissions:
 
 ```sh
 grant-management-catalog -generation 1 -actions > actions.json
@@ -220,13 +223,37 @@ fine-grained catalog layer is the defense-in-depth gate.
 
 ### Existing bindings
 
-Existing role bindings reference action IDs. When migrating to the new
-catalog:
+Role bindings reference roles; `role_actions` associates those roles with
+action IDs. The old three-route catalog used `grant-management.manage` for
+`GET /groups`, `POST /groups`, and `DELETE /groups/{groupId}` under an organization.
+Before activating the new catalog, migrate those existing grants to exactly:
 
-- Bindings referencing `grant-management.manage` continue to work
-  because the action is retained.
-- New bindings should reference the fine-grained action IDs
-  (e.g. `grant-management.applications.read`).
+- `grant-management.groups.read`
+- `grant-management.groups.create`
+- `grant-management.groups.delete`
+
+Use `PUT /orgs/{organizationId}/roles/{roleId}/actions` and
+`PUT /orgs/{organizationId}/apps/{applicationId}/actions` (both under `/api/v1`)
+to add the three actions to each affected role and admitted application while
+preserving its other actions, including `manage` for rollback. Existing
+organization resource bindings can be reused. Trusted apps must temporarily
+leave trusted mode to change their action set, then have trust explicitly
+restored by the operator. For non-trusted apps, each affected user must update
+their consent through `PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/consent`,
+preserving their other consented actions. Do not fabricate consent or set trust
+merely to bypass this step.
+
+Register definitions and stage the catalog while the old generation remains
+active. Check the new exact action decisions for previously allowed and denied
+principals, then activate using the expected old generation/digest. If any
+required role, app admission, or consent is missing, keep the old generation
+active. Retaining only `manage` will deny the new routes. This is an explicit
+operator data migration, not a startup migration or an authorization fallback.
+Never expand a legacy group grant into all 48 management actions; additional
+administration rights require a separate reviewed grant.
+
+For additional explicitly granted management capabilities:
+
 - Platform bindings use the `platform` resource type with resource ID
   `grant` (constant).
 - Organization bindings use the `organization` resource type with
