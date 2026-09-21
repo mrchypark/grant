@@ -57,7 +57,7 @@ func (s *Service) ReplaceRoleActionsAuthorized(ctx context.Context, user, org, i
 	if err != nil {
 		return nil, err
 	}
-	err = s.store.Transaction(ctx, []Statement{assertion("SELECT 1 FROM roles WHERE id=? AND organization_id=?", id, org), assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM json_each(?) j LEFT JOIN actions a ON a.id=j.value WHERE a.id IS NULL)", payload), {SQL: "DELETE FROM role_actions WHERE role_id=?", Args: []any{id}}, {SQL: "INSERT INTO role_actions(role_id,action_id) SELECT ?,value FROM json_each(?)", Args: []any{id, payload}}})
+	err = s.store.actionTransaction(ctx, []Statement{assertion("SELECT 1 FROM roles WHERE id=? AND organization_id=?", id, org), assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM json_each(?) j LEFT JOIN actions a ON a.id=j.value WHERE a.id IS NULL)", payload), {SQL: "DELETE FROM role_actions WHERE role_id=?", Args: []any{id}}, {SQL: "INSERT INTO role_actions(role_id,action_id) SELECT ?,value FROM json_each(?)", Args: []any{id, payload}}})
 	if err != nil {
 		return nil, err
 	}

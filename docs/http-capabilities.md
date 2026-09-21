@@ -7,7 +7,7 @@ Grant stores authorization-significant HTTP contracts; it does not proxy provide
 The Phase A API is inactive by default:
 
 - `POST /api/v1/admin/providers/{providerId}/http-capability-generations` stages one immutable next generation.
-- `PUT /api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}` binds one globally unique active/ready application identity to one provider.
+- `PUT /ops/providers/{providerId}/enforcers/{pepClientId}` binds one globally unique active/ready application identity to one provider.
 - `POST /api/v1/admin/providers/{providerId}/http-capability-active` atomically activates or rolls back the provider pointer.
 - `GET /api/v2/http-capabilities/catalog/{providerId}` returns only the active pointer generation to the configured service-authenticated PEP application.
 - `POST /api/v2/http-capabilities/decide` re-resolves the active capability, verifies the exact method/path/query/resource/digest/credential evidence, evaluates the existing RBAC/application policy tuple and returns a short-lived receipt.

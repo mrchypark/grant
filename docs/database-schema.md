@@ -34,7 +34,7 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. unique key는 `(provider, issuer, collection_id, external_user_id)`다. PocketBase는 `provider=pocketbase`, 설정된 canonical origin인 `issuer`, auth-refresh로 검증한 `collection_id`와 raw record ID를 모두 사용한다. Rauthy는 기존 subject 의미를 유지하고 issuer/collection은 빈 문자열이다. CHECK 제약은 PocketBase의 두 namespace 값이 모두 있어야 하고 다른 provider에서는 모두 비어 있어야 함을 보장한다. 같은 raw ID가 다른 issuer나 collection에 있어도 별도 사용자이며 이메일로 자동 연결하지 않는다. 명시적 master external-owner bootstrap만 선택 조직의 owner membership/binding과 고정 application을 원자 생성한다. 인증 응답의 organizations relation은 사용하지 않는다. 정상 소속·권한의 권위는 Grant local row다.
+외부 인증 공급자와 내부 사용자 매핑. unique key는 `(provider, issuer, collection_id, external_user_id)`다. PocketBase는 `provider=pocketbase`, 설정된 canonical origin인 `issuer`, auth-refresh로 검증한 `collection_id`와 raw record ID를 모두 사용한다. Rauthy는 기존 subject 의미를 유지하고 issuer/collection은 빈 문자열이다. CHECK 제약은 PocketBase의 두 namespace 값이 모두 있어야 하고 다른 provider에서는 모두 비어 있어야 함을 보장한다. 같은 raw ID가 다른 issuer나 collection에 있어도 별도 사용자이며 이메일로 자동 연결하지 않는다. 명시적 master owner bootstrap은 선택 조직의 owner membership/binding을 원자 생성하며 application은 별도 등록한다. 인증 응답의 organizations relation은 사용하지 않는다. 정상 소속·권한의 권위는 Grant local row다.
 
 ### `auth_identity_cache`
 
@@ -165,6 +165,34 @@ PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, 
 - 활성 `provider_http_capability_sets`의 catalog가 참조하는 액션은 Provider 액션 전체 교체로 삭제할 수 없다. 해당 참조가 없는 catalog를 먼저 활성화해야 하며, 활성화 시 현재 액션 레지스트리와의 참조도 다시 검증한다.
 - `actions.grantable_to_applications`를 false로 변경하면 해당 액션의 `application_actions`와 `application_grant_actions` 연결을 제거한다. `role_actions` 연결은 유지한다. 액션 자체를 삭제할 때의 기존 역할·앱·동의 연결 정리와는 구분한다.
 - Application의 액션 선택은 활성 Provider의 앱 부여 가능 액션만 허용한다. 조직별 후보 조회도 같은 조건을 사용하며, 후보에 나타나는 사실은 사용자 RBAC나 리소스 binding을 대신하지 않는다.
+
+#### 역할·앱 액션의 개별 연결
+
+역할과 앱의 액션 연결은 전체 교체(`PUT .../actions`)와 개별 추가·삭제(`PUT/DELETE .../actions/{actionId}`)를 지원한다. 개별 조작은 다른 연결을 보존한다.
+
+- `role_actions`: `(role_id, action_id)`는 복합 PK다. 개별 PUT은 `ON CONFLICT DO NOTHING`으로 연결을 추가하고, 개별 DELETE는 해당 row만 제거한다.
+- `application_actions`: `(application_id, action_id)`는 복합 PK다. 개별 PUT은 멤버십을 추가하고, 개별 DELETE는 해당 row만 제거한다. `application_grant_actions`의 stale row도 같은 트랜잭션에서 정리한다.
+
+단일 액션 변경 시 전체 목록을 다시 보내지 않으므로 다른 액션의 동시 변경을 덮어쓰지 않는다. 개별 PUT·DELETE는 멱등적이다. 같은 액션에 대한 상반된 변경은 트랜잭션 실행 순서를 따른다.
+
+#### Provider 액션 개별 관리
+
+Provider 액션은 전체 교체(`PUT`) 외에 개별 생성(`POST`), 수정(`PATCH`), 삭제(`DELETE`)를 지원한다.
+
+- `POST /api/v1/admin/providers/{providerId}/actions`: 새 액션을 생성한다. ID는 `providerId.code`로 정규화한다.
+- `PATCH /api/v1/admin/providers/{providerId}/actions/{actionId}`: 기존 액션의 이름, 설명, 위험 수준 등을 수정한다. 전체 교체와 달리 다른 액션에 영향을 주지 않는다.
+- `DELETE /api/v1/admin/providers/{providerId}/actions/{actionId}`: 액션과 모든 참조를 삭제한다. 활성 catalog가 참조하는 액션은 삭제할 수 없다.
+
+#### 동시성 제어 (Concurrency control)
+
+액션 멤버십과 consent 교체는 `If-Match`/`ETag` 헤더로 동시성 제어를 지원한다.
+
+- Provider·역할·앱 액션 목록과 현재 동의의 GET 응답은 본문과 같은 strong SQL snapshot에서 계산한 `ETag`를 반환한다. 액션 메타데이터 변경도 태그에 반영한다.
+- 전체 교체 PUT은 해당 GET에서 얻은 `If-Match`가 필수다. 현재 동의가 없는 최초 생성에는 `If-None-Match: *`를 사용한다.
+- 누락은 `428`, 불일치는 `412`다. 읽기 이후 쓰기 직전 상태도 동일 트랜잭션의 assertion으로 비교한다. 비교용 snapshot은 기존 `grant_import_payloads`에 불변 청크로 준비하며 권한 판정에는 사용하지 않는다.
+- 개별 액션 추가·삭제와 메타데이터 PATCH에는 전체 목록 ETag를 요구하지 않는다. 같은 필드를 동시에 PATCH하면 나중 트랜잭션의 값이 남는다.
+
+이 메커니즘은 오래된 전체 목록으로 다른 요청의 변경을 덮어쓰는 일을 막는다. 테이블·컬럼 추가는 없다.
 
 이 구조의 이유는 catalog가 사라진 액션을 계속 참조하지 않도록 하고, 앱에 대한 부여 중단이 과거 동의로 되살아나지 않도록 하기 위해서다. 역할 자체의 권한 정의와 앱이 사용할 수 있는 권한을 구분하므로 앱 부여 가능 여부만 변경했을 때 역할 연결은 보존한다.
 
@@ -321,10 +349,14 @@ Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 
 
 **구조의 이유:** 리소스 유형으로 관리 범위를 구분하고, 설정으로 지정한 운영 조직인지도 별도로 검사한다. 다른 조직이 같은 플랫폼 리소스에 역할을 연결해도 이 조직 검사를 통과하지 못한다. 운영 조직의 역할 관리자는 플랫폼 권한을 부여할 수 있으므로 해당 조직은 운영자 전용으로 관리해야 한다.
 
-**기존 관리 권한 이전:** `grant-management.manage` 정의를 보존하는 것은 이전 카탈로그의 운영·롤백을 위한 것이며 새 액션으로 권한을 전개하지 않는다. 이전 세 그룹 경로를 계속 허용하려면 활성화 전에 해당 역할의 `role_actions`, 앱의 `application_actions`, 비신뢰 앱 사용자의 `application_grant_actions`에 `grant-management.groups.read`, `.groups.create`, `.groups.delete`를 명시적으로 추가해야 한다. 기존 조직 리소스 바인딩은 재사용한다. 동의는 사용자 동의 API로 갱신하며, 이전 `manage` 권한을 전체 48개 관리 권한으로 자동 확대하지 않는다. 이 데이터 이전이 완료되지 않으면 이전 카탈로그를 유지한다.
+**기존 관리 권한 이전:** `grant-management.manage` 정의를 보존하는 것은 이전 카탈로그의 운영·롤백을 위한 것이며 새 액션으로 권한을 전개하지 않는다. 이전 세 그룹 경로를 계속 허용하려면 활성화 전에 해당 역할의 `role_actions`, 앱의 `application_actions`, 비신뢰 앱 사용자의 `application_grant_actions`에 `grant-management.groups.read`, `.groups.create`, `.groups.delete`를 명시적으로 추가해야 한다. 기존 조직 리소스 바인딩은 재사용한다. 동의는 사용자 동의 API로 갱신하며, 이전 `manage` 권한을 전체 관리 권한으로 자동 확대하지 않는다. 이 데이터 이전이 완료되지 않으면 이전 카탈로그를 유지한다.
 
 **가입 전 본인 식별:** `POST /api/v1/me/materialize`는 조직 가입 전에 로컬 사용자 ID를 확보하는 경로다. 이 경로의 정확한 capability에 한해 사용자 인증, 활성 사용자·앱·조직·provider, 앱의 `grant-management.user.materialize` 액션 등록을 검사하되 멤버십·역할·동의는 요구하지 않는다. 이 요청은 본인 identity만 등록하며 멤버십이나 역할, 앱 동의를 생성하지 않는다. 가입하지 않은 사용자는 `membershipStatus: none`을 받고, 다른 관리 경로는 계속 일반 권한 검사를 받는다. 이 예외에는 본문 없는 `forward-user` 요청만 해당한다. 새 테이블이나 컬럼은 없다.
 
 **Actor attribution:** bearer 경로에서 `WithManagementActor(ctx, userID)`로 컨텍스트에 인증된 사용자 ID를 저장한다. 마스터 경로에서는 `"grant-master"`가 기본값으로 유지된다. `ActivateHttpCapabilityGenerationAdmin`과 `SetProviderPepClientAdmin`은 `ManagementActorFromContext(ctx)`를 사용하여 기록된 actor를 결정한다.
 
 **비활성 조직 재활성화 PDP 경로:** `POST /api/v1/orgs/{organizationId}/reactivate`만 조직 활성 상태 검사를 예외 처리한다. `managementReactivationCapability`와 SQL은 정확한 `grant-management.organization.reactivate` 액션, 자기 조직 리소스, 일치하는 조직 경로를 요구한다. 앱 ID를 유지하므로 역할·앱 허용 액션·신뢰 또는 동의 검사는 계속 적용된다. 원본 API는 별도로 `organization.permission.manage` 권한을 확인한다. 일반 관리 요청은 비활성 조직에서 계속 거절하며, 예외 경로에는 `recordScope`, `batch`, `responseAuthorization`를 사용할 수 없다.
+
+### 인증 identity 연결 원칙
+
+모든 인증 어댑터는 정확한 `user_identities` 매핑만 재사용한다. 매핑이 없으면 새 내부 사용자 ID를 발급하고 identity만 생성한다. Rauthy에서도 이메일 일치나 외부 subject와 내부 사용자 ID의 문자열 일치로 기존 사용자를 자동 채택하지 않는다. 기존에 등록된 매핑과 membership/binding은 그대로 보존한다. 매핑 없이 이메일에 의존하던 레거시 계정은 운영자가 소유권을 확인하여 명시적으로 연결해야 한다. 이 원칙은 일반 로그인으로 초기 소유자 등록의 승인 경계를 우회하지 못하게 하기 위한 것이다. 테이블 구조와 canonical identity key는 바뀌지 않는다.

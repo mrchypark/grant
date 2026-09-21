@@ -2,6 +2,7 @@ package grant
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +33,8 @@ var managementRoutes = []ManagementRoute{
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}", ActionCode: "applications.detail"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", ActionCode: "applications.actions.read"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", ActionCode: "applications.actions.replace"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}", ActionCode: "applications.actions.add"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}", ActionCode: "applications.actions.remove"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/app-grants", ActionCode: "applications.grants.read"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.read"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.replace"},
@@ -60,6 +63,9 @@ var managementRoutes = []ManagementRoute{
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/roles", ActionCode: "roles.read"},
 	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/roles", ActionCode: "roles.create"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions", ActionCode: "role.actions.replace"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions", ActionCode: "role.actions.read"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}", ActionCode: "role.actions.add"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}", ActionCode: "role.actions.remove"},
 
 	// --- Organization: bindings ---
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/bindings", ActionCode: "bindings.read"},
@@ -74,6 +80,9 @@ var managementRoutes = []ManagementRoute{
 	{Method: "POST", Path: "/api/v1/admin/providers", ActionCode: "admin.provider.create", Platform: true},
 	{Method: "PUT", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.replace", Platform: true},
 	{Method: "GET", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.read", Platform: true},
+	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.create", Platform: true},
+	{Method: "PATCH", Path: "/api/v1/admin/providers/{providerId}/actions/{actionId}", ActionCode: "admin.provider.actions.update", Platform: true},
+	{Method: "DELETE", Path: "/api/v1/admin/providers/{providerId}/actions/{actionId}", ActionCode: "admin.provider.actions.delete", Platform: true},
 
 	// --- Admin: org providers (authorized user) ---
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", ActionCode: "admin.org.providers.actions.read"},
@@ -83,23 +92,12 @@ var managementRoutes = []ManagementRoute{
 	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/http-capability-generations", ActionCode: "admin.catalog.stage", Platform: true},
 	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/http-capability-active", ActionCode: "admin.catalog.activate", Platform: true},
 
-	// --- Admin: PEP ---
-	{Method: "PUT", Path: "/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}", ActionCode: "admin.pep.upsert", Platform: true},
-
 	// --- Admin: app trust/provision ---
 	{Method: "PUT", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust", ActionCode: "admin.app.trust", Platform: true},
 	{Method: "POST", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify", ActionCode: "admin.app.provision.verify", Platform: true},
 
 	// --- Admin: user active ---
 	{Method: "PUT", Path: "/api/v1/admin/users/{userId}/active", ActionCode: "admin.user.active", Platform: true},
-
-	// --- Admin: import ---
-	{Method: "POST", Path: "/api/v1/admin/imports/patch-data-authority", ActionCode: "admin.import.patch-data-authority", Platform: true},
-
-	// --- Admin: backups ---
-	{Method: "POST", Path: "/api/v1/admin/backups", ActionCode: "admin.backups.trigger", Platform: true},
-	{Method: "GET", Path: "/api/v1/admin/backups", ActionCode: "admin.backups.list", Platform: true},
-	{Method: "GET", Path: "/api/v1/admin/backups/s3", ActionCode: "admin.backups.list-s3", Platform: true},
 }
 
 // ManagementRoutes returns a copy of the complete sorted registry of
@@ -159,9 +157,9 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 			Request:      buildManagementRequest(route),
 			Response: HttpResponsePolicy{
 				MaxBytes:       4 << 20,
-				ForwardHeaders: []string{"content-type"},
+				ForwardHeaders: []string{"content-type", "etag"},
 				Redirects:      "deny",
-				ErrorStatuses:  []int{400, 401, 403, 404, 409, 422, 500, 503},
+				ErrorStatuses:  []int{400, 401, 403, 404, 409, 412, 422, 428, 500, 503},
 			},
 		}
 		var err error
@@ -222,19 +220,27 @@ func getReadQuery(method string) HttpQueryPolicy {
 // 2 MiB limit. Bodyless routes (GET, DELETE, bodyless POST/PUT) use none.
 // Every route forwards x-organization-id; JSON routes also forward content-type.
 func buildManagementRequest(route ManagementRoute) HttpRequestPolicy {
-	hasBody := (route.Method == "POST" || route.Method == "PUT") && isBodyRoute(route.Path)
+	headers := []string{"x-organization-id"}
+	if route.Method == "PUT" && (strings.HasSuffix(route.Path, "/actions") || strings.HasSuffix(route.Path, "/consent")) {
+		headers = append(headers, "if-match")
+		if strings.HasSuffix(route.Path, "/consent") {
+			headers = append(headers, "if-none-match")
+		}
+	}
+	sort.Strings(headers)
+	hasBody := (route.Method == "POST" || route.Method == "PUT" || route.Method == "PATCH") && isBodyRoute(route.Path)
 	if hasBody {
 		return HttpRequestPolicy{
 			Body:           "json",
 			MaxBytes:       2 << 20,
-			ForwardHeaders: []string{"content-type", "x-organization-id"},
+			ForwardHeaders: append([]string{"content-type"}, headers...),
 			Authorization:  "forward-user",
 			ContentTypes:   []string{"application/json"},
 		}
 	}
 	return HttpRequestPolicy{
 		Body:           "none",
-		ForwardHeaders: []string{"x-organization-id"},
+		ForwardHeaders: headers,
 		Authorization:  "forward-user",
 	}
 }
@@ -250,7 +256,8 @@ func isBodyRoute(path string) bool {
 		"/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify",
 		"/api/v1/orgs/{organizationId}/members/{userId}",
 		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}",
-		"/api/v1/admin/backups":
+		"/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}",
+		"/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}":
 		return false
 	}
 	return true

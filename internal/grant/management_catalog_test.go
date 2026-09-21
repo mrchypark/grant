@@ -117,7 +117,7 @@ func TestManagementCatalogHeaders(t *testing.T) {
 	}
 	for _, c := range stage.Capabilities {
 		for _, h := range c.Request.ForwardHeaders {
-			if h != "content-type" && h != "x-organization-id" {
+			if h != "content-type" && h != "x-organization-id" && h != "if-match" && h != "if-none-match" {
 				t.Fatalf("capability %s forwards unexpected header %q", c.CapabilityID, h)
 			}
 		}
@@ -145,7 +145,8 @@ func TestManagementCatalogBodylessCalls(t *testing.T) {
 		"/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify": true,
 		"/api/v1/orgs/{organizationId}/members/{userId}":                               true,
 		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}":              true,
-		"/api/v1/admin/backups":                                                        true,
+		"/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}":              true,
+		"/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}":        true,
 	}
 	for _, c := range stage.Capabilities {
 		if bodyless[c.PathTemplate] {
@@ -179,7 +180,7 @@ func TestManagementCatalogRouteInventory(t *testing.T) {
 		"GET /api/v1/providers",
 		"POST /api/v1/orgs/{organizationId}/deactivate",
 		"POST /api/v1/orgs/{organizationId}/reactivate",
-		"POST /api/v1/admin/backups",
+		"PATCH /api/v1/admin/providers/{providerId}/actions/{actionId}",
 		"PUT /api/v1/admin/users/{userId}/active",
 	} {
 		if !seen[want] {

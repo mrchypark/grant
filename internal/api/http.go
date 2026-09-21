@@ -58,6 +58,10 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, grant.ErrorStatus(err), map[string]string{"error": err.Error()})
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	if snapshot, ok := v.(snapshotResponse); ok {
+		w.Header().Set("ETag", snapshot.ETag)
+		v = snapshot.Value
+	}
 	if v == nil {
 		w.WriteHeader(status)
 		return

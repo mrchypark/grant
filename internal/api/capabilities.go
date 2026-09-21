@@ -12,7 +12,7 @@ func (s *Server) capabilityRoutes() {
 	s.route("POST", "/api/v1/admin/providers/{providerId}/http-capability-active", "master", true, 200, body(true, func(r *request, v grant.ActivateHttpCapabilityGeneration) (any, error) {
 		return s.service.ActivateHttpCapabilityGenerationAdmin(r.Context(), r.PathValue("providerId"), v)
 	}))
-	s.route("PUT", "/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}", "master", true, 200, body(true, func(r *request, v grant.UpsertProviderPepClient) (any, error) {
+	s.route("PUT", "/ops/providers/{providerId}/enforcers/{pepClientId}", "master", true, 200, body(true, func(r *request, v grant.UpsertProviderPepClient) (any, error) {
 		return s.service.SetProviderPepClientAdmin(r.Context(), r.PathValue("providerId"), r.PathValue("pepClientId"), v)
 	}))
 	s.route("GET", "/api/v2/http-capabilities/catalog/{providerId}", "app", false, 200, func(r *request) (any, error) {
@@ -21,7 +21,7 @@ func (s *Server) capabilityRoutes() {
 	s.route("POST", "/api/v2/http-capabilities/decide", "application", false, 200, body(true, func(r *request, v grant.HttpCapabilityDecisionInput) (any, error) {
 		return s.service.DecideHttpCapability(r.Context(), r.bearer, r.org, v)
 	}))
-	s.route("POST", "/api/v1/admin/imports/patch-data-authority", "master", true, 200, body(true, func(r *request, v grant.PatchDataAuthorityImport) (any, error) {
+	s.route("POST", "/ops/migrations/patch-data-authority", "master", true, 200, body(true, func(r *request, v grant.PatchDataAuthorityImport) (any, error) {
 		return s.service.ImportPatchDataAuthority(r.Context(), v)
 	}))
 }
