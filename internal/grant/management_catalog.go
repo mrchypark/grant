@@ -1,0 +1,243 @@
+package grant
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ManagementRoute describes a single management API endpoint for the
+// grant-management provider catalog. Path stores the Go 1.22+ ServeMux
+// path template (e.g. "/api/v1/orgs/{organizationId}/apps"). The registry
+// is the explicit enumeration of every business management route exposed
+// by the server; no implicit grants exist outside this list.
+type ManagementRoute struct {
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	ActionCode string `json:"actionCode"`
+	Platform   bool   `json:"platform"`
+}
+
+// managementRoutes is the canonical sorted registry of management routes.
+// Changes to server routes MUST be reflected here; the test inventory
+// enforces completeness against an explicit exclusion list.
+var managementRoutes = []ManagementRoute{
+	// --- Service (me/providers) ---
+	{Method: "GET", Path: "/api/v1/me", ActionCode: "user.read"},
+	{Method: "POST", Path: "/api/v1/me/materialize", ActionCode: "user.materialize"},
+	{Method: "GET", Path: "/api/v1/providers", ActionCode: "provider.list"},
+
+	// --- Organization: applications ---
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps", ActionCode: "applications.read"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/apps", ActionCode: "applications.create"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}", ActionCode: "applications.detail"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", ActionCode: "applications.actions.read"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", ActionCode: "applications.actions.replace"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/app-grants", ActionCode: "applications.grants.read"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.read"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.replace"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.delete"},
+
+	// --- Organization: groups ---
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/groups", ActionCode: "groups.read"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/groups", ActionCode: "groups.create"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.detail"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.update"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.delete"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}/members", ActionCode: "groups.members.read"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}", ActionCode: "groups.members.add"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}", ActionCode: "groups.members.remove"},
+
+	// --- Organization: members ---
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/members/{userId}", ActionCode: "members.enroll"},
+
+	// --- Organization: agreements ---
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/agreements", ActionCode: "agreements.read"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/agreements", ActionCode: "agreements.create"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/agreements/{agreementId}", ActionCode: "agreements.detail"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/agreements/{agreementId}", ActionCode: "agreements.update"},
+
+	// --- Organization: roles ---
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/roles", ActionCode: "roles.read"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/roles", ActionCode: "roles.create"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions", ActionCode: "role.actions.replace"},
+
+	// --- Organization: bindings ---
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/bindings", ActionCode: "bindings.read"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/bindings", ActionCode: "bindings.create"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/bindings/{bindingId}", ActionCode: "bindings.delete"},
+
+	// --- Organization: lifecycle ---
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/deactivate", ActionCode: "organization.deactivate"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/reactivate", ActionCode: "organization.reactivate"},
+
+	// --- Admin: providers ---
+	{Method: "POST", Path: "/api/v1/admin/providers", ActionCode: "admin.provider.create", Platform: true},
+	{Method: "PUT", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.replace", Platform: true},
+	{Method: "GET", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.read", Platform: true},
+
+	// --- Admin: org providers (authorized user) ---
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", ActionCode: "admin.org.providers.actions.read"},
+
+	// --- Admin: capability catalog ---
+	{Method: "GET", Path: "/api/v1/admin/providers/{providerId}/http-capability-active", ActionCode: "admin.catalog.read", Platform: true},
+	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/http-capability-generations", ActionCode: "admin.catalog.stage", Platform: true},
+	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/http-capability-active", ActionCode: "admin.catalog.activate", Platform: true},
+
+	// --- Admin: PEP ---
+	{Method: "PUT", Path: "/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}", ActionCode: "admin.pep.upsert", Platform: true},
+
+	// --- Admin: app trust/provision ---
+	{Method: "PUT", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust", ActionCode: "admin.app.trust", Platform: true},
+	{Method: "POST", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify", ActionCode: "admin.app.provision.verify", Platform: true},
+
+	// --- Admin: user active ---
+	{Method: "PUT", Path: "/api/v1/admin/users/{userId}/active", ActionCode: "admin.user.active", Platform: true},
+
+	// --- Admin: import ---
+	{Method: "POST", Path: "/api/v1/admin/imports/patch-data-authority", ActionCode: "admin.import.patch-data-authority", Platform: true},
+
+	// --- Admin: backups ---
+	{Method: "POST", Path: "/api/v1/admin/backups", ActionCode: "admin.backups.trigger", Platform: true},
+	{Method: "GET", Path: "/api/v1/admin/backups", ActionCode: "admin.backups.list", Platform: true},
+	{Method: "GET", Path: "/api/v1/admin/backups/s3", ActionCode: "admin.backups.list-s3", Platform: true},
+}
+
+// ManagementRoutes returns a copy of the complete sorted registry of
+// management API routes. Callers must not modify the returned slice.
+func ManagementRoutes() []ManagementRoute {
+	out := make([]ManagementRoute, len(managementRoutes))
+	copy(out, managementRoutes)
+	return out
+}
+
+// LookupManagementRoute returns the ManagementRoute matching the given
+// HTTP method and path template. Path values use Go 1.22+ ServeMux
+// conventions (e.g. "/api/v1/orgs/{organizationId}/apps").
+func LookupManagementRoute(method, path string) (ManagementRoute, bool) {
+	for _, r := range managementRoutes {
+		if r.Method == method && r.Path == path {
+			return r, true
+		}
+	}
+	return ManagementRoute{}, false
+}
+
+// ManagementCatalog produces an immutable StageHttpCapabilityGeneration and
+// the corresponding action definitions for every registered management
+// route. The generation parameter must be 1 without a previous generation,
+// or previous+1 otherwise. The provider is "grant-management".
+func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapabilityGeneration, []Action, error) {
+	stage := StageHttpCapabilityGeneration{SchemaVersion: 1, Generation: generation, ExpectedLatestGeneration: previous}
+	if generation == 0 || (previous == nil && generation != 1) || (previous != nil && (*previous == 0 || generation <= *previous || generation-*previous != 1)) {
+		return stage, nil, fmt.Errorf("generation must be 1 without a previous generation, otherwise previous + 1")
+	}
+	const provider = "grant-management"
+	routes := ManagementRoutes()
+	actions := make([]Action, 0, len(routes)+1)
+	for i, route := range routes {
+		actionID := provider + "." + route.ActionCode
+		actions = append(actions, Action{
+			ID:                      actionID,
+			ProviderID:              provider,
+			Code:                    route.ActionCode,
+			Name:                    route.ActionCode,
+			RiskLevel:               ActionRiskLevelHigh,
+			GrantableToApplications: true,
+		})
+
+		resource := buildManagementResource(route)
+		c := HttpCapability{
+			CapabilityID: fmt.Sprintf("management.%s.%d", route.ActionCode, i),
+			Version:      1,
+			Enabled:      true,
+			AccessMode:   "authorized",
+			Method:       route.Method,
+			PathTemplate: route.Path,
+			ActionID:     &actionID,
+			Resource:     &resource,
+			Query:        HttpQueryPolicy{Mode: "none"},
+			Request:      buildManagementRequest(route),
+			Response: HttpResponsePolicy{
+				MaxBytes:       4 << 20,
+				ForwardHeaders: []string{"content-type"},
+				Redirects:      "deny",
+				ErrorStatuses:  []int{400, 401, 403, 404, 409, 422, 500, 503},
+			},
+		}
+		var err error
+		c.ContractDigest, err = HttpCapabilityContractDigest(c)
+		if err != nil {
+			return stage, nil, err
+		}
+		stage.Capabilities = append(stage.Capabilities, c)
+	}
+
+	// Deprecated legacy "manage" action for backwards catalog transition.
+	// No routes use this action code.
+	actions = append(actions, Action{
+		ID:                      provider + ".manage",
+		ProviderID:              provider,
+		Code:                    "manage",
+		Name:                    "Grant management groups",
+		RiskLevel:               ActionRiskLevelHigh,
+		GrantableToApplications: true,
+	})
+
+	var err error
+	stage.CatalogDigest, err = HttpCapabilityCatalogDigest(provider, stage)
+	if err == nil {
+		err = validateGeneration(provider, stage)
+	}
+	return stage, actions, err
+}
+
+// buildManagementResource returns the resource extractor for a management
+// route based on its path structure and platform flag.
+func buildManagementResource(route ManagementRoute) HttpCapabilityResource {
+	if route.Platform {
+		return HttpCapabilityResource{ResourceType: "platform", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}}
+	}
+	if strings.Contains(route.Path, "{organizationId}") {
+		return HttpCapabilityResource{ResourceType: "organization", ID: HttpResourceExtractor{Kind: "pathSegment", Name: "organizationId", Format: "slug"}}
+	}
+	return HttpCapabilityResource{ResourceType: "service", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}}
+}
+
+// buildManagementRequest returns the request policy for a management route.
+// Routes that accept JSON request bodies (POST/PUT with body) use json with
+// 2 MiB limit. Bodyless routes (GET, DELETE, bodyless POST/PUT) use none.
+// Every route forwards x-organization-id; JSON routes also forward content-type.
+func buildManagementRequest(route ManagementRoute) HttpRequestPolicy {
+	hasBody := (route.Method == "POST" || route.Method == "PUT") && isBodyRoute(route.Path)
+	if hasBody {
+		return HttpRequestPolicy{
+			Body:           "json",
+			MaxBytes:       2 << 20,
+			ForwardHeaders: []string{"content-type", "x-organization-id"},
+			Authorization:  "forward-user",
+			ContentTypes:   []string{"application/json"},
+		}
+	}
+	return HttpRequestPolicy{
+		Body:           "none",
+		ForwardHeaders: []string{"x-organization-id"},
+		Authorization:  "forward-user",
+	}
+}
+
+// isBodyRoute returns true for POST/PUT paths that accept a JSON request body.
+// Bodyless POST paths (materialize, deactivate, reactivate, verify, backups)
+// return false.
+func isBodyRoute(path string) bool {
+	switch path {
+	case "/api/v1/me/materialize",
+		"/api/v1/orgs/{organizationId}/deactivate",
+		"/api/v1/orgs/{organizationId}/reactivate",
+		"/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify",
+		"/api/v1/orgs/{organizationId}/members/{userId}",
+		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}",
+		"/api/v1/admin/backups":
+		return false
+	}
+	return true
+}
