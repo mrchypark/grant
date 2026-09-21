@@ -255,8 +255,23 @@ runtime:
 1. Actions must be registered via
    `PUT /api/v1/admin/providers/grant-management/actions`.
 2. A capability generation must be staged and activated.
-3. Applications must be admitted, and either trusted or explicitly consented.
-4. Role bindings must grant the required action on the target resource.
+3. Applications must be admitted, and ordinarily either trusted or explicitly consented.
+4. Role bindings must grant the required action on the target resource, except for the self-materialization onboarding path below.
 
 No step is implicit. The catalog is a generator; the API is the
 control plane.
+
+### Self-materialization before enrollment
+
+`POST /api/v1/me/materialize` lets an authenticated user obtain their local
+Grant user ID before an organization administrator enrolls them. Its exact
+bodyless, `forward-user` capability requires an active user, ready active app,
+active organization and provider, and the app's explicit admission of
+`grant-management.user.materialize`. It does not require membership, a role, or
+prior consent, which would make first-time enrollment circular.
+
+The endpoint materializes only the bearer user's identity. It creates no
+membership, role binding, or application consent; a new user receives
+`membershipStatus: none`. Other management routes retain their normal permission
+checks. Serve this onboarding route through the management voter, which can
+materialize a previously unseen identity.

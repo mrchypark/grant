@@ -321,6 +321,8 @@ Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 
 
 **구조의 이유:** 리소스 유형으로 관리 범위를 구분하고, 설정으로 지정한 운영 조직인지도 별도로 검사한다. 다른 조직이 같은 플랫폼 리소스에 역할을 연결해도 이 조직 검사를 통과하지 못한다. 운영 조직의 역할 관리자는 플랫폼 권한을 부여할 수 있으므로 해당 조직은 운영자 전용으로 관리해야 한다.
 
+**가입 전 본인 식별:** `POST /api/v1/me/materialize`는 조직 가입 전에 로컬 사용자 ID를 확보하는 경로다. 이 경로의 정확한 capability에 한해 사용자 인증, 활성 사용자·앱·조직·provider, 앱의 `grant-management.user.materialize` 액션 등록을 검사하되 멤버십·역할·동의는 요구하지 않는다. 이 요청은 본인 identity만 등록하며 멤버십이나 역할, 앱 동의를 생성하지 않는다. 가입하지 않은 사용자는 `membershipStatus: none`을 받고, 다른 관리 경로는 계속 일반 권한 검사를 받는다. 이 예외에는 본문 없는 `forward-user` 요청만 해당한다. 새 테이블이나 컬럼은 없다.
+
 **Actor attribution:** bearer 경로에서 `WithManagementActor(ctx, userID)`로 컨텍스트에 인증된 사용자 ID를 저장한다. 마스터 경로에서는 `"grant-master"`가 기본값으로 유지된다. `ActivateHttpCapabilityGenerationAdmin`과 `SetProviderPepClientAdmin`은 `ManagementActorFromContext(ctx)`를 사용하여 기록된 actor를 결정한다.
 
 **비활성 조직 재활성화 PDP 경로:** `POST /api/v1/orgs/{organizationId}/reactivate`만 조직 활성 상태 검사를 예외 처리한다. `managementReactivationCapability`와 SQL은 정확한 `grant-management.organization.reactivate` 액션, 자기 조직 리소스, 일치하는 조직 경로를 요구한다. 앱 ID를 유지하므로 역할·앱 허용 액션·신뢰 또는 동의 검사는 계속 적용된다. 원본 API는 별도로 `organization.permission.manage` 권한을 확인한다. 일반 관리 요청은 비활성 조직에서 계속 거절하며, 예외 경로에는 `recordScope`, `batch`, `responseAuthorization`를 사용할 수 없다.

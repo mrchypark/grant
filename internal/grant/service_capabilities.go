@@ -182,6 +182,23 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			return HttpCapabilityDecision{}, e
 		}
 		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "management_reactivation"
+	} else if managementMaterializeCapability(r.ProviderID, *cap) {
+		// Materialize endpoint: auth-only materialization for self-enrollment.
+		// Requires active org/provider and explicit application_actions admission
+		// but no membership/role/consent because it only materializes self and
+		// returns membershipStatus none.
+		rows, e := serviceRows[struct{}](ctx, s, ReadStrong,
+			`SELECT 1
+			 FROM application_actions aa
+			 JOIN actions a ON a.id = aa.action_id AND a.provider_id = ? AND a.grantable_to_applications = 1
+			 JOIN service_providers sp ON sp.id = a.provider_id AND sp.active = 1
+			 JOIN organizations org ON org.id = ? AND org.inactivated_at IS NULL
+			 WHERE aa.application_id = ? AND aa.action_id = ?`,
+			r.ProviderID, c.OrganizationID, c.ApplicationID, *cap.ActionID)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		allowed, reason = len(rows) == 1, "management_materialize"
 	} else {
 		decisions, err := s.evaluateAuthorizations(ctx, []AuthorizationCheck{{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: *cap.ActionID, Resource: AuthorizationResource{ProviderID: r.ProviderID, ResourceType: cap.Resource.ResourceType, ID: r.ResourceID}}}, ReadStrong, &c.ApplicationID)
 		if err != nil {

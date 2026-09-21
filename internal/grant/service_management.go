@@ -53,3 +53,17 @@ func managementReactivationCapability(provider string, cap HttpCapability, org, 
 		cap.Resource.ID.Kind == "pathSegment" && cap.Resource.ID.Name == "organizationId" &&
 		cap.RecordScope == nil && cap.Batch == nil && cap.ResponseAuthorization == nil
 }
+
+// managementMaterializeCapability matches the exact POST /api/v1/me/materialize
+// capability for auth-only materialization. This endpoint only materializes self
+// and returns membershipStatus none, so it requires active org/provider and
+// explicit application_actions admission but no membership/role/consent.
+func managementMaterializeCapability(provider string, cap HttpCapability) bool {
+	return provider == "grant-management" &&
+		cap.Method == "POST" && cap.PathTemplate == "/api/v1/me/materialize" &&
+		cap.ActionID != nil && *cap.ActionID == "grant-management.user.materialize" &&
+		cap.Resource != nil && cap.Resource.ResourceType == "service" &&
+		cap.Resource.ID.Kind == "constant" && cap.Resource.ID.Value == "grant" &&
+		cap.Request.Body == "none" && cap.Request.Authorization == "forward-user" &&
+		cap.RecordScope == nil && cap.Batch == nil && cap.ResponseAuthorization == nil
+}
