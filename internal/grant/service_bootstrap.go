@@ -2,29 +2,12 @@ package grant
 
 import "context"
 
-func (s *Service) BootstrapRauthyOwner(ctx context.Context, token string) (AuthenticatedPrincipal, error) {
-	if s.AuthProviderMode() != "rauthy" {
-		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: Rauthy owner bootstrap is unavailable for the configured auth provider")
-	}
-	i, err := s.externalIdentity(ctx, token)
-	if err != nil {
-		return AuthenticatedPrincipal{}, err
-	}
-	u, err := s.store.BindIdentityToUser(ctx, BindIdentityInput{UserID: s.cfg.Security.BootstrapUserID, Provider: i.Provider, ExternalUserID: i.ExternalUserID, Email: i.Email, DisplayName: i.DisplayName, Active: i.Active, AllowRebind: true})
-	if err != nil {
-		return AuthenticatedPrincipal{}, err
-	}
-	if !u.Active {
-		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: local user is inactive")
-	}
-	return AuthenticatedPrincipal{UserID: u.ID, OrganizationID: s.cfg.Security.BootstrapUserID}, nil
-}
-func (s *Service) BootstrapExternalOwner(ctx context.Context, token, org string) (AuthenticatedPrincipal, error) {
-	if s.AuthProviderMode() != "pocketbase" {
-		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: external owner bootstrap is unavailable for Rauthy")
-	}
+// BootstrapOwner uses the configured identity adapter and creates only an
+// identity, organization and owner membership. Applications are registered
+// separately by their organization.
+func (s *Service) BootstrapOwner(ctx context.Context, token, org string) (AuthenticatedPrincipal, error) {
 	if org == "" {
-		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: PocketBase organization selection is required")
+		return AuthenticatedPrincipal{}, serviceError(400, "organization id is required")
 	}
 	i, err := s.externalIdentity(ctx, token)
 	if err != nil {
@@ -33,13 +16,22 @@ func (s *Service) BootstrapExternalOwner(ctx context.Context, token, org string)
 	if !i.Active {
 		return AuthenticatedPrincipal{}, serviceError(403, "forbidden: external user is inactive")
 	}
-	v, err := s.store.BootstrapExternalOwnerAtomic(ctx, ExternalOwnerBootstrapCommand{Identity: ExternalIdentityMaterialization{Provider: i.Provider, Issuer: i.Issuer, CollectionID: i.CollectionID, ExternalUserID: i.ExternalUserID, Email: i.Email, DisplayName: i.DisplayName}, OrganizationID: org, ApplicationID: s.cfg.Auth.PocketBase.ApplicationID})
+	cmd := OwnerBootstrapCommand{
+		Identity:       ExternalIdentityMaterialization{Provider: i.Provider, Issuer: i.Issuer, CollectionID: i.CollectionID, ExternalUserID: i.ExternalUserID, Email: i.Email, DisplayName: i.DisplayName},
+		OrganizationID: org,
+	}
+	reserved := s.cfg.Security.BootstrapUserID
+	if reserved == "" {
+		reserved = "conalog-grant"
+	}
+	if org == reserved {
+		cmd.ReservedUserID = reserved
+	}
+	v, err := s.store.BootstrapOwnerAtomic(ctx, cmd)
 	return AuthenticatedPrincipal{UserID: v.UserID, OrganizationID: v.OrganizationID}, err
 }
+
 func (s *Service) TriggerBackup(ctx context.Context) error { return s.store.TriggerBackup(ctx) }
-func (s *Service) ListBackupsLocal(ctx context.Context) ([]BackupInfo, error) {
-	return s.store.ListBackupsLocal(ctx)
-}
-func (s *Service) ListBackupsS3(ctx context.Context) ([]BackupInfo, error) {
-	return s.store.ListBackupsS3(ctx)
+func (s *Service) ListBackups(ctx context.Context) ([]BackupInfo, error) {
+	return s.store.ListBackups(ctx)
 }

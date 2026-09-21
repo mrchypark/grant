@@ -424,7 +424,7 @@ func (s *Store) ListBackupsLocal(ctx context.Context) ([]BackupInfo, error) {
 				return nil, e
 			}
 			n := uint64(info.Size())
-			out = append(out, BackupInfo{Name: v.Name(), LastModified: info.ModTime().Unix(), Size: &n})
+			out = append(out, BackupInfo{Name: v.Name(), LastModified: info.ModTime().Unix(), Size: &n, Storage: "local"})
 		}
 	}
 	return out, nil
@@ -457,9 +457,32 @@ func (s *Store) ListBackupsS3(ctx context.Context) ([]BackupInfo, error) {
 			return nil, v.Err
 		}
 		n := uint64(v.Size)
-		out = append(out, BackupInfo{Name: v.Key, LastModified: v.LastModified.Unix(), Size: &n})
+		out = append(out, BackupInfo{Name: v.Key, LastModified: v.LastModified.Unix(), Size: &n, Storage: "s3"})
 	}
 	return out, nil
+}
+func (s *Store) ListBackups(ctx context.Context) ([]BackupInfo, error) {
+	local, e := s.ListBackupsLocal(ctx)
+	if e != nil {
+		return nil, e
+	}
+	r := s.cfg.Database.Rhiza
+	if r.ObjStoreProvider == "" || r.ObjStoreProvider == "s3" {
+		remote, e := s.ListBackupsS3(ctx)
+		if e != nil {
+			return nil, e
+		}
+		seen := map[string]bool{}
+		for _, b := range local {
+			seen[b.Name] = true
+		}
+		for _, b := range remote {
+			if !seen[b.Name] {
+				local = append(local, b)
+			}
+		}
+	}
+	return local, nil
 }
 
 var _ = io.EOF

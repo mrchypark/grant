@@ -21,11 +21,7 @@ func (s *Service) localIdentity(ctx context.Context, identity ExternalIdentity, 
 	if c == ReadStrong || c == ReadPreferStrong {
 		var u User
 		var err error
-		if identity.Provider == "pocketbase" {
-			u, err = s.store.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
-		} else {
-			u, err = s.store.ResolveOrCreateUserIdentityWithConsistency(ctx, identity.Provider, identity.ExternalUserID, identity.Email, identity.DisplayName, c)
-		}
+		u, err = s.store.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
 		if err != nil && ErrorStatus(err) != 401 && ErrorStatus(err) != 403 {
 			return User{}, serviceError(503, "unavailable: strong consistency requested but quorum-backed identity sync is unavailable")
 		}

@@ -10,16 +10,19 @@ import (
 // requires an explicit exclusion instead of silently omitting management APIs.
 func TestManagementCatalogCoversRegisteredRoutes(t *testing.T) {
 	excluded := map[string]bool{
-		"POST /api/v1/admin/bootstrap/rauthy-owner":          true,
-		"POST /api/v1/admin/bootstrap/external-owner":        true,
-		"POST /api/v1/authz/check":                           true,
-		"POST /api/v1/authz/batch-check":                     true,
-		"POST /api/v1/authz/filter":                          true,
-		"POST /api/v1/application-authz/check":               true,
-		"POST /api/v1/application-authz/batch-check":         true,
-		"POST /api/v1/application-authz/filter":              true,
-		"GET /api/v2/http-capabilities/catalog/{providerId}": true,
-		"POST /api/v2/http-capabilities/decide":              true,
+		"POST /api/v1/admin/bootstrap/owner":                      true,
+		"GET /ops/backups":                                        true,
+		"POST /ops/backups":                                       true,
+		"POST /ops/migrations/patch-data-authority":               true,
+		"PUT /ops/providers/{providerId}/enforcers/{pepClientId}": true,
+		"POST /api/v1/authz/check":                                true,
+		"POST /api/v1/authz/batch-check":                          true,
+		"POST /api/v1/authz/filter":                               true,
+		"POST /api/v1/application-authz/check":                    true,
+		"POST /api/v1/application-authz/batch-check":              true,
+		"POST /api/v1/application-authz/filter":                   true,
+		"GET /api/v2/http-capabilities/catalog/{providerId}":      true,
+		"POST /api/v2/http-capabilities/decide":                   true,
 	}
 	catalog := make(map[string]bool)
 	for _, route := range grant.ManagementRoutes() {

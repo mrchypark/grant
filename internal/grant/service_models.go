@@ -198,6 +198,7 @@ type BackupInfo struct {
 	Name         string  `json:"name"`
 	LastModified int64   `json:"lastModified"`
 	Size         *uint64 `json:"size"`
+	Storage      string  `json:"storage"`
 }
 
 type CurrentUserView struct {

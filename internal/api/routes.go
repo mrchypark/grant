@@ -51,7 +51,7 @@ func (s *Server) routes() {
 	}))
 	s.route("PUT", "/api/v1/admin/providers/{providerId}/actions", "master", true, 200, body(false, s.replaceProviderActions))
 	s.route("GET", "/api/v1/admin/providers/{providerId}/actions", "master", true, 200, func(r *request) (any, error) {
-		return s.service.ListProviderActionsAdmin(r.Context(), r.PathValue("providerId"))
+		return snapshotResult(s.service.ProviderActionsSnapshot(r.Context(), r.PathValue("providerId")))
 	})
 	s.route("GET", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", "user", true, 200, func(r *request) (any, error) {
 		return s.service.ListProviderActionsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("providerId"))
@@ -66,23 +66,35 @@ func (s *Server) routes() {
 		return appResponse(s.service.GetApplicationDetailAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), r.consistency))
 	})
 	s.route("GET", "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", "user", false, 200, func(r *request) (any, error) {
-		return s.service.ListApplicationActionsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), r.consistency)
+		return snapshotResult(s.service.ApplicationActionsSnapshot(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId")))
 	})
 	s.route("PUT", "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", "user", true, 200, body(false, func(r *request, v actionsRequest) (any, error) {
-		return s.service.ReplaceApplicationActionsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), v.ActionIDs)
+		match, err := conditionalHeader(r.Request, "If-Match")
+		if err != nil {
+			return nil, err
+		}
+		return s.service.ReplaceApplicationActionsConditional(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), v.ActionIDs, match)
 	}))
 	s.route("GET", "/api/v1/orgs/{organizationId}/app-grants", "user", false, 200, func(r *request) (any, error) {
 		return s.service.ListApplicationGrantsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.consistency)
 	})
 	s.route("GET", "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", "user", false, 200, func(r *request) (any, error) {
-		v, e := s.service.GetApplicationConsent(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"))
-		if e == nil && v == nil {
+		v, e := s.service.ConsentSnapshot(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"))
+		if e == nil && string(v.Value) == "null" {
 			return nil, failure(404, "application consent not found")
 		}
-		return v, e
+		return snapshotResult(v, e)
 	})
 	s.route("PUT", "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", "user", true, 200, body(false, func(r *request, v actionsRequest) (any, error) {
-		return s.service.ReplaceApplicationConsent(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), v.ActionIDs)
+		match, err := conditionalHeader(r.Request, "If-Match")
+		if err != nil {
+			return nil, err
+		}
+		none, err := conditionalHeader(r.Request, "If-None-Match")
+		if err != nil {
+			return nil, err
+		}
+		return s.service.ReplaceConsentConditional(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), v.ActionIDs, match, none)
 	}))
 	s.route("DELETE", "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", "user", true, 204, func(r *request) (any, error) {
 		return nil, s.service.RevokeApplicationConsent(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"))
@@ -142,7 +154,11 @@ func (s *Server) routes() {
 		return s.service.CreateRoleAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, v)
 	}))
 	s.route("PUT", "/api/v1/orgs/{organizationId}/roles/{roleId}/actions", "user", true, 200, body(false, func(r *request, v actionsRequest) (any, error) {
-		return s.service.ReplaceRoleActionsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("roleId"), v.ActionIDs)
+		match, err := conditionalHeader(r.Request, "If-Match")
+		if err != nil {
+			return nil, err
+		}
+		return s.service.ReplaceRoleActionsConditional(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("roleId"), v.ActionIDs, match)
 	}))
 	s.route("GET", "/api/v1/orgs/{organizationId}/bindings", "user", false, 200, func(r *request) (any, error) {
 		return s.service.ListRoleBindingsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.consistency)
@@ -159,15 +175,7 @@ func (s *Server) routes() {
 	s.route("POST", "/api/v1/orgs/{organizationId}/reactivate", "inactive", true, 200, func(r *request) (any, error) {
 		return s.service.ReactivateOrganization(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("organizationId"))
 	})
-	s.route("POST", "/api/v1/admin/bootstrap/rauthy-owner", "master", true, 201, func(r *request) (any, error) {
-		token, e := bearerToken(r.Request)
-		if e != nil {
-			return nil, e
-		}
-		v, e := s.service.BootstrapRauthyOwner(r.Context(), token)
-		return map[string]string{"userId": v.UserID, "organizationId": v.OrganizationID}, e
-	})
-	s.route("POST", "/api/v1/admin/bootstrap/external-owner", "master", true, 201, func(r *request) (any, error) {
+	s.route("POST", "/api/v1/admin/bootstrap/owner", "master", true, 201, func(r *request) (any, error) {
 		token, e := bearerToken(r.Request)
 		if e != nil {
 			return nil, e
@@ -176,22 +184,19 @@ func (s *Server) routes() {
 		if e != nil {
 			return nil, e
 		}
-		v, e := s.service.BootstrapExternalOwner(r.Context(), token, org)
+		v, e := s.service.BootstrapOwner(r.Context(), token, org)
 		return map[string]string{"userId": v.UserID, "organizationId": v.OrganizationID}, e
 	})
-	s.route("POST", "/api/v1/admin/backups", "master", true, 202, func(r *request) (any, error) { return nil, s.service.TriggerBackup(r.Context()) })
-	s.route("GET", "/api/v1/admin/backups", "master", true, 200, func(r *request) (any, error) {
-		v, e := s.service.ListBackupsLocal(r.Context())
-		return map[string]any{"items": v}, e
-	})
-	s.route("GET", "/api/v1/admin/backups/s3", "master", true, 200, func(r *request) (any, error) {
-		v, e := s.service.ListBackupsS3(r.Context())
-		return map[string]any{"items": v}, e
+	s.route("POST", "/ops/backups", "master", true, 202, func(r *request) (any, error) { return nil, s.service.TriggerBackup(r.Context()) })
+	s.route("GET", "/ops/backups", "master", true, 200, func(r *request) (any, error) {
+		v, e := s.service.ListBackups(r.Context())
+		return map[string]any{"scope": "logical-snapshots", "items": v}, e
 	})
 	s.authorizationRoutes()
 	s.capabilityRoutes()
+	s.actionMutationRoutes()
 	if s.learner {
-		for _, path := range []string{"/api/v1/admin/providers", "/api/v1/admin/providers/{providerId}/actions", "/api/v1/admin/providers/{providerId}/http-capability-generations", "/api/v1/admin/providers/{providerId}/http-capability-active", "/api/v1/admin/providers/{providerId}/pep-clients/{pepClientId}", "/api/v1/admin/backups", "/api/v1/admin/backups/s3", "/api/v1/admin/bootstrap/rauthy-owner", "/api/v1/admin/bootstrap/external-owner", "/api/v1/admin/imports/patch-data-authority"} {
+		for _, path := range []string{"/api/v1/admin/providers", "/api/v1/admin/providers/{providerId}/actions", "/api/v1/admin/providers/{providerId}/http-capability-generations", "/api/v1/admin/providers/{providerId}/http-capability-active", "/ops/providers/{providerId}/enforcers/{pepClientId}", "/ops/backups", "/api/v1/admin/bootstrap/owner", "/ops/migrations/patch-data-authority"} {
 			s.mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 				writeError(w, failure(503, "endpoint requires voter node"))
 			})
@@ -222,5 +227,9 @@ func (s *Server) replaceProviderActions(r *request, v providerActions) (any, err
 		}
 		out[i] = grant.Action{ID: a.ID, ProviderID: r.PathValue("providerId"), Code: a.Code, Name: a.Name, Description: a.Description, RiskLevel: a.RiskLevel, VisibilityGranting: a.VisibilityGranting, GrantableToApplications: a.GrantableToApplications, ConsentLabel: a.ConsentLabel, ConsentDescription: a.ConsentDescription}
 	}
-	return s.service.ReplaceProviderActionsAdmin(r.Context(), r.PathValue("providerId"), out)
+	match, err := conditionalHeader(r.Request, "If-Match")
+	if err != nil {
+		return nil, err
+	}
+	return s.service.ReplaceProviderActionsConditional(r.Context(), r.PathValue("providerId"), out, match)
 }

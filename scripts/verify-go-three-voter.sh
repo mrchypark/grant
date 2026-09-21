@@ -157,7 +157,7 @@ printf '%s\n' 'Cold single-voter and entire-quorum S3 recovery, process liveness
 # Restore a populated logical snapshot into a distinct, wholly fresh cluster.
 # The original prefix and directories remain intact throughout this fixture.
 curl -fsS -X POST -H 'X-Grant-Master-Key: local-master-secret' \
-  "http://127.0.0.1:$http0/api/v1/admin/backups" >/dev/null
+  "http://127.0.0.1:$http0/ops/backups" >/dev/null
 set -- "$node_root"/backups-0/grant-*.json
 [ "$#" -eq 1 ] && [ -f "$1" ] || { echo 'expected one verified source snapshot' >&2; exit 1; }
 restore_snapshot=$1

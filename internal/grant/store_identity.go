@@ -11,11 +11,13 @@ type ExternalIdentityMaterialization struct {
 	Email                    *string
 	DisplayName              string
 }
-type ExternalOwnerBootstrapCommand struct {
-	Identity                      ExternalIdentityMaterialization
-	OrganizationID, ApplicationID string
+type OwnerBootstrapCommand struct {
+	Identity       ExternalIdentityMaterialization
+	OrganizationID string
+	// ReservedUserID is server-selected for the preseeded bootstrap organization.
+	ReservedUserID string
 }
-type ExternalOwnerBootstrapResult struct {
+type OwnerBootstrapResult struct {
 	UserID         string `json:"userId"`
 	OrganizationID string `json:"organizationId"`
 }
@@ -98,44 +100,6 @@ func (s *Store) MaterializeExternalIdentity(ctx context.Context, in ExternalIden
 	}
 	return *u, nil
 }
-func (s *Store) ResolveOrCreateUserIdentityWithConsistency(ctx context.Context, p, id string, email *string, name string, c ReadConsistency) (User, error) {
-	if p != "rauthy" {
-		return User{}, fmt.Errorf("unqualified identity resolution is only supported for Rauthy")
-	}
-	mapped, e := s.ResolveExistingUserIdentityWithConsistency(ctx, p, id, ReadStrong)
-	if e != nil {
-		return User{}, e
-	}
-	userID := p + ":" + id
-	if mapped != nil {
-		userID = mapped.ID
-	} else {
-		if email != nil {
-			rows, e := s.Query(ctx, ReadStrong, "SELECT u.id FROM users u LEFT JOIN user_identities i ON i.user_id=u.id AND i.provider=? WHERE lower(u.email)=lower(?) ORDER BY u.id LIMIT 2", p, *email)
-			if e != nil {
-				return User{}, e
-			}
-			if len(rows) == 1 {
-				userID = rowString(rows[0], "id")
-			}
-		}
-		if userID == p+":"+id {
-			rows, e := s.Query(ctx, ReadStrong, "SELECT id FROM users WHERE id=?", id)
-			if e != nil {
-				return User{}, e
-			}
-			if len(rows) > 0 {
-				userID = id
-			}
-		}
-	}
-	now := nowString()
-	err := s.Transaction(ctx, []Statement{{SQL: "INSERT INTO users(id,email,display_name,active,created_at) VALUES(?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name", Args: []any{userID, email, name, now}}, {SQL: "INSERT INTO user_identities(id,user_id,provider,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,issuer,collection_id,external_user_id) DO UPDATE SET email_snapshot=excluded.email_snapshot,display_name_snapshot=excluded.display_name_snapshot,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at", Args: []any{requestID(), userID, p, id, email, name, now, now, now}}})
-	if err != nil {
-		return User{}, err
-	}
-	return s.GetUserWithConsistency(ctx, userID, c)
-}
 func (s *Store) EnrollActiveMember(ctx context.Context, org, user string) (OrganizationMembership, error) {
 	now := nowString()
 	q := Statement{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) SELECT ?,?,?,'member','active',?,? FROM users u JOIN organizations o ON o.id=? WHERE u.id=? AND u.active=1 AND o.inactivated_at IS NULL ON CONFLICT(organization_id,user_id) DO UPDATE SET status='active',updated_at=excluded.updated_at WHERE organization_memberships.membership_role='member'", Args: []any{requestID(), org, user, now, now, org, user}, ExpectedRowsAffected: requireOne()}
@@ -171,8 +135,8 @@ func (s *Store) BindIdentityToUser(ctx context.Context, in BindIdentityInput) (U
 	}
 	return s.GetUserWithConsistency(ctx, in.UserID, ReadStrong)
 }
-func (s *Store) BootstrapExternalOwnerAtomic(ctx context.Context, c ExternalOwnerBootstrapCommand) (ExternalOwnerBootstrapResult, error) {
-	var out ExternalOwnerBootstrapResult
+func (s *Store) BootstrapOwnerAtomic(ctx context.Context, c OwnerBootstrapCommand) (OwnerBootstrapResult, error) {
+	var out OwnerBootstrapResult
 	u, e := s.resolveScopedIdentity(ctx, c.Identity, ReadStrong)
 	if e != nil {
 		return out, e
@@ -181,30 +145,36 @@ func (s *Store) BootstrapExternalOwnerAtomic(ctx context.Context, c ExternalOwne
 	if u != nil {
 		id = u.ID
 	}
+	if c.ReservedUserID != "" {
+		if u != nil && u.ID != c.ReservedUserID {
+			return out, serviceError(409, "identity is already bound to another user")
+		}
+		id = c.ReservedUserID
+	}
 	now := nowString()
 	in := c.Identity
-	org, app := c.OrganizationID, c.ApplicationID
-	// Admission and all owner/application mutations are one replicated transaction.
-	ss := []Statement{assertion(`SELECT 1 WHERE
- (NOT EXISTS(SELECT 1 FROM applications WHERE id=$2 OR slug=$2) OR EXISTS(SELECT 1 FROM applications WHERE id=$2 AND organization_id=$3 AND slug=$2 AND name='PocketBase Application' AND description IS NULL AND application_type='confidential' AND app_type='server' AND rauthy_client_id IS NULL AND created_by_user_id=$4))
- AND (NOT EXISTS(SELECT 1 FROM organizations WHERE id=$3) OR EXISTS(SELECT 1 FROM organizations WHERE id=$3 AND inactivated_at IS NULL))
- AND EXISTS(SELECT 1 FROM service_providers WHERE id='grant' AND active=1) AND EXISTS(SELECT 1 FROM roles WHERE id='role-system-bootstrap-owner')
- AND NOT EXISTS(SELECT 1 FROM user_identities WHERE provider=$5 AND issuer=$7 AND collection_id=$8 AND external_user_id=$6 AND user_id<>$4)
- AND (NOT EXISTS(SELECT 1 FROM users WHERE id=$4) OR EXISTS(SELECT 1 FROM users WHERE id=$4 AND active=1))
- AND NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=$3 AND user_id=$4 AND (membership_role<>'owner' OR status<>'active'))
- AND NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=$3 AND user_id<>$4 AND membership_role='owner')
- AND NOT EXISTS(SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=$4 AND subject_organization_id=$3 AND provider_id='grant' AND resource_type='organization' AND resource_id=$3 AND role_id='role-system-bootstrap-owner' AND state<>'active')`, app, org, id, in.Provider, in.ExternalUserID, in.Issuer, in.CollectionID)}
+	org := c.OrganizationID
+	ss := []Statement{
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM organizations WHERE id=?) OR EXISTS(SELECT 1 FROM organizations WHERE id=? AND inactivated_at IS NULL)", org, org),
+		assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id='grant' AND active=1) AND EXISTS(SELECT 1 FROM roles WHERE id='role-system-bootstrap-owner')"),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM user_identities WHERE provider=? AND issuer=? AND collection_id=? AND external_user_id=? AND user_id<>?)", in.Provider, in.Issuer, in.CollectionID, in.ExternalUserID, id),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM users WHERE id=?) OR EXISTS(SELECT 1 FROM users WHERE id=? AND active=1)", id, id),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=? AND user_id=? AND (membership_role<>'owner' OR status<>'active'))", org, id),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=? AND user_id<>? AND membership_role='owner')", org, id),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=? AND subject_organization_id=? AND provider_id='grant' AND resource_type='organization' AND resource_id=? AND role_id='role-system-bootstrap-owner' AND state<>'active')", id, org, org),
+	}
+	if c.ReservedUserID != "" {
+		ss = append(ss, assertion("SELECT 1 FROM users WHERE id=? AND active=1", id), assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider=? AND issuer=? AND collection_id=? AND external_user_id<>?)", id, in.Provider, in.Issuer, in.CollectionID, in.ExternalUserID))
+	}
 	ss = append(ss,
 		Statement{SQL: "INSERT INTO users(id,email,display_name,active,created_at) VALUES(?,?,?,1,?) ON CONFLICT(id) DO NOTHING", Args: []any{id, in.Email, in.DisplayName, now}},
 		Statement{SQL: "INSERT INTO user_identities(id,user_id,provider,issuer,collection_id,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,issuer,collection_id,external_user_id) DO NOTHING", Args: []any{requestID(), id, in.Provider, in.Issuer, in.CollectionID, in.ExternalUserID, in.Email, in.DisplayName, now, now, now}},
 		Statement{SQL: "INSERT INTO organizations(id,name,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING", Args: []any{org, org, now, now}},
-		Statement{SQL: "INSERT INTO applications(id,organization_id,slug,name,application_type,app_type,first_party,consent_policy,active,provisioning_status,created_by_user_id,created_at,updated_at) VALUES(?,?,?,'PocketBase Application','confidential','server',1,'auto_approve',1,'ready',?,?,?) ON CONFLICT(id) DO NOTHING", Args: []any{app, org, app, id, now, now}},
 		Statement{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?) ON CONFLICT(organization_id,user_id) DO NOTHING", Args: []any{requestID(), org, id, now, now}},
 		Statement{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user',?,?,'grant','organization',?,'role-system-bootstrap-owner','active',?,?,?) ON CONFLICT(subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id) DO NOTHING", Args: []any{requestID(), id, org, org, id, now, now}},
-		assertion("SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=? AND subject_organization_id=? AND provider_id='grant' AND resource_type='organization' AND resource_id=? AND role_id='role-system-bootstrap-owner' AND state='active'", id, org, org),
-		assertion("SELECT 1 FROM applications WHERE id=? AND organization_id=? AND active=1 AND provisioning_status='ready' AND created_by_user_id=?", app, org, id))
+		assertion("SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=? AND subject_organization_id=? AND provider_id='grant' AND resource_type='organization' AND resource_id=? AND role_id='role-system-bootstrap-owner' AND state='active'", id, org, org))
 	if e = s.Transaction(ctx, ss); e != nil {
-		return out, e
+		return out, capabilityWriteError(e)
 	}
-	return ExternalOwnerBootstrapResult{UserID: id, OrganizationID: org}, nil
+	return OwnerBootstrapResult{UserID: id, OrganizationID: org}, nil
 }

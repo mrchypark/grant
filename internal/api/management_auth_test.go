@@ -100,7 +100,7 @@ func TestManagementInvalidMasterCannotDowngrade(t *testing.T) {
 
 func TestManagementBootstrapRouteMasterOnly(t *testing.T) {
 	s := managementTestServer(t)
-	r := httptest.NewRequest("POST", "/api/v1/admin/bootstrap/rauthy-owner", nil)
+	r := httptest.NewRequest("POST", "/api/v1/admin/bootstrap/owner", nil)
 	r.Header.Set("Authorization", "Bearer tok")
 	r.Header.Set("X-Organization-ID", "mgmt-org")
 	w := httptest.NewRecorder()
