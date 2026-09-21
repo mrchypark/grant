@@ -106,7 +106,7 @@ func validatePatchImport(c PatchDataAuthorityImport) error {
 func (s *Store) ImportPatchDataAuthority(ctx context.Context, c PatchDataAuthorityImport) (PatchDataAuthorityImportResult, error) {
 	var result PatchDataAuthorityImportResult
 	if e := validatePatchImport(c); e != nil {
-		return result, e
+		return result, serviceError(400, e.Error())
 	}
 	old, e := s.Query(ctx, ReadStrong, "SELECT * FROM patch_data_authority_imports WHERE provider_id='patch-data'")
 	if e != nil {
