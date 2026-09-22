@@ -54,11 +54,22 @@ func (s *Store) actionSnapshot(ctx context.Context, query string, args ...any) (
 		}
 		value, err = json.Marshal(actions)
 	} else {
-		var consent ApplicationConsent
-		if err = json.Unmarshal([]byte(state), &consent); err != nil {
+		var envelope struct {
+			Application json.RawMessage `json:"application"`
+			Actions     []Action        `json:"actions"`
+		}
+		if err = json.Unmarshal([]byte(state), &envelope); err != nil {
 			return ActionSnapshot{}, err
 		}
-		value, err = json.Marshal(consent)
+		if envelope.Application != nil {
+			value, err = json.Marshal(envelope.Actions)
+		} else {
+			var consent ApplicationConsent
+			if err = json.Unmarshal([]byte(state), &consent); err != nil {
+				return ActionSnapshot{}, err
+			}
+			value, err = json.Marshal(consent)
+		}
 	}
 	if err != nil {
 		return ActionSnapshot{}, err
@@ -143,7 +154,10 @@ func (s *Service) ApplicationActionsSnapshot(ctx context.Context, user, org, id 
 	if _, err := s.GetApplicationAuthorized(ctx, user, org, id, ReadStrong); err != nil {
 		return ActionSnapshot{}, err
 	}
-	return s.store.actionSnapshot(ctx, actionArraySQL("EXISTS(SELECT 1 FROM application_actions r WHERE r.application_id=? AND r.action_id=a.id)"), id)
+	// Include identity metadata even for an empty action set. An ETag from a
+	// deleted application must not authorize a replacement with the same ID.
+	query := `SELECT COALESCE((SELECT json_object('application',json_object('id',app.id,'organizationId',app.organization_id,'createdAt',app.created_at),'actions',json((` + actionArraySQL("EXISTS(SELECT 1 FROM application_actions r WHERE r.application_id=app.id AND r.action_id=a.id)") + `))) FROM applications app WHERE app.id=? AND app.organization_id=?),'null')`
+	return s.store.actionSnapshot(ctx, query, id, org)
 }
 func (s *Service) ConsentSnapshot(ctx context.Context, user, org, id string) (ActionSnapshot, error) {
 	if _, err := s.applicationInOrg(ctx, id, org); err != nil {

@@ -18,7 +18,7 @@ func (s *Server) capabilityRoutes() {
 	s.route("GET", "/api/v2/http-capabilities/catalog/{providerId}", "app", false, 200, func(r *request) (any, error) {
 		return s.service.ActiveHttpCapabilityCatalog(r.Context(), r.PathValue("providerId"))
 	})
-	s.route("POST", "/api/v2/http-capabilities/decide", "application", false, 200, body(true, func(r *request, v grant.HttpCapabilityDecisionInput) (any, error) {
+	s.route("POST", "/api/v2/http-capabilities/decide", "http-decision", false, 200, body(true, func(r *request, v grant.HttpCapabilityDecisionInput) (any, error) {
 		return s.service.DecideHttpCapability(r.Context(), r.bearer, r.org, v)
 	}))
 	s.route("POST", "/ops/migrations/patch-data-authority", "master", true, 200, body(true, func(r *request, v grant.PatchDataAuthorityImport) (any, error) {

@@ -10,11 +10,11 @@ The reference has **51 distinct HTTP paths**, **60 router registrations** (30 sh
 
 - `internal/grant/models.go`, `service_*.go`, `auth_*.go`, `domain_*`: domain wire shapes, validated service operations, identity verification, authorization and evidence bindings.
 - `internal/grant/store_*.go`, `config.go`, `runtime.go`: native embedded Rhiza, schema/legacy import, transactional authority, persisted catalogs, identity and consent writes, readiness and backup behavior.
-- `internal/api`, `cmd`: method/path/status/wire extraction, reverse proxy, server entrypoint and exporter tools.
+- `internal/api`, `cmd`: method/path/status/wire extraction, server entrypoint and exporter tools.
 
 ## HTTP paths in the reference
 
-This section is historical: it records the original Rust baseline, not the current route inventory. The current API has 48 paths and 63 method registrations after retiring the three Exposure endpoints and the receipt-only V2 authority snapshot receiver, and adding three internal registration-management reads. The retired paths return 404; generic HTTP capabilities and V1 authority imports remain supported. See the current [HTTP contract](porting-go-http-contract.md) and [registration workflow](registration-api-management.md).
+This section is historical: it records the original Rust baseline, not the current route inventory. Current routes and deliberate compatibility changes are documented in the [HTTP contract](porting-go-http-contract.md) and [lifecycle contract](api-lifecycle.md). Do not use the frozen table as evidence that removed paths remain available.
 
 The following is extracted from [crates/api/src/lib.rs](https://github.com/Conalog/grant/blob/c716877e7b970b7d38392b377f64384936992884/crates/api/src/lib.rs); management/shared overlap is intentional. Learner writes must fail with HTTP 503 and `endpoint requires voter node`.
 
@@ -140,3 +140,30 @@ JSON integer generations and revisions must remain exact `uint64`/`int64` (or `j
 ## Verification status
 
 This inventory is a porting checklist, not a claim that all reference behavior has passed. Full package tests, HTTP contract tests, exporter fixtures, race checks, legacy-data migration verification and deployment checks must pass before removing Rust or treating the Go branch as complete. Native Rhiza replaces Hiqlite; any unsupported legacy transport, runtime or backup configuration must fail explicitly and be documented, never silently substitute weaker semantics.
+
+## Deliberate current lifecycle changes
+
+The frozen Rust reference above retains historical `/auth/v1` and provisioning
+reservations. Current Grant intentionally removes `/auth`, `/auth/v1` and its
+wildcard proxy, and replaces the manual POST provisioning route with platform
+PUT identity-binding. Gateway owns IdP routing. App registration no longer
+mints a `grant-*` client ID. The existing `rauthy_client_id` storage column and
+verified bindings are preserved; the configured read-only Rauthy adapter
+verifies an externally assigned client before ready. PocketBase readiness is
+unchanged. Goauthy binding is unsupported and fails without Rauthy fallback.
+The client-read API key is optional for startup and required only for binding.
+
+Provider POST is now create-only (duplicate409); PATCH provides metadata
+updates. Organization creation atomically assigns an existing active owner
+membership and organization-scoped owner role binding. New member/app/role
+lifecycle and administrator consent-revocation routes are additions, not
+claims of identical Rust behavior. Membership removal retains an inactive
+record and revokes user-specific bindings, group membership and consent;
+re-enrollment does not restore those, although current organization-wide
+rights can apply again. Referenced roles/apps reject deletion rather than
+silently deleting bindings or enforcers. First-party app lifecycle stays
+platform-controlled. Existing full-replacement and relationship PUTs remain.
+
+The current branch needs a new management catalog generation and explicit
+app/role grants before Exposure publication. Local contracts and regression
+tests do not establish that IED has already received these changes.

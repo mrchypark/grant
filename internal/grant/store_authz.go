@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 //go:embed store_authz.sql
-var authorizationSQL string
+var authorizationSQLTemplate string
+
+var authorizationSQL = strings.Replace(authorizationSQLTemplate, "{agreement_bounds}", agreementBoundsSQL, 1)
 
 func (s *Store) EvaluateUserActions(ctx context.Context, checks []UserActionCheck) ([]UserActionDecision, error) {
 	return s.evaluateUserActions(ctx, checks, false)
@@ -18,7 +21,7 @@ func (s *Store) evaluateUserActions(ctx context.Context, checks []UserActionChec
 	out := make([]UserActionDecision, 0, len(checks))
 	for _, c := range checks {
 		q := strings.Replace(authorizationSQL, "{values}", "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 1)
-		rows, err := s.Query(ctx, c.Consistency, q, int64(0), c.UserID, c.OrganizationID, c.ProviderID, c.ResourceType, c.ResourceID, c.ActionID, c.ApplicationID, nowString(), inactive)
+		rows, err := s.Query(ctx, c.Consistency, q, int64(0), c.UserID, c.OrganizationID, c.ProviderID, c.ResourceType, c.ResourceID, c.ActionID, c.ApplicationID, time.Now().UTC().Format(agreementTimeLayout), inactive)
 		if err != nil {
 			return nil, err
 		}
@@ -76,7 +79,7 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
 	if cross && (b.SubjectType != "organization" || b.AgreementID == nil) {
 		return fmt.Errorf("cross-organization binding requires organization subject and agreement")
 	}
-	_, e := s.Execute(ctx, requestID(), Statement{SQL: `INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at)
+	_, e := s.Execute(ctx, requestID(), Statement{SQL: `WITH ` + agreementBoundsSQL + ` INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at)
  SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
  WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=$5 AND active=1)
  AND EXISTS(SELECT 1 FROM organizations WHERE id=$4 AND inactivated_at IS NULL)
@@ -85,6 +88,26 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
  AND ($2<>'group' OR EXISTS(SELECT 1 FROM groups WHERE id=$3 AND organization_id=$4))
  AND ($2<>'user' OR EXISTS(SELECT 1 FROM organization_memberships WHERE user_id=$3 AND organization_id=$4))
  AND ($5<>'grant' OR $6<>'organization' OR EXISTS(SELECT 1 FROM organizations WHERE id=$7 AND inactivated_at IS NULL))
- AND ($9 IS NULL OR EXISTS(SELECT 1 FROM agreements WHERE id=$9 AND status='active' AND (starts_at IS NULL OR starts_at<=$14) AND (ends_at IS NULL OR ends_at>=$14) AND ($5<>'grant' OR $6<>'organization' OR $7=$4 OR (grantor_organization_id=$7 AND grantee_organization_id=$4))))`, Args: []any{b.ID, b.SubjectType, b.SubjectID, b.SubjectOrganizationID, b.ProviderID, b.ResourceType, b.ResourceID, b.RoleID, b.AgreementID, b.State, b.CreatedByUserID, b.CreatedAt, b.UpdatedAt, nowString()}, ExpectedRowsAffected: requireOne()})
+ AND ($9 IS NULL OR EXISTS(SELECT 1 FROM valid_agreements WHERE id=$9 AND (starts_at IS NULL OR starts_at<=$14) AND (ends_at IS NULL OR ends_at>=$14) AND ($5<>'grant' OR $6<>'organization' OR $7=$4 OR (grantor_organization_id=$7 AND grantee_organization_id=$4))))`, Args: []any{b.ID, b.SubjectType, b.SubjectID, b.SubjectOrganizationID, b.ProviderID, b.ResourceType, b.ResourceID, b.RoleID, b.AgreementID, b.State, b.CreatedByUserID, b.CreatedAt, b.UpdatedAt, time.Now().UTC().Format(agreementTimeLayout)}, ExpectedRowsAffected: requireOne()})
 	return e
 }
+
+// Shared by authorization reads and replicated mutation guards. Rhiza forbids
+// SQLite date functions in writes, so only exact fixed-width UTC bounds compare.
+// Noncanonical legacy bounds deny until an authorized grantor normalizes them.
+const agreementBoundsSQL = `valid_agreements AS (
+ SELECT a.* FROM agreements a WHERE a.status='active' AND NOT EXISTS (
+  SELECT 1 FROM (SELECT a.starts_at AS bound UNION ALL SELECT a.ends_at) bounds
+  WHERE bound IS NOT NULL AND NOT (
+   length(bound)=30 AND bound GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'
+   AND substr(bound,6,2) BETWEEN '01' AND '12'
+   AND CAST(substr(bound,9,2) AS INTEGER) BETWEEN 1 AND
+    CASE CAST(substr(bound,6,2) AS INTEGER)
+     WHEN 2 THEN CASE WHEN CAST(substr(bound,1,4) AS INTEGER)%400=0 OR (CAST(substr(bound,1,4) AS INTEGER)%4=0 AND CAST(substr(bound,1,4) AS INTEGER)%100<>0) THEN 29 ELSE 28 END
+     WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+   AND substr(bound,12,2) BETWEEN '00' AND '23'
+   AND substr(bound,15,2) BETWEEN '00' AND '59'
+   AND substr(bound,18,2) BETWEEN '00' AND '59'
+  )
+ )
+)`

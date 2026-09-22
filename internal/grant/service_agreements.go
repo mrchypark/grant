@@ -3,6 +3,10 @@ package grant
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 func (s *Service) ListAgreementsAuthorized(ctx context.Context, user, org string, c ReadConsistency) ([]Agreement, error) {
@@ -24,9 +28,9 @@ func (s *Service) GetAgreementAuthorized(ctx context.Context, user, org, id stri
 	}
 	return a, nil
 }
-func (s *Service) agreement(ctx context.Context, user, org string, in UpsertAgreementInput, create bool) (Agreement, error) {
-	if !enumValue(in.AgreementType, "delegation", "epc", "om", "distributor", "dealer") || !enumValue(in.Status, "draft", "active", "expired", "terminated") {
-		return Agreement{}, serviceError(400, "invalid agreement type or status")
+func (s *Service) agreement(ctx context.Context, user, org string, in UpsertAgreementInput, create bool, guards ...Statement) (Agreement, error) {
+	if !enumValue(in.Status, "draft", "active", "expired", "terminated") {
+		return Agreement{}, serviceError(400, "invalid agreement status")
 	}
 	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.permission.manage", "manage organization agreements", ReadStrong); err != nil {
 		return Agreement{}, err
@@ -40,7 +44,15 @@ func (s *Service) agreement(ctx context.Context, user, org string, in UpsertAgre
 		}
 		v[i] = x
 	}
-	a := Agreement{ID: v[0], AgreementType: in.AgreementType, GrantorOrganizationID: v[1], GranteeOrganizationID: v[2], Status: in.Status, Title: v[3], ReferenceNo: optionalText(in.ReferenceNo), StartsAt: optionalText(in.StartsAt), EndsAt: optionalText(in.EndsAt)}
+	typ, err := normalizeAgreementType(in.AgreementType)
+	if err != nil {
+		return Agreement{}, err
+	}
+	start, end, err := normalizeAgreementInterval(in.StartsAt, in.EndsAt)
+	if err != nil {
+		return Agreement{}, err
+	}
+	a := Agreement{ID: v[0], AgreementType: typ, GrantorOrganizationID: v[1], GranteeOrganizationID: v[2], Status: in.Status, Title: v[3], ReferenceNo: optionalText(in.ReferenceNo), StartsAt: start, EndsAt: end}
 	if a.GrantorOrganizationID != org && a.GranteeOrganizationID != org {
 		return a, serviceError(403, "forbidden: agreement is outside organization scope")
 	}
@@ -49,7 +61,8 @@ func (s *Service) agreement(ctx context.Context, user, org string, in UpsertAgre
 		query += " ON CONFLICT(id) DO UPDATE SET agreement_type=excluded.agreement_type,status=excluded.status,title=excluded.title,reference_no=excluded.reference_no,starts_at=excluded.starts_at,ends_at=excluded.ends_at,updated_at=excluded.updated_at"
 	}
 	stmts := []Statement{assertion("SELECT 1 FROM organizations WHERE id=?", a.GrantorOrganizationID), assertion("SELECT 1 FROM organizations WHERE id=?", a.GranteeOrganizationID), {SQL: query, Args: []any{a.ID, a.AgreementType, a.GrantorOrganizationID, a.GranteeOrganizationID, a.Status, a.Title, a.ReferenceNo, a.StartsAt, a.EndsAt, nowString(), nowString()}}}
-	return a, s.store.Transaction(ctx, stmts)
+	stmts = append([]Statement{lifecycleActorGuard(user, org, "organization.permission.manage")}, append(guards, stmts...)...)
+	return a, lifecycleError(s.store.Transaction(ctx, stmts))
 }
 func (s *Service) CreateAgreementAuthorized(ctx context.Context, user, org string, in UpsertAgreementInput) (Agreement, error) {
 	if in.GrantorOrganizationID != org {
@@ -71,5 +84,62 @@ func (s *Service) UpdateAgreementAuthorized(ctx context.Context, user, org, id s
 	if org != a.GrantorOrganizationID && (in.Status != a.Status || ptrValue(in.StartsAt) != ptrValue(a.StartsAt) || ptrValue(in.EndsAt) != ptrValue(a.EndsAt)) {
 		return a, serviceError(403, fmt.Sprintf("forbidden: only grantor organization %s can change agreement authorization terms", a.GrantorOrganizationID))
 	}
-	return s.agreement(ctx, user, org, in, false)
+	if org != a.GrantorOrganizationID {
+		start, end, err := normalizeAgreementInterval(a.StartsAt, a.EndsAt)
+		if err != nil || ptrValue(start) != ptrValue(a.StartsAt) || ptrValue(end) != ptrValue(a.EndsAt) {
+			return a, serviceError(403, "forbidden: grantor must normalize legacy agreement bounds before full replacement; use PATCH for metadata")
+		}
+	}
+	return s.agreement(ctx, user, org, in, false, assertion("SELECT 1 FROM agreements WHERE id=? AND grantor_organization_id=? AND grantee_organization_id=? AND status=? AND starts_at IS ? AND ends_at IS ?", id, a.GrantorOrganizationID, a.GranteeOrganizationID, a.Status, a.StartsAt, a.EndsAt))
+}
+
+const agreementTimeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// Agreement bounds and authorization validation times use fixed-width UTC nanoseconds.
+// Null means unbounded; malformed strings never silently remove a bound.
+func normalizeAgreementInterval(start, end *string) (*string, *string, error) {
+	normalize := func(label string, value *string) (*string, time.Time, error) {
+		if value == nil {
+			return nil, time.Time{}, nil
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(*value))
+		if err != nil {
+			return nil, time.Time{}, serviceError(400, label+" must be an RFC3339 timestamp or null")
+		}
+		if year := parsed.UTC().Year(); year < 0 || year > 9999 {
+			return nil, time.Time{}, serviceError(400, label+" UTC year is out of range")
+		}
+		canonical := parsed.UTC().Format(agreementTimeLayout)
+		return &canonical, parsed, nil
+	}
+	a, at, err := normalize("startsAt", start)
+	if err != nil {
+		return nil, nil, err
+	}
+	b, bt, err := normalize("endsAt", end)
+	if err != nil {
+		return nil, nil, err
+	}
+	if a != nil && b != nil && at.After(bt) {
+		return nil, nil, serviceError(400, "startsAt must not be after endsAt")
+	}
+	return a, b, nil
+}
+
+func agreementBoundsGuard(a Agreement) Statement {
+	return assertion("SELECT 1 FROM agreements WHERE id=? AND starts_at IS ? AND ends_at IS ? AND grantor_organization_id=? AND grantee_organization_id=?", a.ID, a.StartsAt, a.EndsAt, a.GrantorOrganizationID, a.GranteeOrganizationID)
+}
+
+// Agreement classification is display metadata; it never selects authorization rules.
+func normalizeAgreementType(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !utf8.ValidString(value) || value == "" || utf8.RuneCountInString(value) > 128 {
+		return "", serviceError(400, "agreementType must contain 1 to 128 UTF-8 characters")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return "", serviceError(400, "agreementType must not contain control characters")
+		}
+	}
+	return value, nil
 }

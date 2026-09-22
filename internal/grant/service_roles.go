@@ -3,6 +3,7 @@ package grant
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 func (s *Service) ListRolesAuthorized(ctx context.Context, user, org string, c ReadConsistency) ([]Role, error) {
@@ -18,6 +19,9 @@ func (s *Service) CreateRoleAuthorized(ctx context.Context, user, org string, in
 	id, err := required("id", in.ID)
 	if err != nil {
 		return Role{}, err
+	}
+	if strings.HasPrefix(id, "role-system-") {
+		return Role{}, serviceError(400, "role-system- identifiers are reserved")
 	}
 	code, err := required("code", in.Code)
 	if err != nil {

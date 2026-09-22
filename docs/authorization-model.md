@@ -16,7 +16,7 @@
 
 일반 요청에서 조직 소속과 역할·리소스 권한은 Grant의 로컬 권한 데이터가 결정한다. 인증 성공 자체가 조직 가입이나 관리자 권한을 뜻하지 않는다. master 인증 owner bootstrap은 별도 관리 동작이다. `GRANT_POCKETBASE_APPLICATION_ID`는 검증된 토큰을 사용할 Grant 애플리케이션 설정이며 폐기된 Exposure 전용 API와 무관하다.
 
-구현 근거: [공급자 설정](../internal/grant/config.go), [외부 토큰 검증](../internal/grant/auth_external.go), [내부 identity·조직 검증](../internal/grant/auth_current.go). `/auth/v1/*` 프록시와 앱 provisioning 확인은 현재 Rauthy 전용이다. Goauthy 추가를 이유로 이 기능을 다른 공급자에 자동 적용하지 않는다.
+구현 근거: [공급자 설정](../internal/grant/config.go), [외부 토큰 검증](../internal/grant/auth_external.go), [내부 identity·조직 검증](../internal/grant/auth_current.go). Grant의 `/auth`, `/auth/v1`, `/auth/v1/*` 프록시는 제거했다. IdP 요청은 Gateway에서 직접 라우팅한다. 앱 identity-binding의 외부 클라이언트 검증은 현재 Rauthy 읽기 전용 어댑터만 지원하며 Goauthy로 자동 확대하지 않는다.
 
 ## 핵심 객체
 
@@ -60,7 +60,7 @@ binding subject는 세 가지다.
 
 group/user binding은 반드시 `subject_organization_id` 안에서만 유효하다. organization subject binding으로 다른 조직 resource에 접근시키려면 active `agreements`가 필요하다.
 
-그룹 관리 API는 `organization.group.manage`로 보호한다. list/get은 learner에서도 읽을 수 있지만 create/update/delete와 member 변경은 voter에서만 수행한다. member 추가는 같은 조직의 active 사용자 membership에 한정되고, group binding이 남아 있으면 group 삭제는 `409 Conflict`다.
+그룹 관리 API는 `organization.group.manage`로 보호한다. 관리 경로는 voter에서 처리하며 create/update/delete와 member 변경은 voter에서만 수행한다. member 추가는 같은 조직의 active 사용자 membership에 한정되고, group binding이 남아 있으면 group 삭제는 `409 Conflict`다.
 
 ## Coarse Deploy Baseline And Preserved Field Work
 
@@ -101,7 +101,7 @@ application은 조직이 만든 실행 주체다. 조직 owner/관리자는 appl
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
-현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 조직의 application 생성은 generated Rauthy client id를 가진 `unprovisioned` local reservation을 만들며, 선택적 scalar `redirectUri`를 application과 같은 transaction에서 manifest에 저장할 수 있다. 생략하면 manifest는 빈 배열이다. 값은 canonical absolute HTTPS 또는 explicit-port literal loopback-IP HTTP여야 하며 userinfo, query, fragment, wildcard, localhost, custom scheme은 거부된다. create와 single-application GET만 optional `redirectUri`를 readback하고 목록 API의 shape은 바꾸지 않는다. 별도 운영자/IaC가 Rauthy client를 생성한 뒤 master provisioning verify는 `Clients` 그룹의 `read` 권한만 가진 API key로 `GET /auth/v1/clients/{client_id}`를 호출해 id, 이름, 활성·confidential 상태, local manifest와 byte-for-byte 같은 redirect URI 배열, flow 설정을 검증해야 application이 `ready`가 된다. public application은 Rauthy challenges의 exact set이 `{S256}`이어야 한다. Grant는 Rauthy client를 생성·수정하거나 client secret을 회전하지 않으며, 운영자/IaC의 write credential도 보유하지 않는다.
+현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 앱 생성은 IdP client ID를 발급하지 않는다. Rauthy 모드에서는 client ID 없는 unprovisioned 객체와 선택적 단일 redirectUri manifest를 저장한다. 플랫폼 운영자가 `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding`에 기존 `clientId`를 전달하면 설정된 Rauthy 읽기 전용 어댑터가 ID, 이름, 활성·confidential 상태, redirect URI, flow와 public PKCE S256을 검증한다. 검증 당시의 로컬 manifest와 상태가 여전히 같은 경우에만 원자적으로 ready와 client ID를 저장한다. 다른 앱의 client ID 중복이나 ready 앱의 다른 ID로 재연결은 거절한다. URI는 canonical HTTPS 또는 포트를 명시한 loopback IP HTTP만 허용한다. Grant는 IdP 클라이언트를 생성·수정·삭제하지 않는다. `GRANT_RAUTHY_CLIENT_READ_API_KEY`는 이 검증에만 필요하며 없으면 연결 요청은 503이다. 정상 토큰 검증에는 해당 관리 API 키가 필요하지 않다.
 
 trusted auto-approve는 `first_party = true`와 `consent_policy = auto_approve`가 모두 성립할 때만 적용한다. 조직 application API는 두 신뢰 필드를 입력받지 않으며 master trust API만 승격/해제한다. trusted application은 조직 경로에서 보안 설정을 바꿀 수 없다.
 
@@ -172,6 +172,18 @@ V2 authority snapshot 수신 API와 exporter는 제거됐다. V1 manifest import
 - authz check/filter 응답 계약
 - coarse/field capability 경계와 preserved field-work 상태
 
-In PocketBase mode, creating a Grant application immediately sets its provisioning state to `ready` without a Rauthy client ID: there is no OIDC client provisioning step. The application remains untrusted and requires explicit consent by default; readiness does not grant action scope or user authority. Rauthy mode retains its existing external-client provisioning workflow.
+In PocketBase mode, creating a Grant application immediately sets its provisioning state to `ready` without a Rauthy client ID: there is no OIDC client provisioning step. The application remains untrusted and requires explicit consent by default; readiness does not grant action scope or user authority. Rauthy mode creates no client ID and requires explicit verified identity binding to an externally managed client.
 
 Rauthy 일반 로그인도 정확한 identity 매핑만 재사용하며 이메일이나 raw subject로 기존 내부 사용자를 자동 연결하지 않는다. 미등록 subject에는 권한 없는 새 identity를 생성한다. 사전 생성된 owner에 연결하는 예외는 master와 검증된 Bearer를 함께 요구하는 명시적 bootstrap 경로다.
+
+## 조직과 앱의 수명주기
+
+새 조직 생성은 플랫폼 권한으로 기존 활성 사용자를 owner로 지정하며 소속과 해당 조직 owner Binding을 원자 생성한다. 조직 관리자는 그룹·앱·역할의 메타데이터를 PATCH할 수 있지만 식별자·소유 조직·IdP 연결·trust를 이 경로로 변경할 수 없다. 새 경로·입력은 [수명주기 계약](api-lifecycle.md)을 따른다.
+
+구성원 제거는 inactive 소속 기록을 남기고 개인 Binding·그룹 소속·앱 동의를 철회한다. 재가입 시 개인 부여는 복원되지 않으며 현재 조직 전체 권한만 다시 적용될 수 있다. owner는 이 경로로 제거할 수 없다. 앱 비활성화도 기존 동의를 철회하므로 활성화 후 새 동의가 필요하다. first-party 앱의 상태 변경·삭제는 조직 API에서 금지하며 배포 enforcer가 참조한 앱 삭제는 409다. 역할 삭제는 Binding을 먼저 제거해야 한다. 조직 관리자는 `DELETE .../app-grants/{grantId}`로 다른 구성원의 조직 내 동의를 철회할 수 있다.
+
+새 관리 카탈로그를 생성한 것만으로 운영자·앱에게 Action이 부여되지는 않는다. 필요한 역할과 앱 범위에 명시적으로 등록한 후 새 세대를 활성화하고 Exposure digest를 맞춰야 한다. 이 문서는 해당 배포가 완료되었다는 기록이 아니다.
+
+Agreement 새 쓰기는 RFC3339 입력을 UTC 소수점 이하 정확히 9자리의 고정 폭 문자열로 저장한다. 같은 형식의 판정 시각으로 시작·종료 경계를 포함해 비교하며 별도 여유 시간은 없다. 기존 row를 일괄 바꾸지 않고 유효한 offset 표현 등 비정규 기간도 거절한다. 권한 있는 grantor가 명시적으로 PATCH하여 정규화해야 사용할 수 있다. 사용자·그룹·조직 주체의 모든 평가 경로와 Binding 생성에 적용하며 다른 시각 필드의 의미는 바꾸지 않는다.
+
+`GET /api/v1/orgs`의 직접 Grant 인증은 조직 헤더 없는 Bearer다. Exposure에서는 기존 서비스 권한의 조직 문맥이 여전히 필요하므로 조직 미가입자의 완전한 공개 온보딩 경로가 추가된 것은 아니다. 초기 조직 owner Binding은 소유자와 별도로 실제 운영자의 감사 식별자를 기록한다.

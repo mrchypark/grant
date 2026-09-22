@@ -111,7 +111,7 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 
 PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, `rauthy_client_id = NULL`을 저장한다. 별도 OIDC client 생성 절차가 없기 때문이다. 이 상태는 인증 연동 준비만 뜻하며, `first_party = 0`과 `consent_policy = explicit` 및 application action·사용자 권한 검증은 그대로 유지한다. 아래 Rauthy client 생성·검증 절차는 Rauthy 모드에 적용된다.
 
-`applications.rauthy_client_id`는 Rauthy client id와 연결된다. 조직 `POST /apps`는 사용자 application id를 Rauthy id로 재사용하지 않고 충돌 가능성이 사실상 없는 `grant-<uuid>` id를 서버에서 생성하며, `provisioning_status = unprovisioned`인 local reservation만 저장한다. Grant는 Rauthy client를 생성·수정하거나 secret을 회전하지 않는다. 운영자/IaC가 그 generated id와 반환된 application 설정으로 Rauthy client를 먼저 만든 뒤, master provisioning verify API가 read-only Rauthy GET으로 id, name, enabled/confidential, redirect URI, flow 설정을 정확히 검증해야 `ready`로 전환된다. 기존 application id를 client id로 backfill하지 않으며 legacy row는 `unprovisioned`로 남는다.
+`applications.rauthy_client_id`는 호환성을 위해 보존한 기존 컬럼명이다. Rauthy 모드의 새 조직 앱 생성은 IdP client ID를 발급하지 않고 NULL과 unprovisioned 상태를 저장한다. 운영자가 IdP에 생성한 기존 client ID를 플랫폼 PUT identity-binding에 전달하면 설정된 Rauthy 읽기 전용 어댑터가 manifest를 검증한다. 성공 시 검증한 로컬 상태가 변하지 않았는지 트랜잭션에서 다시 확인하고 client ID와 ready를 원자 저장한다. 기존 ready 연결 및 unprovisioned 예약 데이터는 보존한다. 준비된 앱을 다른 client ID로 재연결할 수 없다. Grant는 외부 클라이언트 생성·수정·삭제나 secret 발급·회전을 수행하지 않는다.
 
 `applications.rauthy_client_id`는 Rauthy client와 연결된 실제 값에 대해 전역 partial unique index를 가진다. legacy row의 `NULL`, 빈 문자열, SQLite 기본 `TRIM` 기준의 ASCII space-only 문자열은 미연결 값으로 보아 index와 migration 중복 검사에서 제외한다. 기본 `TRIM`이 제거하지 않는 탭 등의 문자는 실제 client id 문자로 간주해 unique 제약을 적용한다. application authz는 토큰에서 검증한 비어 있지 않은 `client_id`를 이 컬럼의 `ready` application에 정확히 하나 매핑하며, 같은 조직의 active/ready application이 아니면 fail closed한다.
 
@@ -351,7 +351,7 @@ Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 
 
 **기존 관리 권한 이전:** `grant-management.manage` 정의를 보존하는 것은 이전 카탈로그의 운영·롤백을 위한 것이며 새 액션으로 권한을 전개하지 않는다. 이전 세 그룹 경로를 계속 허용하려면 활성화 전에 해당 역할의 `role_actions`, 앱의 `application_actions`, 비신뢰 앱 사용자의 `application_grant_actions`에 `grant-management.groups.read`, `.groups.create`, `.groups.delete`를 명시적으로 추가해야 한다. 기존 조직 리소스 바인딩은 재사용한다. 동의는 사용자 동의 API로 갱신하며, 이전 `manage` 권한을 전체 관리 권한으로 자동 확대하지 않는다. 이 데이터 이전이 완료되지 않으면 이전 카탈로그를 유지한다.
 
-**가입 전 본인 식별:** `POST /api/v1/me/materialize`는 조직 가입 전에 로컬 사용자 ID를 확보하는 경로다. 이 경로의 정확한 capability에 한해 사용자 인증, 활성 사용자·앱·조직·provider, 앱의 `grant-management.user.materialize` 액션 등록을 검사하되 멤버십·역할·동의는 요구하지 않는다. 이 요청은 본인 identity만 등록하며 멤버십이나 역할, 앱 동의를 생성하지 않는다. 가입하지 않은 사용자는 `membershipStatus: none`을 받고, 다른 관리 경로는 계속 일반 권한 검사를 받는다. 이 예외에는 본문 없는 `forward-user` 요청만 해당한다. 새 테이블이나 컬럼은 없다.
+**가입 전 본인 식별:** 조직이 없는 사용자를 위한 정확한 네 HTTP 경로와 저장 관계는 아래 조직 없는 온보딩 절을 따른다. 조직 선택 이전에는 로컬 사용자 존재나 조직 멤버십을 전제로 하지 않지만, 외부 인증과 설정된 신뢰 관리 앱 및 명시적인 Action 등록을 검사한다. 새 테이블이나 컬럼은 없다.
 
 **Actor attribution:** bearer 경로에서 `WithManagementActor(ctx, userID)`로 컨텍스트에 인증된 사용자 ID를 저장한다. 마스터 경로에서는 `"grant-master"`가 기본값으로 유지된다. `ActivateHttpCapabilityGenerationAdmin`과 `SetProviderPepClientAdmin`은 `ManagementActorFromContext(ctx)`를 사용하여 기록된 actor를 결정한다.
 
@@ -360,3 +360,48 @@ Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 
 ### 인증 identity 연결 원칙
 
 모든 인증 어댑터는 정확한 `user_identities` 매핑만 재사용한다. 매핑이 없으면 새 내부 사용자 ID를 발급하고 identity만 생성한다. Rauthy에서도 이메일 일치나 외부 subject와 내부 사용자 ID의 문자열 일치로 기존 사용자를 자동 채택하지 않는다. 기존에 등록된 매핑과 membership/binding은 그대로 보존한다. 매핑 없이 이메일에 의존하던 레거시 계정은 운영자가 소유권을 확인하여 명시적으로 연결해야 한다. 이 원칙은 일반 로그인으로 초기 소유자 등록의 승인 경계를 우회하지 못하게 하기 위한 것이다. 테이블 구조와 canonical identity key는 바뀌지 않는다.
+
+## 관리 수명주기의 릴레이션과 구조의 이유
+
+이번 변경은 테이블·컬럼·인덱스나 canonical key를 추가하지 않으며, 기존 row의 수명주기와 연결 의미를 다음처럼 명시한다. HTTP 계약은 [API 수명주기](api-lifecycle.md)에 있다.
+
+- 조직 생성은 `organizations`, owner `organization_memberships`, 해당 조직 자원에 대한 `role-system-bootstrap-owner`의 개인 `role_bindings`를 같은 트랜잭션으로 생성한다. 플랫폼 생성은 명시한 기존 활성 사용자를 owner로 삼고, 본인 생성은 검증된 현재 사용자를 새 조직의 owner로 삼는다. 어느 경로도 IdP 계정을 만들거나 기존 조직의 소유자를 덮어쓰지 않는다.
+- 구성원 제거는 `organization_memberships.status=inactive`로 이력을 남긴다. 해당 소속의 `group_memberships`, 해당 사용자와 소속 조직의 개인 `role_bindings`를 제거하고 조직 내 활성 `application_grants`를 revoked로 전환한다. owner 제거는 거절한다. 재등록은 기존 소속 row를 재활성화하지만 제거한 개인 권한·그룹·동의는 복원하지 않는다. 조직 전체 Binding은 제거 대상이 아니므로 재가입 후 적용될 수 있다.
+- 앱 비활성화는 기존 동의를 철회한다. 재활성화는 ready 연결이나 동의를 새로 만들어 주지 않는다. 앱 삭제는 grant actions, grants, requested actions, redirect manifest와 application을 함께 지운다. `provider_pep_clients` 참조가 있으면 삭제를 거절하고, first-party 앱의 조직 단위 상태 변경·삭제도 거절한다. 외부 IdP 클라이언트는 변경하지 않는다.
+- 역할 삭제는 어떤 상태의 Binding이든 참조가 있으면 409다. 참조가 없을 때 `role_action_field_views`, `role_actions`, `roles`를 함께 제거한다. 조직 API는 전역 시스템 역할을 수정·삭제하지 않는다.
+- 조직 관리자의 동의 철회는 row를 삭제하지 않고 `status`, `revoked_at`, `revoked_by_user_id`를 기록한다. 과거 Action 연결이 남아도 활성 동의가 아니므로 권한 판정에 사용되지 않는다.
+- identity binding은 기존 `rauthy_client_id`를 외부에서 할당한 검증 대상 client ID로 사용한다. 검증된 이름·종류·redirect manifest·상태와 조직 활성 여부·보안 변경 lease·전역 client ID 유일성을 트랜잭션으로 다시 검사한다. 이미 ready인 다른 연결로 교체하지 않는다. 기존 저장 데이터와 유일성 인덱스는 유지한다.
+
+구조의 이유는 소속 재활성화가 과거 개인 위임을 자동 복구하지 않도록 하고, 사용자 권한과 앱 동의의 별도 철회 의미를 보존하기 위해서다. 참조된 실행기 앱이나 역할을 암묵적으로 지우지 않아서 운영 권한의 의도하지 않은 소실을 막는다. 검증과 저장 사이의 manifest 변경도 ready 상태로 승인하지 않으며, Grant의 권한 객체 삭제가 IdP 계정 관리로 번지지 않는다.
+
+### Agreement 기간 비교와 초기 소유자 감사
+
+Agreement의 새 생성·PUT·PATCH는 RFC3339 입력을 검증하고 UTC 소수점 이하 정확히 9자리의 고정 폭 문자열로 저장한다. 판정 시각도 같은 형식이며 시작·종료를 포함하는 비교를 수행한다. 별도 여유 시간은 없다. 기존 row는 일괄 이관하지 않으며 유효한 offset 표현을 포함한 비정규 기존 기간도 권한 판정에서는 거절한다. 권한 있는 grantor의 명시적 PATCH로 정규화한다. Binding 생성과 사용자·그룹·조직 주체의 모든 평가 경로가 같은 검사를 적용한다. null 경계는 무제한이며 다른 시각 필드의 저장 형식은 바꾸지 않는다.
+
+초기 조직 owner Binding의 `created_by_user_id`는 `ManagementActorFromContext`에서 얻은 실제 운영 행위자를 기록한다. `subject_id`는 지정된 owner이며 두 필드는 서로 다른 의미다. 감사 컬럼이나 canonical key는 바꾸지 않는다.
+
+구성원 제거 시 owner 외의 `membership_role`은 member로 내리고 status를 inactive로 남긴다. 앱 Action 집합의 조건부 변경 snapshot에는 `applications.id`, `organization_id`, `created_at`도 포함하여 삭제·재생성된 앱에 이전 ETag를 사용할 수 없도록 한다. 공개 응답 배열과 DB 컬럼 구성은 바꾸지 않는다.
+
+### Agreement 분류의 의미
+
+`agreements.agreement_type`은 필수 분류 메타데이터다. API의 `agreementType` 필드명과 TEXT 컬럼은 유지하며, 기존 `delegation`, `epc`, `om`, `distributor`, `dealer` 값은 변경하지 않는다. 생성·PUT·PATCH는 앞뒤 공백을 제거한 1–128자 UTF-8 문자열을 받으며 제어 문자는 거절한다. 분류는 대소문자를 구분하여 저장하고 별도 분류 레지스트리나 자동 권한 매핑을 만들지 않는다.
+
+**릴레이션:** 분류 문자열은 다른 테이블의 키가 아니다. Agreement의 당사자 조직과 `role_bindings.agreement_id` 연결은 기존대로 유지한다. 권한 판정에는 Agreement의 존재, 활성 상태, 유효기간 및 Binding의 주체·자원·역할이 사용되며 분류값은 사용하지 않는다.
+
+**구조의 이유:** 서비스의 업종별 분류를 Grant의 권한 의미에서 분리한다. 새로운 분류를 추가하거나 수정해도 권한을 새로 부여하거나 활성화하지 않는다. 기존 데이터의 재작성이나 물리 스키마 변경은 필요하지 않다.
+
+### 조직 소유권 이전의 릴레이션과 구조의 이유
+
+조직의 owner는 `organization_memberships.membership_role=owner`인 유일한 소속 관계로 표현한다. 이전 API는 현재 owner와 대상 사용자가 모두 활성 사용자이자 해당 활성 조직의 활성 구성원이어야 한다. 현재 owner에게 `organization.permission.manage` 권한도 필요하며, 이 권한과 단일 owner 및 활성 상태를 트랜잭션 안에서 다시 검사한다. owner 소속만 남고 관리 Binding이 철회된 사용자는 이전을 통해 권한을 복구할 수 없다.
+
+이전 트랜잭션은 이전 owner의 소속을 member로 내리고 대상의 소속을 owner로 변경한다. 이전 owner의 해당 조직 자원에 대한 `role-system-bootstrap-owner` 개인 Binding을 제거하고 대상에게 같은 owner Binding을 활성 상태로 부여한다. 추가로 이전 owner에게 `role-system-management-owner`의 해당 조직 Binding이 있으면 상태와 Agreement 제한을 보존하여 대상에게 옮기고 원본을 제거한다. 해당 Binding이 없으면 새로 부여하지 않는다. 다른 역할의 Binding, 그룹 소속, 앱 동의는 이 작업에서 변경하지 않는다. 소유권 이전은 이전 사용자의 모든 접근 권한을 철회하는 API가 아니다.
+
+owner GET의 ETag에는 조직 ID, owner 사용자 ID, 소속 ID와 소속 갱신 시각을 포함한다. PUT은 읽은 ETag와 트랜잭션 시점의 owner를 비교하여 동시 이전과 이전 후 되돌리기 과정에서 오래된 요청이 적용되지 않도록 한다. owner가 없거나 여러 명인 기존 데이터는 409로 거절하며 임의 owner를 선택하거나 새로 만들지 않는다. 새 테이블·컬럼·인덱스는 없으며, 시작 시 seed가 이전 owner를 복원하지 않는 기존 규칙을 유지한다.
+
+### 조직 없는 온보딩의 릴레이션과 구조의 이유
+
+조직 없는 온보딩은 정확한 `POST /api/v1/me/materialize`, `GET /api/v1/me`, `GET /api/v1/orgs`, `POST /api/v1/orgs`의 관리 capability에만 적용한다. 설정된 활성·준비 완료 first-party/auto-approve 앱, 활성 앱 조직·Provider·enforcer, 앱에 명시적으로 등록한 Action과 검증된 외부 신원/client 연결이 모두 필요하다. 기존 비활성 사용자는 거절한다. PDP는 로컬 매핑이 없으면 provider·issuer·collection·subject를 분리한 외부 신원 digest로 판정하며 로컬 사용자 생성은 voter의 신원 처리에 맡긴다.
+
+본인 조직 생성은 검증된 사용자 ID로 `organizations`, owner 소속과 기존 Grant owner Binding을 생성하고, 해당 조직 자원에 대한 `role-system-management-owner` 개인 Binding을 같은 트랜잭션에서 추가한다. 이 전역 역할은 `roles.organization_id=NULL`이며 조직 API로 수정하거나 삭제할 수 없다. `role-system-` ID는 조직 역할 생성에 사용할 수 없다. Action은 등록된 조직 관리 경로로 제한하며 필요한 정의가 없거나 전역 역할에 허용 범위 밖 Action이 있으면 생성 전체를 거절한다. 플랫폼 Action이나 다른 조직 자원은 부여하지 않는다.
+
+관리 앱과 대상 조직을 분리하는 이유는 한 관리 앱을 통해 사용자가 본인이 속한 여러 조직을 관리할 수 있게 하기 위해서다. 정확한 조직 관리 capability에만 이 연결을 적용하며, 대상 조직 멤버십과 세부 Binding 판정은 생략하지 않는다. 기존 업무 앱의 일반적인 조직 일치 조건이나 데이터 Provider 권한을 완화하지 않는다. 새 테이블·컬럼 또는 외부 신원 canonical key 변경은 없다.

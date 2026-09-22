@@ -5,6 +5,7 @@
                         ) AS (
                             VALUES {values}
                         ),
+                        {agreement_bounds},
                         eligible_requested AS (
                             SELECT req.*
                             FROM requested req
@@ -72,7 +73,7 @@
                               ON om.organization_id = rb.subject_id
                              AND om.user_id = req.user_id
                              AND om.status = 'active'
-                            LEFT JOIN agreements a ON a.id = rb.agreement_id
+                            LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
                             WHERE rb.agreement_id IS NULL OR (
                                 a.status = 'active'
                                 AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
@@ -101,6 +102,12 @@
                               ON om.organization_id = rb.subject_organization_id
                              AND om.user_id = rb.subject_id
                              AND om.status = 'active'
+                            LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
+                            WHERE rb.agreement_id IS NULL OR (
+                                a.id IS NOT NULL
+                                AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
+                                AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
+                            )
 
                             UNION
 
@@ -125,6 +132,12 @@
                              AND om.user_id = req.user_id
                              AND om.organization_id = req.organization_id
                              AND om.status = 'active'
+                            LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
+                            WHERE rb.agreement_id IS NULL OR (
+                                a.id IS NOT NULL
+                                AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
+                                AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
+                            )
                         ),
                         trusted_application_allowed AS (
                             SELECT DISTINCT req.idx

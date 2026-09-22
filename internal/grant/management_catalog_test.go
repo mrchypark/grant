@@ -139,14 +139,13 @@ func TestManagementCatalogBodylessCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodyless := map[string]bool{
-		"/api/v1/me/materialize":                                                       true,
-		"/api/v1/orgs/{organizationId}/deactivate":                                     true,
-		"/api/v1/orgs/{organizationId}/reactivate":                                     true,
-		"/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify": true,
-		"/api/v1/orgs/{organizationId}/members/{userId}":                               true,
-		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}":              true,
-		"/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}":              true,
-		"/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}":        true,
+		"/api/v1/me/materialize":                                                true,
+		"/api/v1/orgs/{organizationId}/deactivate":                              true,
+		"/api/v1/orgs/{organizationId}/reactivate":                              true,
+		"/api/v1/orgs/{organizationId}/members/{userId}":                        true,
+		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}":       true,
+		"/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}":       true,
+		"/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}": true,
 	}
 	for _, c := range stage.Capabilities {
 		if bodyless[c.PathTemplate] {
@@ -297,5 +296,51 @@ func TestManagementCatalogConsistencyQueryVariants(t *testing.T) {
 				t.Fatalf("mutation %s accepted query", c.CapabilityID)
 			}
 		}
+	}
+}
+
+func TestManagementLifecycleContracts(t *testing.T) {
+	stage, actions, err := ManagementCatalog(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stage.Capabilities) != 69 {
+		t.Fatalf("management capabilities = %d, want 69", len(stage.Capabilities))
+	}
+	if len(actions) != 70 {
+		t.Fatalf("actions = %d, want 69 fine actions + legacy", len(actions))
+	}
+	seen := map[string]bool{}
+	for _, a := range actions {
+		if seen[a.ID] {
+			t.Fatalf("duplicate action %s", a.ID)
+		}
+		seen[a.ID] = true
+	}
+	expected := map[string]string{
+		"PATCH /api/v1/admin/providers/{providerId}": "admin.provider.update",
+		"POST /api/v1/admin/orgs":                    "admin.organization.create",
+		"PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding": "admin.app.identity.bind",
+		"GET /api/v1/orgs":                                      "organization.list",
+		"GET /api/v1/orgs/{organizationId}":                     "organization.detail",
+		"PATCH /api/v1/orgs/{organizationId}":                   "organization.update",
+		"DELETE /api/v1/orgs/{organizationId}/members/{userId}": "members.remove",
+	}
+	for _, cap := range stage.Capabilities {
+		if strings.Contains(cap.PathTemplate, "provisioning/verify") {
+			t.Fatal("retired IdP verification exposed")
+		}
+		if action, ok := expected[cap.Method+" "+cap.PathTemplate]; ok {
+			if cap.ActionID == nil || *cap.ActionID != "grant-management."+action {
+				t.Fatalf("wrong action %+v", cap)
+			}
+			if (cap.Method == "POST" || cap.Method == "PATCH" || cap.Method == "PUT") && cap.Request.Body != "json" {
+				t.Fatalf("missing JSON policy %+v", cap)
+			}
+			delete(expected, cap.Method+" "+cap.PathTemplate)
+		}
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing lifecycle contracts %v", expected)
 	}
 }

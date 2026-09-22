@@ -2,13 +2,9 @@ package grant
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	whatwg "github.com/nlnwa/whatwg-url/url"
 	"net"
-	"net/http"
-	"net/url"
-	"sort"
 	"strings"
 )
 
@@ -102,8 +98,7 @@ func (s *Service) CreateApplication(ctx context.Context, user, org string, in Cr
 		}
 		vals[i] = x
 	}
-	clientID := "grant-" + strings.ReplaceAll(requestID(), "-", "")
-	a := Application{ID: vals[0], OrganizationID: org, Slug: vals[1], Name: vals[2], Description: optionalText(in.Description), ApplicationType: in.ApplicationType, AppType: in.AppType, FirstParty: false, ConsentPolicy: "explicit", Active: in.Active, ProvisioningStatus: "unprovisioned", RauthyClientID: &clientID, CreatedByUserID: user}
+	a := Application{ID: vals[0], OrganizationID: org, Slug: vals[1], Name: vals[2], Description: optionalText(in.Description), ApplicationType: in.ApplicationType, AppType: in.AppType, FirstParty: false, ConsentPolicy: "explicit", Active: in.Active, ProvisioningStatus: "unprovisioned", CreatedByUserID: user}
 	if s.cfg.Auth.ProviderMode == "pocketbase" {
 		a.ProvisioningStatus = "ready"
 		a.RauthyClientID = nil
@@ -136,6 +131,10 @@ func (s *Service) ReplaceApplicationActionsAuthorized(ctx context.Context, user,
 	if err := s.applicationMutationAvailable(ctx, id); err != nil {
 		return nil, err
 	}
+	target, err := serviceRow[applicationActionTarget](ctx, s, ReadStrong, "SELECT id,organization_id,created_at FROM applications WHERE id=? AND organization_id=?", id, org)
+	if err != nil {
+		return nil, err
+	}
 	if len(actions) > 999 {
 		return nil, serviceError(400, "actionIds must contain at most 999 items")
 	}
@@ -155,7 +154,7 @@ func (s *Service) ReplaceApplicationActionsAuthorized(ctx context.Context, user,
 	if len(invalid) != 0 {
 		return nil, serviceError(400, "action "+rowString(invalid[0], "id")+" is not grantable to applications")
 	}
-	out, err := s.store.ReplaceApplicationActions(ctx, id, ids)
+	out, err := s.store.replaceApplicationActions(ctx, target, user, ids)
 	return out, applicationMutationError(err)
 }
 func (s *Service) SetApplicationTrustAdmin(ctx context.Context, org, id string, trusted bool) (Application, error) {
@@ -185,88 +184,6 @@ func applicationMutationError(err error) error {
 		return serviceError(409, "application security mutation preconditions changed")
 	}
 	return err
-}
-func (s *Service) VerifyApplicationProvisioningAdmin(ctx context.Context, org, id string) (Application, error) {
-	a, err := s.store.FindApplicationForOrganizationWithConsistency(ctx, id, org, ReadStrong)
-	if err != nil {
-		return Application{}, err
-	}
-	if a == nil {
-		return Application{}, serviceError(404, "application not found")
-	}
-	clientID := ptrValue(a.RauthyClientID)
-	if strings.TrimSpace(clientID) == "" {
-		return Application{}, serviceError(409, "application has no Rauthy client reservation")
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(s.RauthyBaseURL(), "/")+"/auth/v1/clients/"+url.PathEscape(clientID), nil)
-	if err != nil {
-		return Application{}, err
-	}
-	req.Header.Set("Authorization", "API-Key "+s.cfg.Auth.Rauthy.ClientReadAPIKey)
-	res, err := s.client.Do(req)
-	if err != nil {
-		return Application{}, serviceError(503, "rauthy client fetch failed")
-	}
-	defer res.Body.Close()
-	if res.StatusCode == 404 {
-		return Application{}, serviceError(409, "Rauthy client is not provisioned")
-	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return Application{}, serviceError(503, "rauthy client fetch failed")
-	}
-	var v struct {
-		ID           string   `json:"id"`
-		Name         *string  `json:"name"`
-		Enabled      bool     `json:"enabled"`
-		Confidential bool     `json:"confidential"`
-		RedirectURIs []string `json:"redirect_uris"`
-		FlowsEnabled []string `json:"flows_enabled"`
-		Challenges   []string `json:"challenges"`
-	}
-	if err = json.NewDecoder(res.Body).Decode(&v); err != nil {
-		return Application{}, serviceError(503, "invalid Rauthy client response")
-	}
-	uri, err := s.applicationRedirect(ctx, id, ReadStrong)
-	if err != nil {
-		return Application{}, err
-	}
-	expected := []string{}
-	if uri != nil {
-		canonical, err := CanonicalRedirectURI(*uri)
-		if err != nil || canonical != *uri {
-			return Application{}, serviceError(409, "local application redirect URI manifest is invalid")
-		}
-		expected = append(expected, *uri)
-	}
-	flows := []string{"authorization_code", "refresh_token"}
-	if a.ApplicationType == "confidential" {
-		flows = append(flows, "client_credentials")
-	}
-	same := func(a, b []string) bool {
-		if len(a) != len(b) {
-			return false
-		}
-		for i := range a {
-			if a[i] != b[i] {
-				return false
-			}
-		}
-		return true
-	}
-	sort.Strings(flows)
-	actual := map[string]bool{}
-	for _, f := range v.FlowsEnabled {
-		actual[f] = true
-	}
-	got := make([]string, 0, len(actual))
-	for f := range actual {
-		got = append(got, f)
-	}
-	sort.Strings(got)
-	if v.ID != clientID || ptrValue(v.Name) != a.Name || v.Enabled != a.Active || v.Confidential != (a.ApplicationType == "confidential") || !same(v.RedirectURIs, expected) || !same(got, flows) || (a.ApplicationType == "public" && !same(v.Challenges, []string{"S256"})) {
-		return Application{}, serviceError(409, "Rauthy client configuration does not match the local application reservation")
-	}
-	return s.store.MarkApplicationProvisioningReady(ctx, id, org)
 }
 
 type ApplicationConsent struct {

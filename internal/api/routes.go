@@ -38,16 +38,13 @@ func (s *Server) routes() {
 		}
 		writeJSON(w, code, health)
 	})
-	s.mux.HandleFunc("GET /auth", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/auth/v1", 307) })
-	s.mux.HandleFunc("/auth/v1", s.proxy)
-	s.mux.HandleFunc("/auth/v1/", s.proxy)
 	s.route("GET", "/api/v1/me", "bearer", false, 200, func(r *request) (any, error) {
 		return s.service.CurrentUser(r.Context(), r.bearer, r.org, r.consistency)
 	})
 	s.route("POST", "/api/v1/me/materialize", "bearer", true, 200, func(r *request) (any, error) { return s.service.MaterializeCurrentUser(r.Context(), r.bearer, r.org) })
 	s.route("GET", "/api/v1/providers", "", false, 200, func(r *request) (any, error) { return s.service.ListServiceProviders(r.Context(), r.consistency) })
 	s.route("POST", "/api/v1/admin/providers", "master", true, 201, body(false, func(r *request, v grant.ServiceProvider) (any, error) {
-		return s.service.UpsertServiceProviderAdmin(r.Context(), v)
+		return s.service.CreateServiceProviderAdmin(r.Context(), v)
 	}))
 	s.route("PUT", "/api/v1/admin/providers/{providerId}/actions", "master", true, 200, body(false, s.replaceProviderActions))
 	s.route("GET", "/api/v1/admin/providers/{providerId}/actions", "master", true, 200, func(r *request) (any, error) {
@@ -102,9 +99,6 @@ func (s *Server) routes() {
 	s.route("PUT", "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust", "master", true, 200, body(false, func(r *request, v trustRequest) (any, error) {
 		return s.service.SetApplicationTrustAdmin(r.Context(), r.PathValue("organizationId"), r.PathValue("applicationId"), v.Trusted)
 	}))
-	s.route("POST", "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify", "master", true, 200, func(r *request) (any, error) {
-		return s.service.VerifyApplicationProvisioningAdmin(r.Context(), r.PathValue("organizationId"), r.PathValue("applicationId"))
-	})
 	s.route("PUT", "/api/v1/admin/users/{userId}/active", "master", true, 200, body(false, func(r *request, v activeRequest) (any, error) {
 		return s.service.SetUserActiveAdmin(r.Context(), r.PathValue("userId"), v.Active)
 	}))
@@ -195,6 +189,7 @@ func (s *Server) routes() {
 	s.authorizationRoutes()
 	s.capabilityRoutes()
 	s.actionMutationRoutes()
+	s.lifecycleRoutes()
 	if s.learner {
 		for _, path := range []string{"/api/v1/admin/providers", "/api/v1/admin/providers/{providerId}/actions", "/api/v1/admin/providers/{providerId}/http-capability-generations", "/api/v1/admin/providers/{providerId}/http-capability-active", "/ops/providers/{providerId}/enforcers/{pepClientId}", "/ops/backups", "/api/v1/admin/bootstrap/owner", "/ops/migrations/patch-data-authority"} {
 			s.mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {

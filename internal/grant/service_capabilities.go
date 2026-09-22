@@ -138,7 +138,30 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if CredentialDigest(token) != r.ProviderCredentialDigest {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential digest mismatch")
 	}
-	c, err := s.resolveApplicationAuthorizationContext(ctx, token, org)
+	orglessOnboarding := org == "" && managementOnboardingCapability(r.ProviderID, *cap)
+	trustedTenantManagement := false
+	tenantReactivation := managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath)
+	if org != "" && managementOrganizationCapability(r.ProviderID, *cap) {
+		app, e := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.HTTPCapabilityPEPApplicationID, ReadStrong)
+		if e == nil && app.FirstParty && app.ConsentPolicy == "auto_approve" && app.OrganizationID != org {
+			trustedTenantManagement = true
+		}
+	}
+	var c applicationAuthorizationContext
+	if orglessOnboarding || trustedTenantManagement {
+		c, err = s.resolveOnboardingContext(ctx, token, *cap.ActionID)
+		if err == nil && trustedTenantManagement {
+			var principal AuthenticatedPrincipal
+			if tenantReactivation {
+				principal, err = s.AuthenticateRequestForInactiveOrganization(ctx, token, org, ReadStrong)
+			} else {
+				principal, err = s.Authenticate(ctx, token, org, ReadStrong)
+			}
+			c.UserID, c.OrganizationID = principal.UserID, org
+		}
+	} else {
+		c, err = s.resolveApplicationAuthorizationContext(ctx, token, org)
+	}
 	if err != nil {
 		return HttpCapabilityDecision{}, err
 	}
@@ -151,7 +174,15 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
 	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
-	if r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
+	if orglessOnboarding {
+		allowed, reason = true, "management_onboarding"
+	} else if trustedTenantManagement {
+		decisions, e := s.store.evaluateUserActions(ctx, []UserActionCheck{{UserID: c.UserID, OrganizationID: org, ProviderID: r.ProviderID, ResourceType: "organization", ResourceID: r.ResourceID, ActionID: *cap.ActionID, Consistency: ReadStrong}}, tenantReactivation)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "trusted_tenant_management"
+	} else if r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
 		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID) {
 		allowed, reason = false, "platform_management_organization_required"
 	} else if r.ResponseDigest != "" {

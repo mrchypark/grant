@@ -25,7 +25,7 @@ The catalog covers:
   per-action membership for roles and applications.
 - **Admin routes** (`/api/v1/admin/...`): providers, provider actions
   (replace, create, update, delete), capability catalog staging/activation,
-  application trust and provisioning verification, user activation.
+  application trust and verified identity binding, user activation.
 
 ## Explicit exclusions
 
@@ -299,22 +299,44 @@ runtime:
    `PUT /api/v1/admin/providers/grant-management/actions`.
 2. A capability generation must be staged and activated.
 3. Applications must be admitted, and ordinarily either trusted or explicitly consented.
-4. Role bindings must grant the required action on the target resource, except for the self-materialization onboarding path below.
+4. Role bindings must grant the required action on the target resource, except for the exact organizationless onboarding paths below.
 
 No step is implicit. The catalog is a generator; the API is the
 control plane.
 
-### Self-materialization before enrollment
+### Organizationless onboarding
 
-`POST /api/v1/me/materialize` lets an authenticated user obtain their local
-Grant user ID before an organization administrator enrolls them. Its exact
-bodyless, `forward-user` capability requires an active user, ready active app,
-active organization and provider, and the app's explicit admission of
-`grant-management.user.materialize`. It does not require membership, a role, or
-prior consent, which would make first-time enrollment circular.
+Only these exact management capabilities admit requests without a selected organization: `POST /api/v1/me/materialize`, `GET /api/v1/me`, `GET /api/v1/orgs`, and `POST /api/v1/orgs`. They require the configured active/ready first-party auto-approve management app, an active app organization and Provider, its matching active enforcer, explicit app admission of the exact Action, and a verified token client. Existing inactive local users remain denied.
 
-The endpoint materializes only the bearer user's identity. It creates no
-membership, role binding, or application consent; a new user receives
-`membershipStatus: none`. Other management routes retain their normal permission
-checks. Serve this onboarding route through the management voter, which can
-materialize a previously unseen identity.
+The decision uses a namespaced external identity digest without creating the local user. The voter handles identity materialization. Materialization creates no membership, role Binding, or consent. Self-service organization creation accepts only `id` and `name`, sets the verified current user as owner, and atomically creates organization-scoped coarse and management-owner Bindings. Missing management Action definitions reject creation.
+
+Normal organization and data APIs retain their authorization checks. Exact organization-management capabilities additionally support the configured trusted management app across its own organization boundary, but still require the caller to be an active member of the target organization with its fine-grained RBAC grant. See [the lifecycle contract](api-lifecycle.md) for prerequisites, ownership transfer, and safe updates to an existing trusted app.
+
+## Lifecycle catalog expansion
+
+The current branch adds organization creation/list/profile, Provider metadata
+PATCH, group/agreement metadata PATCH, application metadata/active/delete,
+role metadata/delete, organization membership listing/removal, and administrator
+consent revocation. The former provisioning-verification route is replaced by
+`PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding`.
+Grant no longer serves `/auth` or `/auth/v1/*`; identity validation remains,
+while Gateway routes IdP traffic directly.
+
+The binding endpoint links an existing externally managed client after the
+configured read-only adapter verifies it. Only Rauthy supports that verification
+today; PocketBase continues to create ready applications without client IDs.
+No adapter fallback, client creation or credential issuance occurs. Existing
+verified bindings and the legacy storage column are preserved.
+
+See [complete lifecycle route semantics](api-lifecycle.md) and the
+[method/path contract](porting-go-http-contract.md). Provider POST now returns
+409 on duplicates instead of updating existing rows. Relationships retain PUT;
+action-set replacement retains conditional PUT. Metadata PATCH preserves
+omission and does not provide new ETag protection.
+
+Publication requires generating and reviewing a new management catalog,
+registering its action definitions, explicitly assigning the required actions
+to management applications and roles, and activating the new catalog with the
+matching Exposure digest. Existing activation does not automatically publish
+new routes or grant their permissions. This document does not claim deployment
+or live acceptance of this branch.
