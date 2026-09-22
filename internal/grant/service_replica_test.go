@@ -118,7 +118,7 @@ func TestPocketBaseApplicationIsReadyWithoutTrust(t *testing.T) {
 				if a.Application.ProvisioningStatus != "ready" || a.Application.RauthyClientID != nil {
 					t.Fatal(a)
 				}
-			} else if a.Application.ProvisioningStatus != "unprovisioned" || a.Application.RauthyClientID == nil {
+			} else if a.Application.ProvisioningStatus != "unprovisioned" || a.Application.RauthyClientID != nil {
 				t.Fatal(a)
 			}
 		})

@@ -26,16 +26,24 @@ var managementRoutes = []ManagementRoute{
 	{Method: "GET", Path: "/api/v1/me", ActionCode: "user.read"},
 	{Method: "POST", Path: "/api/v1/me/materialize", ActionCode: "user.materialize"},
 	{Method: "GET", Path: "/api/v1/providers", ActionCode: "provider.list"},
+	{Method: "GET", Path: "/api/v1/orgs", ActionCode: "organization.list"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}", ActionCode: "organization.detail"},
+	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}", ActionCode: "organization.update"},
+	{Method: "POST", Path: "/api/v1/admin/orgs", ActionCode: "admin.organization.create", Platform: true},
 
 	// --- Organization: applications ---
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps", ActionCode: "applications.read"},
 	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/apps", ActionCode: "applications.create"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}", ActionCode: "applications.detail"},
+	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}", ActionCode: "applications.update"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/active", ActionCode: "applications.active"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}", ActionCode: "applications.delete"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", ActionCode: "applications.actions.read"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions", ActionCode: "applications.actions.replace"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}", ActionCode: "applications.actions.add"},
 	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}", ActionCode: "applications.actions.remove"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/app-grants", ActionCode: "applications.grants.read"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/app-grants/{grantId}", ActionCode: "applications.grants.revoke"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.read"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.replace"},
 	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/apps/{applicationId}/consent", ActionCode: "applications.consent.delete"},
@@ -45,6 +53,7 @@ var managementRoutes = []ManagementRoute{
 	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/groups", ActionCode: "groups.create"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.detail"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.update"},
+	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.patch"},
 	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}", ActionCode: "groups.delete"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}/members", ActionCode: "groups.members.read"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}", ActionCode: "groups.members.add"},
@@ -52,16 +61,21 @@ var managementRoutes = []ManagementRoute{
 
 	// --- Organization: members ---
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/members/{userId}", ActionCode: "members.enroll"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/members", ActionCode: "members.read"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/members/{userId}", ActionCode: "members.remove"},
 
 	// --- Organization: agreements ---
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/agreements", ActionCode: "agreements.read"},
 	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/agreements", ActionCode: "agreements.create"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/agreements/{agreementId}", ActionCode: "agreements.detail"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/agreements/{agreementId}", ActionCode: "agreements.update"},
+	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}/agreements/{agreementId}", ActionCode: "agreements.patch"},
 
 	// --- Organization: roles ---
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/roles", ActionCode: "roles.read"},
 	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/roles", ActionCode: "roles.create"},
+	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}", ActionCode: "role.update"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}", ActionCode: "role.delete"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions", ActionCode: "role.actions.replace"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions", ActionCode: "role.actions.read"},
 	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}", ActionCode: "role.actions.add"},
@@ -78,6 +92,7 @@ var managementRoutes = []ManagementRoute{
 
 	// --- Admin: providers ---
 	{Method: "POST", Path: "/api/v1/admin/providers", ActionCode: "admin.provider.create", Platform: true},
+	{Method: "PATCH", Path: "/api/v1/admin/providers/{providerId}", ActionCode: "admin.provider.update", Platform: true},
 	{Method: "PUT", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.replace", Platform: true},
 	{Method: "GET", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.read", Platform: true},
 	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/actions", ActionCode: "admin.provider.actions.create", Platform: true},
@@ -92,9 +107,9 @@ var managementRoutes = []ManagementRoute{
 	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/http-capability-generations", ActionCode: "admin.catalog.stage", Platform: true},
 	{Method: "POST", Path: "/api/v1/admin/providers/{providerId}/http-capability-active", ActionCode: "admin.catalog.activate", Platform: true},
 
-	// --- Admin: app trust/provision ---
+	// --- Admin: app trust/identity binding ---
 	{Method: "PUT", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust", ActionCode: "admin.app.trust", Platform: true},
-	{Method: "POST", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify", ActionCode: "admin.app.provision.verify", Platform: true},
+	{Method: "PUT", Path: "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding", ActionCode: "admin.app.identity.bind", Platform: true},
 
 	// --- Admin: user active ---
 	{Method: "PUT", Path: "/api/v1/admin/users/{userId}/active", ActionCode: "admin.user.active", Platform: true},
@@ -253,7 +268,6 @@ func isBodyRoute(path string) bool {
 	case "/api/v1/me/materialize",
 		"/api/v1/orgs/{organizationId}/deactivate",
 		"/api/v1/orgs/{organizationId}/reactivate",
-		"/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/provisioning/verify",
 		"/api/v1/orgs/{organizationId}/members/{userId}",
 		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}",
 		"/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}",

@@ -66,8 +66,8 @@ func ConfigFromEnv() (Config, error) {
 	}
 	switch c.Auth.ProviderMode {
 	case "rauthy":
-		if c.Auth.Rauthy.ClientID == "" || c.Auth.Rauthy.ClientSecret == "" || c.Auth.Rauthy.ClientReadAPIKey == "" {
-			return c, fmt.Errorf("Rauthy client ID, client secret and client read API key are required")
+		if c.Auth.Rauthy.ClientID == "" || c.Auth.Rauthy.ClientSecret == "" {
+			return c, fmt.Errorf("Rauthy client ID and client secret are required")
 		}
 	case "pocketbase":
 		p := &PocketBaseConfig{BaseURL: os.Getenv("GRANT_POCKETBASE_BASE_URL"), Collection: envDefault("GRANT_POCKETBASE_COLLECTION", "users"), ApplicationID: os.Getenv("GRANT_POCKETBASE_APPLICATION_ID")}
