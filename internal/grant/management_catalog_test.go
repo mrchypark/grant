@@ -318,13 +318,13 @@ func TestManagementLifecycleContracts(t *testing.T) {
 		seen[a.ID] = true
 	}
 	expected := map[string]string{
-		"PATCH /api/v1/admin/providers/{providerId}":                                    "admin.provider.update",
-		"POST /api/v1/admin/orgs":                                                       "admin.organization.create",
+		"PATCH /api/v1/admin/providers/{providerId}": "admin.provider.update",
+		"POST /api/v1/admin/orgs":                    "admin.organization.create",
 		"PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding": "admin.app.identity.bind",
-		"GET /api/v1/orgs":                                                              "organization.list",
-		"GET /api/v1/orgs/{organizationId}":                                             "organization.detail",
-		"PATCH /api/v1/orgs/{organizationId}":                                           "organization.update",
-		"DELETE /api/v1/orgs/{organizationId}/members/{userId}":                         "members.remove",
+		"GET /api/v1/orgs":                                      "organization.list",
+		"GET /api/v1/orgs/{organizationId}":                     "organization.detail",
+		"PATCH /api/v1/orgs/{organizationId}":                   "organization.update",
+		"DELETE /api/v1/orgs/{organizationId}/members/{userId}": "members.remove",
 	}
 	for _, cap := range stage.Capabilities {
 		if strings.Contains(cap.PathTemplate, "provisioning/verify") {
