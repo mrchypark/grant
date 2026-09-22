@@ -5,6 +5,7 @@ ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 MODE=${1:-static}
 NAMESPACE=${NAMESPACE:-grant}
 GRANT_SMOKE_PORT=${GRANT_SMOKE_PORT:-18080}
+RAUTHY_SMOKE_PORT=${RAUTHY_SMOKE_PORT:-18081}
 GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
 GRANT_RAUTHY_CLIENT_SECRET=${GRANT_RAUTHY_CLIENT_SECRET:-devRauthyClientSecret0000000000000000000000000000000000000000000}
 GRANT_RAUTHY_CLIENT_READ_API_KEY=${GRANT_RAUTHY_CLIENT_READ_API_KEY:-grant-client-read\$devRauthyClientReadApiKeySecret00000000000000000000000000000000000}
@@ -12,6 +13,7 @@ REPLACE_RAUTHY_POD=${REPLACE_RAUTHY_POD:-0}
 EXPECTED_RAUTHY_LAUNCHER_IMAGE=ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0-9d95f0f7513b7e26559a87d22d9fb90ccf4ee530@sha256:d1bf34bc156f7227d782c231c3bb0111d1cb8317017f1539f8ef22cdc10f2f7a
 TMP_DIR=
 PORT_FORWARD_PID=
+RAUTHY_PORT_FORWARD_PID=
 
 fail() {
   echo "$*" >&2
@@ -23,6 +25,10 @@ need() {
 }
 
 cleanup() {
+  if [ -n "${RAUTHY_PORT_FORWARD_PID}" ]; then
+    kill "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
   if [ -n "${PORT_FORWARD_PID}" ]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
     wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
@@ -789,20 +795,32 @@ wait_for_grant() {
   fail "timed out waiting for Grant port-forward"
 }
 
-wait_for_rauthy_proxy() {
+wait_for_rauthy() {
   attempts=0
   while [ "${attempts}" -lt 60 ]; do
-    if curl -fsS "http://127.0.0.1:${GRANT_SMOKE_PORT}/auth/v1/health" >/dev/null 2>&1; then
+    if curl --max-time 4 -fsS "http://127.0.0.1:${RAUTHY_SMOKE_PORT}/auth/v1/health" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts + 1))
     sleep 2
   done
-  fail "timed out waiting for Rauthy through Grant proxy"
+  fail "timed out waiting for direct Rauthy port-forward"
+}
+
+start_rauthy_forward() {
+  if [ -n "${RAUTHY_PORT_FORWARD_PID}" ]; then
+    kill "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  kubectl -n "${NAMESPACE}" port-forward service/rauthy "${RAUTHY_SMOKE_PORT}:8080" \
+    >"${TMP_DIR}/rauthy-port-forward.log" 2>&1 &
+  RAUTHY_PORT_FORWARD_PID=$!
+  wait_for_rauthy
 }
 
 assert_runtime() {
   base_url="http://127.0.0.1:${GRANT_SMOKE_PORT}"
+  identity_url="http://127.0.0.1:${RAUTHY_SMOKE_PORT}"
 
   curl --max-time 4 -fsS "${base_url}/healthz" \
     | jq -e '.status == "ok"' >/dev/null \
@@ -810,17 +828,17 @@ assert_runtime() {
   curl --max-time 4 -fsS "${base_url}/readyz" \
     | jq -e '.status == "ok" and .readReady == true and .writeReady == true' >/dev/null \
     || fail "Grant database is not ready"
-  curl -fsS "${base_url}/auth/v1/health" >/dev/null \
-    || fail "Rauthy health proxy failed"
-  curl -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_CLIENT_READ_API_KEY}" \
-    "${base_url}/auth/v1/clients/${GRANT_RAUTHY_CLIENT_ID}" >/dev/null \
-    || fail "bootstrapped Rauthy client is unavailable through Grant proxy"
-  curl -fsS -u "${GRANT_RAUTHY_CLIENT_ID}:${GRANT_RAUTHY_CLIENT_SECRET}" \
+  curl --max-time 4 -fsS "${identity_url}/auth/v1/health" >/dev/null \
+    || fail "Rauthy health check failed"
+  curl --max-time 4 -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_CLIENT_READ_API_KEY}" \
+    "${identity_url}/auth/v1/clients/${GRANT_RAUTHY_CLIENT_ID}" >/dev/null \
+    || fail "bootstrapped Rauthy client is unavailable"
+  curl --max-time 4 -fsS -u "${GRANT_RAUTHY_CLIENT_ID}:${GRANT_RAUTHY_CLIENT_SECRET}" \
     -H 'content-type: application/x-www-form-urlencoded' \
     --data 'token=known-invalid-token' \
-    "${base_url}/auth/v1/oidc/introspect" \
+    "${identity_url}/auth/v1/oidc/introspect" \
     | jq -e '.active == false' >/dev/null \
-    || fail "Rauthy introspection proxy did not reject the invalid token"
+    || fail "Rauthy introspection did not reject the invalid token"
 }
 
 # Each mock PATH is intentionally isolated so real verification keeps its tools.
@@ -831,6 +849,7 @@ verify_runtime_probe_contract() {
 #!/bin/sh
 for url do :; done
 case "$url" in
+  "http://127.0.0.1:${GRANT_SMOKE_PORT:-18080}/auth/"*) exit 1 ;;
   */healthz) printf '{"status":"%s"}\n' "${MOCK_HEALTH_STATUS:-ok}" ;;
   */readyz) printf '{"status":"ok","readReady":true,"writeReady":%s}\n' "${MOCK_WRITE_READY:-true}" ;;
   */auth/v1/oidc/introspect) printf '{"active":false}\n' ;;
@@ -840,7 +859,7 @@ esac
 MOCK
   chmod +x "${mock_dir}/curl"
   mock_path="${mock_dir}:${PATH}"
-  (export PATH="${mock_path}"; assert_runtime) || { rm -r "${mock_dir}"; fail "runtime probe rejected split health/readiness contract"; }
+  (export PATH="${mock_path}" GRANT_SMOKE_PORT RAUTHY_SMOKE_PORT; assert_runtime) || { rm -r "${mock_dir}"; fail "runtime probe rejected split health/readiness contract"; }
   if (export PATH="${mock_path}" MOCK_WRITE_READY=false; assert_runtime) >/dev/null 2>&1; then
     rm -r "${mock_dir}"; fail "runtime probe accepted an unavailable quorum"
   fi
@@ -854,6 +873,7 @@ verify_live() {
   need kubectl
   need curl
   need jq
+  [ "${GRANT_SMOKE_PORT}" != "${RAUTHY_SMOKE_PORT}" ] || fail "Grant and Rauthy smoke ports must differ"
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-smoke.XXXXXX")
 
   kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m
@@ -864,7 +884,7 @@ verify_live() {
     >"${TMP_DIR}/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
   wait_for_grant
-  wait_for_rauthy_proxy
+  start_rauthy_forward
   assert_runtime
 
   if [ "${REPLACE_RAUTHY_POD}" = "1" ]; then
@@ -875,7 +895,7 @@ verify_live() {
     new_uid=$(kubectl -n "${NAMESPACE}" get pod rauthy-0 -o jsonpath='{.metadata.uid}')
     [ "${old_uid}" != "${new_uid}" ] || fail "Rauthy Pod was not replaced"
     assert_live_storage
-    wait_for_rauthy_proxy
+    start_rauthy_forward
     assert_runtime
   fi
 
@@ -904,6 +924,7 @@ verify_native_static() {
 case "${MODE}" in
   static) verify_native_static ;;
   legacy-static) verify_static ;;
+  probe-contract) verify_runtime_probe_contract ;;
   live) verify_live ;;
-  *) fail "usage: $0 [static|live]" ;;
+  *) fail "usage: $0 [static|live|probe-contract]" ;;
 esac

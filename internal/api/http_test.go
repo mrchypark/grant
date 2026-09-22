@@ -116,18 +116,16 @@ func TestBearerAndConsistency(t *testing.T) {
 		t.Fatal(v, e)
 	}
 }
-func TestProxyDoesNotFollowRedirectOrLeakTransport(t *testing.T) {
+func TestGrantDoesNotProxyIdentityProvider(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("Set-Cookie", "a=1")
-		w.Header().Add("Set-Cookie", "b=2")
-		http.Redirect(w, r, "http://unreachable.invalid/", 302)
+		t.Error("Grant forwarded an IdP request")
 	}))
 	defer up.Close()
 	s := New(grant.NewService(grant.Config{Auth: grant.AuthConfig{ProviderMode: "rauthy", Rauthy: grant.RauthyConfig{BaseURL: up.URL}}}, nil), false)
 	r := httptest.NewRequest("GET", "/auth/v1/oidc", nil)
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
-	if w.Code != 302 || len(w.Header().Values("Set-Cookie")) != 2 {
+	if w.Code != 404 {
 		t.Fatalf("%d %v", w.Code, w.Header())
 	}
 }
@@ -149,7 +147,7 @@ func TestRouteMethodsAfterExposureRetirement(t *testing.T) {
 	for _, p := range s.patterns {
 		actual[p] = true
 	}
-	for _, p := range []string{"GET /healthz", "GET /readyz", "GET /auth", "ANY /auth/v1", "ANY /auth/v1/{*rauthyPath}"} {
+	for _, p := range []string{"GET /healthz", "GET /readyz"} {
 		actual[p] = true
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
@@ -297,12 +295,17 @@ func TestJSONUnicodeBoundary(t *testing.T) {
 func TestLearnerOnlyPublishesPDP(t *testing.T) {
 	s := testServer()
 	s.learner = true
-	for _, path := range []string{"/auth/v1/users", "/api/v1/authz/check", "/api/v1/admin/providers", "/ops/migrations/patch-data-authority"} {
+	for _, path := range []string{"/api/v1/authz/check", "/api/v1/admin/providers", "/ops/migrations/patch-data-authority"} {
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
 		if w.Code != 503 {
 			t.Errorf("%s status%d", path, w.Code)
 		}
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest("POST", "/auth/v1/users", strings.NewReader(`{}`)))
+	if w.Code != 404 {
+		t.Fatalf("retired IdP proxy status %d, want 404", w.Code)
 	}
 }
 

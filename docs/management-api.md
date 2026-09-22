@@ -25,7 +25,7 @@ The catalog covers:
   per-action membership for roles and applications.
 - **Admin routes** (`/api/v1/admin/...`): providers, provider actions
   (replace, create, update, delete), capability catalog staging/activation,
-  application trust and provisioning verification, user activation.
+  application trust and verified identity binding, user activation.
 
 ## Explicit exclusions
 
@@ -318,3 +318,32 @@ membership, role binding, or application consent; a new user receives
 `membershipStatus: none`. Other management routes retain their normal permission
 checks. Serve this onboarding route through the management voter, which can
 materialize a previously unseen identity.
+
+## Lifecycle catalog expansion
+
+The current branch adds organization creation/list/profile, Provider metadata
+PATCH, group/agreement metadata PATCH, application metadata/active/delete,
+role metadata/delete, organization membership listing/removal, and administrator
+consent revocation. The former provisioning-verification route is replaced by
+`PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding`.
+Grant no longer serves `/auth` or `/auth/v1/*`; identity validation remains,
+while Gateway routes IdP traffic directly.
+
+The binding endpoint links an existing externally managed client after the
+configured read-only adapter verifies it. Only Rauthy supports that verification
+today; PocketBase continues to create ready applications without client IDs.
+No adapter fallback, client creation or credential issuance occurs. Existing
+verified bindings and the legacy storage column are preserved.
+
+See [complete lifecycle route semantics](api-lifecycle.md) and the
+[method/path contract](porting-go-http-contract.md). Provider POST now returns
+409 on duplicates instead of updating existing rows. Relationships retain PUT;
+action-set replacement retains conditional PUT. Metadata PATCH preserves
+omission and does not provide new ETag protection.
+
+Publication requires generating and reviewing a new management catalog,
+registering its action definitions, explicitly assigning the required actions
+to management applications and roles, and activating the new catalog with the
+matching Exposure digest. Existing activation does not automatically publish
+new routes or grant their permissions. This document does not claim deployment
+or live acceptance of this branch.

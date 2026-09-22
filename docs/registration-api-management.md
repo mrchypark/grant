@@ -1,10 +1,10 @@
 # 내부 Provider·Application 등록 API 정리
 
-상태: 추가 조회와 lifecycle 검사 구현 및 로컬 검증을 완료했다. `go test -race ./...`, `go vet ./...`, `git diff --check`가 통과했다. 이번 변경을 IED에 배포하거나 신규 API를 IED에서 검증하지는 않았다. 범위는 K8s에 직접 배포하는 내부 서비스이며, [외부 Application 로드맵](external-application-roadmap.md)의 IdP 통합 등록·mTLS·SDK·다중 조직 설치는 이번 구현에 포함하지 않는다.
+상태: 현재 브랜치의 등록·수명주기 API 계약이다. 실제 IED 배포 완료를 뜻하지 않는다. 적용 시 새 관리 카탈로그 세대와 필요한 Action 부여를 함께 반영해야 한다. 범위는 Kubernetes 내부 Provider이며 외부 SDK·mTLS 및 Goauthy 어댑터는 포함하지 않는다.
 
 ## 변경 계획
 
-기존 Provider upsert, 액션 전체 교체, 조직별 Application 생성·액션 선택 및 catalog stage/activate 계약을 유지한다. 운영자가 등록 내용을 확인하고 앱에 부여할 후보 액션을 선택할 수 있도록 다음 조회를 추가한다.
+Provider 생성·수정 분리, 액션 전체 교체, 조직별 Application 생성·액션 선택 및 catalog stage/activate 계약을 유지한다. 운영자가 등록 내용을 확인하고 앱에 부여할 후보 액션을 선택할 수 있도록 다음 조회를 추가한다.
 
 | 추가 조회 | 인증·범위 | 목적 |
 |---|---|---|
@@ -22,9 +22,9 @@
 
 ## 등록과 사용 순서
 
-1. 내부 운영자는 `X-Grant-Master-Key`로 POST `/api/v1/admin/providers`에 `{"id":"patch-data","name":"Patch Data","active":true}`를 보낸다. 기존 ID는 갱신하는 upsert 의미를 유지한다.
+1. 내부 운영자는 `X-Grant-Master-Key`로 POST `/api/v1/admin/providers`에 `{"id":"patch-data","name":"Patch Data","active":true}`를 보낸다. 기존 ID에는 409를 반환하며 수정은 PATCH `/api/v1/admin/providers/{providerId}`로 요청한다.
 2. 운영자는 PUT `/api/v1/admin/providers/patch-data/actions`에 `{"actions":[...]}`를 보낸 뒤 관리자 액션 조회로 확인한다. 이 요청은 전체 교체이므로 기존에 유지할 액션과 GET 응답의 ETag를 If-Match로 함께 보낸다.
-3. 조직 관리자는 `Authorization: Bearer <token>`과 `X-Organization-ID: <org>`를 사용해 POST `/api/v1/orgs/{org}/apps`로 Application을 등록한다. 기존 `applicationType`, `appType`, provisioning 계약을 따른다. IdP client를 자동 생성하는 새로운 기능은 추가하지 않는다.
+3. 조직 관리자는 `Authorization: Bearer <token>`과 `X-Organization-ID: <org>`를 사용해 POST `/api/v1/orgs/{org}/apps`로 Application을 등록한다. `applicationType`, `appType`과 선택적 redirect manifest를 등록한다. IdP client ID를 생성하지 않는다. Rauthy 앱은 플랫폼 identity-binding 검증 뒤 ready이며 PocketBase 앱은 기존처럼 ID 없이 ready다.
 4. 조직 관리자는 Provider 후보 액션을 조회한 후 PUT `/api/v1/orgs/{org}/apps/{app}/actions`에 `{"actionIds":["patch-data.plant.read"]}`를 보낸다. GET으로 얻은 ETag를 If-Match로 보내 전체 선택을 교체하며, 기존 trusted 앱의 변경 제한과 사용자 동의 정책을 유지한다.
 5. 권한 관리자는 역할에 같은 액션 ID를 배정하고 필요한 사용자·그룹·조직에 정확한 리소스 binding을 생성한다. 예를 들어 plant 읽기는 `providerId:"patch-data"`, `resourceType:"plant"`, `resourceId:"<plant ID>"`를 사용한다. 앱 선택만으로 이 권한을 얻지 않는다.
 6. 운영자는 기존 generation stage, PEP 등록, compare-and-swap activation 절차를 수행한다. 관리자 활성 상태 조회로 확인한 뒤 기존 PEP catalog 조회와 실제 Exposure 요청으로 사용을 검증한다.
@@ -73,3 +73,9 @@ Provider·역할·앱의 `GET .../actions` 응답에서 `ETag`를 얻는다. 전
 백업은 private `GET/POST /ops/backups`, 기존 PatchData 권한 이전은 private `POST /ops/migrations/patch-data-authority`로 옮긴다. 이전 도구는 `scripts/import-patch-data-authority.sh`로 호출할 수 있다. 이 특정 레거시 형식의 이름은 마이그레이션 어댑터에만 남고 일반 등록 API에는 들어가지 않는다.
 
 PEP는 판정을 요청하는 배포 인스턴스의 신뢰 경계를 식별한다. 개발자의 Application 등록과 구분하여 배포 저장소의 선언 파일로 관리하고, 운영자가 private `PUT /ops/providers/{providerId}/enforcers/{pepClientId}`에 적용한다. Pod 시작 때 자동 재등록하지 않아 운영자가 비활성화한 바인딩을 되살리지 않는다. `/ops`와 bootstrap은 관리 Exposure 카탈로그에서 제외하고 master key로만 호출한다.
+
+## 등록 이후의 관리
+
+[수명주기 전체 계약](api-lifecycle.md)의 조직 생성·목록·프로필, 구성원 제거, 앱 상태·삭제, 역할 수정·삭제 및 관리자 동의 철회 경로를 사용한다. `POST /api/v1/admin/orgs`는 기존 활성 `ownerUserId`에 owner membership과 조직 범위 owner Binding을 원자 생성한다. 호출자를 암묵적으로 owner로 만들지 않는다.
+
+IdP는 클라이언트를 별도로 등록한다. Grant에는 플랫폼 운영자가 `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding`으로 `{"clientId":"existing-client"}`를 전달한다. 읽기 전용 검증을 통과한 기존 클라이언트만 연결되며 일반 조직 관리자가 임의 ID를 등록해 ready로 만들 수 없다. 이전 POST provisioning/verify 및 Grant auth 프록시는 제거되었다. 구성원 재가입은 삭제된 개인 권한을 복원하지 않지만 현재 조직 전체 권한은 적용할 수 있다.
