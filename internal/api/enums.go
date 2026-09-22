@@ -21,9 +21,6 @@ func validateEnums(v any) error {
 		}
 		return oneOf("appType", x.AppType, "web", "mobile", "server", "internal")
 	case grant.UpsertAgreementInput:
-		if e := oneOf("agreementType", x.AgreementType, "delegation", "epc", "om", "distributor", "dealer"); e != nil {
-			return e
-		}
 		return oneOf("status", x.Status, "draft", "active", "expired", "terminated")
 	case grant.CreateRoleBindingInput:
 		if e := oneOf("subjectType", x.SubjectType, "organization", "group", "user"); e != nil {

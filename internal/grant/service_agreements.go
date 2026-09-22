@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 func (s *Service) ListAgreementsAuthorized(ctx context.Context, user, org string, c ReadConsistency) ([]Agreement, error) {
@@ -27,8 +29,8 @@ func (s *Service) GetAgreementAuthorized(ctx context.Context, user, org, id stri
 	return a, nil
 }
 func (s *Service) agreement(ctx context.Context, user, org string, in UpsertAgreementInput, create bool, guards ...Statement) (Agreement, error) {
-	if !enumValue(in.AgreementType, "delegation", "epc", "om", "distributor", "dealer") || !enumValue(in.Status, "draft", "active", "expired", "terminated") {
-		return Agreement{}, serviceError(400, "invalid agreement type or status")
+	if !enumValue(in.Status, "draft", "active", "expired", "terminated") {
+		return Agreement{}, serviceError(400, "invalid agreement status")
 	}
 	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.permission.manage", "manage organization agreements", ReadStrong); err != nil {
 		return Agreement{}, err
@@ -42,11 +44,15 @@ func (s *Service) agreement(ctx context.Context, user, org string, in UpsertAgre
 		}
 		v[i] = x
 	}
+	typ, err := normalizeAgreementType(in.AgreementType)
+	if err != nil {
+		return Agreement{}, err
+	}
 	start, end, err := normalizeAgreementInterval(in.StartsAt, in.EndsAt)
 	if err != nil {
 		return Agreement{}, err
 	}
-	a := Agreement{ID: v[0], AgreementType: in.AgreementType, GrantorOrganizationID: v[1], GranteeOrganizationID: v[2], Status: in.Status, Title: v[3], ReferenceNo: optionalText(in.ReferenceNo), StartsAt: start, EndsAt: end}
+	a := Agreement{ID: v[0], AgreementType: typ, GrantorOrganizationID: v[1], GranteeOrganizationID: v[2], Status: in.Status, Title: v[3], ReferenceNo: optionalText(in.ReferenceNo), StartsAt: start, EndsAt: end}
 	if a.GrantorOrganizationID != org && a.GranteeOrganizationID != org {
 		return a, serviceError(403, "forbidden: agreement is outside organization scope")
 	}
@@ -122,4 +128,18 @@ func normalizeAgreementInterval(start, end *string) (*string, *string, error) {
 
 func agreementBoundsGuard(a Agreement) Statement {
 	return assertion("SELECT 1 FROM agreements WHERE id=? AND starts_at IS ? AND ends_at IS ? AND grantor_organization_id=? AND grantee_organization_id=?", a.ID, a.StartsAt, a.EndsAt, a.GrantorOrganizationID, a.GranteeOrganizationID)
+}
+
+// Agreement classification is display metadata; it never selects authorization rules.
+func normalizeAgreementType(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !utf8.ValidString(value) || value == "" || utf8.RuneCountInString(value) > 128 {
+		return "", serviceError(400, "agreementType must contain 1 to 128 UTF-8 characters")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return "", serviceError(400, "agreementType must not contain control characters")
+		}
+	}
+	return value, nil
 }

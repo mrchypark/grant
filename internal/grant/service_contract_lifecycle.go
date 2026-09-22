@@ -208,11 +208,12 @@ func (s *Service) PatchAgreementAuthorized(ctx context.Context, user, org, id st
 		values = append(values, v)
 	}
 	if in.AgreementType != nil {
-		if !enumValue(*in.AgreementType, "delegation", "epc", "om", "distributor", "dealer") {
-			return Agreement{}, serviceError(400, "invalid agreement type")
+		typ, err := normalizeAgreementType(*in.AgreementType)
+		if err != nil {
+			return Agreement{}, err
 		}
 		keys = append(keys, "agreement_type=?")
-		values = append(values, *in.AgreementType)
+		values = append(values, typ)
 	}
 	if in.Status != nil {
 		if !enumValue(*in.Status, "draft", "active", "expired", "terminated") {
