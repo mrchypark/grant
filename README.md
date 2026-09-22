@@ -6,7 +6,7 @@
 
 ## 구성
 
-Exposure 전용 판정과 고정 `plant.get` 계약, 권한 행을 반영하지 않던 V2 snapshot 수신 API·exporter는 폐기됐다. 현재 API는 49개 경로 패턴에 69개 메서드 항목을 등록한다. [범용 HTTP capability](docs/http-capabilities.md)와 실제 권한을 반영하는 V1 import는 유지한다. 내부 Provider·Application 등록과 신규 조회는 [등록 API 관리](docs/registration-api-management.md)를 따른다.
+Exposure 전용 판정과 고정 `plant.get` 계약, 권한 행을 반영하지 않던 V2 snapshot 수신 API·exporter는 폐기됐다. 현재 API는 55개 경로 패턴에 84개 메서드 항목을 등록하며, 관리 Exposure 카탈로그는 이 중 69개를 공개한다. 이 개수는 지원 경로 수이며 실환경 검증 완료를 뜻하지 않는다. [범용 HTTP capability](docs/http-capabilities.md)와 실제 권한을 반영하는 V1 import는 유지한다. 내부 Provider·Application 등록과 신규 조회는 [등록 API 관리](docs/registration-api-management.md)를 따른다.
 
 이번 정리는 의도적인 비호환 변경이다. 이전 스키마 checksum을 가진 DB는 시작 시 거부되고 이전 backup도 현재 스키마와 호환되지 않으므로 새 DB로 시작해야 한다. 기존 데이터를 삭제하거나 자동 변환하지 않는다. 폐기한 snapshot 수신 경로는 404를 반환하고 exporter 실행 파일은 더 이상 제공하지 않는다.
 

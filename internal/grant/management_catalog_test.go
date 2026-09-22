@@ -304,11 +304,11 @@ func TestManagementLifecycleContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 66 {
-		t.Fatalf("management capabilities = %d, want 66", len(stage.Capabilities))
+	if len(stage.Capabilities) != 69 {
+		t.Fatalf("management capabilities = %d, want 69", len(stage.Capabilities))
 	}
-	if len(actions) != 67 {
-		t.Fatalf("actions = %d, want 66 fine actions + legacy", len(actions))
+	if len(actions) != 70 {
+		t.Fatalf("actions = %d, want 69 fine actions + legacy", len(actions))
 	}
 	seen := map[string]bool{}
 	for _, a := range actions {

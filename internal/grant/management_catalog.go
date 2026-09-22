@@ -27,6 +27,9 @@ var managementRoutes = []ManagementRoute{
 	{Method: "POST", Path: "/api/v1/me/materialize", ActionCode: "user.materialize"},
 	{Method: "GET", Path: "/api/v1/providers", ActionCode: "provider.list"},
 	{Method: "GET", Path: "/api/v1/orgs", ActionCode: "organization.list"},
+	{Method: "POST", Path: "/api/v1/orgs", ActionCode: "organization.create"},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/owner", ActionCode: "organization.owner.read"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/owner", ActionCode: "organization.owner.transfer"},
 	{Method: "GET", Path: "/api/v1/orgs/{organizationId}", ActionCode: "organization.detail"},
 	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}", ActionCode: "organization.update"},
 	{Method: "POST", Path: "/api/v1/admin/orgs", ActionCode: "admin.organization.create", Platform: true},
@@ -236,7 +239,7 @@ func getReadQuery(method string) HttpQueryPolicy {
 // Every route forwards x-organization-id; JSON routes also forward content-type.
 func buildManagementRequest(route ManagementRoute) HttpRequestPolicy {
 	headers := []string{"x-organization-id"}
-	if route.Method == "PUT" && (strings.HasSuffix(route.Path, "/actions") || strings.HasSuffix(route.Path, "/consent")) {
+	if route.Method == "PUT" && (strings.HasSuffix(route.Path, "/actions") || strings.HasSuffix(route.Path, "/consent") || strings.HasSuffix(route.Path, "/owner")) {
 		headers = append(headers, "if-match")
 		if strings.HasSuffix(route.Path, "/consent") {
 			headers = append(headers, "if-none-match")

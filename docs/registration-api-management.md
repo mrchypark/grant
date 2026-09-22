@@ -79,3 +79,7 @@ PEP는 판정을 요청하는 배포 인스턴스의 신뢰 경계를 식별한�
 [수명주기 전체 계약](api-lifecycle.md)의 조직 생성·목록·프로필, 구성원 제거, 앱 상태·삭제, 역할 수정·삭제 및 관리자 동의 철회 경로를 사용한다. `POST /api/v1/admin/orgs`는 기존 활성 `ownerUserId`에 owner membership과 조직 범위 owner Binding을 원자 생성한다. 호출자를 암묵적으로 owner로 만들지 않는다.
 
 IdP는 클라이언트를 별도로 등록한다. Grant에는 플랫폼 운영자가 `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding`으로 `{"clientId":"existing-client"}`를 전달한다. 읽기 전용 검증을 통과한 기존 클라이언트만 연결되며 일반 조직 관리자가 임의 ID를 등록해 ready로 만들 수 없다. 이전 POST provisioning/verify 및 Grant auth 프록시는 제거되었다. 구성원 재가입은 삭제된 개인 권한을 복원하지 않지만 현재 조직 전체 권한은 적용할 수 있다.
+
+조직이 없는 사용자는 설정된 신뢰 관리 앱을 통해 본인 신원 반영·조회·조직 목록·본인 조직 생성의 네 경로를 사용할 수 있다. `POST /api/v1/orgs`는 `id`, `name`만 받고 검증된 현재 사용자를 owner로 설정하며 기존 조직을 덮어쓰지 않는다. `POST /api/v1/admin/orgs`의 운영자 지정 생성과는 별도 계약이다. 새 조직의 관리 owner 역할에는 등록된 조직 관리 Action만 들어가며 누락된 정의가 있으면 생성이 거절된다. 온보딩 카탈로그를 배포하기 전에 관리 앱에 해당 Action을 명시적으로 등록해야 한다.
+
+소유권 이전은 owner GET의 ETag를 읽은 후 owner PUT에 `If-Match`와 새 owner 사용자 ID를 보내 수행한다. 현재 owner의 관리 권한과 양쪽 활성 소속을 검사하며, 기존 관리 owner Binding의 제한도 보존한다. 전체 순서와 PocketBase 배포 전제는 [수명주기 계약](api-lifecycle.md)을 따른다.

@@ -125,14 +125,14 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 				err = failure(401, "unauthorized: missing x-grant-master-key header")
 			}
 		}
-		if auth == "app" || auth == "application" {
+		if auth == "app" || auth == "application" || auth == "http-decision" {
 			err = requireKey(r, "x-grant-app-auth-key", s.service.Config().Security.AppAuthKey, "application authorization key")
 		}
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" {
+		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" || auth == "http-decision" {
 			q.bearer, err = bearerToken(r)
 			if err == nil {
 				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || (auth == "inactive" && s.service.AuthProviderMode() == "pocketbase"))
@@ -141,7 +141,7 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 				writeError(w, err)
 				return
 			}
-			if auth == "application" && q.bearer == "" {
+			if (auth == "application" || auth == "http-decision") && q.bearer == "" {
 				writeError(w, failure(401, "unauthorized: missing authorization header"))
 				return
 			}

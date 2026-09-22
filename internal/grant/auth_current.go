@@ -93,9 +93,6 @@ func (s *Service) CurrentUser(ctx context.Context, token, organization string, c
 	return CurrentUserView{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, User: user, Organizations: orgs, ActiveOrganizationID: active}, nil
 }
 func (s *Service) MaterializeCurrentUser(ctx context.Context, token, org string) (MaterializedUserView, error) {
-	if org == "" {
-		return MaterializedUserView{}, serviceError(403, "forbidden: organization is required")
-	}
 	identity, err := s.resolveExternalIdentity(ctx, token, ReadStrong)
 	if err != nil {
 		return MaterializedUserView{}, err

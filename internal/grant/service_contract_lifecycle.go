@@ -156,6 +156,9 @@ func (s *Service) PatchOrganizationAuthorized(ctx context.Context, user, org str
 // identifies an existing active Grant user; organization creation never creates
 // an identity or promotes the caller implicitly.
 func (s *Service) CreateOrganizationAdmin(ctx context.Context, in CreateOrganizationInput) (Organization, error) {
+	return s.createOrganization(ctx, in, nil)
+}
+func (s *Service) createOrganization(ctx context.Context, in CreateOrganizationInput, extra []Statement) (Organization, error) {
 	var err error
 	if in.ID, err = required("id", in.ID); err != nil {
 		return Organization{}, err
@@ -174,13 +177,14 @@ func (s *Service) CreateOrganizationAdmin(ctx context.Context, in CreateOrganiza
 		return Organization{}, serviceError(400, "owner must be an existing active Grant user")
 	}
 	now := nowString()
-	err = s.store.Transaction(ctx, []Statement{
+	statements := []Statement{
 		assertion("SELECT 1 FROM users WHERE id=? AND active=1", in.OwnerUserID),
 		assertion("SELECT 1 FROM roles WHERE id='role-system-bootstrap-owner' AND organization_id IS NULL"),
 		{SQL: "INSERT INTO organizations(id,name,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING", Args: []any{in.ID, in.Name, now, now}, ExpectedRowsAffected: requireOne()},
 		{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?)", Args: []any{requestID(), in.ID, in.OwnerUserID, now, now}},
 		{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user',?,?,'grant','organization',?,'role-system-bootstrap-owner','active',?,?,?)", Args: []any{requestID(), in.OwnerUserID, in.ID, in.ID, ManagementActorFromContext(ctx), now, now}},
-	})
+	}
+	err = s.store.Transaction(ctx, append(statements, extra...))
 	if err != nil {
 		if rows, e := s.store.Query(ctx, ReadStrong, "SELECT id FROM organizations WHERE id=?", in.ID); e == nil && len(rows) > 0 {
 			return Organization{}, serviceError(409, "organization already exists")

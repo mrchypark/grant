@@ -26,6 +26,7 @@ GET /api/v1/orgs/{organizationId}/groups
 GET /api/v1/orgs/{organizationId}/groups/{groupId}
 GET /api/v1/orgs/{organizationId}/groups/{groupId}/members
 GET /api/v1/orgs/{organizationId}/members
+GET /api/v1/orgs/{organizationId}/owner
 GET /api/v1/orgs/{organizationId}/providers/{providerId}/actions
 GET /api/v1/orgs/{organizationId}/roles
 GET /api/v1/orgs/{organizationId}/roles/{roleId}/actions
@@ -54,6 +55,7 @@ POST /api/v1/authz/batch-check
 POST /api/v1/authz/check
 POST /api/v1/authz/filter
 POST /api/v1/me/materialize
+POST /api/v1/orgs
 POST /api/v1/orgs/{organizationId}/agreements
 POST /api/v1/orgs/{organizationId}/apps
 POST /api/v1/orgs/{organizationId}/bindings
@@ -76,6 +78,7 @@ PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/consent
 PUT /api/v1/orgs/{organizationId}/groups/{groupId}
 PUT /api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}
 PUT /api/v1/orgs/{organizationId}/members/{userId}
+PUT /api/v1/orgs/{organizationId}/owner
 PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions
 PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}
 PUT /ops/providers/{providerId}/enforcers/{pepClientId}

@@ -52,6 +52,10 @@ func lifecycleBody[T any](requiredValues []string, fn func(*request, T) (any, er
 }
 
 func (s *Server) lifecycleRoutes() {
+	s.route("POST", "/api/v1/orgs", "bearer", true, 201, body(true, func(r *request, v grant.SelfOrganizationInput) (any, error) {
+		return s.service.CreateOwnOrganization(r.Context(), r.bearer, v)
+	}))
+	s.ownershipRoutes()
 	s.route("PATCH", "/api/v1/admin/providers/{providerId}", "master", true, 200, lifecycleBody([]string{"name", "active"}, func(r *request, v grant.PatchServiceProviderInput) (any, error) {
 		return s.service.PatchServiceProviderAdmin(r.Context(), r.PathValue("providerId"), v)
 	}))

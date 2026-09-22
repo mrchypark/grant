@@ -143,3 +143,15 @@ secret is issued by Grant. Unsupported adapters return 409 without fallback;
 missing verification credentials return 503. Existing ready bindings remain
 valid. See [lifecycle semantics](api-lifecycle.md) for deletion constraints,
 owner creation, membership tombstones, consent revocation and rollout steps.
+
+## Organizationless creation and ownership transfer
+
+| Method | Path | Authentication | Voter only | Success |
+|---|---|---|---|---|
+| POST | `/api/v1/orgs` | bearer | true | 201 |
+| GET | `/api/v1/orgs/{organizationId}/owner` | user | false | 200 |
+| PUT | `/api/v1/orgs/{organizationId}/owner` | user | true | 200 |
+
+Self-create accepts only `id` and `name`; the verified current user becomes the owner. Owner GET returns an ETag; transfer requires its exact `If-Match` and an `ownerUserId` naming another active member. Only the current owner with organization management permission may transfer. Missing conditions return 428; stale conditions return 412.
+
+The exact four organizationless onboarding capabilities and trusted management-app prerequisites are defined in [the lifecycle contract](api-lifecycle.md). This is not anonymous access or a general removal of organization headers. Agreement classification is now service-defined display metadata: trimmed 1–128 UTF-8 characters, no control characters, unchanged status and interval authorization rules. Existing classification values and field names remain valid.
