@@ -7,6 +7,7 @@ endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
 case "$endpoint" in unix://*) ;; *) echo 'requires an explicitly selected local Unix-socket Docker context' >&2; exit 1 ;; esac
 task_dir=$(mktemp -d "${TMPDIR:-/tmp}/grant-go-three-voter.XXXXXX")
 container="grant-go-three-voter-$$"
+minio_image="$container-minio"
 pids=''
 cleanup() {
   result=$?
@@ -17,13 +18,27 @@ cleanup() {
   for pid in $pids; do kill "$pid" 2>/dev/null || true; done
   for pid in $pids; do wait "$pid" 2>/dev/null || true; done
   docker rm -f "$container" >/dev/null 2>&1 || true
+  docker image rm "$minio_image" >/dev/null 2>&1 || true
   if [ "${KEEP_GRANT_FIXTURE:-0}" = 1 ]; then printf 'Fixture logs: %s\n' "$task_dir"; else rm -rf "$task_dir"; fi
 }
 trap cleanup EXIT HUP INT TERM
 (cd "$root" && CGO_ENABLED=0 go build -o "$task_dir/grant" ./cmd/grant)
+# Upstream no longer publishes the community image. Build the same release
+# from its checksum-verified source (07c3a429bfed433e49018cb0f78a52145d4bedeb).
+minio_source=$(go mod download -json github.com/minio/minio@v0.0.0-20250907161309-07c3a429bfed \
+  | jq -er 'select(.Sum == "h1:deu0m9BiyqnMbGWfJi1PpVyotSXlDnTmRIme1cUXnxo=").Dir')
+minio_arch=$(docker version --format '{{.Server.Arch}}')
+CGO_ENABLED=0 GOOS=linux GOARCH="$minio_arch" go build -C "$minio_source" -mod=readonly -trimpath \
+  -ldflags '-s -w -X github.com/minio/minio/cmd.Version=2025-09-07T16:13:09Z -X github.com/minio/minio/cmd.ReleaseTag=RELEASE.2025-09-07T16-13-09Z -X github.com/minio/minio/cmd.CommitID=07c3a429bfed433e49018cb0f78a52145d4bedeb' \
+  -o "$task_dir/minio" .
+docker build --load --platform "linux/$minio_arch" -t "$minio_image" -f - "$task_dir" <<'DOCKERFILE'
+FROM scratch
+COPY minio /minio
+ENTRYPOINT ["/minio"]
+DOCKERFILE
 docker run -d --name "$container" -p 127.0.0.1::9000 \
   -e MINIO_ROOT_USER=local-grant -e MINIO_ROOT_PASSWORD=local-grant-storage-secret \
-  quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data >/dev/null
+  "$minio_image" server /data >/dev/null
 s3_port=$(docker inspect "$container" | jq -r '.[0].NetworkSettings.Ports["9000/tcp"][0].HostPort // empty')
 case "$s3_port" in ''|*[!0-9]*) echo 'local Docker did not report a numeric published S3 port' >&2; exit 1 ;; esac
 # Dory reports wildcard binding despite the loopback publish request; its
