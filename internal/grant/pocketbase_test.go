@@ -45,16 +45,16 @@ func TestPocketBaseScopedIdentityAndImport(t *testing.T) {
 	defer s.Close()
 	email := "same@example.test"
 	base := ExternalIdentityMaterialization{Provider: "pocketbase", Issuer: "https://auth.example.test", CollectionID: "users_id", ExternalUserID: "same_id", Email: &email, DisplayName: "User"}
-	first, e := s.MaterializeExternalIdentity(ctx, base)
+	first, e := s.EnsureExternalIdentity(ctx, base)
 	if e != nil {
 		t.Fatal(e)
 	}
-	again, e := s.MaterializeExternalIdentity(ctx, base)
+	again, e := s.EnsureExternalIdentity(ctx, base)
 	if e != nil || again.ID != first.ID {
 		t.Fatal("identity retry changed user", e)
 	}
 	for _, other := range []ExternalIdentityMaterialization{{Provider: "pocketbase", Issuer: "https://other.example.test", CollectionID: base.CollectionID, ExternalUserID: base.ExternalUserID, Email: &email, DisplayName: "Other issuer"}, {Provider: "pocketbase", Issuer: base.Issuer, CollectionID: "viewers_id", ExternalUserID: base.ExternalUserID, Email: &email, DisplayName: "Other collection"}} {
-		u, e := s.MaterializeExternalIdentity(ctx, other)
+		u, e := s.EnsureExternalIdentity(ctx, other)
 		if e != nil || u.ID == first.ID {
 			t.Fatal("namespace/email collision", e)
 		}
@@ -67,7 +67,7 @@ func TestPocketBaseScopedIdentityAndImport(t *testing.T) {
 	if _, e = s.ImportPatchDataAuthority(ctx, in); e != nil {
 		t.Fatal(e)
 	}
-	u, e := s.MaterializeExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: "pocketbase", Issuer: base.Issuer, CollectionID: base.CollectionID, ExternalUserID: "imported_id", DisplayName: "Current"})
+	u, e := s.EnsureExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: "pocketbase", Issuer: base.Issuer, CollectionID: base.CollectionID, ExternalUserID: "imported_id", DisplayName: "Current"})
 	if e != nil || u.ID != "imported-user" {
 		t.Fatal("explicit import namespace did not resolve", e)
 	}

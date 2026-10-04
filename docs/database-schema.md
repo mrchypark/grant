@@ -400,7 +400,9 @@ owner GET의 ETag에는 조직 ID, owner 사용자 ID, 소속 ID와 소속 갱�
 
 ### 조직 없는 온보딩의 릴레이션과 구조의 이유
 
-조직 없는 온보딩은 정확한 `POST /api/v1/me/materialize`, `GET /api/v1/me`, `GET /api/v1/orgs`, `POST /api/v1/orgs`의 관리 capability에만 적용한다. 설정된 활성·준비 완료 first-party/auto-approve 앱, 활성 앱 조직·Provider·enforcer, 앱에 명시적으로 등록한 Action과 검증된 외부 신원/client 연결이 모두 필요하다. 기존 비활성 사용자는 거절한다. PDP는 로컬 매핑이 없으면 provider·issuer·collection·subject를 분리한 외부 신원 digest로 판정하며 로컬 사용자 생성은 voter의 신원 처리에 맡긴다.
+조직 없는 온보딩은 정확한 `POST /api/v1/me/ensure`, `GET /api/v1/me`, `GET /api/v1/orgs`, `POST /api/v1/orgs`의 관리 capability에만 적용한다. 설정된 활성·준비 완료 first-party/auto-approve 앱, 활성 앱 조직·Provider·enforcer, 앱에 명시적으로 등록한 Action과 검증된 외부 신원/client 연결이 모두 필요하다. 기존 비활성 사용자는 거절한다. `POST /api/v1/me/ensure`의 카탈로그 Action ID는 기존 권한 참조를 보존하기 위해 `user.materialize`로 유지한다.
+
+외부에서 인증된 계정은 아직 Grant의 `users` 행이 아니며, `user_identities`가 외부 provider·issuer·collection·subject와 내부 `users.id`를 연결할 때만 내부 사용자로 취급한다. PDP, 일반 인증 조회와 `GET /api/v1/me`는 이 관계를 조회만 하며 consistency 수준과 관계없이 사용자·매핑을 만들거나 프로필을 갱신하지 않는다. 매핑이 없는 `GET /api/v1/me`은 `LOCAL_USER_NOT_PROVISIONED` 코드로 404를 반환한다. body 없는 Bearer `POST /api/v1/me/ensure`만 매핑과 내부 사용자를 생성할 수 있고, 기존 매핑에서는 프로필을 쓰지 않은 채 `{"userId":"..."}`만 반환한다. 이 분리는 물리 스키마 변경이나 migration이 아니라 인증 계정과 Grant 권한 주체의 관계 및 생성 경로를 명확히 하는 계약이다.
 
 본인 조직 생성은 검증된 사용자 ID로 `organizations`, owner 소속과 기존 Grant owner Binding을 생성하고, 해당 조직 자원에 대한 `role-system-management-owner` 개인 Binding을 같은 트랜잭션에서 추가한다. 이 전역 역할은 `roles.organization_id=NULL`이며 조직 API로 수정하거나 삭제할 수 없다. `role-system-` ID는 조직 역할 생성에 사용할 수 없다. Action은 등록된 조직 관리 경로로 제한하며 필요한 정의가 없거나 전역 역할에 허용 범위 밖 Action이 있으면 생성 전체를 거절한다. 플랫폼 Action이나 다른 조직 자원은 부여하지 않는다.
 

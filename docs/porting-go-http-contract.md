@@ -16,7 +16,7 @@ The current branch registers 81 method/path entries across 54 distinct paths. Th
 | POST | `/api/v2/http-capabilities/decide` | application | false | 200 |
 | POST | `/ops/migrations/patch-data-authority` | master | true | 200 |
 | GET | `/api/v1/me` | bearer | false | 200 |
-| POST | `/api/v1/me/materialize` | bearer | true | 200 |
+| POST | `/api/v1/me/ensure` | bearer | true | 200 |
 | GET | `/api/v1/providers` |  | false | 200 |
 | POST | `/api/v1/admin/providers` | master | true | 201 |
 | PUT | `/api/v1/admin/providers/{providerId}/actions` | master | true | 200 |
@@ -68,13 +68,17 @@ The current branch registers 81 method/path entries across 54 distinct paths. Th
 
 The inventory includes lifecycle routes listed below and granular action routes in the next section. Removed Exposure APIs, the V2 authority receiver, Grant IdP proxy paths, and the old provisioning verification route return 404 without aliases. Generic HTTP catalog/decide and private V1 authority migration remain supported.
 
+Current learner routing rejects both `POST /api/v1/me/ensure` and `GET /api/v1/me` with HTTP 503 and `read replica only serves capability decisions and catalogs`. The legacy `false` registration flag for `GET /api/v1/me` does not override this server-level restriction.
+
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 
 Legacy JSON DTOs retain permissive unknown-field behavior where the Rust DTO did not declare `deny_unknown_fields`. Capability and authority import contracts are closed. Required fields cannot be omitted or null; duplicate object fields are rejected. Rust enum inputs are checked before service execution. Body limit is 2 MiB for JSON. Canonical signatures/hashes are computed by shared storage/domain functions rather than the HTTP layer.
 
 All six authorization routes reject any present `resource.view` value, including null. Batch/filter requests permit at most 1,000 items. `filter` returns `resource_ids`; batch returns `results`. Generic HTTP capability requests validate the active catalog and exact contract before evaluation. An absent consent returns 404; successful deletion returns an empty 204 body. Domain errors retain the JSON `{ "error": "..." }` envelope.
 
-Grant does not proxy IdP requests. `/auth`, `/auth/v1`, and `/auth/v1/*` return 404; route IdP traffic directly through the Gateway. External token validation remains enabled for the configured provider.
+Grant does not proxy IdP requests. `/auth`, `/auth/v1`, and `/auth/v1/*` return 404; route IdP traffic directly through the Gateway. External token validation remains enabled for the configured provider. Bodyless Bearer `POST /api/v1/me/ensure` creates a missing internal user and external-identity mapping or reuses the existing user without profile writes, and returns only `{ "userId": "..." }`; it grants no membership, role, Binding, or consent. `GET /api/v1/me` and general authentication lookup never create domain users or update profiles at any consistency level. A missing local mapping from `GET /api/v1/me` returns 404 with `LOCAL_USER_NOT_PROVISIONED`.
+
+`GET /api/v1/me` supports `consistency=strong`, `local`, and `prefer-strong`. Consistency selects read freshness and never enables user or identity provisioning. Other routes retain their existing strong-only explicit consistency override. A `LOCAL_USER_NOT_PROVISIONED` 404 under `local` may reflect replica lag; use `GET /api/v1/me?consistency=strong` after ensure when an immediate current view is required.
 
 The raw SQL transport is a distinct private listener and has no public router registration. The native cluster member transport uses UDP QUIC and does not share the API port.
 

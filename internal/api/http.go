@@ -37,6 +37,19 @@ type preparedEndpoint struct {
 	prepare func(*request) (endpoint, error)
 }
 
+func bodyless(fn endpoint) preparedEndpoint {
+	return preparedEndpoint{prepare: func(r *request) (endpoint, error) {
+		data, err := io.ReadAll(io.LimitReader(r.Body, 1))
+		if err != nil {
+			return nil, failure(400, "failed to read request body")
+		}
+		if len(data) != 0 {
+			return nil, failure(400, "request body is not allowed")
+		}
+		return fn, nil
+	}}
+}
+
 func New(service *grant.Service, learner bool) *Server {
 	s := &Server{service: service, mux: http.NewServeMux(), learner: learner}
 	s.routes()
@@ -55,7 +68,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 func failure(status int, msg string) error { return &grant.Error{Status: status, Message: msg} }
 func writeError(w http.ResponseWriter, err error) {
-	writeJSON(w, grant.ErrorStatus(err), map[string]string{"error": err.Error()})
+	body := struct {
+		Error string `json:"error"`
+		Code  string `json:"code,omitempty"`
+	}{Error: err.Error()}
+	var typed *grant.Error
+	if errors.As(err, &typed) {
+		body.Code = typed.Code
+	}
+	writeJSON(w, grant.ErrorStatus(err), body)
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	if snapshot, ok := v.(snapshotResponse); ok {
@@ -233,10 +254,15 @@ func readConsistency(r *http.Request) (grant.ReadConsistency, error) {
 		return "", failure(400, "duplicate consistency")
 	}
 	value := strings.ToLower(strings.TrimSpace(v[0]))
-	if value != "strong" {
-		return "", failure(400, "invalid consistency: "+value)
+	switch value {
+	case grant.ReadStrong:
+		return grant.ReadStrong, nil
+	case grant.ReadLocal, grant.ReadPreferStrong:
+		if r.URL.Path == "/api/v1/me" {
+			return value, nil
+		}
 	}
-	return "strong", nil
+	return "", failure(400, "invalid consistency: "+value)
 }
 
 // decode preserves required non-null fields and closed structs instead of Go's

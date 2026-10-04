@@ -41,7 +41,7 @@ func (s *Server) routes() {
 	s.route("GET", "/api/v1/me", "bearer", false, 200, func(r *request) (any, error) {
 		return s.service.CurrentUser(r.Context(), r.bearer, r.org, r.consistency)
 	})
-	s.route("POST", "/api/v1/me/materialize", "bearer", true, 200, func(r *request) (any, error) { return s.service.MaterializeCurrentUser(r.Context(), r.bearer, r.org) })
+	s.route("POST", "/api/v1/me/ensure", "bearer", true, 200, bodyless(func(r *request) (any, error) { return s.service.EnsureCurrentUser(r.Context(), r.bearer) }))
 	s.route("GET", "/api/v1/providers", "", false, 200, func(r *request) (any, error) { return s.service.ListServiceProviders(r.Context(), r.consistency) })
 	s.route("POST", "/api/v1/admin/providers", "master", true, 201, body(false, func(r *request, v grant.ServiceProvider) (any, error) {
 		return s.service.CreateServiceProviderAdmin(r.Context(), v)

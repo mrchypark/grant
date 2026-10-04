@@ -77,7 +77,7 @@ func managementMaterializeFixture(t *testing.T, managementOrgID string) (context
 		CapabilityVersion:        materializeCap.Version,
 		ContractDigest:           materializeCap.ContractDigest,
 		Method:                   "POST",
-		CanonicalPath:            "/api/v1/me/materialize",
+		CanonicalPath:            "/api/v1/me/ensure",
 		CanonicalQuery:           "",
 		CanonicalQueryDigest:     sha256Text(""),
 		ForwardedHeaderDigest:    sha256Text(""),
@@ -115,16 +115,19 @@ func TestMaterializeAllowNoMembership(t *testing.T) {
 
 func TestMaterializeNewIdentityDoesNotGrantManagementAccess(t *testing.T) {
 	ctx, s, input := managementMaterializeFixture(t, "mgmt-org")
+	if _, err := s.store.Exec(ctx, "UPDATE applications SET first_party=1,consent_policy='auto_approve' WHERE id='app-1'"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.store.Exec(ctx, "DELETE FROM user_identities WHERE user_id='owner'"); err != nil {
 		t.Fatal(err)
 	}
-	decision, err := s.DecideHttpCapability(ctx, "tok", "mgmt-org", input)
+	decision, err := s.DecideHttpCapability(ctx, "tok", "", input)
 	if err != nil || !decision.Allowed {
 		t.Fatalf("new identity materialization: allowed=%v err=%v", decision.Allowed, err)
 	}
-	view, err := s.MaterializeCurrentUser(ctx, "tok", "mgmt-org")
-	if err != nil || view.UserID == "" || view.UserID == "owner" || view.MembershipStatus != "none" {
-		t.Fatalf("materialized view=%+v err=%v", view, err)
+	view, err := s.EnsureCurrentUser(ctx, "tok")
+	if err != nil || view.UserID == "" || view.UserID == "owner" {
+		t.Fatalf("ensured view=%+v err=%v", view, err)
 	}
 	stage, _, err := ManagementCatalog(1, nil)
 	if err != nil {
@@ -234,83 +237,83 @@ func TestMaterializeDenyInactiveApp(t *testing.T) {
 	}
 }
 
-func TestManagementMaterializeCapabilityMatch(t *testing.T) {
+func TestManagementEnsureCapabilityMatch(t *testing.T) {
 	actionID := "grant-management.user.materialize"
 	cap := HttpCapability{
 		Method:       "POST",
-		PathTemplate: "/api/v1/me/materialize",
+		PathTemplate: "/api/v1/me/ensure",
 		ActionID:     &actionID,
 		Resource:     &HttpCapabilityResource{ResourceType: "service", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}},
 		Request:      HttpRequestPolicy{Body: "none", Authorization: "forward-user"},
 	}
-	if !managementMaterializeCapability("grant-management", cap) {
+	if !managementEnsureCapability("grant-management", cap) {
 		t.Fatal("expected match")
 	}
 }
 
-func TestManagementMaterializeCapabilityMismatch(t *testing.T) {
+func TestManagementEnsureCapabilityMismatch(t *testing.T) {
 	actionID := "grant-management.user.materialize"
 	cap := HttpCapability{
 		Method:       "POST",
-		PathTemplate: "/api/v1/me/materialize",
+		PathTemplate: "/api/v1/me/ensure",
 		ActionID:     &actionID,
 		Resource:     &HttpCapabilityResource{ResourceType: "service", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}},
 		Request:      HttpRequestPolicy{Body: "none", Authorization: "forward-user"},
 	}
 	// Wrong provider.
-	if managementMaterializeCapability("other", cap) {
+	if managementEnsureCapability("other", cap) {
 		t.Fatal("should not match on wrong provider")
 	}
 	// Wrong method.
 	cap2 := cap
 	cap2.Method = "GET"
-	if managementMaterializeCapability("grant-management", cap2) {
+	if managementEnsureCapability("grant-management", cap2) {
 		t.Fatal("should not match on wrong method")
 	}
 	// Wrong path.
 	cap3 := cap
 	cap3.PathTemplate = "/api/v1/me"
-	if managementMaterializeCapability("grant-management", cap3) {
+	if managementEnsureCapability("grant-management", cap3) {
 		t.Fatal("should not match on wrong path")
 	}
 	// Wrong action.
 	cap4 := cap
 	cap4.ActionID = ptrString("grant-management.user.read")
-	if managementMaterializeCapability("grant-management", cap4) {
+	if managementEnsureCapability("grant-management", cap4) {
 		t.Fatal("should not match on wrong action")
 	}
 	// Wrong resource type.
 	cap5 := cap
 	cap5.Resource = &HttpCapabilityResource{ResourceType: "organization", ID: HttpResourceExtractor{Kind: "constant", Value: "grant"}}
-	if managementMaterializeCapability("grant-management", cap5) {
+	if managementEnsureCapability("grant-management", cap5) {
 		t.Fatal("should not match on wrong resource type")
 	}
 	// Has recordScope.
 	cap6 := cap
 	cap6.RecordScope = &HttpRecordScopePolicy{}
-	if managementMaterializeCapability("grant-management", cap6) {
+	if managementEnsureCapability("grant-management", cap6) {
 		t.Fatal("should not match when recordScope is set")
 	}
 	// Has batch.
 	cap7 := cap
 	cap7.Batch = &HttpBatchPolicy{}
-	if managementMaterializeCapability("grant-management", cap7) {
+	if managementEnsureCapability("grant-management", cap7) {
 		t.Fatal("should not match when batch is set")
 	}
 	// Has responseAuthorization.
 	cap8 := cap
 	cap8.ResponseAuthorization = &HttpResponseAuthorization{}
-	if managementMaterializeCapability("grant-management", cap8) {
+	if managementEnsureCapability("grant-management", cap8) {
 		t.Fatal("should not match when responseAuthorization is set")
 	}
 	cap9 := cap
 	cap9.Request.Body = "json"
-	if managementMaterializeCapability("grant-management", cap9) {
+	if managementEnsureCapability("grant-management", cap9) {
 		t.Fatal("should not match a body-bearing capability")
 	}
 	cap10 := cap
 	cap10.Request.Authorization = "service-token"
-	if managementMaterializeCapability("grant-management", cap10) {
+	if managementEnsureCapability("grant-management", cap10) {
 		t.Fatal("should not match a service credential capability")
 	}
 }

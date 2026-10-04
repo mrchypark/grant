@@ -135,6 +135,25 @@ grant_image_override_line="$(grep -n 'set image statefulset/grant-voter' "${ROOT
   || fail 'selected IMAGE_NAME is not applied to the Grant StatefulSet'
 grep -q 'applied_grant_image=' "${ROOT_DIR}/scripts/vind-bootstrap.sh" \
   || fail 'Grant image override is not verified after application'
+
+# Render the actual overlay, including bucket initialization on the same volume.
+object_store_image='docker.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499'
+kubectl kustomize "${ROOT_DIR}/deploy/overlays/ephemeral" >"${TMP_DIR}/local-overlay.yaml"
+[[ "$(grep -Fc "image: ${object_store_image}" "${TMP_DIR}/local-overlay.yaml")" -eq 2 ]] \
+  || fail 'gateway and bucket initializer must use the same immutable Versity image'
+grep -Fq "object_store_image=${object_store_image}" "${ROOT_DIR}/scripts/verify-go-three-voter.sh" \
+  || fail 'native and Kubernetes fixtures must use the same immutable Versity image'
+if grep -Eq 'quay.io/minio/|grant-object-store-init' "${TMP_DIR}/local-overlay.yaml"; then
+  fail 'rendered local overlay still contacts the unavailable MinIO registry'
+fi
+grep -q 'mkdir -p /data/grant-rhiza' "${TMP_DIR}/local-overlay.yaml" \
+  || fail 'the local POSIX bucket is not created before the gateway starts'
+object_store_pull_line="$(grep -n 'docker pull --platform' "${ROOT_DIR}/scripts/vind-bootstrap.sh" | cut -d: -f1)"
+[[ -n "${object_store_pull_line}" && "${object_store_pull_line}" -lt "${workload_line}" ]] \
+  || fail 'object-store public image availability is not checked before workload creation'
+grep -q 'rollout status deployment/grant-object-store --timeout=120s' "${ROOT_DIR}/scripts/vind-bootstrap.sh" \
+  || fail 'bootstrap must fail promptly when the object store cannot start'
+
 if grep -Eq 'export GRANT_(MASTER_KEY|APP_AUTH_KEY)=\$\{GRANT_(MASTER_KEY|APP_AUTH_KEY)\}' \
   "${ROOT_DIR}/scripts/vind-bootstrap.sh"; then
   fail 'vind bootstrap completion guidance exposes a Grant secret value'

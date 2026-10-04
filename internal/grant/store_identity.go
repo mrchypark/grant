@@ -67,7 +67,7 @@ func (s *Store) ListUserOrganizationsWithConsistency(ctx context.Context, user s
 	}
 	return decodeRows[Organization](rows)
 }
-func (s *Store) MaterializeExternalIdentity(ctx context.Context, in ExternalIdentityMaterialization) (User, error) {
+func (s *Store) EnsureExternalIdentity(ctx context.Context, in ExternalIdentityMaterialization) (User, error) {
 	if in.Provider == "" || in.ExternalUserID == "" {
 		return User{}, fmt.Errorf("external identity requires provider and subject")
 	}
@@ -96,7 +96,7 @@ func (s *Store) MaterializeExternalIdentity(ctx context.Context, in ExternalIden
 		return User{}, e
 	}
 	if u == nil {
-		return User{}, fmt.Errorf("materialized identity missing")
+		return User{}, fmt.Errorf("ensured identity missing")
 	}
 	return *u, nil
 }

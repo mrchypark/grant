@@ -7,6 +7,7 @@ endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
 case "$endpoint" in unix://*) ;; *) echo 'requires an explicitly selected local Unix-socket Docker context' >&2; exit 1 ;; esac
 task_dir=$(mktemp -d "${TMPDIR:-/tmp}/grant-go-three-voter.XXXXXX")
 container="grant-go-three-voter-$$"
+object_store_image=docker.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
 pids=''
 cleanup() {
   result=$?
@@ -16,25 +17,38 @@ cleanup() {
   fi
   for pid in $pids; do kill "$pid" 2>/dev/null || true; done
   for pid in $pids; do wait "$pid" 2>/dev/null || true; done
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  docker rm -fv "$container" >/dev/null 2>&1 || true
   if [ "${KEEP_GRANT_FIXTURE:-0}" = 1 ]; then printf 'Fixture logs: %s\n' "$task_dir"; else rm -rf "$task_dir"; fi
 }
 trap cleanup EXIT HUP INT TERM
 (cd "$root" && CGO_ENABLED=0 go build -o "$task_dir/grant" ./cmd/grant)
-docker run -d --name "$container" -p 127.0.0.1::9000 \
-  -e MINIO_ROOT_USER=local-grant -e MINIO_ROOT_PASSWORD=local-grant-storage-secret \
-  quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data >/dev/null
+object_store_arch=$(docker version --format '{{.Server.Arch}}')
+docker run -d --platform "linux/$object_store_arch" --name "$container" -p 127.0.0.1::9000 \
+  --mount type=volume,target=/data \
+  -e ROOT_ACCESS_KEY=local-grant -e ROOT_SECRET_KEY=local-grant-storage-secret \
+  "$object_store_image" --port :9000 --health /_/health posix /data >/dev/null
 s3_port=$(docker inspect "$container" | jq -r '.[0].NetworkSettings.Ports["9000/tcp"][0].HostPort // empty')
 case "$s3_port" in ''|*[!0-9]*) echo 'local Docker did not report a numeric published S3 port' >&2; exit 1 ;; esac
 # Dory reports wildcard binding despite the loopback publish request; its
 # Unix-socket local runtime still forwards the published port to localhost.
 printf 'Local object-store endpoint: http://127.0.0.1:%s\n' "$s3_port"
 i=0
-until curl -fsS "http://127.0.0.1:$s3_port/minio/health/ready" >/dev/null 2>&1; do
+until curl -fsS "http://127.0.0.1:$s3_port/_/health" >/dev/null 2>&1; do
   i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1
 done
 curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' --user 'local-grant:local-grant-storage-secret' \
   -X PUT "http://127.0.0.1:$s3_port/grant-rhiza" >/dev/null
+curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' --user 'local-grant:local-grant-storage-secret' \
+  -X PUT --data 'grant-fixture-roundtrip' "http://127.0.0.1:$s3_port/grant-rhiza/fixture-probe" >/dev/null
+probe=$(curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' --user 'local-grant:local-grant-storage-secret' \
+  "http://127.0.0.1:$s3_port/grant-rhiza/fixture-probe")
+[ "$probe" = grant-fixture-roundtrip ] || { echo 'S3 path-style roundtrip failed' >&2; exit 1; }
+denied=$(curl -sS -o /dev/null -w '%{http_code}' --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user 'local-grant:wrong-fixture-secret' "http://127.0.0.1:$s3_port/grant-rhiza/fixture-probe")
+[ "$denied" = 403 ] || { echo "S3 accepted invalid fixture credentials: $denied" >&2; exit 1; }
+curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' --user 'local-grant:local-grant-storage-secret' \
+  -X DELETE "http://127.0.0.1:$s3_port/grant-rhiza/fixture-probe" >/dev/null
+printf '%s\n' 'Versity S3 path-style bucket creation, signed roundtrip and invalid-credential rejection passed'
 base=$((30000 + $$ % 10000))
 http0=$base; http1=$((base+1)); http2=$((base+2))
 peer0=$((base+3)); peer1=$((base+4)); peer2=$((base+5))

@@ -16,6 +16,7 @@ import (
 type Error struct {
 	Status  int
 	Message string
+	Code    string
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -42,7 +43,10 @@ func ErrorStatus(err error) int {
 		return 500
 	}
 }
-func serviceError(status int, message string) error { return &Error{status, message} }
+func serviceError(status int, message string) error { return &Error{Status: status, Message: message} }
+func serviceErrorCode(status int, message, code string) error {
+	return &Error{Status: status, Message: message, Code: code}
+}
 func required(field, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

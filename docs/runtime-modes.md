@@ -25,7 +25,7 @@ Single-voter local development can use a filesystem object store. Multiple voter
 
 Remote SQL uses a separate private listener `GRANT_RUNTIME_BIND_ADDR` with `GRANT_REMOTE_API_SECRET`; remote clients use `GRANT_REMOTE_NODES`. The secret must be at least 32 characters and distinct from both public API keys. This listener is never mounted on the public HTTP router, service, or ingress. Expose it only on a trusted private network; terminate authenticated TLS for traffic crossing hosts. The Kubernetes optional private-runtime overlay restricts ingress to labelled runtime clients. Keep external SQL callers out of the public `grant` Service.
 
-`GRANT_READ_CONSISTENCY` selects the configured read behavior. Public per-request overrides accept only `consistency=strong`; writes and authorization management guards use the strong path. Learners reject voter-only management endpoints with 503.
+`GRANT_READ_CONSISTENCY` selects the configured read behavior. Lookup-only `GET /api/v1/me` accepts `consistency=strong`, `consistency=local`, and `consistency=prefer-strong`; other public per-request overrides accept only `consistency=strong`; writes and authorization management guards use the strong path. Learners reject voter-only management endpoints with 503.
 
 See [the compatibility inventory](porting-go-compatibility.md) for the exact supported environment mapping and [the migration guide](backup-restore.md) for existing stores. The [old Hiqlite runtime guide](history/hiqlite/runtime-modes.md) is historical documentation, not a native Rhiza configuration recipe.
 
@@ -35,7 +35,7 @@ all three voters recover the latest acknowledged state into fresh local director
 from the same S3 archive, cluster identity and membership. It also verifies that
 quorum loss keeps `/healthz` at 200 and closes strong `/readyz` with 503; the latter
 may report `readReady: true` and `writeReady: false` because local reads still work.
-This proof uses disposable local MinIO. Production S3 permissions, network policy,
+This proof uses disposable local Versity Gateway with its POSIX backend. Production S3 permissions, network policy,
 node scheduling and resource limits still require a separate isolated deployment
 rehearsal before traffic cutover.
 

@@ -70,6 +70,13 @@ docker image inspect "${RAUTHY_IMAGE}" >/dev/null 2>&1 \
 ensure_runtime_image "${IMAGE_NAME}"
 ensure_rauthy_runtime_image
 
+if [[ "$(cd "${KUSTOMIZE_DIR}" && pwd -P)" == "${ROOT_DIR}/deploy/overlays/ephemeral" ]]; then
+  object_store_arch="$(kubectl get nodes -o 'jsonpath={.items[0].status.nodeInfo.architecture}')"
+  object_store_image="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(docker.io\/versity\/versitygw[^[:space:]]*\).*/\1/p' "${KUSTOMIZE_DIR}/rhiza-object-store.yaml" | head -n 1)"
+  # Fail immediately on an unavailable fixture image, before creating workloads.
+  docker pull --platform "linux/${object_store_arch}" "${object_store_image}"
+fi
+
 dump_rauthy_debug() {
   echo "[rauthy-debug] statefulset state" >&2
   kubectl -n "${NAMESPACE}" get deploy,pods >&2 || true
@@ -108,6 +115,10 @@ kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply
 apply_rauthy_registry_pull_secret
 apply_grant_secret
 kubectl apply -k "${KUSTOMIZE_DIR}"
+
+if [[ "$(cd "${KUSTOMIZE_DIR}" && pwd -P)" == "${ROOT_DIR}/deploy/overlays/ephemeral" ]]; then
+  kubectl -n "${NAMESPACE}" rollout status deployment/grant-object-store --timeout=120s
+fi
 
 wait_for_resource statefulset rauthy
 if ! kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m; then

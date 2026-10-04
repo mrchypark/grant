@@ -54,7 +54,7 @@ POST /api/v1/application-authz/filter
 POST /api/v1/authz/batch-check
 POST /api/v1/authz/check
 POST /api/v1/authz/filter
-POST /api/v1/me/materialize
+POST /api/v1/me/ensure
 POST /api/v1/orgs
 POST /api/v1/orgs/{organizationId}/agreements
 POST /api/v1/orgs/{organizationId}/apps

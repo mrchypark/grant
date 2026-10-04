@@ -19,11 +19,11 @@ func TestOrglessOnboardingCreatesOnlySelfAndEnablesScopedManagement(t *testing.T
 	if after := lifecycleCount(t, ctx, s, "SELECT id FROM users"); after != before {
 		t.Fatal("PDP materialized identity")
 	}
-	view, err := s.MaterializeCurrentUser(ctx, "tok", "")
-	if err != nil || view.UserID == "owner" || view.MembershipStatus != "none" {
-		t.Fatal(view, err)
+	ensured, err := s.EnsureCurrentUser(ctx, "tok")
+	if err != nil || ensured.UserID == "owner" {
+		t.Fatal(ensured, err)
 	}
-	orgs, err := s.ListOrganizationsAuthorized(ctx, view.UserID, ReadStrong)
+	orgs, err := s.ListOrganizationsAuthorized(ctx, ensured.UserID, ReadStrong)
 	if err != nil || len(orgs) != 0 {
 		t.Fatal(orgs, err)
 	}
@@ -38,7 +38,7 @@ func TestOrglessOnboardingCreatesOnlySelfAndEnablesScopedManagement(t *testing.T
 	if _, err = s.CreateOwnOrganization(ctx, "tok", SelfOrganizationInput{ID: created.ID, Name: "Overwrite"}); ErrorStatus(err) != 409 {
 		t.Fatal("duplicate create", err)
 	}
-	if got, err := s.GetOrganizationAuthorized(ctx, view.UserID, created.ID, ReadStrong); err != nil || got.Name != "Mine" {
+	if got, err := s.GetOrganizationAuthorized(ctx, ensured.UserID, created.ID, ReadStrong); err != nil || got.Name != "Mine" {
 		t.Fatal(got, err)
 	}
 	stage, _, err := ManagementCatalog(1, nil)
@@ -83,17 +83,17 @@ func TestOrglessOnboardingCreatesOnlySelfAndEnablesScopedManagement(t *testing.T
 	if !request("GET", "/api/v1/orgs/my-new-org", created.ID, created.ID, "").Allowed {
 		t.Fatal("new owner cannot manage through configured app")
 	}
-	if _, err = s.DeactivateOrganization(ctx, view.UserID, created.ID, created.ID); err != nil {
+	if _, err = s.DeactivateOrganization(ctx, ensured.UserID, created.ID, created.ID); err != nil {
 		t.Fatal(err)
 	}
 	if !request("POST", "/api/v1/orgs/my-new-org/reactivate", created.ID, created.ID, "").Allowed {
 		t.Fatal("trusted owner cannot reactivate")
 	}
-	if _, err = s.ReactivateOrganization(ctx, view.UserID, created.ID, created.ID); err != nil {
+	if _, err = s.ReactivateOrganization(ctx, ensured.UserID, created.ID, created.ID); err != nil {
 		t.Fatal(err)
 	}
 	lifecycleExec(t, ctx, s, "INSERT INTO users(id,display_name,active,created_at) VALUES('future-owner','Future',1,?)", nowString())
-	if _, err = s.EnrollOrganizationMemberAuthorized(ctx, view.UserID, created.ID, "future-owner"); err != nil {
+	if _, err = s.EnrollOrganizationMemberAuthorized(ctx, ensured.UserID, created.ID, "future-owner"); err != nil {
 		t.Fatal(err)
 	}
 	ownerActions, e := s.store.Query(ctx, ReadStrong, "SELECT action_id FROM role_actions WHERE role_id='role-system-management-owner'")
@@ -113,14 +113,14 @@ func TestOrglessOnboardingCreatesOnlySelfAndEnablesScopedManagement(t *testing.T
 			t.Fatal("system owner gained non-organization rights", id)
 		}
 	}
-	if n := lifecycleCount(t, ctx, s, "SELECT id FROM role_bindings WHERE role_id='role-system-management-owner' AND (resource_type<>'organization' OR resource_id<>'my-new-org' OR subject_id<>?)", view.UserID); n != 0 {
+	if n := lifecycleCount(t, ctx, s, "SELECT id FROM role_bindings WHERE role_id='role-system-management-owner' AND (resource_type<>'organization' OR resource_id<>'my-new-org' OR subject_id<>?)", ensured.UserID); n != 0 {
 		t.Fatal("owner gained unrelated resource rights")
 	}
-	owner, err := s.GetOrganizationOwnerAuthorized(ctx, view.UserID, created.ID)
+	owner, err := s.GetOrganizationOwnerAuthorized(ctx, ensured.UserID, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.TransferOrganizationOwnerAuthorized(ctx, view.UserID, created.ID, "future-owner", owner.ETag); err != nil {
+	if _, err = s.TransferOrganizationOwnerAuthorized(ctx, ensured.UserID, created.ID, "future-owner", owner.ETag); err != nil {
 		t.Fatal(err)
 	}
 	if request("GET", "/api/v1/orgs/my-new-org", created.ID, created.ID, "").Allowed {
@@ -145,7 +145,7 @@ func TestOrglessOnboardingCreatesOnlySelfAndEnablesScopedManagement(t *testing.T
 		lifecycleExec(t, ctx, s, "UPDATE service_providers SET active=1 WHERE id='grant-management'")
 		lifecycleExec(t, ctx, s, "INSERT OR IGNORE INTO application_actions(application_id,action_id) VALUES('app-1','grant-management.user.materialize')")
 	}
-	lifecycleExec(t, ctx, s, "UPDATE users SET active=0 WHERE id=?", view.UserID)
+	lifecycleExec(t, ctx, s, "UPDATE users SET active=0 WHERE id=?", ensured.UserID)
 	if _, err = s.DecideHttpCapability(ctx, "tok", "", input); ErrorStatus(err) != 403 {
 		t.Fatal("inactive identity admitted", err)
 	}
