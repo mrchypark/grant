@@ -35,37 +35,26 @@ spec:
     metadata:
       labels: {app: grant-object-store}
     spec:
+      # The POSIX backend treats top-level directories as buckets.
+      initContainers:
+        - name: create-bucket
+          image: docker.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+          command: ["/bin/sh", "-ec", "mkdir -p /data/grant-rhiza"]
+          volumeMounts:
+            - {name: data, mountPath: /data}
       containers:
-        - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-          args: [server, /data]
+        - name: versitygw
+          image: docker.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+          args: [--port, ":9000", --health, /_/health, posix, /data]
           env:
-            - {name: MINIO_ROOT_USER, value: local-grant}
-            - {name: MINIO_ROOT_PASSWORD, value: local-grant-storage-secret}
+            - {name: ROOT_ACCESS_KEY, value: local-grant}
+            - {name: ROOT_SECRET_KEY, value: local-grant-storage-secret}
           ports:
             - {containerPort: 9000}
           volumeMounts:
             - {name: data, mountPath: /data}
           readinessProbe:
-            httpGet: {path: /minio/health/ready, port: 9000}
+            httpGet: {path: /_/health, port: 9000}
       volumes:
         - name: data
           emptyDir: {}
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: grant-object-store-init
-spec:
-  backoffLimit: 12
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: create-bucket
-          image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-          command: ["/bin/sh", "-ec"]
-          args:
-            - >-
-              mc alias set local http://grant-object-store:9000 local-grant local-grant-storage-secret;
-              mc mb --ignore-existing local/grant-rhiza

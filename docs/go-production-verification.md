@@ -61,6 +61,16 @@ It used native Go processes and disposable MinIO and verified:
    closed readiness before all voters opt in, rejection of conflicting target
    admission, and restored-cluster quorum recovery.
 
+On 2026-10-05, `KEEP_GRANT_FIXTURE=1 sh scripts/verify-go-three-voter.sh`
+passed with native macOS/arm64 Grant processes and a Linux/arm64 Docker object
+store using the official Versity Gateway v1.8.0 POSIX image pinned to
+`sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499`.
+It exited 0 in 58.36 seconds and repeated all five recovery and restore checks
+above, plus S3 path-style bucket creation, signed object write/read/delete, and
+invalid-credential rejection. The image's public Linux/amd64 pull also passed;
+native AMD64 verification of the replacement fixture and its Kubernetes
+bootstrap remain CI gates.
+
 These results establish local and CI behavior. They do not verify the target cluster's
 CNI, Kubernetes probes, production S3 credentials/policies, resource limits,
 authentication ingress, or traffic cutover.

@@ -35,7 +35,7 @@ all three voters recover the latest acknowledged state into fresh local director
 from the same S3 archive, cluster identity and membership. It also verifies that
 quorum loss keeps `/healthz` at 200 and closes strong `/readyz` with 503; the latter
 may report `readReady: true` and `writeReady: false` because local reads still work.
-This proof uses disposable local MinIO. Production S3 permissions, network policy,
+This proof uses disposable local Versity Gateway with its POSIX backend. Production S3 permissions, network policy,
 node scheduling and resource limits still require a separate isolated deployment
 rehearsal before traffic cutover.
 
