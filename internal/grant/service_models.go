@@ -211,10 +211,8 @@ type CurrentUserView struct {
 	ActiveOrganizationID *string        `json:"activeOrganizationId"`
 }
 
-type MaterializedUserView struct {
-	UserID           string `json:"userId"`
-	OrganizationID   string `json:"organizationId"`
-	MembershipStatus string `json:"membershipStatus"`
+type EnsuredUserView struct {
+	UserID string `json:"userId"`
 }
 
 type UserActionCheck struct {

@@ -61,7 +61,7 @@ func managementOnboardingCapability(provider string, cap HttpCapability) bool {
 	}
 	action, body := "", "none"
 	switch cap.Method + " " + cap.PathTemplate {
-	case "POST /api/v1/me/materialize":
+	case "POST /api/v1/me/ensure":
 		action = "user.materialize"
 	case "GET /api/v1/me":
 		action = "user.read"

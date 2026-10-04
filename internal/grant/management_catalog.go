@@ -24,7 +24,8 @@ type ManagementRoute struct {
 var managementRoutes = []ManagementRoute{
 	// --- Service (me/providers) ---
 	{Method: "GET", Path: "/api/v1/me", ActionCode: "user.read"},
-	{Method: "POST", Path: "/api/v1/me/materialize", ActionCode: "user.materialize"},
+	// The action code remains user.materialize for stored-permission compatibility.
+	{Method: "POST", Path: "/api/v1/me/ensure", ActionCode: "user.materialize"},
 	{Method: "GET", Path: "/api/v1/providers", ActionCode: "provider.list"},
 	{Method: "GET", Path: "/api/v1/orgs", ActionCode: "organization.list"},
 	{Method: "POST", Path: "/api/v1/orgs", ActionCode: "organization.create"},
@@ -152,11 +153,19 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 	actions := make([]Action, 0, len(routes)+1)
 	for i, route := range routes {
 		actionID := provider + "." + route.ActionCode
+		name := route.ActionCode
+		var description *string
+		if route.Method == "POST" && route.Path == "/api/v1/me/ensure" && route.ActionCode == "user.materialize" {
+			name = "Ensure current user"
+			detail := "Create or reuse the authenticated external identity's internal user and scoped identity mapping without changing profiles, memberships, or permissions."
+			description = &detail
+		}
 		actions = append(actions, Action{
 			ID:                      actionID,
 			ProviderID:              provider,
 			Code:                    route.ActionCode,
-			Name:                    route.ActionCode,
+			Name:                    name,
+			Description:             description,
 			RiskLevel:               ActionRiskLevelHigh,
 			GrantableToApplications: true,
 		})
@@ -264,11 +273,11 @@ func buildManagementRequest(route ManagementRoute) HttpRequestPolicy {
 }
 
 // isBodyRoute returns true for POST/PUT paths that accept a JSON request body.
-// Bodyless POST paths (materialize, deactivate, reactivate, verify, backups)
+// Bodyless POST paths (ensure, deactivate, reactivate, verify, backups)
 // return false.
 func isBodyRoute(path string) bool {
 	switch path {
-	case "/api/v1/me/materialize",
+	case "/api/v1/me/ensure",
 		"/api/v1/orgs/{organizationId}/deactivate",
 		"/api/v1/orgs/{organizationId}/reactivate",
 		"/api/v1/orgs/{organizationId}/members/{userId}",

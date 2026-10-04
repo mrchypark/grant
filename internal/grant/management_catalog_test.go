@@ -56,6 +56,26 @@ func TestManagementCatalogAllActionsGrantable(t *testing.T) {
 	}
 }
 
+func TestManagementCatalogEnsureActionMetadata(t *testing.T) {
+	_, actions, err := ManagementCatalog(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range actions {
+		if action.ID != "grant-management.user.materialize" {
+			continue
+		}
+		if action.Code != "user.materialize" || action.Name != "Ensure current user" {
+			t.Fatalf("ensure action identity=%q code=%q name=%q", action.ID, action.Code, action.Name)
+		}
+		if action.Description == nil || !strings.Contains(*action.Description, "scoped identity mapping") {
+			t.Fatalf("ensure action description=%v", action.Description)
+		}
+		return
+	}
+	t.Fatal("ensure action not found")
+}
+
 func TestManagementCatalogLegacyManageRetained(t *testing.T) {
 	_, actions, err := ManagementCatalog(1, nil)
 	if err != nil {
@@ -139,7 +159,7 @@ func TestManagementCatalogBodylessCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodyless := map[string]bool{
-		"/api/v1/me/materialize":                                                true,
+		"/api/v1/me/ensure":                                                     true,
 		"/api/v1/orgs/{organizationId}/deactivate":                              true,
 		"/api/v1/orgs/{organizationId}/reactivate":                              true,
 		"/api/v1/orgs/{organizationId}/members/{userId}":                        true,
@@ -175,7 +195,7 @@ func TestManagementCatalogRouteInventory(t *testing.T) {
 	// Verify a few critical routes exist.
 	for _, want := range []string{
 		"GET /api/v1/me",
-		"POST /api/v1/me/materialize",
+		"POST /api/v1/me/ensure",
 		"GET /api/v1/providers",
 		"POST /api/v1/orgs/{organizationId}/deactivate",
 		"POST /api/v1/orgs/{organizationId}/reactivate",
@@ -318,13 +338,13 @@ func TestManagementLifecycleContracts(t *testing.T) {
 		seen[a.ID] = true
 	}
 	expected := map[string]string{
-		"PATCH /api/v1/admin/providers/{providerId}": "admin.provider.update",
-		"POST /api/v1/admin/orgs":                    "admin.organization.create",
+		"PATCH /api/v1/admin/providers/{providerId}":                                    "admin.provider.update",
+		"POST /api/v1/admin/orgs":                                                       "admin.organization.create",
 		"PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding": "admin.app.identity.bind",
-		"GET /api/v1/orgs":                                      "organization.list",
-		"GET /api/v1/orgs/{organizationId}":                     "organization.detail",
-		"PATCH /api/v1/orgs/{organizationId}":                   "organization.update",
-		"DELETE /api/v1/orgs/{organizationId}/members/{userId}": "members.remove",
+		"GET /api/v1/orgs":                                                              "organization.list",
+		"GET /api/v1/orgs/{organizationId}":                                             "organization.detail",
+		"PATCH /api/v1/orgs/{organizationId}":                                           "organization.update",
+		"DELETE /api/v1/orgs/{organizationId}/members/{userId}":                         "members.remove",
 	}
 	for _, cap := range stage.Capabilities {
 		if strings.Contains(cap.PathTemplate, "provisioning/verify") {

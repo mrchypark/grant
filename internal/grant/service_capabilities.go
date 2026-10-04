@@ -213,11 +213,11 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			return HttpCapabilityDecision{}, e
 		}
 		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "management_reactivation"
-	} else if managementMaterializeCapability(r.ProviderID, *cap) {
-		// Materialize endpoint: auth-only materialization for self-enrollment.
+	} else if managementEnsureCapability(r.ProviderID, *cap) {
+		// Ensure endpoint: auth-only provisioning for the authenticated identity.
 		// Requires active org/provider and explicit application_actions admission
-		// but no membership/role/consent because it only materializes self and
-		// returns membershipStatus none.
+		// but no membership/role/consent because it only provisions self and
+		// creates no membership, binding, or role.
 		rows, e := serviceRows[struct{}](ctx, s, ReadStrong,
 			`SELECT 1
 			 FROM application_actions aa

@@ -30,7 +30,7 @@ Grant 변경을 검증한 후 관리 카탈로그를 새 세대로 생성하고,
 ## 유지하거나 후속으로 검토할 사항
 
 - 기존 `authz`와 `application-authz`의 단건·배치·필터 API는 별도 소비자 조사 없이 제거하지 않는다. 현재 Exposure는 HTTP catalog/decide를 사용한다.
-- `me/materialize`는 현재 가입 전 신원 연결 계약이므로 호환성을 유지한다. 자동 조직 가입이나 자동 권한 부여로 바꾸지 않는다.
+- `POST /api/v1/me/ensure`는 가입 전 신원 연결 계약이다. 이 경로는 이전 `POST /api/v1/me/materialize`를 대체한다. 카탈로그 Action ID `user.materialize`는 배포된 권한 참조와 호환되도록 유지하지만, 경로·표시 이름·설명은 ensure 계약을 설명해야 한다. 자동 조직 가입이나 자동 권한 부여로 바꾸지 않는다.
 - 앱 trust 정책 분리, 전용 마이그레이션 HTTP API의 CLI 이전은 각각 데이터·운영 계약을 검토한 후 별도로 진행한다.
 
 ## 검증 기준
@@ -118,14 +118,16 @@ grantee의 전체 PUT은 보존한 기간이라도 정규화 때문에 판정 �
 
 관리 Exposure를 통과하는 조직 없는 요청은 다음 네 경로로 한정한다.
 
-1. `POST /api/v1/me/materialize`: 검증된 외부 신원을 Grant 사용자로 반영한다. 조직 소속이나 역할은 생성하지 않는다.
-2. `GET /api/v1/me`: 현재 사용자와 소속 조직을 조회한다.
+1. `POST /api/v1/me/ensure`: body 없이 Bearer로 호출한다. 검증된 외부 신원에 대응하는 내부 사용자와 `user_identities` 매핑이 없으면 생성하고, 있으면 프로필을 갱신하지 않고 같은 사용자를 재사용한다. 성공 응답은 `{"userId":"..."}`만 포함한다. 기존 내부 사용자가 비활성이면 403이다. 조직 소속, 역할, Binding, 동의는 생성하거나 부여하지 않는다.
+2. `GET /api/v1/me`: 현재 내부 사용자와 소속 조직을 조회할 뿐 사용자·매핑을 만들거나 프로필을 쓰지 않는다. 매핑이 없으면 `LOCAL_USER_NOT_PROVISIONED` 코드와 함께 404를 반환한다.
 3. `GET /api/v1/orgs`: 현재 사용자의 조직을 조회한다. 소속이 없으면 빈 목록이다.
 4. `POST /api/v1/orgs`: `{"id":"새 조직 ID","name":"조직 이름"}`으로 본인 조직을 만든다. owner는 검증된 현재 사용자로 결정한다. `ownerUserId`는 입력받지 않으며 기존 ID는 409다.
 
 이 예외는 무인증 공개가 아니다. 정확한 `grant-management` Provider·메서드·경로·Action과 `service/grant` 자원, `forward-user` 요청 계약을 확인한다. 설정된 관리 앱은 active/ready 및 first-party/auto-approve 상태여야 한다. 앱의 조직과 Provider도 활성 상태여야 하며, 해당 Action을 앱에 명시적으로 등록하고 일치하는 활성 enforcer로 요청해야 한다. IdP가 검증한 token client와 앱의 연결도 일치해야 한다. 일반 앱이나 다른 경로로 이 예외를 확장하지 않는다.
 
-PDP의 최초 사용자 판정은 provider·issuer·collection·subject를 포함한 외부 신원 digest를 사용하며 그 과정에서 로컬 사용자를 생성하지 않는다. 실제 voter의 본인 신원 처리 경로가 사용자 매핑을 반영한다. 이미 존재하는 비활성 사용자는 최초 방문자로 취급하지 않고 거절한다. 이메일이나 외부 subject와 내부 ID의 우연한 일치로 다른 사용자를 채택하지 않는다.
+PDP, `GET /api/v1/me`, 일반 인증 조회는 provider·issuer·collection·subject를 포함한 외부 신원 digest와 기존 매핑을 조회만 한다. 이 경로들은 consistency 수준과 관계없이 내부 사용자 생성, 매핑 생성, 프로필 갱신을 수행하지 않는다. 실제 `POST /api/v1/me/ensure`만 사용자와 매핑을 반영한다. 이미 존재하는 비활성 사용자는 최초 방문자로 취급하지 않고 거절한다. 이메일이나 외부 subject와 내부 ID의 우연한 일치로 다른 사용자를 채택하지 않는다.
+
+`GET /api/v1/me`는 `consistency=strong`, `local`, `prefer-strong`을 지원한다. consistency는 조회 결과의 신선도를 선택하며 사용자나 매핑의 생성을 허용하지 않는다. 다른 경로는 기존처럼 명시적 consistency override로 `strong`만 허용한다. `local` 조회의 `LOCAL_USER_NOT_PROVISIONED` 404는 복제 지연 때문에 발생할 수도 있으므로, ensure 직후 최신 사용자 정보가 필요하면 `GET /api/v1/me?consistency=strong`을 호출한다.
 
 본인 조직 생성은 기본 Grant owner 역할뿐 아니라 보호된 `role-system-management-owner`의 새 조직 범위 Binding을 만든다. 이 역할에는 카탈로그에 등록된 조직 관리 Action만 포함되며 플랫폼 관리나 다른 조직의 권한은 포함되지 않는다. 필요한 Action이 누락되면 조직 생성 전체를 거절한다. 기존 owner에게 새 Action을 무조건 부여하는 배포 스크립트로 이 동작을 대체해서는 안 된다.
 

@@ -134,18 +134,18 @@ func TestOnboardingHTTPDecisionAndManagementFlow(t *testing.T) {
 			}
 		}
 	}
-	decision("POST", "/api/v1/me/materialize", "", "", 200, true)
+	decision("POST", "/api/v1/me/ensure", "", "", 200, true)
 	decision("GET", "/api/v1/providers", "", "", 400, false)
 	users, err := store.Query(ctx, grant.ReadStrong, "SELECT id FROM users")
 	if err != nil || len(users) != 1 {
 		t.Fatal("PDP wrote a local identity", users, err)
 	}
-	materialized, _ := call("POST", "/api/v1/me/materialize", "", "", false, 200)
+	ensured, _ := call("POST", "/api/v1/me/ensure", "", "", false, 200)
 	var local struct {
 		UserID string `json:"userId"`
 	}
-	if err = json.Unmarshal(materialized, &local); err != nil || local.UserID == "" {
-		t.Fatal(err, string(materialized))
+	if err = json.Unmarshal(ensured, &local); err != nil || local.UserID == "" {
+		t.Fatal(err, string(ensured))
 	}
 	for _, path := range []string{"/api/v1/me", "/api/v1/orgs"} {
 		decision("GET", path, "", "", 200, true)

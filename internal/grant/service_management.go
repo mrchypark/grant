@@ -54,13 +54,12 @@ func managementReactivationCapability(provider string, cap HttpCapability, org, 
 		cap.RecordScope == nil && cap.Batch == nil && cap.ResponseAuthorization == nil
 }
 
-// managementMaterializeCapability matches the exact POST /api/v1/me/materialize
-// capability for auth-only materialization. This endpoint only materializes self
-// and returns membershipStatus none, so it requires active org/provider and
+// managementEnsureCapability matches the exact POST /api/v1/me/ensure
+// capability for auth-only self provisioning. It requires active org/provider and
 // explicit application_actions admission but no membership/role/consent.
-func managementMaterializeCapability(provider string, cap HttpCapability) bool {
+func managementEnsureCapability(provider string, cap HttpCapability) bool {
 	return provider == "grant-management" &&
-		cap.Method == "POST" && cap.PathTemplate == "/api/v1/me/materialize" &&
+		cap.Method == "POST" && cap.PathTemplate == "/api/v1/me/ensure" &&
 		cap.ActionID != nil && *cap.ActionID == "grant-management.user.materialize" &&
 		cap.Resource != nil && cap.Resource.ResourceType == "service" &&
 		cap.Resource.ID.Kind == "constant" && cap.Resource.ID.Value == "grant" &&

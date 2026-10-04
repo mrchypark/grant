@@ -141,7 +141,7 @@ func TestRauthyIdentityNeverAdoptsUserByEmailOrRawID(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := ExternalIdentity{Provider: "rauthy", ExternalUserID: "owner", Email: &email, DisplayName: "Different subject", Active: true}
-	user, err := s.localIdentity(ctx, identity, ReadStrong)
+	user, err := s.store.EnsureExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestRauthyIdentityNeverAdoptsUserByEmailOrRawID(t *testing.T) {
 	if allowed, err := s.store.HasActiveOrganizationMembershipWithConsistency(ctx, user.ID, "owner", ReadStrong); err != nil || allowed {
 		t.Fatal("new identity inherited membership", err)
 	}
-	again, err := s.localIdentity(ctx, identity, ReadStrong)
+	again, err := s.store.EnsureExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: identity.Provider, Issuer: identity.Issuer, CollectionID: identity.CollectionID, ExternalUserID: identity.ExternalUserID, Email: identity.Email, DisplayName: identity.DisplayName})
 	if err != nil || again.ID != user.ID {
 		t.Fatal("explicit identity mapping was not stable", err)
 	}
