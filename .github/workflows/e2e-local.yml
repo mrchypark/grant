@@ -195,13 +195,15 @@ jobs:
           )
           posix_scripts=(
             scripts/k8s-secret-helpers.sh
-            scripts/aws-principal-helpers.sh
             scripts/check-s3-object-history.sh
             scripts/verify-lifecycle-values.sh
+            scripts/verify-runtime-tools.sh
+            scripts/verify-go-cli-contract.sh
+            scripts/verify-go-three-voter.sh
             scripts/oci-redirect-fixture
+            scripts/replica-members
             scripts/verify-oci-attestations.sh
             scripts/verify-oci-attestations-tests.sh
-            scripts/verify-aws-principal-helpers.sh
             scripts/verify-ephemeral-k8s.sh
             scripts/verify-s3-object-history.sh
             scripts/verify-docs.sh
@@ -210,6 +212,7 @@ jobs:
             scripts/ghcr-tag-preflight.sh
             scripts/verify-ghcr-tag-preflight.sh
             scripts/materialize-s3-restore.sh
+            scripts/cached-go-module.sh
             scripts/create-recovery-pair.sh
             scripts/restore-full-cluster.sh
             deploy/k8s/lifecycle-gate.sh
