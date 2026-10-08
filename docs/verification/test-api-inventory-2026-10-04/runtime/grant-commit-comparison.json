@@ -1,0 +1,12 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:43:36Z",
+    "kst": "2026-10-04T20:43:36+0900",
+    "method": "OCI revision label at deployed image digest compared to local git HEAD",
+    "source": "image-grant.json + git rev-parse HEAD"
+  },
+  "deployedGrantCommit": "16020fe78bc4a1908f8cc105f0a0c728f5bbce4e",
+  "localGrantCommit": "3d9d4018bfc044421caffba4001901052c1569a3",
+  "sameCommit": false,
+  "documentationWarning": "registration-api-management.md states the three GET routes were not IED-deployed; current active management catalog includes all three and voter master-authenticated actions/active catalog GETs succeed. Runtime evidence supersedes that historical statement for deployed availability."
+}

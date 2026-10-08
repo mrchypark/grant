@@ -1,0 +1,21 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:46:03Z",
+    "kst": "2026-10-04T20:46:03+0900",
+    "method": "read-only Artifact Registry tag listing filtered to deployed immutable digest",
+    "source": "gcloud artifacts docker tags list conalog/patch-auth"
+  },
+  "component": "patch-auth",
+  "digest": "sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+  "tags": [
+    {
+      "tag": "sha-5130e33e8457e94395ce69180faf863cbf2f8dd6",
+      "version": "projects/patch2-the-new-era/locations/asia-northeast3/repositories/conalog/packages/patch-auth/versions/sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335"
+    },
+    {
+      "tag": "sha-bc973ffe0c84a6f4728aa183890033f9d44f27ef",
+      "version": "projects/patch2-the-new-era/locations/asia-northeast3/repositories/conalog/packages/patch-auth/versions/sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335"
+    }
+  ],
+  "limitation": "Tags identify registry associations observed at this time; tags are mutable. OCI revision labels, when present, are stronger source metadata."
+}

@@ -1,0 +1,88 @@
+{
+  "catalogs": [
+    {
+      "observation": {
+        "utc": "2026-10-04T11:37:03Z",
+        "kst": "2026-10-04T20:37:03+0900",
+        "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+        "namespace": "patch-data-grant-exposure-go-v1",
+        "method": "read-only HTTP GET using existing PEP service credential; credential omitted",
+        "source": "GET /api/v2/http-capabilities/catalog/patch-data via pod port-forward"
+      },
+      "providerId": "patch-data",
+      "generation": 1,
+      "catalogDigest": "sha256:c731b83d70142bed04cc68e829cedc08acaa357645feb295097e25de371a99b4",
+      "capabilityCount": 369,
+      "enabledTrueCount": 369,
+      "responseResourceCount": 42,
+      "uniqueMethodPathCount": 369,
+      "methodCounts": [
+        {
+          "method": "DELETE",
+          "count": 60
+        },
+        {
+          "method": "GET",
+          "count": 178
+        },
+        {
+          "method": "HEAD",
+          "count": 10
+        },
+        {
+          "method": "PATCH",
+          "count": 60
+        },
+        {
+          "method": "POST",
+          "count": 61
+        }
+      ]
+    },
+    {
+      "observation": {
+        "utc": "2026-10-04T11:37:03Z",
+        "kst": "2026-10-04T20:37:03+0900",
+        "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+        "namespace": "patch-data-grant-exposure-go-v1",
+        "method": "read-only HTTP GET using existing PEP service credential; credential omitted",
+        "source": "GET /api/v2/http-capabilities/catalog/grant-management via pod port-forward"
+      },
+      "providerId": "grant-management",
+      "generation": 5,
+      "catalogDigest": "sha256:41a7d3ac23e7c3a4f820b553077cb9e01bd0eb38e9105b33196b7af8a1d66a2e",
+      "capabilityCount": 69,
+      "enabledTrueCount": 69,
+      "responseResourceCount": 0,
+      "uniqueMethodPathCount": 69,
+      "methodCounts": [
+        {
+          "method": "DELETE",
+          "count": 11
+        },
+        {
+          "method": "GET",
+          "count": 22
+        },
+        {
+          "method": "PATCH",
+          "count": 7
+        },
+        {
+          "method": "POST",
+          "count": 14
+        },
+        {
+          "method": "PUT",
+          "count": 15
+        }
+      ]
+    }
+  ],
+  "observation": {
+    "utc": "2026-10-04T11:49:50Z",
+    "kst": "2026-10-04T20:49:50+0900",
+    "method": "derived exact counts from current PEP active catalogs",
+    "source": "catalog-data.json,catalog-management.json"
+  }
+}

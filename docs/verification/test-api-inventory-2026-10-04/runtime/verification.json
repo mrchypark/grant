@@ -1,0 +1,74 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:49:50Z",
+    "kst": "2026-10-04T20:49:50+0900",
+    "method": "local JSON parse, deep catalog equality and exact counts; sanitized artifact verification",
+    "source": "runtime JSON snapshots"
+  },
+  "checks": {
+    "allJsonParsed": true,
+    "dataCount": true,
+    "dataAllEnabled": true,
+    "managementCount": true,
+    "managementAllEnabled": true,
+    "dataAdminMatchesPep": true,
+    "managementAdminMatchesPep": true,
+    "dataExpectedDigestMatches": true,
+    "managementExpectedDigestMatches": true,
+    "tenHealthReadinessSuccessful": true,
+    "sevenCredentialFreeDenials": true,
+    "validSyntheticDataIdDenied": true,
+    "invalidIdSeparated": true
+  },
+  "artifactInventory": {
+    "observedUtc": "2026-10-04T11:50:46Z",
+    "observedKst": "2026-10-04T20:50:46+0900",
+    "files": [
+      "catalog-account-status.json",
+      "catalog-admin-grant-management.json",
+      "catalog-admin-patch-data.json",
+      "catalog-counts.json",
+      "catalog-data.json",
+      "catalog-management.json",
+      "cluster-workloads.json",
+      "collection-definitions-data.json",
+      "exposure-configuration.json",
+      "grant-commit-comparison.json",
+      "health-denial-probes.json",
+      "image-exposure.json",
+      "image-grant.json",
+      "image-patch-auth.json",
+      "image-patch-data.json",
+      "image-tags-exposure.json",
+      "image-tags-grant.json",
+      "image-tags-patch-auth.json",
+      "image-tags-patch-data.json",
+      "matching-namespaces.json",
+      "network-access.json",
+      "patch-auth-auth-methods.json",
+      "patch-auth-nonexistent-record.json",
+      "provider-actions-grant-management.json",
+      "provider-actions-patch-data.json",
+      "runtime-status.json",
+      "runtime-summary.md",
+      "verification.json"
+    ],
+    "totalFiles": 28,
+    "jsonFiles": 27,
+    "markdownFiles": 1
+  },
+  "cleanup": {
+    "utc": "2026-10-04T11:50:46Z",
+    "kst": "2026-10-04T20:50:46+0900",
+    "method": "SIGTERM only exact task-owned port-forward processes; lsof checked all eight owned loopback ports; temporary scripts deleted by apply_patch",
+    "stoppedPortForwardPids": [
+      72373,
+      72371,
+      72370
+    ],
+    "ownedPortsClosed": true,
+    "temporaryCredentialsStored": false,
+    "temporaryScriptsRemoved": true,
+    "sharedClusterStateMutated": false
+  }
+}
