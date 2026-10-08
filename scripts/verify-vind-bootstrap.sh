@@ -104,7 +104,7 @@ docker() {
   return 92
 }
 
-digest_ref='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+digest_ref='ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.37.1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 # shellcheck disable=SC2034 # Referenced by the sourced production function.
 RAUTHY_IMAGE="${digest_ref}"
 ensure_rauthy_runtime_image

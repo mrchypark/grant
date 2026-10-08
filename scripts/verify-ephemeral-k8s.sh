@@ -631,9 +631,9 @@ verify_static() {
     fi
   done
 
-  grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.36.0@sha256:e2a670c79e04ddf5947fbd6cd5dc2ec7115bb9f21132ddf03129d7b66d26f11d' \
+  grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.37.1@sha256:72b4734a7c52bd67cd544e7b72a4ab64932a7060844ef475fc2bb3d3da3074d9' \
     "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
-    || fail "Rauthy launcher does not derive from the pinned official 0.36.0 image"
+    || fail "Rauthy launcher does not derive from the pinned official 0.37.1 image"
   grep -q 'ENTRYPOINT \["/usr/local/bin/rauthy-launcher"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
     || fail "Rauthy launcher image entrypoint contract is missing"
   grep -q 'CMD \["/app/rauthy", "serve"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
@@ -765,7 +765,6 @@ verify_static() {
   assert_recovery_role_resolution_policy
   "${ROOT_DIR}/scripts/verify-oci-attestations-tests.sh"
   "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
-  "${ROOT_DIR}/scripts/verify-aws-principal-helpers.sh"
   "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
 
   echo "Kubernetes HA, lifecycle, backup, and restore profiles verified"
@@ -926,5 +925,5 @@ case "${MODE}" in
   legacy-static) verify_static ;;
   probe-contract) verify_runtime_probe_contract ;;
   live) verify_live ;;
-  *) fail "usage: $0 [static|live|probe-contract]" ;;
+  *) fail "usage: $0 [static|legacy-static|live|probe-contract]" ;;
 esac

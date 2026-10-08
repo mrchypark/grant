@@ -2,6 +2,20 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
+## Rhiza v0.19.0 upgrade compatibility guide
+
+Grant selects Rhiza v0.19.0 and latticedb-go v0.11.3 as an upgrade candidate. Production deployment and migration have not been completed.
+
+Rhiza v0.19.0 advances SQL execution policy to 7 and changes protected QLog/WAL compatibility. It refuses old SQL history, materializations and checkpoints; mixed-version peers and downgrade after activation are unsupported. This requires logical migration to a fresh cluster, not a rolling binary upgrade. Keep the old binary, data directories, object namespace and recovery evidence available until cutover is verified. See the [upstream SQL execution policy compatibility boundary](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/sql-execution-policy.md) for the exact documented constraints.
+
+Before these logical cutover steps, require either a Rhiza Operator integration with trusted external fencing or an approved persistent-storage strategy retaining each voter's original disk and WAL. The current `emptyDir` deployment cannot replace a pod under the same identity after WAL loss: cold startup intentionally returns `ErrVoterStateLost`. With surviving quorum, replacement uses a fresh learner, fencing and reconfiguration; otherwise use Operator-managed whole-generation recovery. The [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/recovery.md) and [embedded Operator guide](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/embedded-operator.md) define the prerequisites. Validate the chosen recovery strategy before production migration; copying an old voter identity or replaying old history cannot bypass this requirement.
+
+1. Quiesce writes and create a consistent logical Grant snapshot with the old compatible binary through `POST /ops/backups` or the snapshot export path supported by that source binary. If voters disagree, reconcile the application state before selecting the snapshot.
+2. Create a fresh target with a distinct cluster ID, peer identities, empty dedicated S3 prefix and new local data directories. Follow **Coordinated fresh three-voter restore** below, which uses `migrate-prepare-cluster` and requires every new voter to acknowledge the same immutable snapshot before activation.
+3. Verify imported Grant rows and authorization behavior before switching traffic. Keep the old installation intact to resolve outcomes from its history; do not copy QLog/WAL segments, physical checkpoints, receipts, applied slots or migration history into the new cluster.
+
+This migration uses the existing logical snapshot and coordinated restore commands; no automatic or in-place Rhiza storage migration is available. The standalone `migrate-restore` path is limited to a fresh isolated local single-voter destination.
+
 ## Existing Hiqlite authority data
 
 Stop source writers and obtain a consistent SQLite source through the legacy system's supported recovery path. Preserve the original database, keyring, backup artifacts and import receipts. The native exporter reads a transaction snapshot and never writes authority rows to that source.
@@ -36,7 +50,7 @@ This command validates the snapshot and creates the target admission record with
 
 Each voter validates the admission and acknowledges the same snapshot. Startup waits for all configured voters before opening the native cluster. Import and activation occur atomically, and public readiness remains closed until the restored content is verified. Normal startup cannot bypass a pending admission by omitting the snapshot variable. An interrupted restore retries with the same target identity, snapshot, directories and prefix; repreparing the identical admission is idempotent, while a changed snapshot or membership is rejected. Keep the artifact available during same-directory voter recovery.
 
-Verify restored authority, generation/replay behavior and negative authorization checks before routing traffic. The isolated verification script exercises admission with one voter absent, all-voter activation, restored rows, rejection of an occupied target, and quorum recovery after restore.
+Verify restored authority, generation/replay behavior and negative authorization checks before routing traffic. The isolated verification script exercises admission with one voter absent, all-voter activation, restored rows, rejection of an occupied target, and same-directory quorum recovery with original WALs after restore.
 
 ## Native backups
 
@@ -46,7 +60,7 @@ On IED, native GCS durability/checkpoints remain the persistence mechanism. This
 
 `GRANT_BACKUP_DIR` sets the local artifact directory. S3 backups use the configured Rhiza bucket under the `grant-backups/` subdirectory of its prefix. Use bucket retention/access controls appropriate to operational recovery. A native backup can be restored with the explicit `migrate-restore` command into a new isolated destination.
 
-The local three-voter verification script checks continued writes with one voter down, same-directory peer recovery and a logical restore into a separate fresh three-voter prefix. It uses a disposable local object store and never invokes the current Kubernetes context.
+The corrected local three-voter fixture passes writes, follower strong reads and same-directory peer recovery with original WALs. Cold empty-directory startup under the same voter identity intentionally fails with `ErrVoterStateLost`; the fixture does not establish `emptyDir` pod-replacement compatibility. The verification script also exercises logical restore into a separate fresh three-voter prefix using a disposable local object store and never invokes the current Kubernetes context.
 
 ## Retired Grant Hiqlite entrypoints
 

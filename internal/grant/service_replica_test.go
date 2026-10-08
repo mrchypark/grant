@@ -21,8 +21,8 @@ func TestReplicaFenceRevocationAndReadOnly(t *testing.T) {
 	}
 	addr := udp.LocalAddr().String()
 	udp.Close()
-	member := rhiza.Member{ID: "voter", PeerURL: "quic://" + addr, Token: "voter-only"}
-	cfg := Config{Database: DatabaseConfig{DataDir: t.TempDir(), ReadFenceKey: strings.Repeat("f", 40), RemoteAPISecret: strings.Repeat("w", 40), Rhiza: rhiza.Config{ClusterID: "fence", NodeID: "voter", PeerAddr: addr, Members: []rhiza.Member{member}, AdminToken: "sync-only", ObjStoreProvider: "filesystem", ObjStoreDir: t.TempDir(), ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck}}}
+	member := rhiza.Member{ID: "voter", PeerURL: "quic://" + addr, PublicKey: rhiza.PeerPublicKey("fence", "voter", "voter-only")}
+	cfg := Config{Database: DatabaseConfig{DataDir: t.TempDir(), ReadFenceKey: strings.Repeat("f", 40), RemoteAPISecret: strings.Repeat("w", 40), Rhiza: rhiza.Config{ClusterID: "fence", NodeID: "voter", PeerAddr: addr, PeerToken: "voter-only", Members: []rhiza.Member{member}, AdminToken: "sync-only", ObjStoreProvider: "filesystem", ObjStoreDir: t.TempDir(), ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck}}}
 	voter, e := OpenStore(ctx, cfg)
 	if e != nil {
 		t.Fatal(e)

@@ -31,6 +31,32 @@ func nowString() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func OpenStore(ctx context.Context, cfg Config) (*Store, error) {
 	return openStore(ctx, cfg, false)
 }
+
+func effectiveRhizaConfig(d DatabaseConfig) (rhiza.Config, error) {
+	c := d.Rhiza
+	if c.NodeID == "" {
+		c.NodeID = d.NodeID
+	}
+	if c.NodeID == "" {
+		c.NodeID = "grant-1"
+	}
+	if c.ClusterID == "" {
+		c.ClusterID = d.ClusterID
+	}
+	if c.PeerAddr == "" {
+		c.PeerAddr = d.PeerAddr
+	}
+	if c.Members == nil {
+		c.Members = d.Members
+	} else if len(c.Members) == 0 && len(d.Members) > 1 {
+		return c, fmt.Errorf("empty Rhiza membership cannot override a multi-voter cluster")
+	}
+	if c.Local && len(c.Members) > 1 {
+		return c, fmt.Errorf("local Rhiza mode cannot serve a multi-voter cluster")
+	}
+	return c, nil
+}
+
 func openStore(ctx context.Context, cfg Config, restoring bool) (*Store, error) {
 	if cfg.Database.DataDir == "" {
 		return nil, fmt.Errorf("Grant data directory is required")
@@ -60,23 +86,11 @@ func openStore(ctx context.Context, cfg Config, restoring bool) (*Store, error) 
 	if err != nil {
 		return nil, err
 	}
-	c := cfg.Database.Rhiza
+	c, err := effectiveRhizaConfig(cfg.Database)
+	if err != nil {
+		return nil, err
+	}
 	c.DataDir = dir
-	if c.NodeID == "" {
-		c.NodeID = cfg.Database.NodeID
-	}
-	if c.NodeID == "" {
-		c.NodeID = "grant-1"
-	}
-	if c.ClusterID == "" {
-		c.ClusterID = cfg.Database.ClusterID
-	}
-	if c.PeerAddr == "" {
-		c.PeerAddr = cfg.Database.PeerAddr
-	}
-	if c.Members == nil {
-		c.Members = cfg.Database.Members
-	}
 	s := &Store{cfg: cfg}
 	if cfg.Database.RuntimeMode == "remote" {
 		return s, nil

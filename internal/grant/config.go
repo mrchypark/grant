@@ -46,6 +46,11 @@ type Config struct {
 	Database DatabaseConfig
 }
 
+type configuredMember struct {
+	rhiza.Member
+	Token string `json:"token"`
+}
+
 func envDefault(k, v string) string {
 	if x, ok := os.LookupEnv(k); ok {
 		return x
@@ -138,14 +143,30 @@ func loadDatabaseConfig(c *Config) error {
 	default:
 		return fmt.Errorf("invalid local node role")
 	}
+	var clusterMembers []configuredMember
+	clusterMembersSet := os.Getenv("GRANT_CLUSTER_MEMBERS") != ""
 	if raw := os.Getenv("GRANT_CLUSTER_MEMBERS"); raw != "" {
-		if e := json.Unmarshal([]byte(raw), &d.Members); e != nil {
+		if e := json.Unmarshal([]byte(raw), &clusterMembers); e != nil {
 			return e
 		}
 	}
+	var rhizaMembers []configuredMember
+	rhizaMembersSet := false
 	if raw := os.Getenv("GRANT_RHIZA_CONFIG_JSON"); raw != "" {
 		if e := json.Unmarshal([]byte(raw), &d.Rhiza); e != nil {
 			return e
+		}
+		var fields map[string]json.RawMessage
+		if e := json.Unmarshal([]byte(raw), &fields); e != nil {
+			return e
+		}
+		for name, value := range fields {
+			if strings.EqualFold(name, "members") {
+				rhizaMembersSet = true
+				if e := json.Unmarshal(value, &rhizaMembers); e != nil {
+					return e
+				}
+			}
 		}
 	}
 	if raw := os.Getenv("GRANT_RHIZA_REPLICA_CONFIG_JSON"); raw != "" {
@@ -154,16 +175,39 @@ func loadDatabaseConfig(c *Config) error {
 		}
 	}
 	if d.LocalNodeRole == "learner" {
+		if d.Rhiza.PeerToken != "" || os.Getenv("RHIZA_PEER_TOKEN") != "" {
+			return fmt.Errorf("learner must not receive a voter peer token")
+		}
 		if len(d.Replica.Members) == 0 {
 			return fmt.Errorf("learner requires public replica members")
 		}
-		for _, members := range [][]rhiza.Member{d.Members, d.Rhiza.Members} {
-			for _, member := range members {
-				if member.Token != "" {
-					return fmt.Errorf("learner must not receive voter member tokens")
-				}
-			}
+	}
+	effective, err := effectiveRhizaConfig(*d)
+	if err != nil {
+		return err
+	}
+	peerToken := d.Rhiza.PeerToken
+	if token := os.Getenv("RHIZA_PEER_TOKEN"); token != "" {
+		if peerToken != "" && peerToken != token {
+			return fmt.Errorf("RHIZA_PEER_TOKEN does not match configured peer token")
 		}
+		peerToken = token
+	}
+	if clusterMembersSet {
+		d.Members, peerToken, err = publicMembers(clusterMembers, effective.ClusterID, effective.NodeID, peerToken, d.LocalNodeRole == "learner")
+		if err != nil {
+			return err
+		}
+	}
+	if rhizaMembersSet {
+		d.Rhiza.Members, peerToken, err = publicMembers(rhizaMembers, effective.ClusterID, effective.NodeID, peerToken, d.LocalNodeRole == "learner")
+		if err != nil {
+			return err
+		}
+	}
+	d.Rhiza.PeerToken = peerToken
+	if _, err := effectiveRhizaConfig(*d); err != nil {
+		return err
 	}
 	r := &d.Rhiza
 	for _, v := range []struct {
@@ -202,4 +246,35 @@ func loadDatabaseConfig(c *Config) error {
 		}
 	}
 	return nil
+}
+
+func publicMembers(input []configuredMember, clusterID, localID, peerToken string, learner bool) ([]rhiza.Member, string, error) {
+	if input == nil {
+		return nil, peerToken, nil
+	}
+	members := make([]rhiza.Member, 0, len(input))
+	for _, in := range input {
+		member := in.Member
+		if in.Token != "" {
+			if learner {
+				return nil, "", fmt.Errorf("learner must not receive voter member tokens")
+			}
+			key := rhiza.PeerPublicKey(clusterID, string(member.ID), in.Token)
+			if member.PublicKey != (rhiza.PublicKey{}) && member.PublicKey != key {
+				return nil, "", fmt.Errorf("member public key does not match its token")
+			}
+			member.PublicKey = key
+			if string(member.ID) == localID {
+				if peerToken != "" && peerToken != in.Token {
+					return nil, "", fmt.Errorf("local peer token does not match membership")
+				}
+				peerToken = in.Token
+			}
+		}
+		if string(member.ID) == localID && peerToken != "" && rhiza.PeerPublicKey(clusterID, localID, peerToken) != member.PublicKey {
+			return nil, "", fmt.Errorf("local peer token does not match membership")
+		}
+		members = append(members, member)
+	}
+	return members, peerToken, nil
 }

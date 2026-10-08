@@ -103,7 +103,7 @@ registry_token="$(jq -er '.token // .access_token' "${token_response}")"
   printf 'write-out = "%%{http_code}"\n'
   printf 'header = "Authorization: Bearer %s"\n' "${registry_token}"
   printf 'header = "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"\n'
-  printf 'url = "https://ghcr.io/v2/conalog/grant-rauthy-launcher/manifests/rauthy-0.36.0-%s"\n' "${SOURCE_SHA}"
+  printf 'url = "https://ghcr.io/v2/conalog/grant-rauthy-launcher/manifests/rauthy-0.37.1-%s"\n' "${SOURCE_SHA}"
 } > "${registry_config}"
 
 if ! run_curl "${registry_config}" "${status_response}" 1; then

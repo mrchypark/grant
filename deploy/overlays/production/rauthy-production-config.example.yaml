@@ -47,7 +47,7 @@ metadata:
 data:
   BACKUP_GENERATION: "rauthy-prod-g42"
   KEYRING_GENERATION: "rauthy-keyring-g42"
-  RECOVERY_SCHEMA_ID: "rauthy-0.36.0"
+  RECOVERY_SCHEMA_ID: "rauthy-0.37.1"
   HQL_NODES: |
     1 rauthy-0.rauthy-headless:8100 rauthy-0.rauthy-headless:8200
     2 rauthy-1.rauthy-headless:8100 rauthy-1.rauthy-headless:8200

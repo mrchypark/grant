@@ -23,7 +23,7 @@ CI_SKIP_CLUSTER_DELETE_ON_FAILURE="${CI_SKIP_CLUSTER_DELETE_ON_FAILURE:-0}"
 
 if [[ "${RAUTHY_IMAGE}" == *RAUTHY_LAUNCHER_IMAGE_DIGEST* ]]; then
   echo "Rauthy launcher digest is unpublished; refusing local bootstrap before image pull." >&2
-  echo "Override RAUTHY_IMAGE with a published immutable image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.36.0@sha256:<64-hex-digest>" >&2
+  echo "Override RAUTHY_IMAGE with a published immutable image: ghcr.io/conalog/grant-rauthy-launcher:rauthy-0.37.1@sha256:<64-hex-digest>" >&2
   exit 1
 fi
 

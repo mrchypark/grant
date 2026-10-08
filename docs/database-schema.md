@@ -18,6 +18,10 @@
 - `service_providers`가 compos 같은 외부 서비스와 grant 자체의 action catalog 경계를 선언한다.
 - Rhiza의 SQLite materializer 위에서 애플리케이션이 무결성과 권한 전개를 관리하며, 필요한 관계에는 물리 FK를 사용한다.
 
+### Rhiza 저장 형식 호환성
+
+현재 선택 버전은 Rhiza v0.19.0과 latticedb-go v0.11.3이며, 업그레이드 후보 상태다. Rhiza v0.19.0의 SQL 실행 정책 7은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
+
 ### 1차 단순 배포 기준
 
 현재 배포 바이너리는 coarse authorization만 수행한다. 판정 key는 검증된 사용자/조직, application context, action, `provider_id`, `resource_type`, `resource_id`의 exact tuple이며 Grant는 schema key, JSON pointer, field set, mask를 입력받거나 반환하지 않는다. Exposure read V1은 이 기존 key를 `provider_id=exposure`, `action_id=exposure.read`, `resource_type=exposureId`, `resource_id=resourceId`로 사용한다. `artifactDigest`는 exact 71 ASCII byte `sha256:<64 lowercase hex>` literal만 받고 normalize 없이 byte-for-byte echo한다. `exposureVersion`과 `artifactDigest`는 새 DB key나 policy row가 아니라 short-lived decision에 exact echo하는 replay binding이다. 따라서 permission은 같은 exposure의 published version에 이어지고, Exposure가 business read 전에 tuple/binding/expiry를 검증한다. 외부 resource의 version이나 digest는 Grant DB의 `created_at`/`updated_at`에서 만들 수 없으므로 Grant는 Compos를 조회하거나 `resourceVersion`을 만들지 않는다.
@@ -268,7 +272,7 @@ restore 검증에서 거부된다. 기존 데이터 경로에 덮어쓰거나 �
 새 스키마로 만든 별도 데이터 경로와 snapshot을 사용해야 한다.
 
 The Go runtime's canonical schema is [store_schema.sql](../internal/grant/store_schema.sql),
-with indexes in [store_indexes.sql](../internal/grant/store_indexes.sql). Rhiza v0.12.3
+with indexes in [store_indexes.sql](../internal/grant/store_indexes.sql). Rhiza v0.19.0
 applies the three named migrations through its replicated migration ledger. Existing
 Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
 export/restore procedure in [backup-restore.md](backup-restore.md).
