@@ -59,8 +59,8 @@ func (s *Service) CreateGroupAuthorized(ctx context.Context, user, org string, i
 		return Group{}, err
 	}
 	g := Group{ID: id, OrganizationID: org, Name: name, Description: optionalText(in.Description)}
-	err = s.store.Transaction(ctx, []Statement{assertion("SELECT 1 FROM organizations WHERE id=?", org), {SQL: "INSERT INTO groups(id,organization_id,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)", Args: []any{g.ID, org, g.Name, g.Description, nowString(), nowString()}}})
-	return g, err
+	err = s.store.Transaction(ctx, []Statement{lifecycleActorGuard(user, org, "organization.group.manage"), assertion("SELECT 1 FROM organizations WHERE id=?", org), {SQL: "INSERT INTO groups(id,organization_id,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)", Args: []any{g.ID, org, g.Name, g.Description, nowString(), nowString()}}})
+	return g, lifecycleError(err)
 }
 func (s *Service) UpdateGroupAuthorized(ctx context.Context, user, org, id string, in UpsertGroupInput) (Group, error) {
 	g, err := s.GetGroupAuthorized(ctx, user, org, id, ReadStrong)
@@ -72,8 +72,8 @@ func (s *Service) UpdateGroupAuthorized(ctx context.Context, user, org, id strin
 		return Group{}, err
 	}
 	g.Description = optionalText(in.Description)
-	err = s.store.Transaction(ctx, []Statement{{SQL: "UPDATE groups SET name=?,description=?,updated_at=? WHERE id=? AND organization_id=?", Args: []any{g.Name, g.Description, nowString(), id, org}, ExpectedRowsAffected: requireOne()}})
-	return g, err
+	err = s.store.Transaction(ctx, []Statement{lifecycleActorGuard(user, org, "organization.group.manage"), {SQL: "UPDATE groups SET name=?,description=?,updated_at=? WHERE id=? AND organization_id=?", Args: []any{g.Name, g.Description, nowString(), id, org}, ExpectedRowsAffected: requireOne()}})
+	return g, lifecycleError(err)
 }
 func (s *Service) DeleteGroupAuthorized(ctx context.Context, user, org, id string) error {
 	if _, err := s.GetGroupAuthorized(ctx, user, org, id, ReadStrong); err != nil {
@@ -86,7 +86,7 @@ func (s *Service) DeleteGroupAuthorized(ctx context.Context, user, org, id strin
 	if len(rows) > 0 {
 		return serviceError(409, "group cannot be deleted while role bindings reference it")
 	}
-	return s.store.Transaction(ctx, []Statement{assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM role_bindings WHERE subject_type='group' AND subject_id=?)", id), {SQL: "DELETE FROM group_memberships WHERE group_id=?", Args: []any{id}}, {SQL: "DELETE FROM groups WHERE id=? AND organization_id=?", Args: []any{id, org}, ExpectedRowsAffected: requireOne()}})
+	return lifecycleError(s.store.Transaction(ctx, []Statement{lifecycleActorGuard(user, org, "organization.group.manage"), assertion("SELECT 1 FROM groups WHERE id=? AND organization_id=?", id, org), assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM role_bindings WHERE subject_type='group' AND subject_id=?)", id), {SQL: "DELETE FROM group_memberships WHERE group_id=?", Args: []any{id}}, {SQL: "DELETE FROM groups WHERE id=? AND organization_id=?", Args: []any{id, org}, ExpectedRowsAffected: requireOne()}}))
 }
 func (s *Service) ListGroupMembersAuthorized(ctx context.Context, user, org, id string, c ReadConsistency) ([]GroupMember, error) {
 	if _, err := s.GetGroupAuthorized(ctx, user, org, id, c); err != nil {
@@ -110,15 +110,14 @@ func (s *Service) AddGroupMemberAuthorized(ctx context.Context, user, org, id, t
 		return GroupMember{}, serviceError(403, fmt.Sprintf("forbidden: user %s is not an active member of organization %s", target, org))
 	}
 	membership := rowString(rows[0], "id")
-	err = s.store.Transaction(ctx, []Statement{assertion("SELECT 1 FROM organization_memberships om JOIN users u ON u.id=om.user_id JOIN organizations o ON o.id=om.organization_id JOIN groups g ON g.organization_id=o.id WHERE om.id=? AND om.status='active' AND u.active=1 AND o.inactivated_at IS NULL AND g.id=?", membership, id), {SQL: "INSERT INTO group_memberships(group_id,organization_membership_id) VALUES(?,?) ON CONFLICT DO NOTHING", Args: []any{id, membership}}})
-	return GroupMember{GroupID: id, OrganizationMembershipID: membership, UserID: target}, err
+	err = s.store.Transaction(ctx, []Statement{lifecycleActorGuard(user, org, "organization.group.manage"), assertion("SELECT 1 FROM organization_memberships om JOIN users u ON u.id=om.user_id JOIN organizations o ON o.id=om.organization_id JOIN groups g ON g.organization_id=o.id WHERE om.id=? AND om.status='active' AND u.active=1 AND o.inactivated_at IS NULL AND g.id=?", membership, id), {SQL: "INSERT INTO group_memberships(group_id,organization_membership_id) VALUES(?,?) ON CONFLICT DO NOTHING", Args: []any{id, membership}}})
+	return GroupMember{GroupID: id, OrganizationMembershipID: membership, UserID: target}, lifecycleError(err)
 }
 func (s *Service) RemoveGroupMemberAuthorized(ctx context.Context, user, org, id, target string) error {
 	if _, err := s.GetGroupAuthorized(ctx, user, org, id, ReadStrong); err != nil {
 		return err
 	}
-	_, err := s.store.Exec(ctx, "DELETE FROM group_memberships WHERE group_id=? AND organization_membership_id IN(SELECT id FROM organization_memberships WHERE organization_id=? AND user_id=?)", id, org, target)
-	return err
+	return lifecycleError(s.store.Transaction(ctx, []Statement{lifecycleActorGuard(user, org, "organization.group.manage"), assertion("SELECT 1 FROM groups WHERE id=? AND organization_id=?", id, org), {SQL: "DELETE FROM group_memberships WHERE group_id=? AND organization_membership_id IN(SELECT id FROM organization_memberships WHERE organization_id=? AND user_id=?)", Args: []any{id, org, target}}}))
 }
 func (s *Service) EnrollOrganizationMemberAuthorized(ctx context.Context, user, org, target string) (OrganizationMembership, error) {
 	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.member.manage", "manage organization members", ReadStrong); err != nil {

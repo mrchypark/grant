@@ -66,6 +66,14 @@ func decodeRows[T any](rows []map[string]any) ([]T, error) {
 	return out, nil
 }
 func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
+	if err := validateRoleBinding(b); err != nil {
+		return err
+	}
+	_, e := s.Execute(ctx, requestID(), roleBindingStatement(b))
+	return e
+}
+
+func validateRoleBinding(b RoleBinding) error {
 	if b.SubjectType != "user" && b.SubjectType != "group" && b.SubjectType != "organization" {
 		return fmt.Errorf("invalid binding subject")
 	}
@@ -79,7 +87,11 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
 	if cross && (b.SubjectType != "organization" || b.AgreementID == nil) {
 		return fmt.Errorf("cross-organization binding requires organization subject and agreement")
 	}
-	_, e := s.Execute(ctx, requestID(), Statement{SQL: `WITH ` + agreementBoundsSQL + ` INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at)
+	return nil
+}
+
+func roleBindingStatement(b RoleBinding) Statement {
+	return Statement{SQL: `WITH ` + agreementBoundsSQL + ` INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,agreement_id,state,created_by_user_id,created_at,updated_at)
  SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
  WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=$5 AND active=1)
  AND EXISTS(SELECT 1 FROM organizations WHERE id=$4 AND inactivated_at IS NULL)
@@ -88,8 +100,7 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
  AND ($2<>'group' OR EXISTS(SELECT 1 FROM groups WHERE id=$3 AND organization_id=$4))
  AND ($2<>'user' OR EXISTS(SELECT 1 FROM organization_memberships WHERE user_id=$3 AND organization_id=$4))
  AND ($5<>'grant' OR $6<>'organization' OR EXISTS(SELECT 1 FROM organizations WHERE id=$7 AND inactivated_at IS NULL))
- AND ($9 IS NULL OR EXISTS(SELECT 1 FROM valid_agreements WHERE id=$9 AND (starts_at IS NULL OR starts_at<=$14) AND (ends_at IS NULL OR ends_at>=$14) AND ($5<>'grant' OR $6<>'organization' OR $7=$4 OR (grantor_organization_id=$7 AND grantee_organization_id=$4))))`, Args: []any{b.ID, b.SubjectType, b.SubjectID, b.SubjectOrganizationID, b.ProviderID, b.ResourceType, b.ResourceID, b.RoleID, b.AgreementID, b.State, b.CreatedByUserID, b.CreatedAt, b.UpdatedAt, time.Now().UTC().Format(agreementTimeLayout)}, ExpectedRowsAffected: requireOne()})
-	return e
+ AND ($9 IS NULL OR EXISTS(SELECT 1 FROM valid_agreements WHERE id=$9 AND (starts_at IS NULL OR starts_at<=$14) AND (ends_at IS NULL OR ends_at>=$14) AND ($5<>'grant' OR $6<>'organization' OR $7=$4 OR (grantor_organization_id=$7 AND grantee_organization_id=$4))))`, Args: []any{b.ID, b.SubjectType, b.SubjectID, b.SubjectOrganizationID, b.ProviderID, b.ResourceType, b.ResourceID, b.RoleID, b.AgreementID, b.State, b.CreatedByUserID, b.CreatedAt, b.UpdatedAt, time.Now().UTC().Format(agreementTimeLayout)}, ExpectedRowsAffected: requireOne()}
 }
 
 // Shared by authorization reads and replicated mutation guards. Rhiza forbids
