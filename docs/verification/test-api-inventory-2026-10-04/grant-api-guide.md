@@ -1,6 +1,6 @@
 # 현재 Grant API 안내서
 
-> **2026-10-05 배포 변경:** 현재 경로는 본문 없는 `POST /api/v1/me/ensure`이며, `/me/materialize`는 404를 반환한다. `GET /me`는 조회만 하고, ensure 이전에는 `404 LOCAL_USER_NOT_PROVISIONED`를 반환한다. Ensure는 내부 신원만 준비하며 조직 가입이나 권한을 만들지 않는다. 관리 catalog는 generation 6이다. 아래 표와 runtime 파일은 10월 4일의 관측 기록으로 보존한다. 현재 계약과 실제 호출 결과는 [10월 5일 검증 기록](../../../../deploy/infra/dev/patch/patch-data-grant-exposure-go-v1/verification-2026-10-05-me-ensure.md)을 참고한다.
+> **2026-10-05 배포 변경:** 현재 경로는 본문 없는 `POST /api/v1/me/ensure`이며, `/me/materialize`는 404를 반환한다. `GET /me`는 조회만 하고, ensure 이전에는 `404 LOCAL_USER_NOT_PROVISIONED`를 반환한다. Ensure는 내부 신원만 준비하며 조직 가입이나 권한을 만들지 않는다. 관리 catalog는 generation 6이다. 아래 표와 runtime 파일은 10월 4일의 관측 기록으로 보존한다. 현재 계약과 실제 호출 결과는 [10월 5일 검증 기록](https://github.com/Conalog/deploy/blob/da4f2f983c6310e23ae6e00b8f94ded63f173ba5/infra/dev/patch/patch-data-grant-exposure-go-v1/verification-2026-10-05-me-ensure.md)을 참고한다.
 
 기준일은 **2026-10-04**이다. 이 안내서는 런타임 담당자가 저장한 live 증거와 **배포 이미지의 커밋 `16020fe78bc4a1908f8cc105f0a0c728f5bbce4e`**의 라우트·핸들러·서비스를 기준으로 작성했다. 현재 작업 공간의 HEAD `3d9d4018bfc044421caffba4001901052c1569a3`는 배포 버전과 다르므로 현행 API의 기준으로 사용하지 않는다. 이 문서 작성자는 클러스터를 실행하거나 호출하지 않았다.
 

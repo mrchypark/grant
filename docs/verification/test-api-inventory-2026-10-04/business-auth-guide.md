@@ -18,7 +18,7 @@
 
 업무 API 369개는 목록·단건 조회 **168개**, 생성·수정·삭제 **180개**, 파일 GET·HEAD **20개**, 배치 **1개**로 구성됩니다. 컬렉션 이름과 안정적인 컬렉션 ID는 같은 기능의 두 URL 별칭이므로, 369개의 서로 다른 업무 기능이 있다는 뜻은 아닙니다. 기본 컬렉션은 31개이고 뷰는 11개입니다. 기본 컬렉션 가운데 `rsd_command_tasks`는 읽기만 공개하므로 쓰기 가능한 컬렉션은 30개입니다.
 
-필드와 관계의 **소스 기준선**은 [업무 manifest](../../../internal/grant/patch_data_collections.json), [카탈로그 설명](../../catalog-coverage.md), [Patch Data 스키마 스냅샷](../../../../patch-data-auth-extraction/database/pb_migrations/1785485804_collections_snapshot.js)입니다. 로컬 추출 작업트리 HEAD는 `b7258579b92808b2f1c56795034214946224a602`이며 [배포 이미지의 OCI revision](runtime/image-patch-data.json)과 같습니다. 스냅샷 끝의 인증 분리 변환까지 적용하여 읽었습니다. 이 연결은 배포 이미지가 표기한 소스의 스키마 근거이며 **현재 DB에서 받아 온 스키마는 아닙니다**. [오늘 collection 정의 조회](runtime/collection-definitions-data.json)는 **401**로 실패했고 `collections=[]`, `businessCollectionCount=null`입니다. 따라서 DB의 필드 드리프트·후속 변경·전체 필드 값은 확인하지 못했습니다. 각 컬렉션에서 말하는 필요성은 이 구조가 지원하는 업무를 설명한 것이며, JSON 내부의 계약이나 장비 동작처럼 근거가 부족한 부분은 추론으로 표시합니다.
+필드와 관계의 **소스 기준선**은 [업무 manifest](../../../internal/grant/patch_data_collections.json), [카탈로그 설명](../../catalog-coverage.md), [Patch Data 스키마 스냅샷](https://github.com/Conalog/patch-data-extend/blob/b7258579b92808b2f1c56795034214946224a602/database/pb_migrations/1785485804_collections_snapshot.js)입니다. 로컬 추출 작업트리 HEAD는 `b7258579b92808b2f1c56795034214946224a602`이며 [배포 이미지의 OCI revision](runtime/image-patch-data.json)과 같습니다. 스냅샷 끝의 인증 분리 변환까지 적용하여 읽었습니다. 이 연결은 배포 이미지가 표기한 소스의 스키마 근거이며 **현재 DB에서 받아 온 스키마는 아닙니다**. [오늘 collection 정의 조회](runtime/collection-definitions-data.json)는 **401**로 실패했고 `collections=[]`, `businessCollectionCount=null`입니다. 따라서 DB의 필드 드리프트·후속 변경·전체 필드 값은 확인하지 못했습니다. 각 컬렉션에서 말하는 필요성은 이 구조가 지원하는 업무를 설명한 것이며, JSON 내부의 계약이나 장비 동작처럼 근거가 부족한 부분은 추론으로 표시합니다.
 
 업무·관리 활성 계약은 모두 `accessMode=authorized`입니다. 업무 요청은 Exposure에서 Grant 평가를 거친 뒤 **서버 소유 service-token**으로 Patch Data에 전달합니다. 사용자 토큰을 업무 서버의 로그인 토큰으로 취급하지 않습니다. 업무·관리 합계 **438개**에 직접 Patch Auth 기능이나 아래의 소스 전용 경로를 더하지 않습니다.
 
@@ -440,7 +440,7 @@ multipart 배치는 `@jsonPayload`로 요청 배열을 담고 파일 필드는 `
 
 이 절의 인증 컬렉션은 **Patch Auth origin**에 속합니다. 앞에서 설명한 동일한 이름·ID의 **Patch Data 업무 origin**과 혼동하면 안 됩니다. [배포 설정](runtime/exposure-configuration.json)의 인증 서비스는 `http://patch-auth.patch-data-grant-exposure-go-v1.svc.cluster.local:8091`입니다. 클러스터 내부 주소이며 외부 인터넷 공개 URL이라는 뜻은 아닙니다. 네트워크 endpoint와 포트 포워드를 통한 응답이 확인되었습니다. 사용자 접근 주소는 [런타임 네트워크 근거](runtime/network-access.json)와 해당 환경의 접속 방법을 따릅니다.
 
-소스 근거는 [Patch Auth README](../../../../patch-auth/README.md), [인증 스키마 설명](../../../../patch-auth/docs/database-schema.md), [인증 migration](../../../../patch-auth/pb_migrations/1778142859_auth_collections.js), [보안 migration](../../../../patch-auth/pb_migrations/1785485805_auth_security.js)입니다. **인증 소스와 배포의 연결 확실성은 업무 스키마보다 낮습니다.** 배포 이미지 digest는 `sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335`이고 [OCI labels](runtime/image-patch-auth.json)는 비어 있어 배포 revision을 검증하지 못했습니다. [레지스트리 tag 관찰](runtime/image-tags-patch-auth.json)은 같은 digest에 `sha-5130e33e8457e94395ce69180faf863cbf2f8dd6`와 `sha-bc973ffe0c84a6f4728aa183890033f9d44f27ef`를 연결하며 로컬 HEAD는 전자입니다. tag는 변경 가능하므로 이 연결만으로 로컬 보안 훅 전체가 배포되었다고 단정하지 않습니다. 소스의 PocketBase 0.40.3 기준도 배포 바이너리 버전 관찰과 구분합니다.
+소스 근거는 [Patch Auth README](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/README.md), [인증 스키마 설명](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/docs/database-schema.md), [인증 migration](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_migrations/1778142859_auth_collections.js), [보안 migration](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_migrations/1785485805_auth_security.js)입니다. **인증 소스와 배포의 연결 확실성은 업무 스키마보다 낮습니다.** 배포 이미지 digest는 `sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335`이고 [OCI labels](runtime/image-patch-auth.json)는 비어 있어 배포 revision을 검증하지 못했습니다. [레지스트리 tag 관찰](runtime/image-tags-patch-auth.json)은 같은 digest에 `sha-5130e33e8457e94395ce69180faf863cbf2f8dd6`와 `sha-bc973ffe0c84a6f4728aa183890033f9d44f27ef`를 연결하며 로컬 HEAD는 전자입니다. tag는 변경 가능하므로 이 연결만으로 로컬 보안 훅 전체가 배포되었다고 단정하지 않습니다. 소스의 PocketBase 0.40.3 기준도 배포 바이너리 버전 관찰과 구분합니다.
 
 ### 오늘 직접 관찰한 인증 설정
 
@@ -506,7 +506,7 @@ multipart 배치는 `@jsonPayload`로 요청 배열을 담고 파일 필드는 `
 
 ### 소스에서만 확인한 CSAP MFA: 중간 인증과 최종 로그인을 나누는 이유
 
-비밀번호만 맞았다고 모든 로그인을 완료하지 않고 추가 코드 확인을 요구하면 비밀번호 유출만으로 계정을 사용하는 위험을 줄일 수 있습니다. [CSAP 설정 훅](../../../../patch-auth/pb_hooks/csap_mfa.pb.js)은 `CSAP_SECURITY_ENABLED=true`일 때 users의 auth token 30분, MFA 10분, OTP 3분·6자리를 구성합니다. `CSAP_MFA_EXEMPT_EMAILS` 예외도 별도로 적용됩니다. 이것은 **소스의 조건부 기능**이며 오늘 배포 설정을 확인하기 전에는 활성 기능이라고 주장하지 않습니다.
+비밀번호만 맞았다고 모든 로그인을 완료하지 않고 추가 코드 확인을 요구하면 비밀번호 유출만으로 계정을 사용하는 위험을 줄일 수 있습니다. [CSAP 설정 훅](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_hooks/csap_mfa.pb.js)은 `CSAP_SECURITY_ENABLED=true`일 때 users의 auth token 30분, MFA 10분, OTP 3분·6자리를 구성합니다. `CSAP_MFA_EXEMPT_EMAILS` 예외도 별도로 적용됩니다. 이것은 **소스의 조건부 기능**이며 오늘 배포 설정을 확인하기 전에는 활성 기능이라고 주장하지 않습니다.
 
 | 소스 메서드·경로 | 필요성과 단계 | 입력·응답 개념 / 공개 여부 |
 |---|---|---|
@@ -517,15 +517,15 @@ multipart 배치는 `@jsonPayload`로 요청 배열을 담고 파일 필드는 `
 | `POST /api/csap/mfa/cancel` | 사용자가 중간 인증을 중단하여 challenge를 종료합니다. | 입력 `challengeToken`; 소스는 검증 후 정리하고 204를 반환합니다. 이미 완료한 모든 bearer의 로그아웃 API라고 해석하지 않습니다. |
 | `POST /api/collections/users/auth-with-otp` 및 소스 ID 별칭 | 최종 코드·OTP·MFA·challenge를 함께 맞추고 인증 토큰을 반환합니다. | 로컬 훅은 `X-Patch-CSAP-Challenge` header, query `mfaId`, 본문 `otpId`·6자리 `password`를 확인합니다. 이 CSAP 추가 계약과 ID 별칭은 배포에서 실행 검증하지 않았습니다. |
 
-구체적인 request key·header 계약은 [CSAP 구현](../../../../patch-auth/pb_hooks/csap_mfa.shared.js)의 **로컬 소스 기준선**입니다. 이 구현은 OTP 요청에도 `X-Patch-CSAP-Challenge`를 요구하며 본문 email과 challenge의 사용자를 맞춥니다. 오늘의 MFA/OTP enabled 관찰만으로 CSAP 훅·환경 변수·위 경로의 배포를 확정하지 않습니다. 인증 이미지가 두 SHA tag에 연결되어 있고 revision label이 없다는 공백을 유지합니다. 소스 상태 `send_reserved,sending,awaiting_activation,active,delivery_unknown,exhausted,authenticating,terminal`은 발송 성공 여부가 불확실한 경우와 인증 진행 중 상태를 따로 처리하려는 구조입니다. 내부 상태 레코드를 직접 CRUD하여 최종 인증을 완료하는 공개 방식은 아닙니다. 별도 계정 Exposure가 없으므로 이 경로들을 활성 Exposure 수에 포함하지 않습니다.
+구체적인 request key·header 계약은 [CSAP 구현](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_hooks/csap_mfa.shared.js)의 **로컬 소스 기준선**입니다. 이 구현은 OTP 요청에도 `X-Patch-CSAP-Challenge`를 요구하며 본문 email과 challenge의 사용자를 맞춥니다. 오늘의 MFA/OTP enabled 관찰만으로 CSAP 훅·환경 변수·위 경로의 배포를 확정하지 않습니다. 인증 이미지가 두 SHA tag에 연결되어 있고 revision label이 없다는 공백을 유지합니다. 소스 상태 `send_reserved,sending,awaiting_activation,active,delivery_unknown,exhausted,authenticating,terminal`은 발송 성공 여부가 불확실한 경우와 인증 진행 중 상태를 따로 처리하려는 구조입니다. 내부 상태 레코드를 직접 CRUD하여 최종 인증을 완료하는 공개 방식은 아닙니다. 별도 계정 Exposure가 없으므로 이 경로들을 활성 Exposure 수에 포함하지 않습니다.
 
 ### 보안 정책과 가입 동의
 
-[비밀번호 정책](../../../../patch-auth/pb_hooks/users_password_policy.shared.js)은 CSAP 활성 시 문자 종류·길이와 연속 숫자·반복·키보드 연속·개인정보 포함을 검증합니다. [잠금 훅](../../../../patch-auth/pb_hooks/csap_auth_lockout.pb.js)은 users 비밀번호 실패를 5회까지 기록하고 잠금 조건을 적용합니다. 성공 OTP 처리에서는 token key 갱신 등 후속 처리가 있습니다. 비밀번호 변경 시각도 인증 소유 상태입니다. 별도 “비밀번호 정책 API”나 “잠금 해제 API”가 공개되었다는 뜻은 아닙니다.
+[비밀번호 정책](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_hooks/users_password_policy.shared.js)은 CSAP 활성 시 문자 종류·길이와 연속 숫자·반복·키보드 연속·개인정보 포함을 검증합니다. [잠금 훅](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_hooks/csap_auth_lockout.pb.js)은 users 비밀번호 실패를 5회까지 기록하고 잠금 조건을 적용합니다. 성공 OTP 처리에서는 token key 갱신 등 후속 처리가 있습니다. 비밀번호 변경 시각도 인증 소유 상태입니다. 별도 “비밀번호 정책 API”나 “잠금 해제 API”가 공개되었다는 뜻은 아닙니다.
 
-[가입 약관 훅](../../../../patch-auth/pb_hooks/users_agreements.pb.js)은 CSAP 활성 시 인증 소유 `agreement_documents` 가운데 활성·가입 화면 표시 문서를 읽고, 필수 문서가 모두 동의되었는지 확인합니다. 가입 입력의 `agreements`는 `document`와 `agreed=true` 개념을 갖는 배열이며, 저장할 동의 시각·버전·출처는 서버가 확정합니다. 이 검증이 필요한 이유는 체크박스 표시만으로 정확한 문서 버전에 동의했다는 기록이 남지 않기 때문입니다. 비-superuser 응답에는 동의 메타데이터를 숨기는 훅도 있습니다.
+[가입 약관 훅](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_hooks/users_agreements.pb.js)은 CSAP 활성 시 인증 소유 `agreement_documents` 가운데 활성·가입 화면 표시 문서를 읽고, 필수 문서가 모두 동의되었는지 확인합니다. 가입 입력의 `agreements`는 `document`와 `agreed=true` 개념을 갖는 배열이며, 저장할 동의 시각·버전·출처는 서버가 확정합니다. 이 검증이 필요한 이유는 체크박스 표시만으로 정확한 문서 버전에 동의했다는 기록이 남지 않기 때문입니다. 비-superuser 응답에는 동의 메타데이터를 숨기는 훅도 있습니다.
 
-[메일 링크 훅](../../../../patch-auth/pb_hooks/auth_email_links.pb.js)의 `POST /api/auth/action-token/validate`는 `action=password-reset` 또는 `email-verification`과 `token`을 받아 `{valid: ...}`를 반환하는 소스 기능입니다. 만료된 링크에서 입력을 받기 전에 유효성을 표시하는 용도이며, 토큰 검증 성공만으로 재설정·확인을 완료하지 않습니다. 해당 경로의 공개 여부와 `PATCH_SERVICE_ORIGIN` 링크 설정은 별도로 확인해야 합니다.
+[메일 링크 훅](https://github.com/Conalog/patch-auth/blob/5130e33e8457e94395ce69180faf863cbf2f8dd6/pb_hooks/auth_email_links.pb.js)의 `POST /api/auth/action-token/validate`는 `action=password-reset` 또는 `email-verification`과 `token`을 받아 `{valid: ...}`를 반환하는 소스 기능입니다. 만료된 링크에서 입력을 받기 전에 유효성을 표시하는 용도이며, 토큰 검증 성공만으로 재설정·확인을 완료하지 않습니다. 해당 경로의 공개 여부와 `PATCH_SERVICE_ORIGIN` 링크 설정은 별도로 확인해야 합니다.
 
 ## 7. 공개하지 않은 기능과 확인이 남은 부분
 

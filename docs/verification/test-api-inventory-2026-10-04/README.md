@@ -1,6 +1,6 @@
 # 테스트 배포 API 안내와 전체 목록 · 2026-10-04
 
-> **2026-10-05 변경 안내:** Grant의 `/api/v1/me/materialize`가 `/api/v1/me/ensure`로 바뀌었고, `/me` 조회는 사용자를 생성하지 않습니다. 아래 목록과 runtime snapshot은 10월 4일 기록입니다. 현재 호출 방법과 배포·기능 점검 결과는 [10월 5일 검증 기록](../../../../deploy/infra/dev/patch/patch-data-grant-exposure-go-v1/verification-2026-10-05-me-ensure.md)을 참고하세요.
+> **2026-10-05 변경 안내:** Grant의 `/api/v1/me/materialize`가 `/api/v1/me/ensure`로 바뀌었고, `/me` 조회는 사용자를 생성하지 않습니다. 아래 목록과 runtime snapshot은 10월 4일 기록입니다. 현재 호출 방법과 배포·기능 점검 결과는 [10월 5일 검증 기록](https://github.com/Conalog/deploy/blob/da4f2f983c6310e23ae6e00b8f94ded63f173ba5/infra/dev/patch/patch-data-grant-exposure-go-v1/verification-2026-10-05-me-ensure.md)을 참고하세요.
 
 이 문서는 테스트 환경에서 어떤 API를 사용할 수 있는지, 각 기능이 왜 필요한지, 어떤 인증과 권한을 준비해야 하는지를 설명합니다. **현재 활성 catalog와 실제 배포 이미지의 계약**을 기준으로 작성했습니다. 로컬 최신 코드나 9월 12일 검증 기록에만 있는 기능은 현재 지원 기능으로 올리지 않습니다. catalog에 등록된 변경 기능은 계약의 존재를 뜻하며, 이번 조사에서 새 데이터를 생성하거나 수정하거나 삭제했다는 뜻은 아닙니다.
 
