@@ -14,6 +14,19 @@ cleanup() {
   if [ "$result" -ne 0 ]; then
     printf 'Fixture failed (exit %s); logs: %s\n' "$result" "$task_dir" >&2
     docker logs --tail 30 "$container" >"$task_dir/object-store.log" 2>&1 || true
+    for log in "$task_dir"/node-*.log; do
+      [ -f "$log" ] || continue
+      printf '%s\n' "Recent ${log##*/} lines (fixture credentials redacted):" >&2
+      tail -n 20 "$log" | sed \
+        -e 's/local-master-secret/[REDACTED]/g' \
+        -e 's/local-app-secret/[REDACTED]/g' \
+        -e 's/local-fixture-secret/[REDACTED]/g' \
+        -e 's/local-fixture-read/[REDACTED]/g' \
+        -e 's/local-runtime-secret-distinct-32-bytes/[REDACTED]/g' \
+        -e 's/local-rhiza-admin-012345678901234567890123/[REDACTED]/g' \
+        -e 's/local-voter-[0-3]-012345678901234567890123/[REDACTED]/g' \
+        -e 's/local-grant-storage-secret/[REDACTED]/g' >&2
+    done
   fi
   for pid in $pids; do kill "$pid" 2>/dev/null || true; done
   for pid in $pids; do wait "$pid" 2>/dev/null || true; done
@@ -236,7 +249,40 @@ until curl --max-time 3 -fsS "http://127.0.0.1:$http2/healthz" >/dev/null 2>&1; 
   i=$((i+1)); [ "$i" -lt 90 ] || { cat "$task_dir/node-3.log" >&2; exit 1; }; sleep 1
 done
 printf '%s\n' 'Pending learner private gates and graceful restart passed'
-learner_status=$(curl -fsS -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator2/membership/status")
+learner_status_code=$(curl --max-time 3 -sS -o "$task_dir/learner-membership-status.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator2/membership/status") || {
+  echo 'learner membership status request failed before admission' >&2
+  cat "$task_dir/learner-membership-status.json" >&2
+  exit 1
+}
+i=0
+while [ "$learner_status_code" = 503 ]; do
+  check_children
+  i=$((i+1)); [ "$i" -lt 90 ] || {
+    echo 'learner membership status remained unavailable after restart (HTTP 503)' >&2
+    cat "$task_dir/learner-membership-status.json" >&2
+    exit 1
+  }
+  sleep 1
+  learner_status_code=$(curl --max-time 3 -sS -o "$task_dir/learner-membership-status.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator2/membership/status") || {
+    echo 'learner membership status request failed during startup' >&2
+    cat "$task_dir/learner-membership-status.json" >&2
+    exit 1
+  }
+done
+[ "$learner_status_code" = 200 ] || {
+  echo "learner membership status returned HTTP $learner_status_code before admission" >&2
+  cat "$task_dir/learner-membership-status.json" >&2
+  exit 1
+}
+learner_status=$(cat "$task_dir/learner-membership-status.json")
+printf '%s' "$learner_status" | jq -e --arg cluster "$cluster_id" \
+  '.node_id == "grant-3" and .cluster_id == $cluster and .voting == false' >/dev/null || {
+  echo 'fresh learner membership identity or non-voting state was invalid' >&2
+  cat "$task_dir/learner-membership-status.json" >&2
+  exit 1
+}
 learner_wal=$(printf '%s' "$learner_status" | jq -r '.wal_identity')
 [ -n "$learner_wal" ] && [ "$learner_wal" != null ] || { echo 'fresh learner did not expose a WAL identity' >&2; exit 1; }
 add_body=$(jq -cn --arg op add-grant-3 --arg cluster "$cluster_id" --argjson config "$expected_config" \
@@ -246,7 +292,34 @@ curl --fail-with-body -sS -H "Authorization: Bearer $admin_token" -H 'Content-Ty
   --data "$add_body" "http://127.0.0.1:$operator0/membership/change" >"$task_dir/learner-added.json"
 i=0
 while :; do
-  learner_status=$(curl -fsS -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator2/membership/status")
+  learner_status_code=$(curl --max-time 3 -sS -o "$task_dir/learner-membership-status.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator2/membership/status") || {
+    echo 'learner membership status request failed during admission' >&2
+    cat "$task_dir/learner-membership-status.json" >&2
+    exit 1
+  }
+  if [ "$learner_status_code" = 503 ]; then
+    check_children
+    i=$((i+1)); [ "$i" -lt 90 ] || {
+      echo 'learner membership status remained unavailable during admission (HTTP 503)' >&2
+      cat "$task_dir/learner-membership-status.json" >&2
+      exit 1
+    }
+    sleep 1
+    continue
+  fi
+  [ "$learner_status_code" = 200 ] || {
+    echo "learner membership status returned HTTP $learner_status_code during admission" >&2
+    cat "$task_dir/learner-membership-status.json" >&2
+    exit 1
+  }
+  learner_status=$(cat "$task_dir/learner-membership-status.json")
+  printf '%s' "$learner_status" | jq -e --arg cluster "$cluster_id" --arg wal "$learner_wal" \
+    '.node_id == "grant-3" and .cluster_id == $cluster and .wal_identity == $wal' >/dev/null || {
+    echo 'learner membership identity or WAL changed during admission' >&2
+    cat "$task_dir/learner-membership-status.json" >&2
+    exit 1
+  }
   if printf '%s' "$learner_status" | jq -e '.voting == true' >/dev/null 2>&1; then break; fi
   i=$((i+1)); [ "$i" -lt 90 ] || { echo 'learner admission did not promote the fresh voter' >&2; exit 1; }; sleep 1
 done
