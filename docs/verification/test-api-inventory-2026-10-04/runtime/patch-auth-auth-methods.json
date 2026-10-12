@@ -1,0 +1,31 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:44:38Z",
+    "kst": "2026-10-04T20:44:38+0900",
+    "method": "read-only unauthenticated HTTP GET via patch-auth port-forward; OAuth provider details limited to identifiers",
+    "source": "GET /api/collections/users/auth-methods"
+  },
+  "httpStatus": 200,
+  "authMethods": {
+    "password": {
+      "enabled": true,
+      "identityFields": [
+        "email",
+        "username"
+      ]
+    },
+    "oauth2": {
+      "enabled": true,
+      "providerIds": []
+    },
+    "otp": {
+      "enabled": true
+    },
+    "mfa": {
+      "enabled": true
+    },
+    "legacyPasswordEnabled": true,
+    "legacyUsernamePasswordEnabled": true,
+    "legacyProviderIds": []
+  }
+}

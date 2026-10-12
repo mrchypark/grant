@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/mrchypark/rhiza"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,9 +30,41 @@ func requestID() string {
 }
 func nowString() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func OpenStore(ctx context.Context, cfg Config) (*Store, error) {
-	return openStore(ctx, cfg, false)
+	return openStore(ctx, cfg, false, nil)
 }
-func openStore(ctx context.Context, cfg Config, restoring bool) (*Store, error) {
+
+// OpenStoreWithOperator starts the private operator listener after Rhiza has
+// opened its peer endpoint, before Grant waits for quorum or bootstraps data.
+func OpenStoreWithOperator(ctx context.Context, cfg Config, start func(http.Handler) error) (*Store, error) {
+	return openStore(ctx, cfg, false, start)
+}
+
+func effectiveRhizaConfig(d DatabaseConfig) (rhiza.Config, error) {
+	c := d.Rhiza
+	if c.NodeID == "" {
+		c.NodeID = d.NodeID
+	}
+	if c.NodeID == "" {
+		c.NodeID = "grant-1"
+	}
+	if c.ClusterID == "" {
+		c.ClusterID = d.ClusterID
+	}
+	if c.PeerAddr == "" {
+		c.PeerAddr = d.PeerAddr
+	}
+	if c.Members == nil {
+		c.Members = d.Members
+	} else if len(c.Members) == 0 && len(d.Members) > 1 {
+		return c, fmt.Errorf("empty Rhiza membership cannot override a multi-voter cluster")
+	}
+	if c.Local && len(c.Members) > 1 {
+		return c, fmt.Errorf("local Rhiza mode cannot serve a multi-voter cluster")
+	}
+	return c, nil
+}
+
+func openStore(ctx context.Context, cfg Config, restoring bool, startOperator func(http.Handler) error) (*Store, error) {
 	if cfg.Database.DataDir == "" {
 		return nil, fmt.Errorf("Grant data directory is required")
 	}
@@ -60,23 +93,11 @@ func openStore(ctx context.Context, cfg Config, restoring bool) (*Store, error) 
 	if err != nil {
 		return nil, err
 	}
-	c := cfg.Database.Rhiza
+	c, err := effectiveRhizaConfig(cfg.Database)
+	if err != nil {
+		return nil, err
+	}
 	c.DataDir = dir
-	if c.NodeID == "" {
-		c.NodeID = cfg.Database.NodeID
-	}
-	if c.NodeID == "" {
-		c.NodeID = "grant-1"
-	}
-	if c.ClusterID == "" {
-		c.ClusterID = cfg.Database.ClusterID
-	}
-	if c.PeerAddr == "" {
-		c.PeerAddr = cfg.Database.PeerAddr
-	}
-	if c.Members == nil {
-		c.Members = cfg.Database.Members
-	}
 	s := &Store{cfg: cfg}
 	if cfg.Database.RuntimeMode == "remote" {
 		return s, nil
@@ -127,25 +148,23 @@ func openStore(ctx context.Context, cfg Config, restoring bool) (*Store, error) 
 	if err != nil {
 		return nil, err
 	}
-	readyCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	for {
-		_, e := s.db.Query(readyCtx, rhiza.QueryRequest{SQL: "SELECT 1", Consistency: rhiza.ConsistencyLinearizable})
-		if e == nil {
-			break
-		}
-		if !errors.Is(e, rhiza.ErrNotReady) && !errors.Is(e, rhiza.ErrQuorumUnavailable) {
+	if startOperator != nil {
+		handler, handlerErr := s.OperatorHandler()
+		if handlerErr != nil {
 			s.Close()
-			return nil, fmt.Errorf("startup strong read: %w", e)
+			return nil, handlerErr
 		}
-		select {
-		case <-readyCtx.Done():
+		if err = startOperator(handler); err != nil {
 			s.Close()
-			return nil, fmt.Errorf("wait for Rhiza quorum readiness: %w", readyCtx.Err())
-		case <-time.After(250 * time.Millisecond):
+			return nil, fmt.Errorf("start Rhiza operator listener: %w", err)
 		}
 	}
-	if err = s.Migrate(ctx); err != nil {
+	if c.Learner != nil {
+		return s, nil
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err = s.waitForReady(readyCtx, false); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -164,6 +183,44 @@ func openStore(ctx context.Context, cfg Config, restoring bool) (*Store, error) 
 		}
 	}
 	return s, nil
+}
+
+// WaitForPromotion waits for a native learner to become a voter. It has no
+// deadline: membership admission is controlled by an external fence workflow.
+func (s *Store) WaitForPromotion(ctx context.Context) error {
+	return s.waitForReady(ctx, true)
+}
+
+func (s *Store) waitForReady(ctx context.Context, requireVoter bool) error {
+	if s.db == nil {
+		return fmt.Errorf("local Rhiza voter required")
+	}
+	for {
+		_, e := s.db.Query(ctx, rhiza.QueryRequest{SQL: "SELECT 1", Consistency: rhiza.ConsistencyLinearizable})
+		if e == nil && !requireVoter {
+			break
+		}
+		if e == nil {
+			status, statusErr := s.db.MembershipStatus()
+			if statusErr == nil && status.Voting {
+				break
+			}
+			if statusErr != nil && !errors.Is(statusErr, rhiza.ErrNotReady) {
+				return fmt.Errorf("read Rhiza membership status: %w", statusErr)
+			}
+		} else if !errors.Is(e, rhiza.ErrNotReady) && !errors.Is(e, rhiza.ErrQuorumUnavailable) {
+			return fmt.Errorf("startup strong read: %w", e)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for Rhiza quorum readiness: %w", ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if err := s.Migrate(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 func (s *Store) Close() error {
 	if s.replica != nil {

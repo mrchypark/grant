@@ -37,13 +37,18 @@ type DatabaseConfig struct {
 	Rhiza                                                                                                              rhiza.Config
 	Replica                                                                                                            rhiza.ReplicaConfig
 	RemoteNodes                                                                                                        []string
-	RemoteAPISecret, RuntimeBindAddr, ReadFenceKey                                                                     string
+	RemoteAPISecret, RuntimeBindAddr, OperatorBindAddr, ReadFenceKey                                                   string
 }
 type Config struct {
 	Server   ServerConfig
 	Security SecurityConfig
 	Auth     AuthConfig
 	Database DatabaseConfig
+}
+
+type configuredMember struct {
+	rhiza.Member
+	Token string `json:"token"`
 }
 
 func envDefault(k, v string) string {
@@ -97,6 +102,9 @@ func ConfigFromEnv() (Config, error) {
 }
 
 func loadDatabaseConfig(c *Config) error {
+	if os.Getenv("RHIZA_BIND_ADDR") != "" {
+		return loadOperatorDatabaseConfig(c)
+	}
 	d := &c.Database
 	d.NodeID = envDefault("GRANT_NODE_ID", envDefault("POD_NAME", "grant-1"))
 	d.RemoteAPISecret = os.Getenv("GRANT_REMOTE_API_SECRET")
@@ -114,16 +122,8 @@ func loadDatabaseConfig(c *Config) error {
 			d.RemoteNodes = append(d.RemoteNodes, strings.TrimRight(v, "/"))
 		}
 	}
-	if d.RuntimeBindAddr != "" || (len(d.RemoteNodes) > 0 && d.LocalNodeRole != "learner") {
-		if len(d.RemoteAPISecret) < 32 || d.RemoteAPISecret == c.Security.MasterKey || d.RemoteAPISecret == c.Security.AppAuthKey {
-			return fmt.Errorf("runtime transport needs distinct GRANT_REMOTE_API_SECRET of at least 32 bytes")
-		}
-	}
-	if d.ReadFenceKey != "" && (len(d.ReadFenceKey) < 32 || d.ReadFenceKey == d.RemoteAPISecret || d.ReadFenceKey == c.Security.MasterKey || d.ReadFenceKey == c.Security.AppAuthKey) {
-		return fmt.Errorf("read fence key must be distinct and at least 32 bytes")
-	}
-	if d.LocalNodeRole == "learner" && (len(d.RemoteNodes) == 0 || len(d.ReadFenceKey) < 32 || d.RuntimeBindAddr != "" || d.RemoteAPISecret != "") {
-		return fmt.Errorf("learner requires private read-fence transport, without runtime writer credentials/listener")
+	if err := validateRuntimeConfig(*d, c.Security); err != nil {
+		return err
 	}
 	switch d.RuntimeMode {
 	case "embedded", "remote", "split":
@@ -138,14 +138,30 @@ func loadDatabaseConfig(c *Config) error {
 	default:
 		return fmt.Errorf("invalid local node role")
 	}
+	var clusterMembers []configuredMember
+	clusterMembersSet := os.Getenv("GRANT_CLUSTER_MEMBERS") != ""
 	if raw := os.Getenv("GRANT_CLUSTER_MEMBERS"); raw != "" {
-		if e := json.Unmarshal([]byte(raw), &d.Members); e != nil {
+		if e := json.Unmarshal([]byte(raw), &clusterMembers); e != nil {
 			return e
 		}
 	}
+	var rhizaMembers []configuredMember
+	rhizaMembersSet := false
 	if raw := os.Getenv("GRANT_RHIZA_CONFIG_JSON"); raw != "" {
 		if e := json.Unmarshal([]byte(raw), &d.Rhiza); e != nil {
 			return e
+		}
+		var fields map[string]json.RawMessage
+		if e := json.Unmarshal([]byte(raw), &fields); e != nil {
+			return e
+		}
+		for name, value := range fields {
+			if strings.EqualFold(name, "members") {
+				rhizaMembersSet = true
+				if e := json.Unmarshal(value, &rhizaMembers); e != nil {
+					return e
+				}
+			}
 		}
 	}
 	if raw := os.Getenv("GRANT_RHIZA_REPLICA_CONFIG_JSON"); raw != "" {
@@ -154,16 +170,39 @@ func loadDatabaseConfig(c *Config) error {
 		}
 	}
 	if d.LocalNodeRole == "learner" {
+		if d.Rhiza.PeerToken != "" || os.Getenv("RHIZA_PEER_TOKEN") != "" {
+			return fmt.Errorf("learner must not receive a voter peer token")
+		}
 		if len(d.Replica.Members) == 0 {
 			return fmt.Errorf("learner requires public replica members")
 		}
-		for _, members := range [][]rhiza.Member{d.Members, d.Rhiza.Members} {
-			for _, member := range members {
-				if member.Token != "" {
-					return fmt.Errorf("learner must not receive voter member tokens")
-				}
-			}
+	}
+	effective, err := effectiveRhizaConfig(*d)
+	if err != nil {
+		return err
+	}
+	peerToken := d.Rhiza.PeerToken
+	if token := os.Getenv("RHIZA_PEER_TOKEN"); token != "" {
+		if peerToken != "" && peerToken != token {
+			return fmt.Errorf("RHIZA_PEER_TOKEN does not match configured peer token")
 		}
+		peerToken = token
+	}
+	if clusterMembersSet {
+		d.Members, peerToken, err = publicMembers(clusterMembers, effective.ClusterID, effective.NodeID, peerToken, d.LocalNodeRole == "learner")
+		if err != nil {
+			return err
+		}
+	}
+	if rhizaMembersSet {
+		d.Rhiza.Members, peerToken, err = publicMembers(rhizaMembers, effective.ClusterID, effective.NodeID, peerToken, d.LocalNodeRole == "learner")
+		if err != nil {
+			return err
+		}
+	}
+	d.Rhiza.PeerToken = peerToken
+	if _, err := effectiveRhizaConfig(*d); err != nil {
+		return err
 	}
 	r := &d.Rhiza
 	for _, v := range []struct {
@@ -202,4 +241,137 @@ func loadDatabaseConfig(c *Config) error {
 		}
 	}
 	return nil
+}
+
+func validateRuntimeConfig(d DatabaseConfig, security SecurityConfig) error {
+	if d.RuntimeBindAddr != "" || (len(d.RemoteNodes) > 0 && d.LocalNodeRole != "learner") {
+		if len(d.RemoteAPISecret) < 32 || d.RemoteAPISecret == security.MasterKey || d.RemoteAPISecret == security.AppAuthKey {
+			return fmt.Errorf("runtime transport needs distinct GRANT_REMOTE_API_SECRET of at least 32 bytes")
+		}
+	}
+	if d.ReadFenceKey != "" && (len(d.ReadFenceKey) < 32 || d.ReadFenceKey == d.RemoteAPISecret || d.ReadFenceKey == security.MasterKey || d.ReadFenceKey == security.AppAuthKey) {
+		return fmt.Errorf("read fence key must be distinct and at least 32 bytes")
+	}
+	if d.LocalNodeRole == "learner" && (len(d.RemoteNodes) == 0 || len(d.ReadFenceKey) < 32 || d.RuntimeBindAddr != "" || d.RemoteAPISecret != "") {
+		return fmt.Errorf("learner requires private read-fence transport, without runtime writer credentials/listener")
+	}
+	return nil
+}
+
+// loadOperatorDatabaseConfig uses the generation-owned RHIZA_* environment.
+// GRANT's older topology aliases are rejected so a stale Deployment value
+// cannot silently replace a generation written by the Rhiza operator.
+func loadOperatorDatabaseConfig(c *Config) error {
+	for _, key := range []string{
+		"GRANT_DATA_DIR", "GRANT_NODE_ID", "GRANT_CLUSTER_ID", "GRANT_PEER_ADDR",
+		"GRANT_CLUSTER_MEMBERS", "GRANT_RHIZA_CONFIG_JSON", "GRANT_RHIZA_REPLICA_CONFIG_JSON",
+		"GRANT_REMOTE_NODES", "GRANT_CLUSTER_RESTORE_SNAPSHOT",
+	} {
+		if os.Getenv(key) != "" {
+			return fmt.Errorf("%s conflicts with operator-managed RHIZA_* configuration", key)
+		}
+	}
+	if mode := os.Getenv("GRANT_RUNTIME_MODE"); mode != "" && mode != "embedded" {
+		return fmt.Errorf("GRANT_RUNTIME_MODE conflicts with operator-managed embedded Rhiza")
+	}
+	if role := os.Getenv("GRANT_LOCAL_NODE_ROLE"); role != "" && role != "voter" {
+		return fmt.Errorf("GRANT_LOCAL_NODE_ROLE conflicts with operator-managed Rhiza learner")
+	}
+
+	r, err := rhiza.ConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("operator Rhiza environment: %w", err)
+	}
+	if err := validateOperatorRhizaConfig(r, c.Security); err != nil {
+		return err
+	}
+	c.Database.DataDir = r.DataDir
+	c.Database.NodeID = r.NodeID
+	c.Database.ClusterID = r.ClusterID
+	c.Database.PeerAddr = r.PeerAddr
+	c.Database.RuntimeMode = "embedded"
+	c.Database.LocalNodeRole = "voter"
+	c.Database.Rhiza = r
+	c.Database.OperatorBindAddr = r.BindAddr
+	c.Database.RemoteAPISecret = os.Getenv("GRANT_REMOTE_API_SECRET")
+	c.Database.ReadFenceKey = os.Getenv("GRANT_READ_FENCE_KEY")
+	c.Database.RuntimeBindAddr = os.Getenv("GRANT_RUNTIME_BIND_ADDR")
+	if err := validateRuntimeConfig(c.Database, c.Security); err != nil {
+		return err
+	}
+	for _, token := range []string{c.Database.RemoteAPISecret, c.Database.ReadFenceKey} {
+		if token != "" && (token == r.PeerToken || token == r.AdminToken) {
+			return fmt.Errorf("Grant runtime credentials must differ from Rhiza credentials")
+		}
+	}
+	return nil
+}
+
+func validateOperatorRhizaConfig(r rhiza.Config, security SecurityConfig) error {
+	if r.BindAddr == "" {
+		return fmt.Errorf("RHIZA_BIND_ADDR is required for operator-managed Rhiza")
+	}
+	if len(r.Members) != 3 {
+		return fmt.Errorf("operator-managed Rhiza requires exactly three voter members")
+	}
+	seen := make(map[string]bool, len(r.Members))
+	for _, member := range r.Members {
+		id := string(member.ID)
+		if id == "" || member.PeerURL == "" || member.PublicKey == (rhiza.PublicKey{}) || seen[id] {
+			return fmt.Errorf("operator-managed Rhiza has invalid voter membership")
+		}
+		seen[id] = true
+	}
+	if !seen[r.NodeID] && r.Learner == nil {
+		return fmt.Errorf("RHIZA_NODE_ID is not in operator voter membership")
+	}
+	if r.Learner == nil && os.Getenv("RHIZA_PEER_TOKENS") == "" {
+		return fmt.Errorf("three-voter operator-managed Rhiza requires RHIZA_PEER_TOKENS")
+	}
+	for _, token := range []struct{ name, value string }{
+		{"RHIZA_PEER_TOKENS/RHIZA_PEER_TOKEN", r.PeerToken},
+		{"RHIZA_ADMIN_TOKEN", r.AdminToken},
+	} {
+		if len(token.value) < 32 {
+			return fmt.Errorf("%s must be at least 32 bytes", token.name)
+		}
+		if token.value == security.MasterKey || token.value == security.AppAuthKey {
+			return fmt.Errorf("%s must differ from Grant business credentials", token.name)
+		}
+	}
+	if r.PeerToken == r.AdminToken {
+		return fmt.Errorf("RHIZA peer and admin tokens must differ")
+	}
+	return nil
+}
+
+func publicMembers(input []configuredMember, clusterID, localID, peerToken string, learner bool) ([]rhiza.Member, string, error) {
+	if input == nil {
+		return nil, peerToken, nil
+	}
+	members := make([]rhiza.Member, 0, len(input))
+	for _, in := range input {
+		member := in.Member
+		if in.Token != "" {
+			if learner {
+				return nil, "", fmt.Errorf("learner must not receive voter member tokens")
+			}
+			key := rhiza.PeerPublicKey(clusterID, string(member.ID), in.Token)
+			if member.PublicKey != (rhiza.PublicKey{}) && member.PublicKey != key {
+				return nil, "", fmt.Errorf("member public key does not match its token")
+			}
+			member.PublicKey = key
+			if string(member.ID) == localID {
+				if peerToken != "" && peerToken != in.Token {
+					return nil, "", fmt.Errorf("local peer token does not match membership")
+				}
+				peerToken = in.Token
+			}
+		}
+		if string(member.ID) == localID && peerToken != "" && rhiza.PeerPublicKey(clusterID, localID, peerToken) != member.PublicKey {
+			return nil, "", fmt.Errorf("local peer token does not match membership")
+		}
+		members = append(members, member)
+	}
+	return members, peerToken, nil
 }

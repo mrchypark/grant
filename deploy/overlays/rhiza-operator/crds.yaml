@@ -1,0 +1,182 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rhizarecoveries.rhiza.mrchypark.dev
+spec:
+  group: rhiza.mrchypark.dev
+  scope: Namespaced
+  names: {plural: rhizarecoveries, singular: rhizarecovery, kind: RhizaRecovery, shortNames: [rhizarecovery]}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [statefulSet, sourceClusterID, durability]
+              properties:
+                statefulSet: {type: string, minLength: 1}
+                container: {type: string}
+                sourceClusterID: {type: string, minLength: 1}
+                durability: {type: string, enum: [async, before-ack]}
+                recoveryID: {type: string}
+                allowDataLoss: {type: boolean}
+                maxArchiveAgeSeconds: {type: integer, format: int64, minimum: 0}
+                anchorID: {type: string}
+                fence:
+                  type: object
+                  properties:
+                    recoveryID: {type: string}
+                    clusterID: {type: string}
+                    statefulSetUID: {type: string}
+                    confirmed: {type: boolean}
+                    evidence: {type: string}
+                membership:
+                  type: object
+                  required: [operationID, remove, fence, voterPods, replacementPod, replacementSecret]
+                  properties:
+                    operationID: {type: string, minLength: 1}
+                    remove: {type: string, minLength: 1}
+                    voterPods:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: object
+                        required: [nodeID, pod]
+                        properties:
+                          nodeID: {type: string, minLength: 1}
+                          pod: {type: string, minLength: 1}
+                    removedPod: {type: string}
+                    abortAddition: {type: boolean}
+                    replacementPod: {type: string, minLength: 1}
+                    replacementSecret: {type: string, minLength: 1}
+                    fence:
+                      type: object
+                      required: [nodeID, walIdentity, workloadUID, confirmed, evidence]
+                      properties:
+                        nodeID: {type: string, minLength: 1}
+                        walIdentity: {type: string, minLength: 1}
+                        workloadUID: {type: string, minLength: 1}
+                        confirmed: {type: boolean}
+                        evidence: {type: string, minLength: 1}
+            status: {type: object, x-kubernetes-preserve-unknown-fields: true}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rhizaclusters.rhiza.mrchypark.dev
+spec:
+  group: rhiza.mrchypark.dev
+  scope: Namespaced
+  names: {plural: rhizaclusters, singular: rhizacluster, kind: RhizaCluster}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [logicalID, statefulSet, container, adoptClusterID, voterPods, automatic, policy]
+              properties:
+                logicalID: {type: string, minLength: 1}
+                statefulSet: {type: string, minLength: 1}
+                container: {type: string, minLength: 1}
+                adoptClusterID: {type: string, minLength: 1}
+                anchorID: {type: string}
+                voterPods:
+                  type: array
+                  minItems: 3
+                  maxItems: 3
+                  items:
+                    type: object
+                    required: [nodeID, pod]
+                    properties:
+                      nodeID: {type: string, minLength: 1}
+                      pod: {type: string, minLength: 1}
+                automatic: {type: boolean}
+                policy:
+                  type: object
+                  required: [failureGraceSeconds, cooldownSeconds, maxRecoveriesPerDay, allowDataLoss]
+                  properties:
+                    failureGraceSeconds: {type: integer, minimum: 1, maximum: 86400}
+                    cooldownSeconds: {type: integer, minimum: 1, maximum: 604800}
+                    maxRecoveriesPerDay: {type: integer, minimum: 1, maximum: 100}
+                    allowDataLoss: {type: boolean}
+            status:
+              type: object
+              properties:
+                phase: {type: string}
+                message: {type: string}
+                activeClusterID: {type: string}
+                activeRecovery: {type: string}
+                observedGeneration: {type: integer, format: int64}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rhizafences.rhiza.mrchypark.dev
+spec:
+  group: rhiza.mrchypark.dev
+  scope: Namespaced
+  names: {plural: rhizafences, singular: rhizafence, kind: RhizaFence}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: fencing requests are immutable
+              required: [logicalID, bindingUID, namespace, statefulSet, statefulSetUID, sourceClusterID, operationID, scope, targets]
+              properties:
+                logicalID: {type: string, maxLength: 256, minLength: 1}
+                bindingUID: {type: string, maxLength: 256, minLength: 1}
+                namespace: {type: string, maxLength: 256, minLength: 1}
+                statefulSet: {type: string, maxLength: 256, minLength: 1}
+                statefulSetUID: {type: string, maxLength: 256, minLength: 1}
+                sourceClusterID: {type: string, maxLength: 256, minLength: 1}
+                operationID: {type: string, maxLength: 256, minLength: 1}
+                scope: {type: string, enum: [Voter, Generation]}
+                targets:
+                  type: array
+                  maxItems: 16
+                  items:
+                    type: object
+                    required: [nodeID, pod, podUID, walIdentity]
+                    properties:
+                      nodeID: {type: string, maxLength: 256, minLength: 1}
+                      pod: {type: string, maxLength: 256}
+                      podUID: {type: string, maxLength: 256}
+                      walIdentity: {type: string, maxLength: 256}
+            status:
+              type: object
+              properties:
+                proof:
+                  type: object
+                  required: [operationID, sourceClusterID, bindingUID, requestHash, proofID, processesTerminated, recreationBlocked, storageQuiesced]
+                  properties:
+                    operationID: {type: string, maxLength: 256, minLength: 1}
+                    sourceClusterID: {type: string, maxLength: 256, minLength: 1}
+                    bindingUID: {type: string, maxLength: 256, minLength: 1}
+                    requestHash: {type: string, pattern: '^[a-f0-9]{64}$'}
+                    proofID: {type: string, maxLength: 256, minLength: 1}
+                    processesTerminated: {type: boolean}
+                    recreationBlocked: {type: boolean}
+                    storageQuiesced: {type: boolean}

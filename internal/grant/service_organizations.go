@@ -37,7 +37,10 @@ func (s *Service) DeactivateOrganization(ctx context.Context, user, org, target 
 	if err := s.requireOrganizationAction(ctx, user, org, target, "organization.permission.manage", "deactivate organization", ReadStrong); err != nil {
 		return Organization{}, err
 	}
-	_, err := s.store.Exec(ctx, "UPDATE organizations SET inactivated_at=COALESCE(inactivated_at,?),updated_at=? WHERE id=?", nowString(), nowString(), target)
+	err := lifecycleError(s.store.Transaction(ctx, []Statement{
+		lifecycleActorTargetGuard(user, org, target, "organization.permission.manage", false),
+		{SQL: "UPDATE organizations SET inactivated_at=COALESCE(inactivated_at,?),updated_at=? WHERE id=?", Args: []any{nowString(), nowString(), target}, ExpectedRowsAffected: requireOne()},
+	}))
 	if err != nil {
 		return Organization{}, err
 	}
@@ -54,7 +57,10 @@ func (s *Service) ReactivateOrganization(ctx context.Context, user, org, target 
 	if len(ds) != 1 || !ds[0].Allowed {
 		return Organization{}, serviceError(403, fmt.Sprintf("forbidden: user %s cannot reactivate organization %s", user, target))
 	}
-	_, err = s.store.Exec(ctx, "UPDATE organizations SET inactivated_at=NULL,updated_at=? WHERE id=?", nowString(), target)
+	err = lifecycleError(s.store.Transaction(ctx, []Statement{
+		lifecycleActorTargetGuard(user, org, target, "organization.permission.manage", true),
+		{SQL: "UPDATE organizations SET inactivated_at=NULL,updated_at=? WHERE id=?", Args: []any{nowString(), target}, ExpectedRowsAffected: requireOne()},
+	}))
 	if err != nil {
 		return Organization{}, err
 	}

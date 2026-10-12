@@ -27,12 +27,20 @@ patches:
       kind: ConfigMap
       name: grant-lifecycle-state
     patch: |-
+      $patch: delete
       apiVersion: v1
       kind: ConfigMap
       metadata:
         name: grant-lifecycle-state
-      data:
-        rauthy-mode: null
+  - target:
+      kind: ConfigMap
+      name: lifecycle-gate
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: lifecycle-gate
   - target:
       kind: StatefulSet
       name: grant-voter

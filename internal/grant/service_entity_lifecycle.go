@@ -20,8 +20,12 @@ type ApplicationPatch struct {
 }
 
 func lifecycleActorGuard(user, org, action string) Statement {
+	return lifecycleActorTargetGuard(user, org, org, action, false)
+}
+
+func lifecycleActorTargetGuard(user, org, target, action string, inactive bool) Statement {
 	q := strings.Replace(authorizationSQL, "{values}", "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 1)
-	return assertion("SELECT 1 FROM ("+q+") WHERE allowed=1", int64(0), user, org, "grant", "organization", org, action, nil, time.Now().UTC().Format(agreementTimeLayout), false)
+	return assertion("SELECT 1 FROM ("+q+") WHERE allowed=1", int64(0), user, org, "grant", "organization", target, action, nil, time.Now().UTC().Format(agreementTimeLayout), inactive)
 }
 
 func lifecycleError(err error) error {

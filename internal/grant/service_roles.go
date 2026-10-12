@@ -93,7 +93,13 @@ func (s *Service) CreateRoleBindingAuthorized(ctx context.Context, user, org str
 		vals[i] = v
 	}
 	b := RoleBinding{ID: vals[0], SubjectType: in.SubjectType, SubjectID: vals[1], SubjectOrganizationID: org, ProviderID: vals[2], ResourceType: vals[3], ResourceID: vals[4], RoleID: vals[5], AgreementID: optionalText(in.AgreementID), State: in.State, CreatedByUserID: user, CreatedAt: nowString(), UpdatedAt: nowString()}
-	return b, s.store.InsertRoleBinding(ctx, b)
+	if err := validateRoleBinding(b); err != nil {
+		return RoleBinding{}, err
+	}
+	if err := lifecycleError(s.store.Transaction(ctx, []Statement{lifecycleActorGuard(user, org, "organization.permission.manage"), roleBindingStatement(b)})); err != nil {
+		return RoleBinding{}, err
+	}
+	return b, nil
 }
 func (s *Service) DeleteRoleBindingAuthorized(ctx context.Context, user, org, id string) error {
 	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.permission.manage", "manage organization role bindings", ReadStrong); err != nil {
@@ -102,6 +108,9 @@ func (s *Service) DeleteRoleBindingAuthorized(ctx context.Context, user, org, id
 	if _, err := serviceRow[RoleBinding](ctx, s, ReadStrong, "SELECT * FROM role_bindings WHERE id=? AND subject_organization_id=?", id, org); err != nil {
 		return err
 	}
-	_, err := s.store.Exec(ctx, "DELETE FROM role_bindings WHERE id=? AND subject_organization_id=?", id, org)
-	return err
+	return lifecycleError(s.store.Transaction(ctx, []Statement{
+		lifecycleActorGuard(user, org, "organization.permission.manage"),
+		assertion("SELECT 1 FROM role_bindings WHERE id=? AND subject_organization_id=?", id, org),
+		{SQL: "DELETE FROM role_bindings WHERE id=? AND subject_organization_id=?", Args: []any{id, org}, ExpectedRowsAffected: requireOne()},
+	}))
 }

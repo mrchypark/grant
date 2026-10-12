@@ -1,0 +1,18 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:43:36Z",
+    "kst": "2026-10-04T20:43:36+0900",
+    "method": "read-only OCI manifest and image config inspect by immutable deployed digest; only OCI metadata labels retained",
+    "source": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296"
+  },
+  "component": "grant",
+  "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296",
+  "architecture": "amd64",
+  "os": "linux",
+  "labels": {
+    "org.opencontainers.image.created": "2026-09-22T12:30:59.239Z",
+    "org.opencontainers.image.revision": "16020fe78bc4a1908f8cc105f0a0c728f5bbce4e",
+    "org.opencontainers.image.source": "https://github.com/Conalog/grant",
+    "org.opencontainers.image.version": "20260922-16020fe"
+  }
+}

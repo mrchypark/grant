@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -44,25 +45,82 @@ func run() error {
 		}
 		defer private.Close()
 	}
+	var operator net.Listener
+	if cfg.Database.OperatorBindAddr != "" {
+		operator, e = net.Listen("tcp", cfg.Database.OperatorBindAddr)
+		if e != nil {
+			return e
+		}
+		defer operator.Close()
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	store, e := grant.OpenStore(ctx, cfg)
+	done := make(chan error, 4)
+	servers := make([]*http.Server, 0, 3)
+	startOperator := func(handler http.Handler) error {
+		if operator == nil {
+			return nil
+		}
+		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		servers = append(servers, server)
+		go func() { done <- server.Serve(operator) }()
+		return nil
+	}
+	store, e := grant.OpenStoreWithOperator(ctx, cfg, startOperator)
 	if e != nil {
 		return e
 	}
 	defer store.Close()
 	service := grant.NewService(cfg, store)
-	if cfg.Database.LocalNodeRole != "learner" {
+	promotionLearner := cfg.Database.Rhiza.Learner != nil
+	passiveLearner := cfg.Database.LocalNodeRole == "learner"
+	if !promotionLearner && !passiveLearner {
 		if e = service.Bootstrap(ctx); e != nil {
 			return fmt.Errorf("initialize Grant catalog: %w", e)
 		}
 	}
-	server := &http.Server{Addr: cfg.Server.BindAddr, Handler: api.New(service, cfg.Database.LocalNodeRole == "learner"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	done := make(chan error, 2)
+	var publicHandler http.Handler
+	var runtimeHandler http.Handler
+	var publicHandlerMu sync.RWMutex
+	publicHandler = api.New(service, passiveLearner)
+	runtimeHandler = store.RuntimeHandler()
+	if promotionLearner {
+		publicHandler = promotionGate{}
+		runtimeHandler = promotionGate{private: true}
+		go func() {
+			if err := store.WaitForPromotion(ctx); err != nil {
+				if ctx.Err() == nil {
+					done <- err
+				}
+				return
+			}
+			if err := service.Bootstrap(ctx); err != nil {
+				if ctx.Err() == nil {
+					done <- fmt.Errorf("initialize promoted Grant catalog: %w", err)
+				}
+				return
+			}
+			publicHandlerMu.Lock()
+			publicHandler = api.New(service, false)
+			runtimeHandler = store.RuntimeHandler()
+			publicHandlerMu.Unlock()
+		}()
+	}
+	server := &http.Server{Addr: cfg.Server.BindAddr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		publicHandlerMu.RLock()
+		h := publicHandler
+		publicHandlerMu.RUnlock()
+		h.ServeHTTP(w, r)
+	}), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() { done <- server.Serve(public) }()
-	servers := []*http.Server{server}
+	servers = append(servers, server)
 	if private != nil {
-		runtimeServer := &http.Server{Handler: store.RuntimeHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+		runtimeServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			publicHandlerMu.RLock()
+			h := runtimeHandler
+			publicHandlerMu.RUnlock()
+			h.ServeHTTP(w, r)
+		}), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 		servers = append(servers, runtimeServer)
 		go func() { done <- runtimeServer.Serve(private) }()
 	}
@@ -86,4 +144,15 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+type promotionGate struct{ private bool }
+
+func (g promotionGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !g.private && r.URL.Path == "/healthz" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		return
+	}
+	http.Error(w, "Rhiza learner awaiting promotion", http.StatusServiceUnavailable)
 }

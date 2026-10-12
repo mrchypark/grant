@@ -1,0 +1,1391 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "method": "read-only GET using existing master credential; credential omitted",
+    "source": "voter GET /api/v1/admin/providers/patch-data/actions"
+  },
+  "count": 138,
+  "actions": [
+    {
+      "id": "patch-data.agreement_documents.create",
+      "providerId": "patch-data",
+      "code": "agreement_documents.create",
+      "name": "create agreement_documents records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.agreement_documents.delete",
+      "providerId": "patch-data",
+      "code": "agreement_documents.delete",
+      "name": "delete agreement_documents records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.agreement_documents.read",
+      "providerId": "patch-data",
+      "code": "agreement_documents.read",
+      "name": "Read agreement_documents records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.agreement_documents.update",
+      "providerId": "patch-data",
+      "code": "agreement_documents.update",
+      "name": "update agreement_documents records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrence_checkpoints.create",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrence_checkpoints.create",
+      "name": "create anomaly_occurrence_checkpoints records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrence_checkpoints.delete",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrence_checkpoints.delete",
+      "name": "delete anomaly_occurrence_checkpoints records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrence_checkpoints.read",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrence_checkpoints.read",
+      "name": "Read anomaly_occurrence_checkpoints records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrence_checkpoints.update",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrence_checkpoints.update",
+      "name": "update anomaly_occurrence_checkpoints records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrences.create",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrences.create",
+      "name": "create anomaly_occurrences records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrences.delete",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrences.delete",
+      "name": "delete anomaly_occurrences records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrences.read",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrences.read",
+      "name": "Read anomaly_occurrences records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.anomaly_occurrences.update",
+      "providerId": "patch-data",
+      "code": "anomaly_occurrences.update",
+      "name": "update anomaly_occurrences records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.batch.execute",
+      "providerId": "patch-data",
+      "code": "batch.execute",
+      "name": "Execute an authorized native batch",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints.create",
+      "providerId": "patch-data",
+      "code": "blueprints.create",
+      "name": "create blueprints records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints.delete",
+      "providerId": "patch-data",
+      "code": "blueprints.delete",
+      "name": "delete blueprints records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints.read",
+      "providerId": "patch-data",
+      "code": "blueprints.read",
+      "name": "Read blueprints records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints.update",
+      "providerId": "patch-data",
+      "code": "blueprints.update",
+      "name": "update blueprints records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints_list.read",
+      "providerId": "patch-data",
+      "code": "blueprints_list.read",
+      "name": "Read blueprints_list records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints_viewer.read",
+      "providerId": "patch-data",
+      "code": "blueprints_viewer.read",
+      "name": "Read blueprints_viewer records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.blueprints_viewer_list.read",
+      "providerId": "patch-data",
+      "code": "blueprints_viewer_list.read",
+      "name": "Read blueprints_viewer_list records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.command_history.create",
+      "providerId": "patch-data",
+      "code": "command_history.create",
+      "name": "create command_history records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.command_history.delete",
+      "providerId": "patch-data",
+      "code": "command_history.delete",
+      "name": "delete command_history records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.command_history.read",
+      "providerId": "patch-data",
+      "code": "command_history.read",
+      "name": "Read command_history records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.command_history.update",
+      "providerId": "patch-data",
+      "code": "command_history.update",
+      "name": "update command_history records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.comments.create",
+      "providerId": "patch-data",
+      "code": "comments.create",
+      "name": "create comments records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.comments.delete",
+      "providerId": "patch-data",
+      "code": "comments.delete",
+      "name": "delete comments records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.comments.read",
+      "providerId": "patch-data",
+      "code": "comments.read",
+      "name": "Read comments records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.comments.update",
+      "providerId": "patch-data",
+      "code": "comments.update",
+      "name": "update comments records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.dashboard.create",
+      "providerId": "patch-data",
+      "code": "dashboard.create",
+      "name": "create dashboard records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.dashboard.delete",
+      "providerId": "patch-data",
+      "code": "dashboard.delete",
+      "name": "delete dashboard records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.dashboard.read",
+      "providerId": "patch-data",
+      "code": "dashboard.read",
+      "name": "Read dashboard records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.dashboard.update",
+      "providerId": "patch-data",
+      "code": "dashboard.update",
+      "name": "update dashboard records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.files.create",
+      "providerId": "patch-data",
+      "code": "files.create",
+      "name": "create files records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.files.delete",
+      "providerId": "patch-data",
+      "code": "files.delete",
+      "name": "delete files records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.files.file.read",
+      "providerId": "patch-data",
+      "code": "files.file.read",
+      "name": "Read files record files",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.files.read",
+      "providerId": "patch-data",
+      "code": "files.read",
+      "name": "Read files records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.files.update",
+      "providerId": "patch-data",
+      "code": "files.update",
+      "name": "update files records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.groupconditions.create",
+      "providerId": "patch-data",
+      "code": "groupconditions.create",
+      "name": "create groupconditions records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.groupconditions.delete",
+      "providerId": "patch-data",
+      "code": "groupconditions.delete",
+      "name": "delete groupconditions records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.groupconditions.read",
+      "providerId": "patch-data",
+      "code": "groupconditions.read",
+      "name": "Read groupconditions records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.groupconditions.update",
+      "providerId": "patch-data",
+      "code": "groupconditions.update",
+      "name": "update groupconditions records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.images.create",
+      "providerId": "patch-data",
+      "code": "images.create",
+      "name": "create images records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.images.delete",
+      "providerId": "patch-data",
+      "code": "images.delete",
+      "name": "delete images records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.images.file.read",
+      "providerId": "patch-data",
+      "code": "images.file.read",
+      "name": "Read images record files",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.images.read",
+      "providerId": "patch-data",
+      "code": "images.read",
+      "name": "Read images records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.images.update",
+      "providerId": "patch-data",
+      "code": "images.update",
+      "name": "update images records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.invitations.create",
+      "providerId": "patch-data",
+      "code": "invitations.create",
+      "name": "create invitations records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.invitations.delete",
+      "providerId": "patch-data",
+      "code": "invitations.delete",
+      "name": "delete invitations records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.invitations.read",
+      "providerId": "patch-data",
+      "code": "invitations.read",
+      "name": "Read invitations records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.invitations.update",
+      "providerId": "patch-data",
+      "code": "invitations.update",
+      "name": "update invitations records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_comments.create",
+      "providerId": "patch-data",
+      "code": "issue_comments.create",
+      "name": "create issue_comments records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_comments.delete",
+      "providerId": "patch-data",
+      "code": "issue_comments.delete",
+      "name": "delete issue_comments records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_comments.read",
+      "providerId": "patch-data",
+      "code": "issue_comments.read",
+      "name": "Read issue_comments records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_comments.update",
+      "providerId": "patch-data",
+      "code": "issue_comments.update",
+      "name": "update issue_comments records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_content_logs.create",
+      "providerId": "patch-data",
+      "code": "issue_content_logs.create",
+      "name": "create issue_content_logs records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_content_logs.delete",
+      "providerId": "patch-data",
+      "code": "issue_content_logs.delete",
+      "name": "delete issue_content_logs records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_content_logs.read",
+      "providerId": "patch-data",
+      "code": "issue_content_logs.read",
+      "name": "Read issue_content_logs records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_content_logs.update",
+      "providerId": "patch-data",
+      "code": "issue_content_logs.update",
+      "name": "update issue_content_logs records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_fields_logs.create",
+      "providerId": "patch-data",
+      "code": "issue_fields_logs.create",
+      "name": "create issue_fields_logs records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_fields_logs.delete",
+      "providerId": "patch-data",
+      "code": "issue_fields_logs.delete",
+      "name": "delete issue_fields_logs records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_fields_logs.read",
+      "providerId": "patch-data",
+      "code": "issue_fields_logs.read",
+      "name": "Read issue_fields_logs records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_fields_logs.update",
+      "providerId": "patch-data",
+      "code": "issue_fields_logs.update",
+      "name": "update issue_fields_logs records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_schedules.create",
+      "providerId": "patch-data",
+      "code": "issue_schedules.create",
+      "name": "create issue_schedules records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_schedules.delete",
+      "providerId": "patch-data",
+      "code": "issue_schedules.delete",
+      "name": "delete issue_schedules records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_schedules.read",
+      "providerId": "patch-data",
+      "code": "issue_schedules.read",
+      "name": "Read issue_schedules records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_schedules.update",
+      "providerId": "patch-data",
+      "code": "issue_schedules.update",
+      "name": "update issue_schedules records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_tags.create",
+      "providerId": "patch-data",
+      "code": "issue_tags.create",
+      "name": "create issue_tags records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_tags.delete",
+      "providerId": "patch-data",
+      "code": "issue_tags.delete",
+      "name": "delete issue_tags records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_tags.read",
+      "providerId": "patch-data",
+      "code": "issue_tags.read",
+      "name": "Read issue_tags records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issue_tags.update",
+      "providerId": "patch-data",
+      "code": "issue_tags.update",
+      "name": "update issue_tags records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issues.create",
+      "providerId": "patch-data",
+      "code": "issues.create",
+      "name": "create issues records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issues.delete",
+      "providerId": "patch-data",
+      "code": "issues.delete",
+      "name": "delete issues records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issues.read",
+      "providerId": "patch-data",
+      "code": "issues.read",
+      "name": "Read issues records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.issues.update",
+      "providerId": "patch-data",
+      "code": "issues.update",
+      "name": "update issues records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.latest_loss_reports.read",
+      "providerId": "patch-data",
+      "code": "latest_loss_reports.read",
+      "name": "Read latest_loss_reports records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.org_parent_map.create",
+      "providerId": "patch-data",
+      "code": "org_parent_map.create",
+      "name": "create org_parent_map records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.org_parent_map.delete",
+      "providerId": "patch-data",
+      "code": "org_parent_map.delete",
+      "name": "delete org_parent_map records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.org_parent_map.read",
+      "providerId": "patch-data",
+      "code": "org_parent_map.read",
+      "name": "Read org_parent_map records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.org_parent_map.update",
+      "providerId": "patch-data",
+      "code": "org_parent_map.update",
+      "name": "update org_parent_map records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.organizations.create",
+      "providerId": "patch-data",
+      "code": "organizations.create",
+      "name": "create organizations records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.organizations.delete",
+      "providerId": "patch-data",
+      "code": "organizations.delete",
+      "name": "delete organizations records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.organizations.file.read",
+      "providerId": "patch-data",
+      "code": "organizations.file.read",
+      "name": "Read organizations record files",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.organizations.read",
+      "providerId": "patch-data",
+      "code": "organizations.read",
+      "name": "Read organizations records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.organizations.update",
+      "providerId": "patch-data",
+      "code": "organizations.update",
+      "name": "update organizations records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.panelmaps.create",
+      "providerId": "patch-data",
+      "code": "panelmaps.create",
+      "name": "create panelmaps records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.panelmaps.delete",
+      "providerId": "patch-data",
+      "code": "panelmaps.delete",
+      "name": "delete panelmaps records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.panelmaps.read",
+      "providerId": "patch-data",
+      "code": "panelmaps.read",
+      "name": "Read panelmaps records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.panelmaps.update",
+      "providerId": "patch-data",
+      "code": "panelmaps.update",
+      "name": "update panelmaps records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.panelmaps_viewer.read",
+      "providerId": "patch-data",
+      "code": "panelmaps_viewer.read",
+      "name": "Read panelmaps_viewer records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.passwords.create",
+      "providerId": "patch-data",
+      "code": "passwords.create",
+      "name": "create passwords records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.passwords.delete",
+      "providerId": "patch-data",
+      "code": "passwords.delete",
+      "name": "delete passwords records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.passwords.read",
+      "providerId": "patch-data",
+      "code": "passwords.read",
+      "name": "Read passwords records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.passwords.update",
+      "providerId": "patch-data",
+      "code": "passwords.update",
+      "name": "update passwords records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.permissions.create",
+      "providerId": "patch-data",
+      "code": "permissions.create",
+      "name": "create permissions records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.permissions.delete",
+      "providerId": "patch-data",
+      "code": "permissions.delete",
+      "name": "delete permissions records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.permissions.read",
+      "providerId": "patch-data",
+      "code": "permissions.read",
+      "name": "Read permissions records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.permissions.update",
+      "providerId": "patch-data",
+      "code": "permissions.update",
+      "name": "update permissions records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.plant.create",
+      "providerId": "patch-data",
+      "code": "plant.create",
+      "name": "create plants records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.plant.delete",
+      "providerId": "patch-data",
+      "code": "plant.delete",
+      "name": "delete plants records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.plant.read",
+      "providerId": "patch-data",
+      "code": "plant.read",
+      "name": "Read plants records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.plant.update",
+      "providerId": "patch-data",
+      "code": "plant.update",
+      "name": "update plants records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.plants_viewer.read",
+      "providerId": "patch-data",
+      "code": "plants_viewer.read",
+      "name": "Read plants_viewer records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports.create",
+      "providerId": "patch-data",
+      "code": "reports.create",
+      "name": "create reports records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports.delete",
+      "providerId": "patch-data",
+      "code": "reports.delete",
+      "name": "delete reports records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports.file.read",
+      "providerId": "patch-data",
+      "code": "reports.file.read",
+      "name": "Read reports record files",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports.read",
+      "providerId": "patch-data",
+      "code": "reports.read",
+      "name": "Read reports records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports.update",
+      "providerId": "patch-data",
+      "code": "reports.update",
+      "name": "update reports records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports_v2.create",
+      "providerId": "patch-data",
+      "code": "reports_v2.create",
+      "name": "create reports_v2 records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports_v2.delete",
+      "providerId": "patch-data",
+      "code": "reports_v2.delete",
+      "name": "delete reports_v2 records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports_v2.read",
+      "providerId": "patch-data",
+      "code": "reports_v2.read",
+      "name": "Read reports_v2 records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports_v2.update",
+      "providerId": "patch-data",
+      "code": "reports_v2.update",
+      "name": "update reports_v2 records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.reports_v2_list.read",
+      "providerId": "patch-data",
+      "code": "reports_v2_list.read",
+      "name": "Read reports_v2_list records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.resources.create",
+      "providerId": "patch-data",
+      "code": "resources.create",
+      "name": "create resources records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.resources.delete",
+      "providerId": "patch-data",
+      "code": "resources.delete",
+      "name": "delete resources records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.resources.read",
+      "providerId": "patch-data",
+      "code": "resources.read",
+      "name": "Read resources records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.resources.update",
+      "providerId": "patch-data",
+      "code": "resources.update",
+      "name": "update resources records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.rsd_command_tasks.read",
+      "providerId": "patch-data",
+      "code": "rsd_command_tasks.read",
+      "name": "Read rsd_command_tasks records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_accounts.create",
+      "providerId": "patch-data",
+      "code": "temporary_accounts.create",
+      "name": "create temporary_accounts records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_accounts.delete",
+      "providerId": "patch-data",
+      "code": "temporary_accounts.delete",
+      "name": "delete temporary_accounts records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_accounts.read",
+      "providerId": "patch-data",
+      "code": "temporary_accounts.read",
+      "name": "Read temporary_accounts records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_accounts.update",
+      "providerId": "patch-data",
+      "code": "temporary_accounts.update",
+      "name": "update temporary_accounts records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_blueprints.read",
+      "providerId": "patch-data",
+      "code": "temporary_blueprints.read",
+      "name": "Read temporary_blueprints records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_blueprints_list.read",
+      "providerId": "patch-data",
+      "code": "temporary_blueprints_list.read",
+      "name": "Read temporary_blueprints_list records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_panelmaps.read",
+      "providerId": "patch-data",
+      "code": "temporary_panelmaps.read",
+      "name": "Read temporary_panelmaps records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.temporary_plants.read",
+      "providerId": "patch-data",
+      "code": "temporary_plants.read",
+      "name": "Read temporary_plants records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.users.create",
+      "providerId": "patch-data",
+      "code": "users.create",
+      "name": "create users records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.users.delete",
+      "providerId": "patch-data",
+      "code": "users.delete",
+      "name": "delete users records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.users.file.read",
+      "providerId": "patch-data",
+      "code": "users.file.read",
+      "name": "Read users record files",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.users.read",
+      "providerId": "patch-data",
+      "code": "users.read",
+      "name": "Read users records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.users.update",
+      "providerId": "patch-data",
+      "code": "users.update",
+      "name": "update users records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.viewers.create",
+      "providerId": "patch-data",
+      "code": "viewers.create",
+      "name": "create viewers records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.viewers.delete",
+      "providerId": "patch-data",
+      "code": "viewers.delete",
+      "name": "delete viewers records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.viewers.read",
+      "providerId": "patch-data",
+      "code": "viewers.read",
+      "name": "Read viewers records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.viewers.update",
+      "providerId": "patch-data",
+      "code": "viewers.update",
+      "name": "update viewers records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.work_orders.create",
+      "providerId": "patch-data",
+      "code": "work_orders.create",
+      "name": "create work_orders records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.work_orders.delete",
+      "providerId": "patch-data",
+      "code": "work_orders.delete",
+      "name": "delete work_orders records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.work_orders.read",
+      "providerId": "patch-data",
+      "code": "work_orders.read",
+      "name": "Read work_orders records",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "patch-data.work_orders.update",
+      "providerId": "patch-data",
+      "code": "work_orders.update",
+      "name": "update work_orders records",
+      "description": "Authorize the whole native record operation, including relation changes and hook/cascade side effects. Related resources are not separately checked.",
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    }
+  ]
+}

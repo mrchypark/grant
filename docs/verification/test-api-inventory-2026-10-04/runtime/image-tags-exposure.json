@@ -1,0 +1,17 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:46:03Z",
+    "kst": "2026-10-04T20:46:03+0900",
+    "method": "read-only Artifact Registry tag listing filtered to deployed immutable digest",
+    "source": "gcloud artifacts docker tags list conalog/exposure"
+  },
+  "component": "exposure",
+  "digest": "sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c",
+  "tags": [
+    {
+      "tag": "sha-d7807e6395513702ea958eaad35dfa5238f17136",
+      "version": "projects/patch2-the-new-era/locations/asia-northeast3/repositories/conalog/packages/exposure/versions/sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c"
+    }
+  ],
+  "limitation": "Tags identify registry associations observed at this time; tags are mutable. OCI revision labels, when present, are stronger source metadata."
+}

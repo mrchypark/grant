@@ -1,0 +1,19 @@
+apiVersion: rhiza.mrchypark.dev/v1alpha1
+kind: RhizaCluster
+metadata:
+  name: grant-rhiza
+spec:
+  logicalID: grant-rhiza
+  statefulSet: grant-voter
+  container: grant
+  adoptClusterID: grant-rhiza-v019
+  voterPods:
+    - {nodeID: grant-voter-0, pod: grant-voter-0}
+    - {nodeID: grant-voter-1, pod: grant-voter-1}
+    - {nodeID: grant-voter-2, pod: grant-voter-2}
+  automatic: false
+  policy:
+    failureGraceSeconds: 120
+    cooldownSeconds: 1800
+    maxRecoveriesPerDay: 3
+    allowDataLoss: false

@@ -1,0 +1,314 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:46:34Z",
+    "kst": "2026-10-04T20:46:34+0900",
+    "method": "derived from sanitized runtime snapshots",
+    "source": "cluster-workloads.json,catalog-counts.json,health-denial-probes.json"
+  },
+  "deployments": [
+    {
+      "name": "data-stack",
+      "desired": 1,
+      "ready": 1,
+      "observedGeneration": 26,
+      "generation": 26
+    },
+    {
+      "name": "grant-voter",
+      "desired": 1,
+      "ready": 1,
+      "observedGeneration": 23,
+      "generation": 23
+    },
+    {
+      "name": "patch-auth",
+      "desired": 1,
+      "ready": 1,
+      "observedGeneration": 11,
+      "generation": 11
+    }
+  ],
+  "activePods": [
+    {
+      "name": "data-stack-6d5b859ff9-pgmpc",
+      "ready": true,
+      "containers": [
+        {
+          "name": "exposure-data",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c"
+        },
+        {
+          "name": "grant-learner",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296"
+        },
+        {
+          "name": "patch-data",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b"
+        }
+      ]
+    },
+    {
+      "name": "grant-voter-6bd88657fc-8j6vw",
+      "ready": true,
+      "containers": [
+        {
+          "name": "exposure-management",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c"
+        },
+        {
+          "name": "grant-voter",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296"
+        }
+      ]
+    },
+    {
+      "name": "patch-auth-78ff85b9c5-tnwq6",
+      "ready": true,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335"
+        }
+      ]
+    }
+  ],
+  "oldInactivePods": [
+    {
+      "name": "data-stack-6d5b859ff9-swxhc",
+      "phase": "Failed",
+      "reason": "Evicted",
+      "ready": false
+    },
+    {
+      "name": "patch-auth-78ff85b9c5-4l22k",
+      "phase": "Succeeded",
+      "reason": null,
+      "ready": false
+    },
+    {
+      "name": "patch-auth-78ff85b9c5-cwxbr",
+      "phase": "Succeeded",
+      "reason": null,
+      "ready": false
+    },
+    {
+      "name": "patch-auth-78ff85b9c5-p78t6",
+      "phase": "Failed",
+      "reason": "Evicted",
+      "ready": false
+    },
+    {
+      "name": "patch-auth-78ff85b9c5-znkwv",
+      "phase": "Failed",
+      "reason": "Evicted",
+      "ready": false
+    }
+  ],
+  "readyMainContainerCount": 6,
+  "services": [
+    {
+      "name": "exposure",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.6.183",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8082,
+          "protocol": "TCP",
+          "targetPort": 8082
+        }
+      ]
+    },
+    {
+      "name": "grant",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.6.142",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "TCP",
+          "targetPort": 8086
+        }
+      ]
+    },
+    {
+      "name": "grant-management",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.15.192",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8084,
+          "protocol": "TCP",
+          "targetPort": 8084
+        }
+      ]
+    },
+    {
+      "name": "grant-voter-runtime",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.1.155",
+      "ports": [
+        {
+          "name": "runtime",
+          "port": 8087,
+          "protocol": "TCP",
+          "targetPort": 8087
+        },
+        {
+          "name": "peer",
+          "port": 8088,
+          "protocol": "UDP",
+          "targetPort": 8088
+        }
+      ]
+    },
+    {
+      "name": "patch-auth",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.4.234",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8091,
+          "protocol": "TCP",
+          "targetPort": 8091
+        }
+      ]
+    }
+  ],
+  "catalogs": [
+    {
+      "observation": {
+        "utc": "2026-10-04T11:37:03Z",
+        "kst": "2026-10-04T20:37:03+0900",
+        "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+        "namespace": "patch-data-grant-exposure-go-v1",
+        "method": "read-only HTTP GET using existing PEP service credential; credential omitted",
+        "source": "GET /api/v2/http-capabilities/catalog/patch-data via pod port-forward"
+      },
+      "providerId": "patch-data",
+      "generation": 1,
+      "catalogDigest": "sha256:c731b83d70142bed04cc68e829cedc08acaa357645feb295097e25de371a99b4",
+      "capabilityCount": 369,
+      "enabledTrueCount": 369,
+      "responseResourceCount": 42,
+      "uniqueMethodPathCount": 369,
+      "methodCounts": [
+        {
+          "method": "DELETE",
+          "count": 60
+        },
+        {
+          "method": "GET",
+          "count": 178
+        },
+        {
+          "method": "HEAD",
+          "count": 10
+        },
+        {
+          "method": "PATCH",
+          "count": 60
+        },
+        {
+          "method": "POST",
+          "count": 61
+        }
+      ]
+    },
+    {
+      "observation": {
+        "utc": "2026-10-04T11:37:03Z",
+        "kst": "2026-10-04T20:37:03+0900",
+        "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+        "namespace": "patch-data-grant-exposure-go-v1",
+        "method": "read-only HTTP GET using existing PEP service credential; credential omitted",
+        "source": "GET /api/v2/http-capabilities/catalog/grant-management via pod port-forward"
+      },
+      "providerId": "grant-management",
+      "generation": 5,
+      "catalogDigest": "sha256:41a7d3ac23e7c3a4f820b553077cb9e01bd0eb38e9105b33196b7af8a1d66a2e",
+      "capabilityCount": 69,
+      "enabledTrueCount": 69,
+      "responseResourceCount": 0,
+      "uniqueMethodPathCount": 69,
+      "methodCounts": [
+        {
+          "method": "DELETE",
+          "count": 11
+        },
+        {
+          "method": "GET",
+          "count": 22
+        },
+        {
+          "method": "PATCH",
+          "count": 7
+        },
+        {
+          "method": "POST",
+          "count": 14
+        },
+        {
+          "method": "PUT",
+          "count": 15
+        }
+      ]
+    }
+  ],
+  "probeCount": 19,
+  "probeStatusCounts": [
+    {
+      "httpStatus": 200,
+      "count": 10
+    },
+    {
+      "httpStatus": 400,
+      "count": 1
+    },
+    {
+      "httpStatus": 401,
+      "count": 7
+    },
+    {
+      "httpStatus": 422,
+      "count": 1
+    }
+  ],
+  "probeCategoryCounts": [
+    {
+      "category": "denial",
+      "count": 7
+    },
+    {
+      "category": "health",
+      "count": 6
+    },
+    {
+      "category": "input-validation",
+      "count": 1
+    },
+    {
+      "category": "readiness",
+      "count": 4
+    },
+    {
+      "category": "request-context-validation",
+      "count": 1
+    }
+  ]
+}

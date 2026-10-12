@@ -1,0 +1,28 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:43:36Z",
+    "kst": "2026-10-04T20:43:36+0900",
+    "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+    "namespace": "patch-data-grant-exposure-go-v1",
+    "method": "deployment/service metadata plus two existing-master read-only Provider active catalog GETs",
+    "source": "cluster-workloads.json; GET voter /api/v1/admin/providers/{providerId}/http-capability-active"
+  },
+  "status": "not_deployed_in_selected_namespace",
+  "accountExposureContainers": 0,
+  "accountExposureServices": 0,
+  "capabilityCount": null,
+  "catalog": null,
+  "providerProbes": [
+    {
+      "providerId": "patch-auth",
+      "httpStatus": 404,
+      "error": "service provider not found"
+    },
+    {
+      "providerId": "patch-auth-account",
+      "httpStatus": 404,
+      "error": "service provider not found"
+    }
+  ],
+  "limitation": "These two Provider names were not found. No exhaustive Provider enumeration or authenticated account session was attempted; direct Patch Auth native API remains deployed. No separate auth/account active catalog can be established from this namespace."
+}

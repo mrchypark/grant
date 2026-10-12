@@ -1,0 +1,11 @@
+apiVersion: rhiza.mrchypark.dev/v1alpha1
+kind: RhizaRecovery
+metadata:
+  name: grant-rhiza-observe
+spec:
+  statefulSet: grant-voter
+  container: grant
+  sourceClusterID: grant-rhiza-v019
+  durability: before-ack
+  recoveryID: ""
+  allowDataLoss: false

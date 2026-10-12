@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grant-voter
+spec:
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        rhiza.mrchypark.dev/embedded: "true"
+    spec:
+      containers:
+        - name: grant
+          envFrom:
+            - configMapRef: {name: grant-config}
+            - configMapRef: {name: grant-rhiza-config}
+            - secretRef: {name: grant-rhiza-operator-business}
+            - secretRef: {name: grant-rhiza-operator-object-store}
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - {name: GRANT_RUNTIME_MODE, value: embedded}
+            - {name: GRANT_LOCAL_NODE_ROLE, value: voter}
+            - {name: GRANT_READ_CONSISTENCY, value: strong}
+            - name: RHIZA_NODE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: RHIZA_CLUSTER_MEMBERS
+              valueFrom:
+                secretKeyRef: {name: grant-rhiza-operator-credentials, key: members}
+            - name: RHIZA_PEER_TOKENS
+              valueFrom:
+                secretKeyRef: {name: grant-rhiza-operator-credentials, key: peer_tokens}
+            - name: RHIZA_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef: {name: grant-rhiza-operator-credentials, key: admin}
+          ports:
+            - {name: http, containerPort: 8080, protocol: TCP}
+            - {name: peer-quic, containerPort: 8100, protocol: UDP}
+            - {name: recovery, containerPort: 8101, protocol: TCP}
