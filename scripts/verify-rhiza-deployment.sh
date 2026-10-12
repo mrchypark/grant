@@ -21,6 +21,27 @@ for overlay in ephemeral production ied; do
     exit 1
   fi
 done
+operator=$(kubectl kustomize "$root/deploy/overlays/rhiza-operator")
+printf '%s\n' "$operator" | grep -q 'name: grant-rhiza-config'
+printf '%s\n' "$operator" | grep -q 'RHIZA_BIND_ADDR: 0.0.0.0:8101'
+printf '%s\n' "$operator" | grep -q 'RHIZA_CLUSTER_ID: grant-rhiza-v019'
+printf '%s\n' "$operator" | grep -q 'RHIZA_ENABLE_RECONFIGURATION: "true"'
+printf '%s\n' "$operator" | grep -q 'name: grant-rhiza-operator-credentials'
+printf '%s\n' "$operator" | grep -q 'key: peer_tokens'
+printf '%s\n' "$operator" | grep -q 'name: peer-quic'
+printf '%s\n' "$operator" | grep -q 'type: OnDelete'
+printf '%s\n' "$operator" | grep -q 'name: grant-rhiza-observe'
+printf '%s\n' "$operator" | grep -q 'automatic: false'
+printf '%s\n' "$operator" | grep -q 'name: rhizarecoveries.rhiza.mrchypark.dev'
+printf '%s\n' "$operator" | grep -q 'name: rhizaclusters.rhiza.mrchypark.dev'
+printf '%s\n' "$operator" | grep -q 'name: rhizafences.rhiza.mrchypark.dev'
+printf '%s\n' "$operator" | grep -q 'image: ghcr.io/mrchypark/rhiza-operator:v0.19.0@sha256:'
+printf '%s\n' "$operator" | grep -q 'port: 8101'
+printf '%s\n' "$operator" | grep -q 'rhiza.mrchypark.dev/automatic-learner'
+if printf '%s\n' "$operator" | grep -Eq 'GRANT_(CLUSTER_ID|PEER_ADDR|DATA_DIR):|RHIZA_AUTOMATIC_RECOVERY|RHIZA_FENCER_BACKEND|image: .*:latest'; then
+  echo 'Rhiza Operator overlay retains a forbidden legacy alias or automatic/latest setting' >&2
+  exit 1
+fi
 if grep -q 'restore-once\|HQL_' "$root/deploy/k8s/app-statefulset.yaml"; then
   echo 'native Grant must not run the legacy Hiqlite restore wrapper' >&2
   exit 1

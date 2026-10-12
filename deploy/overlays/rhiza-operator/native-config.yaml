@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grant-rhiza-config
+data:
+  # A new logical cluster. Replace consistently before the first render/apply.
+  RHIZA_CLUSTER_ID: grant-rhiza-v019
+  RHIZA_DATA_DIR: /var/lib/grant/rhiza
+  RHIZA_PEER_ADDR: 0.0.0.0:8100
+  RHIZA_BIND_ADDR: 0.0.0.0:8101
+  RHIZA_OBJSTORE_DURABILITY: before-ack
+  RHIZA_ENABLE_RECONFIGURATION: "true"

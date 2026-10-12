@@ -232,7 +232,7 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) e
 	if e := writeDurableExclusive(pending, []byte(snap.Digest)); e != nil {
 		return e
 	}
-	s, e := openStore(ctx, cfg, true)
+	s, e := openStore(ctx, cfg, true, nil)
 	if e != nil {
 		return e
 	}

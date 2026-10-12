@@ -17,13 +17,15 @@ and consistent local schema reads; it reports `writeReady: false` because replic
 
 ## Configuration
 
-Grant selects Rhiza v0.19.0 with latticedb-go v0.11.3 as an upgrade candidate; production deployment and migration have not been completed. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+Grant selects Rhiza v0.19.0 with latticedb-go v0.11.3. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
 
-`GRANT_NODE_ID` identifies the exact native member; `POD_NAME` is its Kubernetes fallback. `GRANT_CLUSTER_MEMBERS` accepts a JSON member list with `node_id`, `peer_url` (`quic://host:port`) and legacy member `token`; Grant derives each Rhiza public key and the local peer token from that input. Alternatively, `GRANT_RHIZA_CONFIG_JSON` may provide native JSON fields `Members` with nested `public_key` values and local `PeerToken`, or the local token may be supplied through `RHIZA_PEER_TOKEN`. Public-key membership does not require distributing a secret to every member. Every voter receives the same membership. `GRANT_PEER_ADDR` is the UDP bind address. Three voters start concurrently; the old Grant Hiqlite ordinal-zero lifecycle gate is not used. Rauthy's separate lifecycle remains unchanged.
+The ordinary embedded configuration accepts Grant aliases for the current candidate. The optional Operator deployment instead uses only native `RHIZA_*` values for generation-owned topology: `RHIZA_NODE_ID`, `RHIZA_DATA_DIR`, `RHIZA_CLUSTER_ID`, `RHIZA_CLUSTER_MEMBERS`, `RHIZA_PEER_TOKENS`, `RHIZA_ADMIN_TOKEN`, `RHIZA_PEER_ADDR`, `RHIZA_BIND_ADDR`, and `RHIZA_ENABLE_RECONFIGURATION`. In that mode, Grant rejects nonempty `GRANT_DATA_DIR`, `GRANT_NODE_ID`, `GRANT_CLUSTER_ID`, `GRANT_PEER_ADDR`, `GRANT_CLUSTER_MEMBERS`, `GRANT_RHIZA_CONFIG_JSON`, `GRANT_RHIZA_REPLICA_CONFIG_JSON`, `GRANT_REMOTE_NODES`, and `GRANT_CLUSTER_RESTORE_SNAPSHOT`. `GRANT_RUNTIME_MODE=embedded`, `GRANT_LOCAL_NODE_ROLE=voter`, `GRANT_RUNTIME_BIND_ADDR`, `GRANT_REMOTE_API_SECRET`, and `GRANT_READ_FENCE_KEY` remain allowed with their existing validation; the runtime secret and fence key must remain distinct from native Rhiza admin and peer credentials. Native `RHIZA_LEARNER` controls learner admission. Three native members start concurrently; the old Grant Hiqlite ordinal-zero lifecycle gate is not used. Rauthy's separate lifecycle remains unchanged.
 
 Single-voter local development can use a filesystem object store. Multiple voters require the shared object-store configuration: `RHIZA_OBJSTORE_PROVIDER`, `ENDPOINT`, `BUCKET`, `PREFIX`, `REGION`, `ACCESS_KEY`, `SECRET_KEY`, and optionally `SESSION_TOKEN` (all prefixed `RHIZA_OBJSTORE_`). The full native configuration can be supplied through `GRANT_RHIZA_CONFIG_JSON`. Use `RHIZA_OBJSTORE_DURABILITY=before-ack` for the provided three-voter deployment. A fresh Rhiza prefix must not overlap a legacy Hiqlite backup prefix.
 
 Remote SQL uses a separate private listener `GRANT_RUNTIME_BIND_ADDR` with `GRANT_REMOTE_API_SECRET`; remote clients use `GRANT_REMOTE_NODES`. The secret must be at least 32 characters and distinct from both public API keys. This listener is never mounted on the public HTTP router, service, or ingress. Expose it only on a trusted private network; terminate authenticated TLS for traffic crossing hosts. The Kubernetes optional private-runtime overlay restricts ingress to labelled runtime clients. Keep external SQL callers out of the public `grant` Service.
+
+An embedded native voter may still enable this private runtime transport on TCP 8200. It requires the separate `private-runtime` Service and its `grant-runtime-client: "true"` NetworkPolicy rule; the Rhiza Operator overlay does not enable or publish TCP 8200 by default. Until a native learner completes its quorum-certified promotion, its private runtime handler also returns 503. The Patch Data passive learner architecture remains separate and unchanged.
 
 `GRANT_READ_CONSISTENCY` selects the configured read behavior. Lookup-only `GET /api/v1/me` accepts `consistency=strong`, `consistency=local`, and `consistency=prefer-strong`; other public per-request overrides accept only `consistency=strong`; writes and authorization management guards use the strong path. Learners reject voter-only management endpoints with 503.
 
@@ -32,8 +34,10 @@ See [the compatibility inventory](porting-go-compatibility.md) for the exact sup
 The corrected native three-voter fixture passes writes, follower strong reads and
 same-directory recovery with the original WAL intact. Cold startup into an empty
 directory under the same voter identity intentionally fails with `ErrVoterStateLost`.
-The current `emptyDir` deployment therefore fails the pod-replacement compatibility
-gate for this candidate. This is the documented voter safety contract.
+The base `emptyDir` deployment cannot recover a replacement under that identity.
+The optional Operator integration instead starts a fresh learner; the local fixture
+verifies promotion, preserved data and new writes. This does not qualify production
+fencing or Kubernetes whole-generation recovery.
 
 Production migration requires either a Rhiza Operator integration with trusted
 external fencing or an approved persistent-storage strategy that retains each
@@ -43,6 +47,10 @@ whole-generation recovery. See the upstream [recovery contract](https://github.c
 and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/embedded-operator.md).
 The isolated fixture uses disposable local Versity Gateway; production recovery
 must be rehearsed before traffic cutover.
+
+## Optional embedded Rhiza Operator
+
+[`deploy/overlays/rhiza-operator`](../deploy/overlays/rhiza-operator) is an opt-in, no-PVC recovery controller overlay. It preserves the base `emptyDir` three-voter `StatefulSet`, sets `OnDelete`, and mounts a separate native configuration and credential contract. It does not change the default, IED, production, or private-runtime overlays. The rendered default namespace is `grant`; an IED composition must transform every namespaced resource together and provide namespace-local copies of the three required secrets. See [rhiza-operator.md](rhiza-operator.md) for the provisioning and recovery contract.
 
 ### Local authority PDP
 

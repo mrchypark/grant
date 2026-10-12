@@ -1,0 +1,52 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grant-rhiza-operator
+spec:
+  podSelector:
+    matchLabels: {app: grant, role: voter}
+  policyTypes: [Ingress]
+  ingress:
+    # Preserve the base public Service/Ingress contract, including external LBs.
+    - ports:
+        - {port: 8080, protocol: TCP}
+    - from:
+        - podSelector:
+            matchLabels: {app: grant, role: voter}
+        - podSelector:
+            matchExpressions:
+              - key: rhiza.mrchypark.dev/automatic-learner
+                operator: Exists
+      ports:
+        - {port: 8100, protocol: UDP}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: rhiza-operator}
+      ports:
+        - {port: 8101, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grant-rhiza-automatic-learner
+spec:
+  podSelector:
+    matchExpressions:
+      - key: rhiza.mrchypark.dev/automatic-learner
+        operator: Exists
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: grant, role: voter}
+        - podSelector:
+            matchExpressions:
+              - key: rhiza.mrchypark.dev/automatic-learner
+                operator: Exists
+      ports:
+        - {port: 8100, protocol: UDP}
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: rhiza-operator}
+      ports:
+        - {port: 8101, protocol: TCP}
