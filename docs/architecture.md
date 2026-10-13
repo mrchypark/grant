@@ -8,4 +8,6 @@ Canonical mutations use native atomic execution with statement expectations. Bul
 
 Each native voter has a local materialized store and participates in the shared durable object-store topology. Strong reads use the native linearizable path. Remote SQL is an authenticated separate private listener; public API credentials cannot authorize it. Kubernetes peers use UDP QUIC and fixed member identities.
 
+Learner reads retain a fresh per-request quorum fence: the learner catches up to at least that fence, and each decision uses one pinned applied snapshot. Fence acquisition or catch-up failure, or a snapshot that remains unstable after bounded retries, fails closed. The local performance comparison did not establish a consistent benefit from removing this freshness guarantee; an unfenced stale snapshot can still allow an action after its permission is revoked.
+
 See [runtime modes](runtime-modes.md), [migration and recovery](backup-restore.md), and [schema documentation](database-schema.md). The previous [Rust/Hiqlite architecture](history/hiqlite/architecture.md) is retained only as migration reference.

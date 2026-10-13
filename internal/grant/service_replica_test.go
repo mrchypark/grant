@@ -52,7 +52,7 @@ func TestReplicaFenceRevocationAndReadOnly(t *testing.T) {
 		defer ls.Close()
 		services = append(services, NewService(lc, ls))
 	}
-	check := func(s *Service) (bool, error) {
+	check := func(ctx context.Context, s *Service) (bool, error) {
 		return localReplicaRead(ctx, s, func(c context.Context) (bool, error) {
 			d, e := s.store.EvaluateUserActions(c, []UserActionCheck{{UserID: "conalog-grant", OrganizationID: "conalog-grant", ProviderID: "grant", ActionID: "organization.group.manage", ResourceType: "organization", ResourceID: "conalog-grant", Consistency: ReadStrong}})
 			if e != nil {
@@ -62,7 +62,7 @@ func TestReplicaFenceRevocationAndReadOnly(t *testing.T) {
 		})
 	}
 	for _, s := range services {
-		if ok, e := check(s); e != nil || !ok {
+		if ok, e := check(ctx, s); e != nil || !ok {
 			t.Fatalf("before revoke=%v %v", ok, e)
 		}
 		if _, e = s.store.Exec(ctx, "DELETE FROM users"); e == nil {
@@ -75,8 +75,27 @@ func TestReplicaFenceRevocationAndReadOnly(t *testing.T) {
 	if _, e = voter.Exec(ctx, "UPDATE role_bindings SET state='revoked' WHERE id='binding-system-bootstrap-owner'"); e != nil {
 		t.Fatal(e)
 	}
+	fence, e := voter.db.Query(ctx, rhiza.QueryRequest{SQL: "SELECT 1", Consistency: rhiza.ConsistencyLinearizable})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if ok, e := check(ctx, NewService(cfg, voter)); e != nil || ok {
+		t.Fatalf("voter after revoke=%v %v", ok, e)
+	}
 	for _, s := range services {
-		if ok, e := check(s); e != nil || ok {
+		if applied := s.store.replica.Status().AppliedSlot; applied >= fence.AppliedSlot {
+			t.Fatalf("learner already caught up: applied=%d committed=%d", applied, fence.AppliedSlot)
+		}
+		// Bypass the request fence only here to expose the stale authorization.
+		scope := &replicaRead{}
+		staleCtx := context.WithValue(ctx, replicaReadKey{}, scope)
+		if ok, err := check(staleCtx, s); err != nil || !ok {
+			t.Fatalf("scoped stale read=%v %v", ok, err)
+		}
+		if !scope.pinned || scope.changed || scope.slot >= fence.AppliedSlot {
+			t.Fatalf("stale snapshot scope=%+v committed=%d", scope, fence.AppliedSlot)
+		}
+		if ok, e := check(ctx, s); e != nil || ok {
 			t.Fatalf("after revoke=%v %v", ok, e)
 		}
 	}
@@ -89,7 +108,7 @@ func TestReplicaFenceRevocationAndReadOnly(t *testing.T) {
 	}
 	server.Close()
 	for _, s := range services {
-		if _, e := check(s); ErrorStatus(e) != 503 {
+		if _, e := check(ctx, s); ErrorStatus(e) != 503 {
 			t.Fatalf("partition did not fail closed: %v", e)
 		}
 	}
