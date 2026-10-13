@@ -3,6 +3,7 @@ package grant
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 type ExternalIdentityMaterialization struct {
@@ -77,6 +78,12 @@ func (s *Store) EnsureExternalIdentity(ctx context.Context, in ExternalIdentityM
 			return User{}, fmt.Errorf("invalid scoped PocketBase identity")
 		}
 	}
+	if in.Provider == "goauthy" {
+		origin, e := canonicalGoauthyOrigin(in.Issuer)
+		if e != nil || origin != in.Issuer || in.CollectionID != "" {
+			return User{}, fmt.Errorf("invalid scoped Goauthy identity")
+		}
+	}
 	if u, e := s.resolveScopedIdentity(ctx, in, ReadStrong); e != nil {
 		return User{}, e
 	} else if u != nil {
@@ -99,6 +106,32 @@ func (s *Store) EnsureExternalIdentity(ctx context.Context, in ExternalIdentityM
 		return User{}, fmt.Errorf("ensured identity missing")
 	}
 	return *u, nil
+}
+
+type GoauthyIdentityLinkInput struct {
+	ExistingUserID, Issuer, Subject, ExpectedEmail string
+}
+
+// LinkGoauthyIdentityToExistingUser records an operator-attested subject mapping.
+// It deliberately does not infer identity ownership from email or alter the user.
+func (s *Store) LinkGoauthyIdentityToExistingUser(ctx context.Context, in GoauthyIdentityLinkInput) error {
+	if in.ExistingUserID == "" || in.Subject == "" || in.Subject != strings.TrimSpace(in.Subject) || in.ExpectedEmail == "" {
+		return serviceError(422, "invalid Goauthy identity link")
+	}
+	now := nowString()
+	statements := []Statement{
+		assertion("SELECT 1 FROM users WHERE id=? AND active=1 AND email=?", in.ExistingUserID, in.ExpectedEmail),
+		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM user_identities WHERE provider='goauthy' AND issuer=? AND collection_id='' AND external_user_id=? AND user_id<>?)", in.Issuer, in.Subject, in.ExistingUserID),
+		{SQL: "INSERT INTO user_identities(id,user_id,provider,issuer,collection_id,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) SELECT ?,id,'goauthy',?,'',?,email,display_name,NULL,?,? FROM users WHERE id=? AND active=1 AND email=? ON CONFLICT(provider,issuer,collection_id,external_user_id) DO NOTHING", Args: []any{requestID(), in.Issuer, in.Subject, now, now, in.ExistingUserID, in.ExpectedEmail}},
+		assertion("SELECT 1 FROM user_identities WHERE provider='goauthy' AND issuer=? AND collection_id='' AND external_user_id=? AND user_id=?", in.Issuer, in.Subject, in.ExistingUserID),
+	}
+	if err := s.Transaction(ctx, statements); err != nil {
+		if strings.Contains(err.Error(), "transaction rejected") {
+			return serviceError(409, "Goauthy identity link conflict")
+		}
+		return err
+	}
+	return nil
 }
 func (s *Store) EnrollActiveMember(ctx context.Context, org, user string) (OrganizationMembership, error) {
 	now := nowString()

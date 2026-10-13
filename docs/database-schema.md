@@ -1,6 +1,6 @@
 # Database Schema
 
-이 문서는 현재 [`internal/grant/store_schema.sql`](../internal/grant/store_schema.sql)을 기준으로 실제 스키마를 설명한다.
+이 문서는 immutable V1/V2 DDL과 V4 forward migration을 합친 현재 실제 스키마를 설명한다.
 
 ## 프로젝트 경계
 
@@ -38,7 +38,7 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 ### `user_identities`
 
-외부 인증 공급자와 내부 사용자 매핑. unique key는 `(provider, issuer, collection_id, external_user_id)`다. PocketBase는 `provider=pocketbase`, 설정된 canonical origin인 `issuer`, auth-refresh로 검증한 `collection_id`와 raw record ID를 모두 사용한다. Rauthy는 기존 subject 의미를 유지하고 issuer/collection은 빈 문자열이다. CHECK 제약은 PocketBase의 두 namespace 값이 모두 있어야 하고 다른 provider에서는 모두 비어 있어야 함을 보장한다. 같은 raw ID가 다른 issuer나 collection에 있어도 별도 사용자이며 이메일로 자동 연결하지 않는다. 명시적 master owner bootstrap은 선택 조직의 owner membership/binding을 원자 생성하며 application은 별도 등록한다. 인증 응답의 organizations relation은 사용하지 않는다. 정상 소속·권한의 권위는 Grant local row다.
+외부 인증 공급자와 내부 사용자 매핑. unique key는 `(provider, issuer, collection_id, external_user_id)`다. PocketBase는 `provider=pocketbase`, 설정된 canonical origin인 `issuer`, auth-refresh로 검증한 `collection_id`와 raw record ID를 모두 사용한다. Rauthy는 기존 subject 의미를 유지하고 issuer/collection은 빈 문자열이다. Goauthy는 `(goauthy, canonical HTTPS issuer origin, '', sub)`을 사용한다. V4 CHECK는 이 세 namespace를 분리하고 Goauthy row의 empty issuer/collection 같은 legacy shape를 허용하지 않는다. 같은 raw ID가 다른 issuer나 collection에 있어도 별도 사용자이며 이메일로 자동 연결하지 않는다. private master-only `POST /api/v1/admin/identity-links/goauthy`만 운영자가 확인한 `existingUserId`, exact configured issuer, subject와 대상 사용자 이메일을 함께 받아 기존 활성 사용자에 Goauthy subject를 명시적으로 연결한다. 이 작업은 profile, membership, RBAC, application, consent를 바꾸지 않는다. 정상 소속·권한의 권위는 Grant local row다.
 
 ### `auth_identity_cache`
 
@@ -215,7 +215,7 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 
 큰 provider action manifest는 기존 `grant_import_payloads`에 `kind='provider-actions'`로 불변 문자열 조각을 먼저 저장한다. 한 최종 transaction에서 전체 action 교체, 생략된 action의 role/application/consent 연결 삭제, staging 정리를 함께 수행한다. 중간 chunk는 권한 판단에 사용하지 않으며 최종 실패 시 기존 권한을 유지한다. 실패한 요청의 참조되지 않는 staging 조각이 남을 수 있다. 새 테이블이나 DDL 변경은 없다.
 
-- `user_identities.user_id` -> `users.id`
+- `user_identities.user_id` -> `users.id`는 애플리케이션 관계다. 물리 FK는 없으므로 V4 atomic rebuild 전에 `user_identities`를 참조하는 FK가 없는 것을 확인했다.
 - `organization_memberships.user_id` -> `users.id`
 - `organization_memberships.organization_id` -> `organizations.id`
 - `organization_party_links.organization_id` -> `organizations.id`

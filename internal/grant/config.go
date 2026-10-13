@@ -25,10 +25,15 @@ type RauthyConfig struct {
 	CacheTTLSeconds                                                                 uint64
 }
 type PocketBaseConfig struct{ BaseURL, Collection, ApplicationID string }
+type GoauthyConfig struct {
+	Issuer, IntrospectionClientID, IntrospectionClientSecret, ExpectedClientID, Resource, ApplicationID string
+	RequiredScopes                                                                                      []string
+}
 type AuthConfig struct {
 	ProviderMode string
 	Rauthy       RauthyConfig
 	PocketBase   *PocketBaseConfig
+	Goauthy      *GoauthyConfig
 }
 type DatabaseConfig struct {
 	ClusterRestoreSnapshot                                                                                             string
@@ -85,6 +90,25 @@ func ConfigFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid PocketBase origin/collection configuration")
 		}
 		c.Auth.PocketBase = p
+	case "goauthy":
+		g := &GoauthyConfig{Issuer: strings.TrimSpace(os.Getenv("GRANT_GOAUTHY_ISSUER")), IntrospectionClientID: strings.TrimSpace(os.Getenv("GRANT_GOAUTHY_INTROSPECTION_CLIENT_ID")), IntrospectionClientSecret: os.Getenv("GRANT_GOAUTHY_INTROSPECTION_CLIENT_SECRET"), ExpectedClientID: strings.TrimSpace(os.Getenv("GRANT_GOAUTHY_EXPECTED_CLIENT_ID")), Resource: strings.TrimSpace(os.Getenv("GRANT_GOAUTHY_RESOURCE")), ApplicationID: strings.TrimSpace(os.Getenv("GRANT_GOAUTHY_APPLICATION_ID")), RequiredScopes: strings.Fields(os.Getenv("GRANT_GOAUTHY_REQUIRED_SCOPES"))}
+		var e error
+		g.Issuer, e = canonicalGoauthyOrigin(g.Issuer)
+		if e != nil || g.IntrospectionClientID == "" || g.IntrospectionClientSecret == "" || g.Resource == "" || g.ApplicationID == "" || len(g.RequiredScopes) == 0 {
+			return c, fmt.Errorf("invalid Goauthy configuration")
+		}
+		g.Resource, e = canonicalGoauthyResource(g.Resource)
+		if e != nil || g.ExpectedClientID == "" {
+			return c, fmt.Errorf("invalid Goauthy configuration")
+		}
+		seen := map[string]bool{}
+		for _, scope := range g.RequiredScopes {
+			if scope == "" || seen[scope] {
+				return c, fmt.Errorf("invalid Goauthy required scopes")
+			}
+			seen[scope] = true
+		}
+		c.Auth.Goauthy = g
 	default:
 		return c, fmt.Errorf("invalid GRANT_AUTH_PROVIDER")
 	}

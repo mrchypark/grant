@@ -32,6 +32,17 @@ func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, to
 		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
 			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured PocketBase application is not active for this organization")
 		}
+	} else if s.AuthProviderMode() == "goauthy" {
+		if s.cfg.Auth.Goauthy == nil {
+			return applicationAuthorizationContext{}, serviceError(503, "Goauthy is not configured")
+		}
+		a, err = s.store.GetApplicationWithConsistency(ctx, s.cfg.Auth.Goauthy.ApplicationID, ReadStrong)
+		if err != nil {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured Goauthy application is not ready")
+		}
+		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured Goauthy application is not active for this organization")
+		}
 	} else {
 		rows, e := serviceRows[Application](ctx, s, ReadStrong, "SELECT * FROM applications WHERE rauthy_client_id=? AND organization_id=? AND active=1 AND provisioning_status='ready'", identity.ClientID, org)
 		if e != nil {
@@ -45,8 +56,14 @@ func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, to
 	subject := identity.ExternalUserID
 	if identity.Provider == "pocketbase" {
 		subject = pocketBaseSubject(identity.Issuer, identity.CollectionID, identity.ExternalUserID)
+	} else if identity.Provider == "goauthy" {
+		subject = goauthySubject(identity.Issuer, identity.ExternalUserID)
 	}
-	return applicationAuthorizationContext{u.ID, org, a.ID, subject, identity.ClientID}, nil
+	audience := identity.ClientID
+	if identity.Provider == "goauthy" {
+		audience = a.ID
+	}
+	return applicationAuthorizationContext{u.ID, org, a.ID, subject, audience}, nil
 }
 func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org string, checks []ApplicationAuthorizationCheck) ([]AuthorizationDecision, error) {
 	c, err := s.resolveApplicationAuthorizationContext(ctx, token, org)

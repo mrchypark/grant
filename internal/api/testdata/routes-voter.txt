@@ -43,6 +43,7 @@ PATCH /api/v1/orgs/{organizationId}/apps/{applicationId}
 PATCH /api/v1/orgs/{organizationId}/groups/{groupId}
 PATCH /api/v1/orgs/{organizationId}/roles/{roleId}
 POST /api/v1/admin/bootstrap/owner
+POST /api/v1/admin/identity-links/goauthy
 POST /api/v1/admin/orgs
 POST /api/v1/admin/providers
 POST /api/v1/admin/providers/{providerId}/actions

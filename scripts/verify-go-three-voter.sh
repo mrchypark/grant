@@ -62,10 +62,35 @@ denied=$(curl -sS -o /dev/null -w '%{http_code}' --aws-sigv4 'aws:amz:us-east-1:
 curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' --user 'local-grant:local-grant-storage-secret' \
   -X DELETE "http://127.0.0.1:$s3_port/grant-rhiza/fixture-probe" >/dev/null
 printf '%s\n' 'Versity S3 path-style bucket creation, signed roundtrip and invalid-credential rejection passed'
-base=$((30000 + $$ % 10000))
+# Keep every fixture listener below Linux's ephemeral client-port range. Node 2
+# is stopped before the learner starts, so S3 egress could otherwise claim its
+# later-reused runtime port.
+if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+  # dash's byte reads truncate procfs sysctl records; buffer the record first.
+  ephemeral_range=$(cat /proc/sys/net/ipv4/ip_local_port_range)
+  read -r ephemeral_first ephemeral_last <<EOF
+$ephemeral_range
+EOF
+  case "$ephemeral_first:$ephemeral_last" in
+    *[!0-9:]*|:*) echo 'Linux ephemeral port range is invalid' >&2; exit 1 ;;
+  esac
+  [ "$ephemeral_first" -gt 1034 ] || { echo 'Linux ephemeral port range leaves no fixture listener range' >&2; exit 1; }
+  base=$((1024 + $$ % (ephemeral_first - 1034)))
+else
+  base=$((20000 + $$ % 10000))
+fi
 http0=$base; http1=$((base+1)); http2=$((base+2))
-peer0=$((base+3)); peer1=$((base+4)); peer2=$((base+5))
-operator0=$((base+6)); operator1=$((base+7)); operator2=$((base+8))
+# Old and replacement identities coexist during admission and need distinct peer endpoints.
+peer0=$((base+3)); peer1=$((base+4)); peer2=$((base+5)); peer3=$((base+6))
+operator0=$((base+7)); operator1=$((base+8)); operator2=$((base+9))
+runtime=$((base+10))
+for port in "$http0" "$http1" "$http2" "$peer0" "$peer1" "$peer2" "$peer3" "$operator0" "$operator1" "$operator2" "$runtime"; do
+  [ "$port" -ne "$s3_port" ] || { echo "fixture listener collides with Docker S3 port: $port" >&2; exit 1; }
+  if [ -n "${ephemeral_first:-}" ] && [ "$port" -ge "$ephemeral_first" ] && [ "$port" -le "$ephemeral_last" ]; then
+    echo "fixture listener is in Linux ephemeral port range: $port" >&2
+    exit 1
+  fi
+done
 cluster_id=$container
 token0=local-voter-0-012345678901234567890123
 token1=local-voter-1-012345678901234567890123
@@ -210,12 +235,12 @@ printf '%s\n' 'Same-ID empty-WAL replacement was rejected before serving'
 node_root=$source_root
 expected_config=$(curl -fsS -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator0/membership/status" | jq -r '.config_id')
 key3=$(public_key "$cluster_id" grant-3 "$token3")
-learner_member=$(printf '{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","public_key":"%s"}' "$peer2" "$key3")
-node=3; http=$http2; peer=$peer2; operator=$operator2
+learner_member=$(printf '{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","public_key":"%s"}' "$peer3" "$key3")
+node=3; http=$http2; peer=$peer3; operator=$operator2
 configure_env
 export RHIZA_NODE_ID=grant-3 RHIZA_PEER_TOKEN="$token3" \
   RHIZA_PEER_TOKENS='' RHIZA_LEARNER="$learner_member" \
-  GRANT_RUNTIME_BIND_ADDR="127.0.0.1:$((base+9))" \
+  GRANT_RUNTIME_BIND_ADDR="127.0.0.1:$runtime" \
   GRANT_REMOTE_API_SECRET=local-runtime-secret-distinct-32-bytes
 "$task_dir/grant" >"$task_dir/node-3.log" 2>&1 &
 pid3=$!; pids="$pids $pid3"; pid2=$pid3
@@ -234,7 +259,7 @@ learner_admin_code=$(curl --max-time 3 -sS -o /dev/null -w '%{http_code}' \
   "http://127.0.0.1:$http2/api/v1/admin/providers")
 [ "$learner_admin_code" = 503 ] || { echo "fresh learner admin API was $learner_admin_code, want 503" >&2; exit 1; }
 for path in healthz read-fence; do
-  private_code=$(curl --max-time 3 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$((base+9))/$path")
+  private_code=$(curl --max-time 3 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$runtime/$path")
   [ "$private_code" = 503 ] || { echo "pending learner private /$path was $private_code, want 503" >&2; exit 1; }
 done
 # Cancellation during admission must exit cleanly and preserve the learner WAL.
@@ -285,11 +310,35 @@ printf '%s' "$learner_status" | jq -e --arg cluster "$cluster_id" \
 }
 learner_wal=$(printf '%s' "$learner_status" | jq -r '.wal_identity')
 [ -n "$learner_wal" ] && [ "$learner_wal" != null ] || { echo 'fresh learner did not expose a WAL identity' >&2; exit 1; }
+# The learner can publish its identity before the surviving voter has rebuilt a
+# quorum read index after the learner restart. Wait for that source-voter gate;
+# do not retry the membership mutation itself because its outcome can be unknown.
+i=0
+until curl --max-time 3 -fsS "http://127.0.0.1:$operator0/recovery/status" >"$task_dir/source-recovery-status.json" \
+  && jq -e --arg cluster "$cluster_id" '.node_id == "grant-0" and .cluster_id == $cluster and .ready == true and .quorum == true' "$task_dir/source-recovery-status.json" >/dev/null; do
+  check_children
+  i=$((i+1)); [ "$i" -lt 90 ] || {
+    echo 'source voter did not regain quorum readiness before learner admission' >&2
+    cat "$task_dir/source-recovery-status.json" >&2
+    exit 1
+  }
+  sleep 1
+done
 add_body=$(jq -cn --arg op add-grant-3 --arg cluster "$cluster_id" --argjson config "$expected_config" \
-  --arg id grant-3 --arg peer "quic://127.0.0.1:$peer2" --arg key "$key3" --arg wal "$learner_wal" \
+  --arg id grant-3 --arg peer "quic://127.0.0.1:$peer3" --arg key "$key3" --arg wal "$learner_wal" \
   '{operation_id:$op,cluster_id:$cluster,expected_config_id:$config,add:{node_id:$id,peer_url:$peer,public_key:$key,wal_identity:$wal}}')
-curl --fail-with-body -sS -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
-  --data "$add_body" "http://127.0.0.1:$operator0/membership/change" >"$task_dir/learner-added.json"
+learner_add_code=$(curl --max-time 30 -sS -o "$task_dir/learner-added.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  --data "$add_body" "http://127.0.0.1:$operator0/membership/change") || {
+  echo 'learner membership admission request failed' >&2
+  cat "$task_dir/learner-added.json" >&2
+  exit 1
+}
+[ "$learner_add_code" = 200 ] || {
+  echo "learner membership admission returned HTTP $learner_add_code" >&2
+  cat "$task_dir/learner-added.json" >&2
+  exit 1
+}
 i=0
 while :; do
   learner_status_code=$(curl --max-time 3 -sS -o "$task_dir/learner-membership-status.json" -w '%{http_code}' \
@@ -323,26 +372,63 @@ while :; do
   if printf '%s' "$learner_status" | jq -e '.voting == true' >/dev/null 2>&1; then break; fi
   i=$((i+1)); [ "$i" -lt 90 ] || { echo 'learner admission did not promote the fresh voter' >&2; exit 1; }; sleep 1
 done
-# Finish application initialization before beginning the next membership change.
-i=0
-until curl --max-time 3 -fsS "http://127.0.0.1:$http2/readyz" >/dev/null 2>&1; do
-  check_children
-  i=$((i+1)); [ "$i" -lt 90 ] || { cat "$task_dir/node-3.log" >&2; exit 1; }; sleep 1
+# Wait until every voter has rebuilt strong-read readiness after promotion.
+for port in "$http0" "$http1" "$http2"; do
+  i=0
+  until curl --max-time 3 -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1; do
+    check_children
+    i=$((i+1)); [ "$i" -lt 90 ] || { echo "voter on port $port did not regain read readiness after learner promotion" >&2; exit 1; }
+    sleep 1
+  done
 done
 remove_body=$(jq -cn --arg op remove-grant-2 --arg cluster "$cluster_id" --argjson config "$((expected_config+1))" \
   --arg wal "$old2_wal" '{operation_id:$op,cluster_id:$cluster,expected_config_id:$config,remove:"grant-2",fence:{node_id:"grant-2",wal_identity:$wal,workload_uid:"grant-go-three-voter",confirmed:true,evidence:"owned local process terminated and empty replacement rejected"}}')
-curl --fail-with-body -sS -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
-  --data "$remove_body" "http://127.0.0.1:$operator0/membership/change" >"$task_dir/learner-promoted.json"
-curl -fsS -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator0/membership/status" \
-  | jq -e '.voters | index("grant-3") and (index("grant-2") | not)' >/dev/null
+remove_code=$(curl --max-time 30 -sS -o "$task_dir/learner-promoted.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  --data "$remove_body" "http://127.0.0.1:$operator0/membership/change") || {
+  echo 'learner removal request failed before receiving a response' >&2
+  cat "$task_dir/learner-promoted.json" >&2
+  exit 1
+}
+[ "$remove_code" = 200 ] || {
+  echo "learner removal returned HTTP $remove_code" >&2
+  cat "$task_dir/learner-promoted.json" >&2
+  exit 1
+}
 i=0
-until curl --max-time 3 -fsS "http://127.0.0.1:$http2/readyz" >/dev/null 2>&1; do
+while :; do
+  status_code=$(curl --max-time 3 -sS -o "$task_dir/membership-after-removal.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $admin_token" "http://127.0.0.1:$operator0/membership/status") || {
+    echo 'membership status request failed after learner removal' >&2
+    cat "$task_dir/membership-after-removal.json" >&2
+    exit 1
+  }
+  if [ "$status_code" = 200 ] && jq -e '.voters | index("grant-3") and (index("grant-2") | not)' \
+    "$task_dir/membership-after-removal.json" >/dev/null; then break; fi
+  case "$status_code" in
+    200|503) ;;
+    *) echo "membership status returned HTTP $status_code after learner removal" >&2
+       cat "$task_dir/membership-after-removal.json" >&2; exit 1 ;;
+  esac
   check_children
-  i=$((i+1)); [ "$i" -lt 90 ] || { cat "$task_dir"/node-3.log >&2; exit 1; }; sleep 1
+  i=$((i+1)); [ "$i" -lt 90 ] || {
+    echo "membership did not converge after learner removal (HTTP $status_code)" >&2
+    cat "$task_dir/membership-after-removal.json" >&2
+    exit 1
+  }
+  sleep 1
+done
+for port in "$http0" "$http1" "$http2"; do
+  i=0
+  until curl --max-time 3 -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1; do
+    check_children
+    i=$((i+1)); [ "$i" -lt 90 ] || { echo "voter on port $port did not regain read readiness after learner removal" >&2; exit 1; }
+    sleep 1
+  done
 done
 peer_tokens=$(printf '{"grant-0":"%s","grant-1":"%s","grant-3":"%s"}' "$token0" "$token1" "$token3")
-legacy_members=$(printf '[{"node_id":"grant-0","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-1","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","token":"%s"}]' "$peer0" "$token0" "$peer1" "$token1" "$peer2" "$token3")
-members=$(printf '[{"node_id":"grant-0","peer_url":"quic://127.0.0.1:%s","public_key":"%s"},{"node_id":"grant-1","peer_url":"quic://127.0.0.1:%s","public_key":"%s"},{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","public_key":"%s"}]' "$peer0" "$key0" "$peer1" "$key1" "$peer2" "$key3")
+legacy_members=$(printf '[{"node_id":"grant-0","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-1","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","token":"%s"}]' "$peer0" "$token0" "$peer1" "$token1" "$peer3" "$token3")
+members=$(printf '[{"node_id":"grant-0","peer_url":"quic://127.0.0.1:%s","public_key":"%s"},{"node_id":"grant-1","peer_url":"quic://127.0.0.1:%s","public_key":"%s"},{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","public_key":"%s"}]' "$peer0" "$key0" "$peer1" "$key1" "$peer3" "$key3")
 curl -fsS -H 'X-Grant-Master-Key: local-master-secret' -H 'Content-Type: application/json' \
  --data '{"id":"cold-recovery-latest","name":"Latest before cold loss","active":true}' \
  "http://127.0.0.1:$http0/api/v1/admin/providers" >/dev/null
@@ -387,7 +473,7 @@ cluster_id="$container-restored"
 node_root="$task_dir/restored"
 mkdir "$node_root"
 legacy_mode=1
-legacy_members=$(printf '[{"node_id":"grant-0","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-1","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","token":"%s"}]' "$peer0" "$token0" "$peer1" "$token1" "$peer2" "$token3")
+legacy_members=$(printf '[{"node_id":"grant-0","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-1","peer_url":"quic://127.0.0.1:%s","token":"%s"},{"node_id":"grant-3","peer_url":"quic://127.0.0.1:%s","token":"%s"}]' "$peer0" "$token0" "$peer1" "$token1" "$peer3" "$token3")
 node=0; http=$http0; peer=$peer0; operator=$operator0
 configure_env
 "$task_dir/grant" migrate-prepare-cluster --snapshot "$restore_snapshot"
@@ -404,7 +490,7 @@ while [ "$i" -lt 3 ]; do
  done
  i=$((i+1)); sleep 1
 done
-start 3 "$http2" "$peer2" "$operator2"; pid2=$started_pid
+start 3 "$http2" "$peer3" "$operator2"; pid2=$started_pid
 for port in "$http0" "$http1" "$http2"; do
  i=0
  until curl --max-time 2 -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1; do
@@ -435,7 +521,7 @@ curl --retry 12 --retry-all-errors --retry-delay 1 --max-time 30 -fsS \
  -H 'X-Grant-Master-Key: local-master-secret' -H 'Content-Type: application/json' \
  --data '{"id":"restore-recovery","name":"Restored quorum recovery","active":true}' \
  "http://127.0.0.1:$http0/api/v1/admin/providers" >/dev/null
-start 3 "$http2" "$peer2" "$operator2"; pid2=$started_pid
+start 3 "$http2" "$peer3" "$operator2"; pid2=$started_pid
 i=0
 until curl --max-time 2 -fsS "http://127.0.0.1:$http2/readyz" >/dev/null 2>&1; do
  check_children

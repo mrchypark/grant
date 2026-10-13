@@ -16,12 +16,23 @@ var schemaSQL string
 //go:embed store_indexes.sql
 var indexesSQL string
 
+//go:embed store_schema_goauthy_v4.sql
+var goauthySchemaV4SQL string
+
+func canonicalSchemaDigest() string {
+	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL))
+}
+
+func legacySchemaDigestV3() string {
+	return digestBytes([]byte(schemaSQL + indexesSQL))
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
 	if e := s.coarsePreflight(ctx, ReadStrong); e != nil {
 		return e
 	}
 	var migrations []rhiza.Migration
-	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}} {
+	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}} {
 		var stmts []Statement
 		for _, q := range strings.Split(group.sql, ";") {
 			if strings.TrimSpace(q) != "" {

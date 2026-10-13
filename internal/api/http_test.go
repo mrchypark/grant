@@ -81,11 +81,13 @@ func TestBodyLimitAndMediaType(t *testing.T) {
 func TestLearnerWriteIsUnavailable(t *testing.T) {
 	s := testServer()
 	s.learner = true
-	r := httptest.NewRequest("POST", "/api/v1/admin/providers", nil)
-	w := httptest.NewRecorder()
-	s.ServeHTTP(w, r)
-	if w.Code != 503 {
-		t.Fatal(w.Code)
+	for _, path := range []string{"/api/v1/admin/providers", "/api/v1/admin/identity-links/goauthy"} {
+		r := httptest.NewRequest("POST", path, nil)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 503 {
+			t.Fatalf("%s: %d", path, w.Code)
+		}
 	}
 }
 func TestProxyUnavailableForPocketBase(t *testing.T) {

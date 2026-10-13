@@ -64,7 +64,7 @@ func tableDigest(t SnapshotTable) (string, error) {
 	return digestBytes([]byte(v)), e
 }
 func (s *Store) ExportSnapshot(ctx context.Context) (StoreSnapshot, error) {
-	out := StoreSnapshot{Version: 1, Backend: "rhiza", CreatedAt: nowString(), SchemaDigest: digestBytes([]byte(schemaSQL + indexesSQL)), Tables: []SnapshotTable{}}
+	out := StoreSnapshot{Version: 1, Backend: "rhiza", CreatedAt: nowString(), SchemaDigest: canonicalSchemaDigest(), Tables: []SnapshotTable{}}
 	out.ClusterID = s.cfg.Database.ClusterID
 	if s.cfg.Database.Rhiza.ClusterID != "" {
 		out.ClusterID = s.cfg.Database.Rhiza.ClusterID
@@ -188,7 +188,7 @@ func ReadStoreSnapshot(path string) (StoreSnapshot, error) {
 	return s, ValidateStoreSnapshot(s)
 }
 func ValidateStoreSnapshot(s StoreSnapshot) error {
-	if s.Version != 1 || s.SchemaDigest != digestBytes([]byte(schemaSQL+indexesSQL)) {
+	if s.Version != 1 || (s.SchemaDigest != canonicalSchemaDigest() && s.SchemaDigest != legacySchemaDigestV3()) {
 		return fmt.Errorf("snapshot schema mismatch")
 	}
 	expected := applicationTables()
@@ -213,7 +213,54 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 	if e != nil || d != s.Digest {
 		return fmt.Errorf("snapshot digest mismatch")
 	}
+	if s.SchemaDigest == legacySchemaDigestV3() {
+		if e := validateLegacyV3IdentityRows(s); e != nil {
+			return e
+		}
+	}
 	return nil
+}
+
+// A v3 snapshot is admitted only as frozen pre-Goauthy state. Its identity
+// tuples must satisfy the v3 namespace rules and contain no Goauthy rows, which
+// v4 would otherwise reject during the atomic table rebuild.
+func validateLegacyV3IdentityRows(s StoreSnapshot) error {
+	for _, table := range s.Tables {
+		if table.Name != "user_identities" {
+			continue
+		}
+		columns := map[string]int{}
+		for i, name := range table.Columns {
+			columns[name] = i
+		}
+		for _, row := range table.Rows {
+			provider, issuer, collection, ok := snapshotIdentityTuple(row, columns)
+			if !ok {
+				return fmt.Errorf("legacy snapshot identity shape is invalid")
+			}
+			if provider == "goauthy" || (provider == "pocketbase" && (issuer == "" || collection == "")) || (provider != "pocketbase" && (issuer != "" || collection != "")) {
+				return fmt.Errorf("legacy snapshot contains incompatible identity namespace")
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("legacy snapshot is missing user_identities")
+}
+
+func snapshotIdentityTuple(row []any, columns map[string]int) (provider, issuer, collection string, ok bool) {
+	values := []*string{&provider, &issuer, &collection}
+	for i, name := range []string{"provider", "issuer", "collection_id"} {
+		position, found := columns[name]
+		if !found || position >= len(row) {
+			return "", "", "", false
+		}
+		value, isString := row[position].(string)
+		if !isString {
+			return "", "", "", false
+		}
+		*values[i] = value
+	}
+	return provider, issuer, collection, true
 }
 func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) error {
 	if e := ValidateStoreSnapshot(snap); e != nil {
@@ -289,7 +336,7 @@ func writeDurableExclusive(path string, b []byte) error {
 	return syncDirectory(filepath.Dir(path))
 }
 func ExportLegacySQLite(ctx context.Context, path string) (StoreSnapshot, error) {
-	out := StoreSnapshot{Version: 1, Backend: "hiqlite-sqlite", CreatedAt: nowString(), SchemaDigest: digestBytes([]byte(schemaSQL + indexesSQL)), Tables: []SnapshotTable{}}
+	out := StoreSnapshot{Version: 1, Backend: "hiqlite-sqlite", CreatedAt: nowString(), SchemaDigest: legacySchemaDigestV3(), Tables: []SnapshotTable{}}
 	abs, e := filepath.Abs(path)
 	if e != nil {
 		return out, e

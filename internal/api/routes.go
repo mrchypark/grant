@@ -102,6 +102,7 @@ func (s *Server) routes() {
 	s.route("PUT", "/api/v1/admin/users/{userId}/active", "master", true, 200, body(false, func(r *request, v activeRequest) (any, error) {
 		return s.service.SetUserActiveAdmin(r.Context(), r.PathValue("userId"), v.Active)
 	}))
+	s.privateAdminAccountLinkRoutes()
 	s.route("GET", "/api/v1/orgs/{organizationId}/groups", "user", false, 200, func(r *request) (any, error) {
 		return s.service.ListGroupsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.consistency)
 	})

@@ -16,10 +16,16 @@ func (s *Service) externalIdentity(ctx context.Context, authorization string) (E
 	if strings.TrimSpace(authorization) == "" {
 		return ExternalIdentity{}, serviceError(401, "unauthorized: missing bearer token")
 	}
-	if s.cfg.Auth.ProviderMode == "pocketbase" {
+	switch s.cfg.Auth.ProviderMode {
+	case "pocketbase":
 		return s.pocketBaseIdentity(ctx, authorization)
+	case "goauthy":
+		return s.goauthyIdentity(ctx, authorization)
+	case "rauthy":
+		return s.rauthyIdentity(ctx, authorization)
+	default:
+		return ExternalIdentity{}, serviceError(503, "authentication provider is not configured")
 	}
-	return s.rauthyIdentity(ctx, authorization)
 }
 func (s *Service) authJSON(ctx context.Context, request *http.Request, out any, provider string) error {
 	response, err := s.client.Do(request.WithContext(ctx))

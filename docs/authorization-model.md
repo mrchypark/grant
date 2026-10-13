@@ -4,13 +4,13 @@
 
 ## 인증 공급자 방향과 현재 지원 범위
 
-인증 연동 대상은 **PocketBase, Rauthy, 개발 중인 Goauthy**다. 현재 `GRANT_AUTH_PROVIDER`는 배포당 `rauthy` 또는 `pocketbase` 하나를 선택한다. Goauthy adapter는 아직 없으며 프로토콜을 미리 가정하지 않는다.
+인증 연동 대상은 **PocketBase, Rauthy, Goauthy**다. `GRANT_AUTH_PROVIDER`는 배포당 `rauthy`, `pocketbase`, `goauthy` 중 하나를 선택한다. Goauthy는 고정 issuer의 online introspection과 userinfo로 subject를 검증한다.
 
 | 대상 | 현재 구현 |
 |---|---|
 | PocketBase | 설정된 issuer origin 및 auth collection 하나의 auth-refresh를 호출한다. patch-auth의 users, viewers, temporary_accounts 중 선택할 수 있으며 요청자가 endpoint를 바꾸지 못한다. |
 | Rauthy | 설정된 introspection endpoint에 client 인증과 토큰을 보내고, userinfo의 subject가 같은지 확인한다. 기본 경로는 `/auth/v1/oidc/introspect`, `/auth/v1/oidc/userinfo`다. 로컬 JWT 서명 검증이나 OIDC discovery 방식은 아니다. |
-| Goauthy | 연동 목표다. 저장소·인증 인터페이스가 확인되면 토큰 검증 요청/응답, 안정적인 subject, 앱·audience 매핑, 만료·철회 동작을 정한다. OIDC 또는 PocketBase 호환이라고 미리 가정하지 않는다. |
+| Goauthy | canonical HTTPS issuer에 introspection/userinfo를 호출한다. introspection의 `client_id`는 expected client와 정확히 같아야 하고, `aud`는 configured resource 하나만 정확히 담아야 하며, `sub`와 `openid goauthy.read` scope도 검증한다. 서명 JWT projection의 client ID audience를 introspection `aud` 계약으로 사용하지 않는다. Goauthy application ID는 Grant application admission과 evidence audience에 사용한다. |
 
 인증 공급자와 권한 대상인 `service_providers`는 다른 개념이다. PocketBase identity는 issuer·collection·record를 모두 구분한다. 권한 catalog의 `patch-data` provider 이름은 유지하며 인증 공급자 이름과 연결하지 않는다. 외부 subject를 내부 사용자 ID로 추정하지 않는다.
 
@@ -130,7 +130,7 @@ POST /api/v1/application-authz/batch-check
 POST /api/v1/application-authz/filter
 ```
 
-이 경로는 전용 `x-grant-app-auth-key`, Bearer token, `x-organization-id`를 모두 요구하고 strong consistency만 사용한다. `GRANT_APP_AUTH_KEY`는 필수이며 `GRANT_MASTER_KEY`와 다른 값이어야 한다. master key는 application-authz 인증에 사용할 수 없고 app-auth key도 admin 인증에 사용할 수 없다. subject와 application id는 body에서 받지 않는다. 서버가 검증된 토큰 `sub`와 `client_id`를 사용해 exact 사용자와 동일 조직의 active application을 결정한다. client mismatch, 모호한 매핑, 검증 정보가 없는 cache 또는 identity provider 장애에서 안전한 cache가 없으면 fail closed한다. 기존 `/api/v1/authz/*` master API는 `x-grant-master-key`로 명시한 subject를 검사하는 trusted-provider 계약으로 유지한다.
+이 경로는 전용 `x-grant-app-auth-key`, Bearer token, `x-organization-id`를 모두 요구하고 strong consistency만 사용한다. `GRANT_APP_AUTH_KEY`는 필수이며 `GRANT_MASTER_KEY`와 다른 값이어야 한다. master key는 application-authz 인증에 사용할 수 없고 app-auth key도 admin 인증에 사용할 수 없다. subject와 application id는 body에서 받지 않는다. 서버는 검증된 identity와 application context로 exact 사용자와 동일 조직의 active application을 결정한다. PocketBase와 Goauthy는 fixed application ID를 사용하고 Rauthy는 검증된 `client_id`를 사용한다. client mismatch, 모호한 매핑, 검증 정보가 없는 cache 또는 identity provider 장애에서 안전한 cache가 없으면 fail closed한다. 기존 `/api/v1/authz/*` master API는 `x-grant-master-key`로 명시한 subject를 검사하는 trusted-provider 계약으로 유지한다.
 
 ## PocketBase authentication mode
 

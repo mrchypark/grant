@@ -28,6 +28,17 @@ func (s *Service) CreateOwnOrganization(ctx context.Context, token string, in Se
 	return s.createOrganization(WithManagementActor(ctx, view.User.ID), CreateOrganizationInput{ID: id, Name: in.Name, OwnerUserID: view.User.ID}, managementOwnerBindingStatements(id, view.User.ID, view.User.ID))
 }
 
+func (s *Service) LinkGoauthyIdentityAdmin(ctx context.Context, in GoauthyIdentityLinkInput) error {
+	if s.cfg.Auth.Goauthy == nil {
+		return serviceError(503, "Goauthy is not configured")
+	}
+	issuer, err := canonicalGoauthyOrigin(in.Issuer)
+	if err != nil || issuer != s.cfg.Auth.Goauthy.Issuer || in.Issuer != issuer {
+		return serviceError(422, "Goauthy issuer does not match configured issuer")
+	}
+	return s.store.LinkGoauthyIdentityToExistingUser(ctx, in)
+}
+
 // This protected system role contains only registered tenant-management actions.
 // Ownership transfer moves an existing binding and preserves restrictions;
 // it must not create or restore rights for organizations without that binding.
@@ -93,6 +104,10 @@ func (s *Service) resolveOnboardingContext(ctx context.Context, token, action st
 		if s.cfg.Auth.PocketBase == nil || s.cfg.Auth.PocketBase.ApplicationID != app.ID || identity.ClientID != app.ID {
 			return applicationAuthorizationContext{}, serviceError(403, "onboarding application mismatch")
 		}
+	} else if identity.Provider == "goauthy" {
+		if s.cfg.Auth.Goauthy == nil || s.cfg.Auth.Goauthy.ApplicationID != app.ID || identity.ClientID != app.ID {
+			return applicationAuthorizationContext{}, serviceError(403, "onboarding application mismatch")
+		}
 	} else if identity.ClientID == "" || identity.ClientID != ptrValue(app.RauthyClientID) {
 		return applicationAuthorizationContext{}, serviceError(403, "onboarding application mismatch")
 	}
@@ -113,8 +128,14 @@ func (s *Service) resolveOnboardingContext(ctx context.Context, token, action st
 	subject := identity.ExternalUserID
 	if identity.Provider == "pocketbase" {
 		subject = pocketBaseSubject(identity.Issuer, identity.CollectionID, identity.ExternalUserID)
+	} else if identity.Provider == "goauthy" {
+		subject = goauthySubject(identity.Issuer, identity.ExternalUserID)
 	}
 	// Namespace the verified external identity separately from local user IDs.
 	key, _ := json.Marshal([]string{identity.Provider, identity.Issuer, identity.CollectionID, identity.ExternalUserID})
-	return applicationAuthorizationContext{UserID: "onboarding:" + sha256Text(string(key)), OrganizationID: app.OrganizationID, ApplicationID: app.ID, ExternalSubject: subject, ProviderAudience: identity.ClientID}, nil
+	audience := identity.ClientID
+	if identity.Provider == "goauthy" {
+		audience = app.ID
+	}
+	return applicationAuthorizationContext{UserID: "onboarding:" + sha256Text(string(key)), OrganizationID: app.OrganizationID, ApplicationID: app.ID, ExternalSubject: subject, ProviderAudience: audience}, nil
 }
