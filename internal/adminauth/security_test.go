@@ -67,7 +67,7 @@ func newIssuerFixture(t *testing.T) *issuerFixture {
 
 func assertSecurityHeaders(t *testing.T, w *httptest.ResponseRecorder) {
 	t.Helper()
-	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Referrer-Policy") != "no-referrer" || w.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" {
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Referrer-Policy") != "same-origin" || w.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" {
 		t.Fatalf("missing response security headers: %v", w.Header())
 	}
 }

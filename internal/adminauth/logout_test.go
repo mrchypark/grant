@@ -30,6 +30,8 @@ func TestLogoutEndsLocallyAndConfirmationDoesNotLogout(t *testing.T) {
 	}
 	if w := request("GET", "/", "", "", cookie); w.Code != 200 {
 		t.Fatal(w.Code)
+	} else {
+		assertSecurityHeaders(t, w)
 	}
 	if w := request("GET", "/logged-out", "", "", cookie); w.Code != 303 || w.Header().Get("Location") != "/" || len(w.Result().Cookies()) != 0 {
 		t.Fatal("confirmation changed live session")
@@ -37,9 +39,12 @@ func TestLogoutEndsLocallyAndConfirmationDoesNotLogout(t *testing.T) {
 	if w := request("GET", "/", "", "", cookie); w.Code != 200 {
 		t.Fatal("session lost")
 	}
-	for _, tc := range []struct{ token, origin string }{{"wrong", testPublicURL}, {csrf, "https://attacker.example"}} {
+	for _, tc := range []struct{ token, origin string }{{"wrong", testPublicURL}, {"", testPublicURL}, {csrf, "https://attacker.example"}, {csrf, "null"}} {
 		if w := request("POST", "/logout", tc.token, tc.origin, cookie); w.Code != 403 {
 			t.Fatalf("invalid logout accepted: %d", w.Code)
+		}
+		if w := request("GET", "/", "", "", cookie); w.Code != 200 {
+			t.Fatal("rejected logout invalidated session")
 		}
 	}
 	w := request("POST", "/logout", csrf, testPublicURL, cookie)

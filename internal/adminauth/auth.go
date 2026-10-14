@@ -228,7 +228,8 @@ func randomValue(size int) (string, error) {
 
 func (s *server) serve(next http.Handler, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Preserve Origin on same-origin form POSTs without sending cross-origin referrers.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	switch {
 	case r.URL.Path == "/logged-out":

@@ -39,6 +39,8 @@ docker run --rm \
 
 로그아웃하면 Grant 관리 세션만 종료하고 로컬 완료 화면으로 이동한다. Goauthy 로그인 상태는 변경하지 않으며, 다시 로그인 링크를 선택하면 기존 Goauthy 세션으로 인증될 수 있다.
 
+관리 화면은 `Referrer-Policy: same-origin`을 사용한다. [Fetch 표준의 Origin 헤더 생성 규칙](https://fetch.spec.whatwg.org/#append-a-request-origin-header)에 따라 일반 폼 POST에서 `no-referrer`는 `Origin: null`을 만들지만, `same-origin`은 같은 출처로 보내는 요청의 Origin을 유지한다. 다른 출처에는 Referer를 보내지 않는다. 로그아웃의 Origin·CSRF 검증은 그대로 유지하며, `Origin: null`이나 다른 출처의 요청은 거부한다.
+
 ## 화면 범위와 API 권한
 
 화면은 provider/action/HTTP capability 카탈로그의 stage·activate 작업과 users, members/enrollment, organizations, groups, agreements, applications, roles, bindings 관리로 나뉜다. 카탈로그 배포 단계와 Grant의 조직·사용자 권한 관리는 서로 다른 관리 경계다.
