@@ -34,6 +34,7 @@ catalog. They are private, infrastructure, or authorization endpoints
 that do not participate in the management grant model:
 
 - `POST /api/v1/admin/bootstrap/owner` (unified provider-neutral bootstrap)
+- `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` (master-only operational first-party admission; never exposed through the admin UI registry)
 - `POST /ops/backups`, `GET /ops/backups` (private backup ops)
 - `PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (private enforcer registration)
 - `POST /ops/migrations/patch-data-authority` (private import)

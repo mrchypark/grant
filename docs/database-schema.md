@@ -113,6 +113,10 @@ grant 조직 간 권한은 active `agreements`가 있어야 cross-org binding을
 
 API/OAuth application와 사용자 consent grant. active grant unique 제약과 action subset 검증 때문에 grant 경계에 남긴다.
 
+**운영용 first-party action admission:** `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}`는 master key 전용 voter API이며 성공 시 204를 반환한다. bearer management 권한으로 호출할 수 없으며 management capability catalog에도 포함하지 않는다. 같은 트랜잭션에서 조직이 활성 상태이고 앱이 해당 조직의 active/ready, first-party/auto-approve 상태인지 확인한다. 유효한 security mutation lease가 없어야 하며, 대상 action은 활성 provider에 속하는 canonical ID이고 application에 부여할 수 있어야 한다. 조건이 충족되지 않으면 409로 거부한다. 최대 999개 제한 안에서 `(application_id, action_id)` 연결 하나만 idempotent하게 추가한다. 이미 있는 연결도 현재 조건을 다시 검사한다.
+
+**릴레이션과 구조의 이유:** 이 운영 API는 기존 `application_actions` 관계만 추가하며 테이블이나 컬럼을 추가하지 않는다. 기존 action 연결, role 권한, 사용자 consent grant, trust 설정, identity 연결을 변경하지 않는다. 따라서 이미 신뢰된 앱에 필요한 capability 하나를 허용하면서 사용자의 별도 권한 검증을 유지한다. 조직 API의 trusted application action 변경은 계속 403으로 거부한다.
+
 PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, `rauthy_client_id = NULL`을 저장한다. 별도 OIDC client 생성 절차가 없기 때문이다. 이 상태는 인증 연동 준비만 뜻하며, `first_party = 0`과 `consent_policy = explicit` 및 application action·사용자 권한 검증은 그대로 유지한다. 아래 Rauthy client 생성·검증 절차는 Rauthy 모드에 적용된다.
 
 `applications.rauthy_client_id`는 호환성을 위해 보존한 기존 컬럼명이다. Rauthy 모드의 새 조직 앱 생성은 IdP client ID를 발급하지 않고 NULL과 unprovisioned 상태를 저장한다. 운영자가 IdP에 생성한 기존 client ID를 플랫폼 PUT identity-binding에 전달하면 설정된 Rauthy 읽기 전용 어댑터가 manifest를 검증한다. 성공 시 검증한 로컬 상태가 변하지 않았는지 트랜잭션에서 다시 확인하고 client ID와 ready를 원자 저장한다. 기존 ready 연결 및 unprovisioned 예약 데이터는 보존한다. 준비된 앱을 다른 client ID로 재연결할 수 없다. Grant는 외부 클라이언트 생성·수정·삭제나 secret 발급·회전을 수행하지 않는다.

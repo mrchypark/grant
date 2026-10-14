@@ -43,6 +43,6 @@ docker run --rm \
 
 새 API는 두 개다. `GET /api/v1/admin/users`는 `admin.users.read` 권한으로 Grant 사용자 directory를 읽고, `GET /api/v1/admin/providers/{providerId}/http-capability-generations/{generation}`는 `admin.catalog.read` 권한으로 지정한 HTTP capability generation을 읽는다. Stage 성공 후 일반 form 제출은 HTTP `303`으로 generation 읽기 화면에 이동한다. HTMX 요청은 HTTP `204`와 `HX-Redirect` 헤더를 받아 같은 화면으로 이동한다. 화면에는 generation, catalog digest, capability 내용이 표시된다. 이 GET 주소는 새로고침해도 stage POST를 재실행하지 않으므로 활성화 전에 결과를 확인할 수 있다.
 
-관리 API catalog에는 71개 management capability가 있으며 전체 API에는 87개 route가 있다. 새 route를 추가하는 경우 generated management catalog를 다시 게시하고 필요한 route 권한을 부여해야 gateway가 요청을 허용한다. UI가 이를 자동으로 넓게 승인하거나 권한을 대신 만들지 않는다.
+관리 API catalog에는 71개 management capability가 있으며 전체 API에는 88개 route가 있다. master 전용 first-party action admission API는 management catalog에서 제외된다. management route를 추가하는 경우 generated management catalog를 다시 게시하고 필요한 route 권한을 부여해야 gateway가 요청을 허용한다. UI가 이를 자동으로 넓게 승인하거나 권한을 대신 만들지 않는다.
 
 현재 UI는 감사 추적이나 유효 권한 설명을 제공하지 않는다. 작업 결과만으로 감사 기록 또는 권한 전개 설명이 제공된다고 간주하면 안 된다.

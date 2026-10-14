@@ -2,7 +2,7 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The executable route inventory is `internal/api/testdata/routes-voter.txt`. GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
+The executable route inventory is `internal/api/testdata/routes-voter.txt` (88 routes; 71 management capabilities). GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
 
 ## Method, path, authorization and node role
 
@@ -33,6 +33,7 @@ The executable route inventory is `internal/api/testdata/routes-voter.txt`. GET 
 | PUT | `/api/v1/orgs/{organizationId}/apps/{applicationId}/consent` | user | true | 200 |
 | DELETE | `/api/v1/orgs/{organizationId}/apps/{applicationId}/consent` | user | true | 204 |
 | PUT | `/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust` | master | true | 200 |
+| PUT | `/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` | master only; no bearer fallback | true | 204 |
 | GET | `/api/v1/admin/users` | master or authorized platform bearer | true | 200 |
 | PUT | `/api/v1/admin/users/{userId}/active` | master | true | 200 |
 | GET | `/api/v1/orgs/{organizationId}/groups` | user | false | 200 |
@@ -182,3 +183,16 @@ owner creation, membership tombstones, consent revocation and rollout steps.
 Self-create accepts only `id` and `name`; the verified current user becomes the owner. Owner GET returns an ETag; transfer requires its exact `If-Match` and an `ownerUserId` naming another active member. Only the current owner with organization management permission may transfer. Missing conditions return 428; stale conditions return 412.
 
 The exact four organizationless onboarding capabilities and trusted management-app prerequisites are defined in [the lifecycle contract](api-lifecycle.md). This is not anonymous access or a general removal of organization headers. Agreement classification is now service-defined display metadata: trimmed 1–128 UTF-8 characters, no control characters, unchanged status and interval authorization rules. Existing classification values and field names remain valid.
+
+## Operational first-party admission
+
+The master-only application action PUT above accepts no body and adds only the
+specified association, idempotently. Its transaction requires an active
+organization, same-organization active/ready first-party auto-approve app, no
+active security-mutation lease, and an application-grantable canonical action
+belonging to an active provider. Failed state preconditions return 409. The
+999-action limit permits retrying an existing association at the limit.
+Unauthenticated and ordinary bearer requests return 401; learners return 503.
+Other associations, consent grants, role permissions, trust and identity fields
+are preserved. Tenant action PUTs still reject trusted applications with 403.
+This operational route has no management capability or admin UI registry entry.

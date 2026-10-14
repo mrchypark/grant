@@ -10,8 +10,9 @@ import (
 // requires an explicit exclusion instead of silently omitting management APIs.
 func TestManagementCatalogCoversRegisteredRoutes(t *testing.T) {
 	excluded := map[string]bool{
-		"POST /api/v1/admin/bootstrap/owner":                      true,
-		"POST /api/v1/admin/identity-links/goauthy":               true,
+		"PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}": true,
+		"POST /api/v1/admin/bootstrap/owner":                                              true,
+		"POST /api/v1/admin/identity-links/goauthy":                                       true,
 		"GET /ops/backups":                                        true,
 		"POST /ops/backups":                                       true,
 		"POST /ops/migrations/patch-data-authority":               true,

@@ -99,6 +99,10 @@ func (s *Server) routes() {
 	s.route("PUT", "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust", "master", true, 200, body(false, func(r *request, v trustRequest) (any, error) {
 		return s.service.SetApplicationTrustAdmin(r.Context(), r.PathValue("organizationId"), r.PathValue("applicationId"), v.Trusted)
 	}))
+	// Operational bootstrap only: deliberately absent from the management catalog.
+	s.route("PUT", "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}", "master", true, 204, func(r *request) (any, error) {
+		return nil, s.service.AdmitFirstPartyApplicationActionAdmin(r.Context(), r.PathValue("organizationId"), r.PathValue("applicationId"), r.PathValue("actionId"))
+	})
 	s.route("GET", "/api/v1/admin/users", "master", true, 200, bodyless(s.listAdminUsers))
 	s.route("PUT", "/api/v1/admin/users/{userId}/active", "master", true, 200, body(false, func(r *request, v activeRequest) (any, error) {
 		return s.service.SetUserActiveAdmin(r.Context(), r.PathValue("userId"), v.Active)

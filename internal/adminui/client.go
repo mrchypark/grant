@@ -75,7 +75,8 @@ func (c *apiClient) call(ctx context.Context, method, route string, vars map[str
 }
 
 func (c *apiClient) callWithMeta(ctx context.Context, method, route string, vars map[string]string, query url.Values, body any, organization, managementOrganization string, extra ...http.Header) (apiResponse, error) {
-	if _, ok := grant.LookupManagementRoute(method, route); !ok {
+	definition, ok := grant.LookupManagementRoute(method, route)
+	if !ok {
 		return apiResponse{}, errors.New("unsupported management operation")
 	}
 	path, err := expandManagementPath(route, vars)
@@ -109,9 +110,8 @@ func (c *apiClient) callWithMeta(ctx context.Context, method, route string, vars
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	platform := strings.Contains(route, "/admin/")
 	org := organization
-	if platform {
+	if definition.Platform || (org == "" && definition.ActionCode == "provider.list") {
 		org = managementOrganization
 	}
 	if org != "" {
