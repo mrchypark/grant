@@ -201,11 +201,41 @@ func TestManagementCatalogRouteInventory(t *testing.T) {
 		"POST /api/v1/orgs/{organizationId}/reactivate",
 		"PATCH /api/v1/admin/providers/{providerId}/actions/{actionId}",
 		"PUT /api/v1/admin/users/{userId}/active",
+		"GET /api/v1/admin/users",
 	} {
 		if !seen[want] {
 			t.Fatalf("expected route %s not in registry", want)
 		}
 	}
+}
+
+func TestManagementCatalogAdminUsersPlatformGate(t *testing.T) {
+	route, ok := LookupManagementRoute("GET", "/api/v1/admin/users")
+	if !ok || !route.Platform || route.ActionCode != "admin.users.read" {
+		t.Fatalf("directory platform gate: %+v, found=%v", route, ok)
+	}
+	stage, _, err := ManagementCatalog(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range stage.Capabilities {
+		if c.Method != route.Method || c.PathTemplate != route.Path {
+			continue
+		}
+		if c.AccessMode != "authorized" || c.ActionID == nil || *c.ActionID != "grant-management.admin.users.read" || c.Request.Body != "none" || c.Request.Authorization != "forward-user" {
+			t.Fatalf("directory contract: %+v", c)
+		}
+		if _, err := canonicalQuery(c.Query, "cursor=user-1&limit=2&q=%25"); err != nil {
+			t.Fatalf("directory query rejected by catalog: %v", err)
+		}
+		for _, query := range []string{"q=x&q=y", "unknown=x", "q=%FF", "q=%00"} {
+			if _, err := canonicalQuery(c.Query, query); err == nil {
+				t.Fatalf("catalog accepted invalid query %q", query)
+			}
+		}
+		return
+	}
+	t.Fatal("directory capability missing")
 }
 
 func TestManagementCatalogAsciiTokenOrgFormat(t *testing.T) {
@@ -245,7 +275,24 @@ func TestManagementCatalogGetReadQueryConsistency(t *testing.T) {
 			if c.Query.Mode != "exact" {
 				t.Fatalf("GET capability %s query mode = %q, want exact", c.CapabilityID, c.Query.Mode)
 			}
-			if len(c.Query.Parameters) != 1 || c.Query.Parameters[0].Name != "consistency" || c.Query.Parameters[0].Format != "text" || c.Query.Parameters[0].MaxBytes != 32 {
+			wantCount := 1
+			if c.PathTemplate == "/api/v1/admin/users" {
+				wantCount = 4
+				if len(c.Query.Parameters) != wantCount {
+					t.Fatalf("directory query parameters = %+v", c.Query.Parameters)
+				}
+				for i, name := range []string{"cursor", "limit", "q"} {
+					p := c.Query.Parameters[i+1]
+					maxBytes := uint64(1024)
+					if name == "limit" {
+						maxBytes = 20
+					}
+					if p.Name != name || p.Format != "text" || p.Required || p.Repeated || p.MaxBytes != maxBytes {
+						t.Fatalf("invalid directory query parameter: %+v", p)
+					}
+				}
+			}
+			if len(c.Query.Parameters) != wantCount || c.Query.Parameters[0].Name != "consistency" || c.Query.Parameters[0].Format != "text" || c.Query.Parameters[0].MaxBytes != 32 {
 				t.Fatalf("GET capability %s query parameters = %+v, want [consistency text 32]", c.CapabilityID, c.Query.Parameters)
 			}
 		} else {
@@ -324,11 +371,11 @@ func TestManagementLifecycleContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 69 {
-		t.Fatalf("management capabilities = %d, want 69", len(stage.Capabilities))
+	if len(stage.Capabilities) != 71 {
+		t.Fatalf("management capabilities = %d, want 71", len(stage.Capabilities))
 	}
-	if len(actions) != 70 {
-		t.Fatalf("actions = %d, want 69 fine actions + legacy", len(actions))
+	if len(actions) != 71 {
+		t.Fatalf("actions = %d, want 70 fine actions + legacy", len(actions))
 	}
 	seen := map[string]bool{}
 	for _, a := range actions {
@@ -338,6 +385,7 @@ func TestManagementLifecycleContracts(t *testing.T) {
 		seen[a.ID] = true
 	}
 	expected := map[string]string{
+		"GET /api/v1/admin/users":                    "admin.users.read",
 		"PATCH /api/v1/admin/providers/{providerId}": "admin.provider.update",
 		"POST /api/v1/admin/orgs":                    "admin.organization.create",
 		"PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding": "admin.app.identity.bind",
@@ -363,4 +411,53 @@ func TestManagementLifecycleContracts(t *testing.T) {
 	if len(expected) != 0 {
 		t.Fatalf("missing lifecycle contracts %v", expected)
 	}
+}
+
+func TestManagementCatalogPreservesUserActivationCapabilityID(t *testing.T) {
+	stage, _, err := ManagementCatalog(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// HEAD's original 69-route registry ends with user activation at index 68.
+	const want = "management.admin.user.active.68"
+	for _, capability := range stage.Capabilities {
+		if capability.Method == "PUT" && capability.PathTemplate == "/api/v1/admin/users/{userId}/active" {
+			if capability.CapabilityID != want {
+				t.Fatalf("existing capability ID changed: got %q, want %q", capability.CapabilityID, want)
+			}
+			return
+		}
+	}
+	t.Fatal("user activation capability missing")
+}
+
+func TestManagementCatalogHistoricalGenerationRead(t *testing.T) {
+	const path = "/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}"
+	route, ok := LookupManagementRoute("GET", path)
+	if !ok || !route.Platform || route.ActionCode != "admin.catalog.read" {
+		t.Fatalf("generation route: %+v", route)
+	}
+	stage, actions, err := ManagementCatalog(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, a := range actions {
+		if a.ID == "grant-management.admin.catalog.read" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("shared read action emitted %d times", count)
+	}
+	for _, c := range stage.Capabilities {
+		if c.PathTemplate != path {
+			continue
+		}
+		if c.Method != "GET" || c.AccessMode != "authorized" || c.ActionID == nil || *c.ActionID != "grant-management.admin.catalog.read" || c.Resource == nil || c.Resource.ResourceType != "platform" || c.Resource.ID.Kind != "constant" || c.Resource.ID.Value != "grant" || c.Request.Body != "none" || c.Request.Authorization != "forward-user" {
+			t.Fatalf("generation contract: %+v", c)
+		}
+		return
+	}
+	t.Fatal("generation read capability missing")
 }

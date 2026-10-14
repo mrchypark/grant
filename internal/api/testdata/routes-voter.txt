@@ -11,6 +11,7 @@ DELETE /api/v1/orgs/{organizationId}/roles/{roleId}
 DELETE /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}
 GET /api/v1/admin/providers/{providerId}/actions
 GET /api/v1/admin/providers/{providerId}/http-capability-active
+GET /api/v1/admin/providers/{providerId}/http-capability-generations/{generation}
 GET /api/v1/me
 GET /api/v1/orgs
 GET /api/v1/orgs/{organizationId}
@@ -70,6 +71,7 @@ POST /ops/migrations/patch-data-authority
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust
 PUT /api/v1/admin/providers/{providerId}/actions
+GET /api/v1/admin/users
 PUT /api/v1/admin/users/{userId}/active
 PUT /api/v1/orgs/{organizationId}/agreements/{agreementId}
 PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/actions

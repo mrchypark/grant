@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/minio/minio-go/v7 v7.3.0
+	github.com/mrchypark/ely-htmx v0.1.0
 	github.com/mrchypark/rhiza v0.19.0
 	github.com/ncruces/go-sqlite3 v0.35.6
 	github.com/nlnwa/whatwg-url v0.6.2
@@ -43,6 +44,7 @@ require (
 	github.com/aws/smithy-go v1.28.4 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.26.0 // indirect
+	github.com/boombuler/barcode v1.1.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
@@ -92,6 +94,7 @@ require (
 	github.com/spiffe/go-spiffe/v2 v2.9.0 // indirect
 	github.com/thanos-io/objstore v0.0.0-20261004184409-a1e2d22b4767 // indirect
 	github.com/tinylib/msgp v1.6.5 // indirect
+	github.com/yuin/goldmark v1.8.6 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

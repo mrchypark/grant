@@ -25,7 +25,7 @@ The catalog covers:
   per-action membership for roles and applications.
 - **Admin routes** (`/api/v1/admin/...`): providers, provider actions
   (replace, create, update, delete), capability catalog staging/activation,
-  application trust and verified identity binding, user activation.
+  application trust and verified identity binding, user listing and activation.
 
 ## Explicit exclusions
 
@@ -155,7 +155,8 @@ not permitted unless declared as path parameters.
 
 ## Query policies
 
-GET routes use `mode: exact` with a single optional parameter:
+GET routes use `mode: exact` with the following optional parameter;
+the admin user listing additionally accepts `q`, `limit`, and `cursor`:
 
 | Parameter | Format | MaxBytes | Required |
 |-----------|--------|----------|----------|
@@ -164,6 +165,36 @@ GET routes use `mode: exact` with a single optional parameter:
 The `consistency` parameter accepts any case/whitespace variant of the
 backend value (e.g. `strong`, ` Strong `, `STRONG`). Non-GET routes
 (mutations) use `mode: none` — query strings are rejected.
+
+### Admin user listing
+
+`GET /api/v1/admin/users` is a bodyless platform route with action code
+`admin.users.read` (Action ID `grant-management.admin.users.read`) against
+resource `grant-management/platform/grant`. It uses the platform Bearer gate
+above or the existing master-key access path; it is not organization-scoped.
+
+- `q` is an optional literal substring filter over the existing Grant User
+  fields `id`, `email`, and `displayName`, not a regex or wildcard expression.
+  SQLite LIKE case matching applies; `%`, `_`, and `\` are escaped literally.
+- `limit` is a positive decimal integer, defaults to 50, and is capped at 100
+  users per page (larger valid integers are clamped).
+- `cursor` is optional. Pagination is bounded and ordered by Grant user ID
+  ascending; subsequent pages continue strictly after the cursor's user ID.
+- A successful response is `200` with `{"items":[...],"nextCursor":"..."}`.
+  `items` contains existing Grant User fields: `id`, optional `email`,
+  `displayName`, and `active`. `nextCursor` is omitted when no next page exists.
+- Results include inactive/disabled Grant users (`active: false`). This is
+  the Grant directory, not an identity-provider account listing; no external
+  subject identifiers, identity mappings, credentials, or secrets are returned.
+- Each page and its lookahead use one strong consistent SQL read. Optional
+  `consistency` accepts only `strong` (including the variants described above);
+  it cannot weaken this read. Separate pages do not share a frozen snapshot.
+- The exact query policy allows only `q`, `limit`, `cursor`, and `consistency`,
+  each at most once. Decoded UTF-8 byte limits are 1024 for `q` and `cursor`,
+  20 for `limit`, and 32 for `consistency`. Malformed encoding, control characters,
+  duplicates, unknown keys, invalid limits, and request bodies return `400`.
+  Empty `q` or `cursor` values are equivalent to omitting them. An empty result
+  is `{"items":[]}`.
 
 ## Request and response policies
 
@@ -197,6 +228,18 @@ The catalog is deterministic: identical inputs always produce identical
 digests. The CLI tool `grant-management-catalog` emits either the stage
 payload or the action definitions for review.
 
+`GET /api/v1/admin/providers/{providerId}/http-capability-generations/{generation}`
+reads a stored immutable generation, including a staged or historical generation,
+using a strong read on a voter. It reuses the platform `admin.catalog.read` action
+and the existing master-key or management-organization bearer authorization.
+It returns `providerId`, `generation`, `catalogDigest`, `capabilityCount`,
+`responseResourceCount`, `capabilities`, and `responseResources`; both arrays are
+present even when empty. It includes no activation or PEP lease metadata and never
+changes the active pointer. Invalid/zero/out-of-range generations return 400;
+the accepted range is `1..9223372036854775807`. An absent provider/generation pair
+returns 404. Shared actions appear once in the generated action definitions,
+even when multiple routes use them.
+
 ## Migration instructions
 
 ### Staging before activation
@@ -206,7 +249,8 @@ payload or the action definitions for review.
 2. Review the output for correctness.
 3. POST the stage payload to
    `POST /api/v1/admin/providers/grant-management/http-capability-generations`.
-4. Verify the staged generation digest matches the expected value.
+4. GET `/api/v1/admin/providers/grant-management/http-capability-generations/N`
+   and verify the stored generation content and digest match the expected values.
 5. Complete the role, application and consent migration below, and verify the
    intended principals can authorize the new exact actions.
 6. Activate with

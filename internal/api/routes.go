@@ -99,6 +99,7 @@ func (s *Server) routes() {
 	s.route("PUT", "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust", "master", true, 200, body(false, func(r *request, v trustRequest) (any, error) {
 		return s.service.SetApplicationTrustAdmin(r.Context(), r.PathValue("organizationId"), r.PathValue("applicationId"), v.Trusted)
 	}))
+	s.route("GET", "/api/v1/admin/users", "master", true, 200, bodyless(s.listAdminUsers))
 	s.route("PUT", "/api/v1/admin/users/{userId}/active", "master", true, 200, body(false, func(r *request, v activeRequest) (any, error) {
 		return s.service.SetUserActiveAdmin(r.Context(), r.PathValue("userId"), v.Active)
 	}))
@@ -189,6 +190,7 @@ func (s *Server) routes() {
 	})
 	s.authorizationRoutes()
 	s.capabilityRoutes()
+	s.route("GET", "/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}", "master", true, 200, bodyless(s.httpCapabilityGeneration))
 	s.actionMutationRoutes()
 	s.lifecycleRoutes()
 	if s.learner {

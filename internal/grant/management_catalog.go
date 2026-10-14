@@ -117,6 +117,10 @@ var managementRoutes = []ManagementRoute{
 
 	// --- Admin: user active ---
 	{Method: "PUT", Path: "/api/v1/admin/users/{userId}/active", ActionCode: "admin.user.active", Platform: true},
+
+	// Append new routes to preserve existing capability IDs, which include the index.
+	{Method: "GET", Path: "/api/v1/admin/users", ActionCode: "admin.users.read", Platform: true},
+	{Method: "GET", Path: "/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}", ActionCode: "admin.catalog.read", Platform: true},
 }
 
 // ManagementRoutes returns a copy of the complete sorted registry of
@@ -151,6 +155,7 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 	const provider = "grant-management"
 	routes := ManagementRoutes()
 	actions := make([]Action, 0, len(routes)+1)
+	seenActions := make(map[string]bool, len(routes))
 	for i, route := range routes {
 		actionID := provider + "." + route.ActionCode
 		name := route.ActionCode
@@ -160,15 +165,18 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 			detail := "Create or reuse the authenticated external identity's internal user and scoped identity mapping without changing profiles, memberships, or permissions."
 			description = &detail
 		}
-		actions = append(actions, Action{
-			ID:                      actionID,
-			ProviderID:              provider,
-			Code:                    route.ActionCode,
-			Name:                    name,
-			Description:             description,
-			RiskLevel:               ActionRiskLevelHigh,
-			GrantableToApplications: true,
-		})
+		if !seenActions[actionID] {
+			seenActions[actionID] = true
+			actions = append(actions, Action{
+				ID:                      actionID,
+				ProviderID:              provider,
+				Code:                    route.ActionCode,
+				Name:                    name,
+				Description:             description,
+				RiskLevel:               ActionRiskLevelHigh,
+				GrantableToApplications: true,
+			})
+		}
 
 		resource := buildManagementResource(route)
 		c := HttpCapability{
@@ -188,6 +196,12 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 				Redirects:      "deny",
 				ErrorStatuses:  []int{400, 401, 403, 404, 409, 412, 422, 428, 500, 503},
 			},
+		}
+		if route.Method == "GET" && route.Path == "/api/v1/admin/users" {
+			c.Query.Parameters = append(c.Query.Parameters,
+				HttpQueryParameter{Name: "cursor", Format: "text", MaxBytes: 1024},
+				HttpQueryParameter{Name: "limit", Format: "text", MaxBytes: 20},
+				HttpQueryParameter{Name: "q", Format: "text", MaxBytes: 1024})
 		}
 		var err error
 		c.ContractDigest, err = HttpCapabilityContractDigest(c)

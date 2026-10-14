@@ -10,9 +10,12 @@ Provider 생성·수정 분리, 액션 전체 교체, 조직별 Application 생�
 |---|---|---|
 | GET `/api/v1/admin/providers/{providerId}/actions` | master, voter | 해당 Provider의 전체 액션을 `[]Action`으로 조회한다. |
 | GET `/api/v1/admin/providers/{providerId}/http-capability-active` | master, voter | PEP 설정과 독립적으로 현재 활성 catalog 상태를 확인한다. |
+| GET `/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}` | master 또는 관리 조직의 `admin.catalog.read` bearer, voter | 활성화하지 않고 저장된 staged·historical 세대를 조회한다. |
 | GET `/api/v1/orgs/{organizationId}/providers/{providerId}/actions` | user, voter, 해당 조직의 `organization.application.manage` | 활성 Provider에서 `grantableToApplications=true`인 후보 액션을 조회한다. |
 
-세 조회는 strong read를 사용한다. 액션 조회는 `code` 순서의 `[]Action`을 반환하고 빈 결과는 `[]`다. 존재하지 않는 Provider는 404이며, 조직 후보 조회에서는 비활성 Provider도 404다. 관리자 조회는 비활성 Provider도 확인할 수 있다.
+네 조회는 strong read를 사용한다. 액션 조회는 `code` 순서의 `[]Action`을 반환하고 빈 결과는 `[]`다. 존재하지 않는 Provider는 404이며, 조직 후보 조회에서는 비활성 Provider도 404다. 관리자 조회는 비활성 Provider도 확인할 수 있다.
+
+세대별 조회의 응답 필드와 숫자 범위, 오류 계약은 [HTTP capabilities](http-capabilities.md)에 정의한다. 저장된 세대가 없으면 404를 반환하며, 조회는 활성 포인터를 바꾸지 않는다.
 
 관리자 활성 catalog 응답은 `schemaVersion`, `providerId`, `generation`, `catalogDigest`, `activatedAt`, `activatedBy`, `capabilityCount`, `responseResourceCount`, `capabilities`와 선택적 `responseResources`를 포함한다. PEP용 응답의 `pepClientId`, `issuedAt`, `expiresAt`은 포함하지 않는다. Provider가 없으면 404 `service provider not found`, 활성 catalog가 없으면 404 `HTTP capability catalog not active`를 반환한다. 이 조회는 PEP 설정 없이도 작동하며, 실제 전달용 catalog는 기존 `/api/v2/http-capabilities/catalog/{providerId}`를 사용한다.
 

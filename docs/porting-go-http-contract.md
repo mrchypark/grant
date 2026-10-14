@@ -2,13 +2,14 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The current branch registers 81 method/path entries across 54 distinct paths. The executable inventory is `internal/api/testdata/routes-voter.txt`. GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
+The executable route inventory is `internal/api/testdata/routes-voter.txt`. GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
 
 ## Method, path, authorization and node role
 
 | Method | Path | Authentication | Voter only | Success |
 |---|---|---|---|---|
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-generations` | master | true | 201 |
+| GET | `/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}` | master or authorized platform bearer (`admin.catalog.read`) | true | 200 |
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
 | GET | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
 | PUT | `/ops/providers/{providerId}/enforcers/{pepClientId}` | master | true | 200 |
@@ -32,6 +33,7 @@ The current branch registers 81 method/path entries across 54 distinct paths. Th
 | PUT | `/api/v1/orgs/{organizationId}/apps/{applicationId}/consent` | user | true | 200 |
 | DELETE | `/api/v1/orgs/{organizationId}/apps/{applicationId}/consent` | user | true | 204 |
 | PUT | `/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust` | master | true | 200 |
+| GET | `/api/v1/admin/users` | master or authorized platform bearer | true | 200 |
 | PUT | `/api/v1/admin/users/{userId}/active` | master | true | 200 |
 | GET | `/api/v1/orgs/{organizationId}/groups` | user | false | 200 |
 | POST | `/api/v1/orgs/{organizationId}/groups` | user | true | 201 |
@@ -81,6 +83,27 @@ Grant does not proxy IdP requests. `/auth`, `/auth/v1`, and `/auth/v1/*` return 
 `GET /api/v1/me` supports `consistency=strong`, `local`, and `prefer-strong`. Consistency selects read freshness and never enables user or identity provisioning. Other routes retain their existing strong-only explicit consistency override. A `LOCAL_USER_NOT_PROVISIONED` 404 under `local` may reflect replica lag; use `GET /api/v1/me?consistency=strong` after ensure when an immediate current view is required.
 
 The raw SQL transport is a distinct private listener and has no public router registration. The native cluster member transport uses UDP QUIC and does not share the API port.
+
+## Admin user listing
+
+`GET /api/v1/admin/users` requires the platform gate action `admin.users.read`
+(`grant-management.admin.users.read`) on `grant-management/platform/grant`
+for Bearer access; existing master-key access remains supported. The route is
+bodyless and returns `200`. Optional `q` is a literal substring filter over
+Grant User `id`, `email`, and `displayName`, not regex or wildcard syntax.
+`limit` defaults to 50 and is capped at 100. Optional `cursor` provides bounded
+pagination in stable Grant user ID ascending order, continuing strictly after
+the cursor's user ID. Each page and its lookahead come from a single strong
+consistent read. Only `q`, `limit`, `cursor`, and `consistency` are accepted,
+without duplicates; malformed or invalid query values and bodies return `400`.
+`consistency` cannot select a weaker read than `strong`.
+
+The response is `{"items":[...],"nextCursor":"..."}`; `nextCursor` is omitted
+on the final page. Each item uses the existing Grant User JSON fields `id`,
+optional `email`, `displayName`, and `active`. Inactive/disabled Grant users
+(`active: false`) are included. External subjects, identity mappings, credentials,
+and secrets are excluded; this is not an identity-provider account listing.
+See [management query and access policies](management-api.md#admin-user-listing).
 
 ## Granular action mutations and preconditions
 

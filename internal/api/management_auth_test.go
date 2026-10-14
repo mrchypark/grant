@@ -13,6 +13,12 @@ import (
 
 func managementTestServer(t *testing.T) *Server {
 	t.Helper()
+	s, _ := managementTestServerWithStore(t)
+	return s
+}
+
+func managementTestServerWithStore(t *testing.T) (*Server, *grant.Store) {
+	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"token":  "tok",
@@ -66,7 +72,7 @@ func managementTestServer(t *testing.T) *Server {
 	exec("INSERT OR IGNORE INTO application_grants(id,user_id,application_id,organization_id,status,consented_at,created_at,updated_at) VALUES('g1','owner','app-1','mgmt-org','active',?,?,?)", now, now, now)
 	exec("INSERT OR IGNORE INTO application_grant_actions(application_grant_id,action_id) VALUES('g1','grant-management.admin.provider.create')")
 
-	return New(svc, false)
+	return New(svc, false), store
 }
 
 func TestManagementBearerFallbackSuccess(t *testing.T) {
