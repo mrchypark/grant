@@ -618,6 +618,9 @@ func (s *server) operation(w http.ResponseWriter, r *http.Request) {
 		q.Set("provider", provider)
 	}
 	r.URL.RawQuery = q.Encode()
+	if method == http.MethodDelete {
+		w.Header().Set("HX-Replace-Url", r.URL.RequestURI())
+	}
 	s.view(w, r)
 }
 

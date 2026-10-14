@@ -37,6 +37,8 @@ docker run --rm \
 
 세션은 단일 프로세스의 메모리에 최대 8시간 보관되며 재시작하면 다시 로그인해야 한다. 여러 인스턴스를 실행할 때는 sticky routing이 필요하다.
 
+로그아웃하면 Grant 관리 세션만 종료하고 로컬 완료 화면으로 이동한다. Goauthy 로그인 상태는 변경하지 않으며, 다시 로그인 링크를 선택하면 기존 Goauthy 세션으로 인증될 수 있다.
+
 ## 화면 범위와 API 권한
 
 화면은 provider/action/HTTP capability 카탈로그의 stage·activate 작업과 users, members/enrollment, organizations, groups, agreements, applications, roles, bindings 관리로 나뉜다. 카탈로그 배포 단계와 Grant의 조직·사용자 권한 관리는 서로 다른 관리 경계다.

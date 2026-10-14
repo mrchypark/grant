@@ -230,8 +230,24 @@ func (s *server) serve(next http.Handler, w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-	s.cleanup(time.Now())
 	switch {
+	case r.URL.Path == "/logged-out":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if id, ok := s.sessionCookie(r); ok {
+			s.mu.Lock()
+			current, exists := s.sessions[id]
+			s.mu.Unlock()
+			if exists && time.Now().Before(current.expires) {
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>로그아웃 · Grant 관리</title><link rel="stylesheet" href="/assets/grant-admin.css"></head><body><main class="workspace"><h1>Grant에서 로그아웃했습니다</h1><p>Grant 관리 세션이 종료되었습니다. Goauthy 로그인 상태는 변경하지 않았습니다.</p><p><a href="/login">다시 로그인</a></p></main></body></html>`))
+		return
 	case r.URL.Path == "/login":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -258,8 +274,13 @@ func (s *server) serve(next http.Handler, w http.ResponseWriter, r *http.Request
 		next.ServeHTTP(w, r)
 		return
 	}
+	s.cleanup(time.Now())
 	sessionID, ok := s.sessionCookie(r)
 	if !ok {
+		if r.URL.Path == "/logout" {
+			s.finishLogout(w, r)
+			return
+		}
 		redirectToLogin(w, r)
 		return
 	}
@@ -267,6 +288,10 @@ func (s *server) serve(next http.Handler, w http.ResponseWriter, r *http.Request
 	current, ok := s.sessions[sessionID]
 	s.mu.Unlock()
 	if !ok || !time.Now().Before(current.expires) {
+		if r.URL.Path == "/logout" {
+			s.finishLogout(w, r)
+			return
+		}
 		redirectToLogin(w, r)
 		return
 	}
@@ -287,11 +312,15 @@ func (s *server) serve(next http.Handler, w http.ResponseWriter, r *http.Request
 		s.mu.Lock()
 		delete(s.sessions, sessionID)
 		s.mu.Unlock()
-		s.clearCookie(w, sessionCookie)
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		s.finishLogout(w, r)
 		return
 	}
 	next.ServeHTTP(w, r)
+}
+
+func (s *server) finishLogout(w http.ResponseWriter, r *http.Request) {
+	s.clearCookie(w, sessionCookie)
+	http.Redirect(w, r, "/logged-out", http.StatusSeeOther)
 }
 
 func redirectToLogin(w http.ResponseWriter, r *http.Request) {

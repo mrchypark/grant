@@ -20,8 +20,9 @@ import (
 const maxAPIResponse = 4 << 20
 
 type apiClient struct {
-	base   *url.URL
-	client *http.Client
+	base      *url.URL
+	client    *http.Client
+	bodyModes map[string]string
 }
 
 type apiResponse struct {
@@ -53,7 +54,15 @@ func newAPIClient(raw string, supplied *http.Client) (*apiClient, error) {
 		c.Transport = t
 	}
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &apiClient{base: u, client: &c}, nil
+	catalog, _, err := grant.ManagementCatalog(1, nil)
+	if err != nil {
+		return nil, err
+	}
+	modes := make(map[string]string)
+	for _, capability := range catalog.Capabilities {
+		modes[capability.Method+" "+capability.PathTemplate] = capability.Request.Body
+	}
+	return &apiClient{base: u, client: &c, bodyModes: modes}, nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -78,6 +87,13 @@ func (c *apiClient) callWithMeta(ctx context.Context, method, route string, vars
 	definition, ok := grant.LookupManagementRoute(method, route)
 	if !ok {
 		return apiResponse{}, errors.New("unsupported management operation")
+	}
+	if c.bodyModes[method+" "+route] == "none" && body != nil {
+		empty, ok := body.(map[string]any)
+		if !ok || len(empty) != 0 {
+			return apiResponse{}, errors.New("bodyless management operation received a payload")
+		}
+		body = nil
 	}
 	path, err := expandManagementPath(route, vars)
 	if err != nil {
