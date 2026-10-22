@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grant-lifecycle-state
+data:
+  recovery-id: local-development
+  rauthy-mode: fresh

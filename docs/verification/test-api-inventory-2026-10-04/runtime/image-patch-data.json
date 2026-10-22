@@ -1,0 +1,18 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:43:36Z",
+    "kst": "2026-10-04T20:43:36+0900",
+    "method": "read-only OCI manifest and image config inspect by immutable deployed digest; only OCI metadata labels retained",
+    "source": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b"
+  },
+  "component": "patch-data",
+  "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b",
+  "architecture": "amd64",
+  "os": "linux",
+  "labels": {
+    "org.opencontainers.image.created": "2026-09-08T17:52:06.231Z",
+    "org.opencontainers.image.revision": "b7258579b92808b2f1c56795034214946224a602",
+    "org.opencontainers.image.source": "
+    "org.opencontainers.image.version": "20260909-b725857"
+  }
+}

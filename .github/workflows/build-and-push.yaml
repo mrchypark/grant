@@ -1,0 +1,12 @@
+name: build and push
+
+on:
+  workflow_dispatch:
+jobs:
+  docker:
+    uses: ./.github/workflows/buildandpush.yaml
+    secrets: inherit
+    with:
+      application-name: 'grant'
+      dockerfile: './Dockerfile'
+      arch: 'linux/amd64'

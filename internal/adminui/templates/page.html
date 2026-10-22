@@ -1,0 +1,107 @@
+{{define "page"}}<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{if .Title}}{{.Title}} · {{end}}Grant 관리</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/grant-admin.css">
+  <script src="/assets/htmx.min.js" defer></script>
+  {{template "ui-component-assets"}}
+  <script src="/assets/grant-admin.js" defer></script>
+</head>
+<body>
+  <div class="admin-shell">
+    {{template "sidebar" .}}
+    {{template "content" .}}
+  </div>
+</body>
+</html>{{end}}
+
+{{define "sidebar"}}
+<aside class="sidebar" aria-label="주요 메뉴">
+  <a class="brand" href="/" aria-label="Grant 관리 홈"><span class="brand-mark" aria-hidden="true">G</span><span>Grant<span class="brand-sub">관리</span></span></a>
+  <nav class="primary-nav">
+    {{$current := .Section}}
+    {{$group := ""}}
+    {{range .Navigation}}
+      {{if ne .Group $group}}{{$group = .Group}}<h2 class="nav-group">{{.Group}}</h2>{{end}}
+      <a class="nav-link{{if eq .ID $current}} is-current{{end}}" href="{{queryHref .Href $}}"{{if eq .ID $current}} aria-current="page"{{end}} hx-get="{{queryHref .Href $}}" hx-target="#admin-content" hx-swap="outerHTML" hx-push-url="true">{{.Label}}</a>
+    {{end}}
+  </nav>
+  <form class="logout-form" method="post" action="/logout">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit" class="logout-button">로그아웃</button>
+  </form>
+</aside>
+{{end}}
+
+{{define "content"}}<div id="admin-content" class="admin-content">
+  {{template "scope-header" .}}
+  {{template "workspace" .}}
+</div>{{end}}
+
+{{define "scope-header"}}
+<header class="scope-header">
+  <form class="scope-form" method="get" action="">
+    <label class="scope-field"><span>조직</span>
+      {{template "select" (dict "Name" "org" "Value" .OrganizationID "Placeholder" "조직 선택" "AriaLabel" "조직 선택" "Options" (elyOptions .Organizations) "Attrs" (dict "data-admin-scope" ""))}}
+    </label>
+    <label class="scope-field"><span>프로바이더</span>
+      {{template "select" (dict "Name" "provider" "Value" .ProviderID "Placeholder" "프로바이더 선택" "AriaLabel" "프로바이더 선택" "Options" (elyOptions .Providers) "Attrs" (dict "data-admin-scope" ""))}}
+    </label>
+    {{if eq .Section "users"}}
+      <label class="scope-search"><span class="sr-only">사용자 검색</span>
+        {{template "input" (dict "Type" "search" "Name" "q" "Value" .Search "Placeholder" "사용자 검색" "AriaLabel" "사용자 검색" "Attrs" (dict "data-admin-search" ""))}}
+      </label>
+      <button type="submit" class="sr-only">사용자 검색</button>
+    {{end}}
+  </form>
+</header>
+{{end}}
+
+{{define "workspace"}}
+<main id="workspace" class="workspace" tabindex="-1">
+  <div class="breadcrumb" aria-label="현재 위치"><span>Grant</span><span aria-hidden="true">/</span><span>{{sectionLabel .Navigation .Section}}</span></div>
+  <header class="page-heading">
+    <div><h1>{{.Title}}</h1>{{if .Description}}<p>{{.Description}}</p>{{end}}</div>
+  </header>
+  {{if .Notice}}{{template "alert" (dict "Title" "안내" "Content" .Notice)}}{{end}}
+  {{if .Error}}{{template "alert" (dict "Title" "요청을 처리하지 못했습니다" "Content" .Error "Urgent" true)}}{{end}}
+  {{if .Detail}}<details class="detail-panel"><summary>상세 정보</summary><pre>{{.Detail}}</pre></details>{{end}}
+  {{if .Forms}}<div class="forms-list">{{range $index, $form := .Forms}}{{template "admin-form" (dict "Page" $ "Form" $form "Open" (and (not $.Columns) (eq $index 0)))}}{{end}}</div>{{end}}
+  {{if .Columns}}{{template "admin-table" .}}{{end}}
+  {{range .Tables}}{{template "admin-table" .}}{{end}}
+  {{if .NextURL}}<nav class="pagination" aria-label="페이지 이동"><a href="{{queryHref .NextURL .}}" hx-get="{{queryHref .NextURL .}}" hx-target="#admin-content" hx-swap="outerHTML" hx-push-url="true">다음 페이지<span aria-hidden="true"> →</span></a></nav>{{end}}
+</main>
+{{end}}
+
+{{define "admin-form"}}
+{{$p := .Page}}{{$f := .Form}}
+<details class="form-section"{{if .Open}} open{{end}}>
+  <summary class="form-heading"><span class="form-title">{{$f.Title}}</span>{{if $f.Description}}<span class="form-description">{{$f.Description}}</span>{{end}}</summary>
+  <form id="{{$f.ID}}" class="admin-form" method="post" action="{{$f.Action}}" hx-post="{{$f.Action}}" hx-target="#admin-content" hx-swap="outerHTML"{{if $f.Confirmation}} data-confirm="{{$f.Confirmation}}"{{end}}>
+    {{range $key, $value := formHidden $p $f}}<input type="hidden" name="{{$key}}" value="{{$value}}">{{end}}
+    <div class="field-grid">
+      {{range $f.Fields}}
+      <div class="field-row">
+        <label for="{{$f.ID}}-{{.Name}}">{{.Label}}{{if .Required}}<span aria-hidden="true"> *</span>{{end}}</label>
+        {{if .Options}}{{template "select" (dict "ID" (printf "%s-%s" $f.ID .Name) "Name" .Name "Value" .Value "Placeholder" "선택하세요" "Required" .Required "Options" (elyOptions .Options) "Attrs" (dict "aria-describedby" (printf "%s-%s-help" $f.ID .Name)))}}
+        {{else if or (eq .Type "textarea") (eq .Type "json")}}{{template "textarea" (dict "ID" (printf "%s-%s" $f.ID .Name) "Name" .Name "Value" .Value "Required" .Required "Rows" 7 "AriaDescribedby" (printf "%s-%s-help" $f.ID .Name))}}
+        {{else if or (eq .Type "bool") (eq .Type "boolean") (eq .Type "checkbox")}}{{template "input" (dict "ID" (printf "%s-%s" $f.ID .Name) "Name" .Name "Type" "checkbox" "Checked" (or (eq .Value "true") (eq .Value "on")) "Required" .Required "Attrs" (dict "aria-describedby" (printf "%s-%s-help" $f.ID .Name)))}}
+        {{else}}{{template "input" (dict "ID" (printf "%s-%s" $f.ID .Name) "Name" .Name "Type" (or .Type "text") "Value" .Value "Required" .Required "Attrs" (dict "aria-describedby" (printf "%s-%s-help" $f.ID .Name)) )}}{{end}}
+        <p class="field-help" id="{{$f.ID}}-{{.Name}}-help">{{.Help}}</p>
+      </div>
+      {{end}}
+    </div>
+    <div class="form-actions">{{if $f.Danger}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장") "Variant" "destructive")}}{{else}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장"))}}{{end}}
+  </form>
+</details>
+{{end}}
+
+{{define "admin-table"}}
+<div class="table-frame"><table class="admin-table"><caption class="sr-only">{{.Title}} 목록</caption><thead><tr>{{range .Columns}}<th scope="col">{{.}}</th>{{end}}</tr></thead><tbody>
+  {{range .Rows}}{{$row := .}}<tr>{{range $index, $cell := $row.Cells}}<td>{{if and (eq $index 0) $row.Link}}<a href="{{$row.Link}}">{{$cell}}</a>{{else}}{{$cell}}{{end}}</td>{{end}}</tr>{{else}}<tr><td class="empty-row" colspan="{{len .Columns}}">표시할 항목이 없습니다.</td></tr>{{end}}
+</tbody></table></div>
+{{end}}

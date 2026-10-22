@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grant-recovery-state
+data:
+  recovery-id: "none"
+  phase: "unfenced"
+  rauthy-mode: "steady"

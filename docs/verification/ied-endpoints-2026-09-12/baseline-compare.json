@@ -1,0 +1,219 @@
+[
+  {
+    "collection": "plants",
+    "beforeCount": 1,
+    "afterCount": 1,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "panelmaps",
+    "beforeCount": 1,
+    "afterCount": 1,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "organizations",
+    "beforeCount": 1,
+    "afterCount": 1,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "viewers",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "invitations",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "images",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "users",
+    "beforeCount": 1,
+    "afterCount": 1,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "dashboard",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "comments",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "permissions",
+    "beforeCount": 1,
+    "afterCount": 1,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "groupconditions",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "passwords",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "temporary_accounts",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "issue_comments",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "issue_content_logs",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "issue_fields_logs",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "issue_tags",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "issues",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "work_orders",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "command_history",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "issue_schedules",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "org_parent_map",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "reports",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "files",
+    "beforeCount": 1,
+    "afterCount": 1,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "blueprints",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "resources",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "reports_v2",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "rsd_command_tasks",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "anomaly_occurrences",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "anomaly_occurrence_checkpoints",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  },
+  {
+    "collection": "agreement_documents",
+    "beforeCount": 0,
+    "afterCount": 0,
+    "missing": [],
+    "added": []
+  }
+]

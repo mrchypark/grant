@@ -1,0 +1,214 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rauthy
+  labels:
+    app: rauthy
+spec:
+  serviceName: rauthy-headless
+  podManagementPolicy: Parallel
+  minReadySeconds: 10
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rauthy
+  template:
+    metadata:
+      labels:
+        app: rauthy
+    spec:
+      imagePullSecrets:
+        - name: rauthy-launcher-pull
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: rauthy
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: rauthy
+      initContainers:
+        - name: lifecycle-gate
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          command: ["/bin/sh", "/gate/lifecycle-gate.sh"]
+          env:
+            - name: LIFECYCLE_HEADLESS_SERVICE
+              value: rauthy-headless
+            - name: LIFECYCLE_REPLICAS
+              value: "3"
+            - name: LIFECYCLE_PEER_PORT
+              value: "8200"
+            - name: LIFECYCLE_PEER_PATH
+              value: /ready
+            - name: LIFECYCLE_ALLOW_LOCAL_FRESH
+              value: "true"
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: lifecycle-state
+              mountPath: /lifecycle
+              readOnly: true
+            - name: lifecycle-gate
+              mountPath: /gate
+              readOnly: true
+            - name: restore-authorization
+              mountPath: /restore
+              readOnly: true
+        - name: render-bootstrap
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - /bin/sh
+            - /renderer/render-rauthy-bootstrap.sh
+            - /bootstrap-template
+            - /bootstrap
+          env:
+            - name: GRANT_RAUTHY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: grant-secrets
+                  key: GRANT_RAUTHY_CLIENT_SECRET
+            - name: GRANT_RAUTHY_CLIENT_READ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: grant-secrets
+                  key: GRANT_RAUTHY_CLIENT_READ_API_KEY
+          volumeMounts:
+            - name: rauthy-bootstrap-template
+              mountPath: /bootstrap-template
+              readOnly: true
+            - name: rauthy-bootstrap-renderer
+              mountPath: /renderer
+              readOnly: true
+            - name: rauthy-bootstrap
+              mountPath: /bootstrap
+      containers:
+        - name: rauthy
+          image: ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0-9d95f0f7513b7e26559a87d22d9fb90ccf4ee530@sha256:d1bf34bc156f7227d782c231c3bb0111d1cb8317017f1539f8ef22cdc10f2f7a
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/rauthy-launcher"]
+          args: ["/app/rauthy", "serve"]
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: https
+              containerPort: 8443
+            - name: hiq-raft
+              containerPort: 8100
+            - name: hiq-api
+              containerPort: 8200
+          env:
+            - name: RAUTHY_LAUNCHER_HEALTH_URL
+              value: http://127.0.0.1:8200/ready
+          volumeMounts:
+            - name: rauthy-data
+              mountPath: /app/data
+            - name: rauthy-config
+              mountPath: /app/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: rauthy-bootstrap
+              mountPath: /app/bootstrap
+              readOnly: true
+            - name: lifecycle-state
+              mountPath: /lifecycle
+              readOnly: true
+            - name: restore-authorization
+              mountPath: /restore
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 128Mi
+            limits:
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: hiq-api
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: hiq-api
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /auth/v1/health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 2
+      volumes:
+        - name: lifecycle-state
+          configMap:
+            name: grant-lifecycle-state
+            items:
+              - key: rauthy-mode
+                path: mode
+              - key: recovery-id
+                path: recovery-id
+        - name: lifecycle-gate
+          configMap:
+            name: lifecycle-gate
+            defaultMode: 0555
+        - name: rauthy-data
+          emptyDir: {}
+        - name: rauthy-config
+          secret:
+            secretName: rauthy-config
+        - name: rauthy-bootstrap
+          emptyDir: {}
+        - name: rauthy-bootstrap-template
+          secret:
+            secretName: rauthy-config
+            items:
+              - key: clients.json
+                path: clients.json
+              - key: api_keys.json
+                path: api_keys.json
+        - name: rauthy-bootstrap-renderer
+          configMap:
+            name: rauthy-bootstrap-renderer
+            defaultMode: 0555
+        - name: restore-authorization
+          secret:
+            secretName: rauthy-restore-once
+            optional: true

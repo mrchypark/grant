@@ -1,0 +1,14 @@
+.git
+.github
+.codex
+.idea
+.DS_Store
+target
+deploy
+docs
+sandbox
+secrets
+scripts
+/var
+tmp
+*.log

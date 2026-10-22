@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rauthy-production-config
+type: Opaque
+stringData:
+  config.toml: |
+    [bootstrap]
+    admin_email = "identity-admin@example.com"
+    bootstrap_dir = "/app/bootstrap"
+
+    [cluster]
+    node_id_from = "k8s"
+    nodes = [
+      "1 rauthy-0.rauthy-headless:8100 rauthy-0.rauthy-headless:8200",
+      "2 rauthy-1.rauthy-headless:8100 rauthy-1.rauthy-headless:8200",
+      "3 rauthy-2.rauthy-headless:8100 rauthy-2.rauthy-headless:8200",
+    ]
+
+    [email]
+    rauthy_admin_email = "identity-admin@example.com"
+    smtp_from = "Identity <identity@example.com>"
+
+    [events]
+    email = "identity-ops@example.com"
+
+    [mfa]
+    admin_force_mfa = true
+
+    [server]
+    scheme = "https"
+    pub_url = "identity.example.com"
+    proxy_mode = true
+
+    [webauthn]
+    rp_id = "identity.example.com"
+    rp_origin = "https://identity.example.com"
+  clients.json: |
+    [{"id":"grant-production","name":"Grant","secret":{"Plain":"__GRANT_RAUTHY_CLIENT_SECRET__"},"redirect_uris":["https://grant.example.com/auth/callback"],"post_logout_redirect_uris":["https://grant.example.com/"],"allowed_origins":["https://grant.example.com"],"enabled":true,"flows_enabled":["authorization_code","client_credentials","refresh_token"],"access_token_alg":"EdDSA","id_token_alg":"EdDSA","auth_code_lifetime":60,"access_token_lifetime":3600,"scopes":["openid","profile","email"],"default_scopes":["openid","profile","email"],"force_mfa":true}]
+  api_keys.json: |
+    [{"name":"__GRANT_RAUTHY_CLIENT_READ_API_KEY_NAME__","exp":4070905200,"secret":{"Plain":"__GRANT_RAUTHY_CLIENT_READ_API_KEY_SECRET__"},"access":[{"group":"Clients","access_rights":["read"]}]}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rauthy-production-backup
+data:
+  BACKUP_GENERATION: "rauthy-prod-g42"
+  KEYRING_GENERATION: "rauthy-keyring-g42"
+  RECOVERY_SCHEMA_ID: "rauthy-0.37.1"
+  HQL_NODES: |
+    1 rauthy-0.rauthy-headless:8100 rauthy-0.rauthy-headless:8200
+    2 rauthy-1.rauthy-headless:8100 rauthy-1.rauthy-headless:8200
+    3 rauthy-2.rauthy-headless:8100 rauthy-2.rauthy-headless:8200
+  HQL_BACKUP_CRON: "0 30 * * * * *"
+  HQL_BACKUP_KEEP_DAYS: "30"
+  HQL_BACKUP_KEEP_DAYS_LOCAL: "1"
+  HQL_S3_URL: "https://s3.example.com"
+  HQL_S3_BUCKET: "rauthy-production-g42-backups"
+  HQL_S3_REGION: "example-region-1"
+  HQL_S3_PATH_STYLE: "false"

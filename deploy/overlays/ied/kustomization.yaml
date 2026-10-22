@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: grant-chaos
+
+resources:
+  - ../../k8s
+
+patches:
+  - target:
+      kind: Namespace
+      name: grant
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: grant-chaos
+  - target:
+      kind: Ingress
+      name: grant
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: grant

@@ -1,0 +1,190 @@
+name: build and push gcp
+
+on:
+  workflow_call:
+    inputs:
+      application-name:
+        description: '빌드할 이미지의 이름을 지정합니다. 보통 저장소 이름과 같습니다.'
+        required: true
+        type: string
+      dockerfile:
+        description: '빌드를 위한 도커파일 위치입니다. 파일명까지 작성하면 됩니다.'
+        required: true
+        type: string
+      context:
+        description: '도커 빌드 컨택스트를 지정합니다. 기본값은 ./ 입니다.'
+        default: './'
+        type: string
+      arch:
+        description: '빌드할 아키텍처를 지정합니다. 기본값은 linux/amd64 입니다.'
+        default: 'linux/amd64'
+        type: string
+      latest:
+        description: 'docker image에 latest tag를 추가합니다. 기본값은 false 입니다.'
+        default: 'false'
+        type: string
+      build-args:
+        description: 'docker build args에 전달할 명령을 전달합니다.'
+        default: ''
+        type: string
+      push:
+        description: '이미지를 레지스트리에 푸시할지 여부를 지정합니다. 기본값은 true 입니다.'
+        default: true
+        type: boolean
+      output-types:
+        description: '빌드 후 출력할 타입을 지정합니다. 기본값은 registry입니다. 참고. https://docs.docker.com/reference/cli/docker/buildx/build/#output'
+        required: false
+        default: 'type=registry'
+        type: string
+      lfs:
+        description: 'Git LFS 파일을 checkout 시 함께 받을지 여부. LFS 추적 바이너리(예: 사전 빌드 번들)를 Docker context에 포함시켜야 할 때만 true. 기본값 false (= 기존 동작과 동일).'
+        required: false
+        default: false
+        type: boolean
+      go-build-cache:
+        description: 'Docker BuildKit Go build cache mount를 GitHub Actions cache에 보존합니다. Go/cgo 이미지처럼 빌드 캐시 이득이 큰 경우에만 true로 설정합니다.'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      GCP_SA_KEY:
+        required: true
+      GCP_REGISTRY_HOST:
+        required: true
+      GCP_PROJECT_ID:
+        required: true
+      GCP_REPOSITORY:
+        required: true
+    outputs:
+      image_version:
+        description: "빌드된 이미지의 버전입니다. eg) 20250101-000000"
+        value: ${{ jobs.build.outputs.image_version }}
+      image_tags:
+        description: "빌드된 이미지의 태그입니다. ex) ***/patch:20250101-000000"
+        value: ${{ jobs.build.outputs.image_tags }}
+      revision:
+        description: "빌드 결과를 식별하는 revision 입니다. tag가 있으면 tag, 없으면 image_version 입니다."
+        value: ${{ jobs.build.outputs.revision }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_version: ${{ steps.meta.outputs.version }}
+      image_tags: ${{ steps.meta.outputs.tags }}
+      revision: ${{ steps.meta_revision.outputs.revision }}
+    steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(TZ=Asia/Seoul date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      -
+        name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          lfs: ${{ inputs.lfs }}
+
+      -
+        name: Set up QEMU
+        if: ${{ inputs.arch != 'linux/amd64' }}
+        uses: docker/setup-qemu-action@v4.0.0
+
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      -
+        name: Cache Go build cache for Docker
+        if: ${{ inputs.go-build-cache }}
+        uses: actions/cache@v5
+        with:
+          path: go-build-cache
+          key: ${{ runner.os }}-${{ inputs.application-name }}-${{ inputs.arch }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ inputs.application-name }}-${{ inputs.arch }}-go-build-
+
+      -
+        name: Inject Go build cache into BuildKit
+        if: ${{ inputs.go-build-cache }}
+        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
+        with:
+          cache-map: |
+            {
+              "go-build-cache/go-build": "/root/.cache/go-build"
+            }
+
+      -
+        name: Login to Google Artifact Registry
+        uses: docker/login-action@v4.1.0
+        with:
+          registry: ${{ secrets.GCP_REGISTRY_HOST }}
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
+
+      -
+        name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6.0.0
+        with:
+          images: |
+            name=${{ secrets.GCP_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY }}/${{ inputs.application-name }}
+          flavor: |
+            latest=${{ inputs.latest }}
+          tags: |
+            type=ref,enable=true,priority=600,prefix=,suffix=,event=tag
+            type=sha,enable=true,priority=100,prefix={{date 'YYYYMMDD' tz='Asia/Seoul'}}-,suffix=,format=short
+
+      -
+        name: Set revision output
+        id: meta_revision
+        run: |
+          set -euo pipefail
+
+          {
+            echo "revision=${{ github.ref_type == 'tag' && github.ref_name || steps.meta.outputs.version }}"
+          } >> "$GITHUB_OUTPUT"
+
+      -
+        name: Build and push
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.arch }}
+          push: ${{ inputs.push }}
+          outputs: ${{ inputs.output-types }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ inputs.application-name }}-build
+          cache-to: type=gha,mode=max,scope=${{ inputs.application-name }}-build
+          build-args: |
+            IMAGE_TAGS=${{ steps.meta.outputs.version }}
+            BUILD_HASH=${{ github.sha }}
+            BUILD_BRANCH=${{ github.ref_name }}
+            BUILD_DATE=${{ steps.date.outputs.date }}
+            BUILDER="${{ github.actor }}"
+            BUILD_VERSION="${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}"
+            ${{ inputs.build-args }}
+      - name: Upload buildx output
+        if: ${{ startsWith(inputs.output-types, 'type=local') }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: buildx-output        # 아티팩트 이름
+          path: /tmp/buildx-output   # 업로드할 디렉터리
+
+      -
+        name: Build summary
+        run: |
+          {
+            echo "## Build outputs"
+            echo
+            echo "- revision: ${{ steps.meta_revision.outputs.revision }}"
+            echo "- image_version: ${{ steps.meta.outputs.version }}"
+            echo "- image_tags:"
+            echo '```'
+            echo '${{ steps.meta.outputs.tags }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "revision=${{ steps.meta_revision.outputs.revision }}"
+          echo "image_version=${{ steps.meta.outputs.version }}"

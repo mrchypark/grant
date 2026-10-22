@@ -1,0 +1,7 @@
+denied	GET	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups	403	403
+denied	POST	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups	403	403
+owner	POST	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups	201	201
+owner	GET	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups	200	200
+denied	DELETE	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups/ied-sweep-management-20260912	403	403
+owner	DELETE	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups/ied-sweep-management-20260912	204	204
+owner	GET	http://127.0.0.1:28084/api/v1/orgs/ied-dev/groups	200	200

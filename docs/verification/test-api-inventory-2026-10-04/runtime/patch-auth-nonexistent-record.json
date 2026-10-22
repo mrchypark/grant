@@ -1,0 +1,13 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:44:38Z",
+    "kst": "2026-10-04T20:44:38+0900",
+    "method": "read-only unauthenticated GET of synthetic nonexistent record ID; no account record data retained",
+    "source": "GET /api/collections/users/records/inventory000001"
+  },
+  "sanitizedResponse": {
+    "status": 404,
+    "message": "The requested resource wasn't found."
+  },
+  "httpStatus": 404
+}

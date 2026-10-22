@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: grant-voter
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: grant
+      role: voter

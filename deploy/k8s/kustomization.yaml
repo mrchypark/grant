@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: grant
+resources:
+  - namespace.yaml
+  - app-configmap.yaml
+  - app-headless-service.yaml
+  - app-service.yaml
+  - app-pdb.yaml
+  - app-statefulset.yaml
+  - rauthy-service.yaml
+  - rauthy-pdb.yaml
+  - rauthy-statefulset.yaml
+  - ingress.yaml
+  - rauthy-config.yaml
+  - lifecycle-state.yaml
+configMapGenerator:
+  - name: rauthy-bootstrap-renderer
+    files:
+      - render-rauthy-bootstrap.sh
+  - name: lifecycle-gate
+    files:
+      - lifecycle-gate.sh

@@ -1,0 +1,37 @@
+apiVersion: skaffold/v4beta13
+kind: Config
+metadata:
+  name: grant
+
+build:
+  local:
+    useDockerCLI: true
+  artifacts:
+    - image: grant
+      context: .
+      docker:
+        dockerfile: Dockerfile
+
+manifests:
+  kustomize:
+    paths:
+      - deploy/k8s
+
+deploy:
+  kubectl: {}
+
+profiles:
+  - name: ied
+    activation:
+      - kubeContext: gke_ied-cluster
+    manifests:
+      kustomize:
+        paths:
+          - deploy/overlays/ied
+    build:
+      local:
+        push: true
+        useDockerCLI: true
+    deploy:
+      kubeContext: gke_ied-cluster
+      kubectl: {}

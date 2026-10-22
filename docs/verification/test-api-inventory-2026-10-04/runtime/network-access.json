@@ -1,0 +1,162 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+    "namespace": "patch-data-grant-exposure-go-v1",
+    "method": "kubectl get; route and service endpoint metadata only",
+    "source": "gateways,httproutes,endpointslices"
+  },
+  "items": [
+    {
+      "kind": "EndpointSlice",
+      "name": "exposure-gdf4q",
+      "service": "exposure",
+      "addressType": "IPv4",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8082,
+          "protocol": "TCP"
+        }
+      ],
+      "endpoints": [
+        {
+          "addresses": [
+            "10.11.2.170"
+          ],
+          "conditions": {
+            "ready": true,
+            "serving": true,
+            "terminating": false
+          },
+          "targetRef": {
+            "kind": "Pod",
+            "name": "data-stack-6d5b859ff9-pgmpc"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "EndpointSlice",
+      "name": "grant-45ccl",
+      "service": "grant",
+      "addressType": "IPv4",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8086,
+          "protocol": "TCP"
+        }
+      ],
+      "endpoints": [
+        {
+          "addresses": [
+            "10.11.2.170"
+          ],
+          "conditions": {
+            "ready": true,
+            "serving": true,
+            "terminating": false
+          },
+          "targetRef": {
+            "kind": "Pod",
+            "name": "data-stack-6d5b859ff9-pgmpc"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "EndpointSlice",
+      "name": "grant-management-vzswk",
+      "service": "grant-management",
+      "addressType": "IPv4",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8084,
+          "protocol": "TCP"
+        }
+      ],
+      "endpoints": [
+        {
+          "addresses": [
+            "10.11.2.135"
+          ],
+          "conditions": {
+            "ready": true,
+            "serving": true,
+            "terminating": false
+          },
+          "targetRef": {
+            "kind": "Pod",
+            "name": "grant-voter-6bd88657fc-8j6vw"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "EndpointSlice",
+      "name": "grant-voter-runtime-57zpj",
+      "service": "grant-voter-runtime",
+      "addressType": "IPv4",
+      "ports": [
+        {
+          "name": "peer",
+          "port": 8088,
+          "protocol": "UDP"
+        },
+        {
+          "name": "runtime",
+          "port": 8087,
+          "protocol": "TCP"
+        }
+      ],
+      "endpoints": [
+        {
+          "addresses": [
+            "10.11.2.135"
+          ],
+          "conditions": {
+            "ready": true,
+            "serving": true,
+            "terminating": false
+          },
+          "targetRef": {
+            "kind": "Pod",
+            "name": "grant-voter-6bd88657fc-8j6vw"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "EndpointSlice",
+      "name": "patch-auth-8zhf2",
+      "service": "patch-auth",
+      "addressType": "IPv4",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8091,
+          "protocol": "TCP"
+        }
+      ],
+      "endpoints": [
+        {
+          "addresses": [
+            "10.11.2.192"
+          ],
+          "conditions": {
+            "ready": true,
+            "serving": true,
+            "terminating": false
+          },
+          "targetRef": {
+            "kind": "Pod",
+            "name": "patch-auth-78ff85b9c5-tnwq6"
+          }
+        }
+      ]
+    }
+  ]
+}

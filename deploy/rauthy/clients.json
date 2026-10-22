@@ -1,0 +1,39 @@
+[
+  {
+    "id": "grant",
+    "name": "Grant",
+    "secret": {
+      "Plain": "__GRANT_RAUTHY_CLIENT_SECRET__"
+    },
+    "redirect_uris": [
+      "http://localhost:8080/auth/callback"
+    ],
+    "post_logout_redirect_uris": [
+      "http://localhost:8080/auth/v1"
+    ],
+    "allowed_origins": [
+      "http://localhost:8080"
+    ],
+    "enabled": true,
+    "flows_enabled": [
+      "authorization_code",
+      "client_credentials",
+      "refresh_token"
+    ],
+    "access_token_alg": "EdDSA",
+    "id_token_alg": "EdDSA",
+    "auth_code_lifetime": 60,
+    "access_token_lifetime": 3600,
+    "scopes": [
+      "openid",
+      "profile",
+      "email"
+    ],
+    "default_scopes": [
+      "openid",
+      "profile",
+      "email"
+    ],
+    "force_mfa": false
+  }
+]

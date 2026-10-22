@@ -1,0 +1,13 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "method": "Existing upstream-token from runtime-credentials used privately for read-only native metadata GET; credential omitted",
+    "source": "GET patch-data /api/collections?perPage=500 via port-forward"
+  },
+  "status": "unavailable",
+  "httpStatus": 401,
+  "businessCollectionCount": null,
+  "collections": [],
+  "limitation": "Existing secret upstream credential was rejected. Exposure container has no cat executable to read its mounted runtime token. No login or refresh was performed. No collection definitions or record contents were downloaded."
+}

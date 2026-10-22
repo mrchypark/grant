@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ResolveRecoveryComparisonRoles",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": [
+        "arn:aws:iam::111111111111:role/platform/recovery/grant-backup-writer",
+        "arn:aws:iam::111111111111:role/platform/recovery/grant-materializer",
+        "arn:aws:iam::111111111111:role/platform/recovery/grant-restore-reader"
+      ]
+    }
+  ]
+}

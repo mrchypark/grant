@@ -1,0 +1,225 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+    "namespace": "patch-data-grant-exposure-go-v1",
+    "method": "kubectl get deployments; explicit safe environment name allowlist; no credential values",
+    "source": "deployment pod templates"
+  },
+  "deployments": [
+    {
+      "name": "data-stack",
+      "containers": [
+        {
+          "name": "patch-data",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b",
+          "safeConfig": []
+        },
+        {
+          "name": "grant-learner",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296",
+          "safeConfig": [
+            {
+              "name": "GRANT_AUTH_PROVIDER",
+              "value": "pocketbase"
+            },
+            {
+              "name": "GRANT_POCKETBASE_BASE_URL",
+              "value": "http://patch-auth.patch-data-grant-exposure-go-v1.svc.cluster.local:8091"
+            },
+            {
+              "name": "GRANT_POCKETBASE_COLLECTION",
+              "value": "users"
+            },
+            {
+              "name": "GRANT_RUNTIME_MODE",
+              "value": "embedded"
+            },
+            {
+              "name": "GRANT_LOCAL_NODE_ROLE",
+              "value": "learner"
+            },
+            {
+              "name": "GRANT_BIND_ADDR",
+              "value": "0.0.0.0:8086"
+            },
+            {
+              "name": "GRANT_POCKETBASE_APPLICATION_ID",
+              "value": "ied-data"
+            },
+            {
+              "name": "GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID",
+              "value": "ied-data"
+            }
+          ]
+        },
+        {
+          "name": "exposure-data",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c",
+          "safeConfig": [
+            {
+              "name": "EXPOSURE_PROXY_ENABLED",
+              "value": "true"
+            },
+            {
+              "name": "EXPOSURE_CREDENTIAL_MODE",
+              "value": "pocketbase"
+            },
+            {
+              "name": "EXPOSURE_POCKETBASE_ISSUER",
+              "value": "http://patch-auth.patch-data-grant-exposure-go-v1.svc.cluster.local:8091"
+            },
+            {
+              "name": "EXPOSURE_DATA_ADDR",
+              "value": ":8082"
+            },
+            {
+              "name": "EXPOSURE_ADMIN_ADDR",
+              "value": ":8083"
+            },
+            {
+              "name": "EXPOSURE_PROVIDER_ID",
+              "value": "patch-data"
+            },
+            {
+              "name": "EXPOSURE_PEP_CLIENT_ID",
+              "value": "ied-data-pep"
+            },
+            {
+              "name": "EXPOSURE_POCKETBASE_APPLICATION_ID",
+              "value": "ied-data"
+            },
+            {
+              "name": "EXPOSURE_GRANT_LEARNER_URL",
+              "value": "http://grant.patch-data-grant-exposure-go-v1.svc.cluster.local:8080"
+            },
+            {
+              "name": "EXPOSURE_PROVIDER_ORIGIN",
+              "value": "http://127.0.0.1:8090"
+            },
+            {
+              "name": "EXPOSURE_PROVIDER_AUTHORIZATION_MODE",
+              "value": "service-token"
+            },
+            {
+              "name": "EXPOSURE_EXPECTED_CATALOG_DIGEST",
+              "value": "sha256:c731b83d70142bed04cc68e829cedc08acaa357645feb295097e25de371a99b4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "grant-voter",
+      "containers": [
+        {
+          "name": "grant-voter",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296",
+          "safeConfig": [
+            {
+              "name": "GRANT_AUTH_PROVIDER",
+              "value": "pocketbase"
+            },
+            {
+              "name": "GRANT_POCKETBASE_BASE_URL",
+              "value": "http://patch-auth.patch-data-grant-exposure-go-v1.svc.cluster.local:8091"
+            },
+            {
+              "name": "GRANT_POCKETBASE_COLLECTION",
+              "value": "users"
+            },
+            {
+              "name": "GRANT_RUNTIME_MODE",
+              "value": "embedded"
+            },
+            {
+              "name": "GRANT_LOCAL_NODE_ROLE",
+              "value": "voter"
+            },
+            {
+              "name": "GRANT_BIND_ADDR",
+              "value": "127.0.0.1:8080"
+            },
+            {
+              "name": "GRANT_POCKETBASE_APPLICATION_ID",
+              "value": "ied-management"
+            },
+            {
+              "name": "GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID",
+              "value": "ied-management"
+            }
+          ]
+        },
+        {
+          "name": "exposure-management",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c",
+          "safeConfig": [
+            {
+              "name": "EXPOSURE_PROXY_ENABLED",
+              "value": "true"
+            },
+            {
+              "name": "EXPOSURE_CREDENTIAL_MODE",
+              "value": "pocketbase"
+            },
+            {
+              "name": "EXPOSURE_POCKETBASE_ISSUER",
+              "value": "http://patch-auth.patch-data-grant-exposure-go-v1.svc.cluster.local:8091"
+            },
+            {
+              "name": "EXPOSURE_DATA_ADDR",
+              "value": ":8084"
+            },
+            {
+              "name": "EXPOSURE_ADMIN_ADDR",
+              "value": ":8085"
+            },
+            {
+              "name": "EXPOSURE_PROVIDER_ID",
+              "value": "grant-management"
+            },
+            {
+              "name": "EXPOSURE_PEP_CLIENT_ID",
+              "value": "ied-management-pep"
+            },
+            {
+              "name": "EXPOSURE_POCKETBASE_APPLICATION_ID",
+              "value": "ied-management"
+            },
+            {
+              "name": "EXPOSURE_GRANT_LEARNER_URL",
+              "value": "http://127.0.0.1:8080"
+            },
+            {
+              "name": "EXPOSURE_PROVIDER_ORIGIN",
+              "value": "http://127.0.0.1:8080"
+            },
+            {
+              "name": "EXPOSURE_PROVIDER_AUTHORIZATION_MODE",
+              "value": "forward-user"
+            },
+            {
+              "name": "EXPOSURE_EXPECTED_CATALOG_DIGEST",
+              "value": "sha256:41a7d3ac23e7c3a4f820b553077cb9e01bd0eb38e9105b33196b7af8a1d66a2e"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "patch-auth",
+      "containers": [
+        {
+          "name": "patch-auth",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "safeConfig": []
+        }
+      ]
+    }
+  ],
+  "accountExposure": {
+    "deployed": false,
+    "evidence": "No account Exposure container or service in the selected namespace; patch-auth remains a direct native provider"
+  }
+}

@@ -1,0 +1,17 @@
+[
+  {
+    "name": "__GRANT_RAUTHY_CLIENT_READ_API_KEY_NAME__",
+    "exp": 4070905200,
+    "secret": {
+      "Plain": "__GRANT_RAUTHY_CLIENT_READ_API_KEY_SECRET__"
+    },
+    "access": [
+      {
+        "group": "Clients",
+        "access_rights": [
+          "read"
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:43:36Z",
+    "kst": "2026-10-04T20:43:36+0900",
+    "method": "read-only OCI manifest and image config inspect by immutable deployed digest; only OCI metadata labels retained",
+    "source": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c"
+  },
+  "component": "exposure",
+  "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c",
+  "architecture": "amd64",
+  "os": "linux",
+  "labels": {}
+}

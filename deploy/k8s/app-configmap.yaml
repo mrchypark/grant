@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grant-config
+data:
+  GRANT_BIND_ADDR: "0.0.0.0:8080"
+  GRANT_RAUTHY_BASE_URL: "http://rauthy:8080"
+  GRANT_RAUTHY_INTROSPECT_PATH: "/auth/v1/oidc/introspect"
+  GRANT_RAUTHY_USERINFO_PATH: "/auth/v1/oidc/userinfo"
+  GRANT_RAUTHY_CACHE_TTL_SECONDS: "45"
+  GRANT_CLUSTER_ID: "grant"
+  GRANT_PEER_ADDR: "0.0.0.0:8100"
+  GRANT_DATA_DIR: "/var/lib/grant/rhiza"
+  GRANT_BACKUP_DIR: "/var/lib/grant/backups"
+  RHIZA_OBJSTORE_DURABILITY: "before-ack"

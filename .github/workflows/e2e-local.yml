@@ -1,0 +1,399 @@
+name: e2e-local
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_rauthy_launcher_gar:
+        description: Publish the feature Rauthy launcher image to GAR
+        required: false
+        default: false
+        type: boolean
+      launcher_source_sha:
+        description: Exact 40-character feature-branch launcher commit to publish
+        required: false
+        default: ''
+        type: string
+      launcher_confirmation:
+        description: Type publish-grant-rauthy-launcher-gar
+        required: false
+        default: ''
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/e2e-local.yml"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+      - "cmd/**"
+      - "Dockerfile"
+      - "README.md"
+      - "deploy/**"
+      - "docs/**"
+      - "scripts/**"
+
+concurrency:
+  group: >-
+    ${{ inputs.publish_rauthy_launcher_gar &&
+      format('rauthy-launcher-gar-{0}', github.ref) ||
+      format('e2e-local-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ !inputs.publish_rauthy_launcher_gar }}
+
+jobs:
+  go-verification:
+    if: ${{ !inputs.publish_rauthy_launcher_gar }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Reclaim runner disk
+        run: |
+          echo "[storage] before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af --volumes || true
+          echo "[storage] after cleanup"
+          df -h
+          docker system df || true
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l internal cmd)"
+
+      - name: Verify runtime tool packaging
+        run: sh scripts/verify-runtime-tools.sh
+
+      - name: Build Go executables
+        run: CGO_ENABLED=0 go build ./cmd/...
+
+      - name: Vet Go packages
+        run: go vet ./...
+
+      - name: Test Go contracts and race safety
+        run: go test -race ./...
+
+      - name: Verify executable stdout and SQLite export contracts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 jq
+          sh scripts/verify-go-cli-contract.sh
+
+      - name: Verify native quorum and fresh-cluster restore
+        run: sh scripts/verify-go-three-voter.sh
+
+      - name: Verify native AMD64 container under production security limits
+        run: |
+          docker build --platform linux/amd64 --label org.opencontainers.image.revision="${GITHUB_SHA}" -t grant:container-verify .
+          IMAGE_NAME=grant:container-verify sh scripts/verify-go-container.sh
+
+  local-bootstrap:
+    if: ${{ !inputs.publish_rauthy_launcher_gar }}
+    runs-on: ubuntu-latest
+    needs: go-verification
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Reclaim runner disk
+        run: |
+          echo "[storage] before cleanup"
+          df -h
+          docker system df || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af --volumes || true
+          echo "[storage] after cleanup"
+          df -h
+          docker system df || true
+
+      - name: Install kubectl
+        run: |
+          curl_retry_args=(
+            --fail
+            --show-error
+            --silent
+            --location
+            --retry 5
+            --retry-delay 3
+            --retry-all-errors
+            --connect-timeout 20
+            --max-time 300
+          )
+          KUBECTL_VERSION="$(curl "${curl_retry_args[@]}" https://dl.k8s.io/release/stable.txt)"
+          curl "${curl_retry_args[@]}" -o kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+
+      - name: Install vCluster CLI
+        run: |
+          curl_retry_args=(
+            --fail
+            --show-error
+            --silent
+            --location
+            --retry 5
+            --retry-delay 3
+            --retry-all-errors
+            --connect-timeout 20
+            --max-time 300
+          )
+          VCLUSTER_VERSION="0.33.1"
+          ARCH="$(uname -m)"
+          case "${ARCH}" in
+            x86_64) ARCH="amd64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            *)
+              echo "unsupported architecture: ${ARCH}" >&2
+              exit 1
+              ;;
+          esac
+          curl "${curl_retry_args[@]}" -o vcluster \
+            "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"
+          chmod +x vcluster
+          sudo mv vcluster /usr/local/bin/vcluster
+
+      - name: Preload kernel modules
+        run: |
+          sudo modprobe br_netfilter
+          sudo modprobe bridge || true
+          sudo modprobe overlay || true
+
+      - name: Install jq and shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      - name: Verify toolchain
+        run: |
+          docker version
+          kubectl version --client
+          vcluster version
+          jq --version
+          shellcheck --version
+          actionlint -version
+
+      - name: Verify local scripts
+        run: |
+          bash_scripts=(
+            scripts/vind-exec.sh
+            scripts/vind-cluster.sh
+            scripts/ci-local.sh
+            scripts/vind-bootstrap.sh
+            scripts/vind-image-helpers.sh
+            scripts/verify-vind-bootstrap.sh
+            scripts/gke-skaffold-run.sh
+          )
+          posix_scripts=(
+            scripts/k8s-secret-helpers.sh
+            scripts/check-s3-object-history.sh
+            scripts/verify-lifecycle-values.sh
+            scripts/verify-runtime-tools.sh
+            scripts/verify-go-cli-contract.sh
+            scripts/verify-go-three-voter.sh
+            scripts/oci-redirect-fixture
+            scripts/replica-members
+            scripts/verify-oci-attestations.sh
+            scripts/verify-oci-attestations-tests.sh
+            scripts/verify-ephemeral-k8s.sh
+            scripts/verify-s3-object-history.sh
+            scripts/verify-docs.sh
+            scripts/verify-rhiza-deployment.sh
+            scripts/verify-go-container.sh
+            scripts/ghcr-tag-preflight.sh
+            scripts/verify-ghcr-tag-preflight.sh
+            scripts/materialize-s3-restore.sh
+            scripts/cached-go-module.sh
+            scripts/create-recovery-pair.sh
+            scripts/restore-full-cluster.sh
+            deploy/k8s/lifecycle-gate.sh
+          )
+          bash -n "${bash_scripts[@]}"
+          for script in "${posix_scripts[@]}"; do sh -n "${script}"; done
+          shellcheck --exclude=SC2015 "${bash_scripts[@]}" "${posix_scripts[@]}"
+          actionlint -shellcheck= .github/workflows/*.yml
+
+      - name: Verify docs and recovery manifests
+        run: |
+          scripts/verify-docs.sh
+          sh scripts/verify-rhiza-deployment.sh
+          sh scripts/verify-ghcr-tag-preflight.sh
+          scripts/verify-ephemeral-k8s.sh static
+
+      - name: Run local bootstrap regression
+        env:
+          CLUSTER_NAME: grant-vind-ci
+          CI_CLUSTER_BACKEND: vind
+          CI_DOCKER_BUILDER_PRUNE: "1"
+          NAMESPACE: grant
+          GRANT_MASTER_KEY: local-dev-master-key
+          GRANT_APP_AUTH_KEY: local-dev-app-auth-key
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESET_CLUSTER: "1"
+          KEEP_CLUSTER: "0"
+        run: bash scripts/ci-local.sh
+
+  launcher-source-guard:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.publish_rauthy_launcher_gar &&
+        github.repository == 'mrchypark/grant' &&
+        github.ref == 'refs/heads/feature/grant-simple-deploy-v1'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify exact launcher source
+        env:
+          SOURCE_SHA: ${{
+            inputs.launcher_source_sha }}
+          CONFIRMATION: ${{
+            inputs.launcher_confirmation }}
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION}" = publish-grant-rauthy-launcher-gar
+          printf '%s\n' "${SOURCE_SHA}" | grep -Eq '^[0-9a-f]{40}$'
+          test "${SOURCE_SHA}" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test -z "$(git status --porcelain=v1)"
+          grep -Fx 'ARG RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.37.1@sha256:72b4734a7c52bd67cd544e7b72a4ab64932a7060844ef475fc2bb3d3da3074d9' \
+            deploy/rauthy-launcher/Dockerfile
+
+  launcher-tag-preflight:
+    needs: launcher-source-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{
+        steps.tag.outputs.tag }}
+    steps:
+      - name: Compute the reusable workflow tag
+        id: tag
+        env:
+          GCP_REGISTRY_HOST: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{
+            secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{
+            secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tag="$(TZ=Asia/Seoul date +%Y%m%d)-${GITHUB_SHA::7}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          username: _json_key
+          password: ${{
+            secrets.GCP_SA_KEY }}
+
+      - name: Refuse an existing tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GCP_REGISTRY_HOST: ${{ secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{ secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tagged_image="${GCP_REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_REPOSITORY}/grant-rauthy-launcher:${TAG}"
+          inspect_error=""
+          if inspect_error="$(docker buildx imagetools inspect "${tagged_image}" 2>&1)"; then
+            echo "::error::refusing to overwrite existing image tag ${tagged_image}"
+            exit 1
+          fi
+          case "${inspect_error}" in
+            *"not found"*|*"Not Found"*|*"manifest unknown"*) ;;
+            *)
+              echo "::error::could not prove image tag absence"
+              exit 1
+              ;;
+          esac
+
+  launcher-tag-recheck:
+    needs: launcher-tag-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Refuse a KST date rollover before publication
+        env:
+          EXPECTED_TAG: ${{ needs.launcher-tag-preflight.outputs.tag }}
+          GCP_REGISTRY_HOST: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{
+            secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{
+            secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tag="$(TZ=Asia/Seoul date +%Y%m%d)-${GITHUB_SHA::7}"
+          test "${tag}" = "${EXPECTED_TAG}"
+
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{
+            secrets.GCP_REGISTRY_HOST }}
+          username: _json_key
+          password: ${{
+            secrets.GCP_SA_KEY }}
+
+      - name: Recheck that the tag is absent
+        env:
+          TAG: ${{ needs.launcher-tag-preflight.outputs.tag }}
+          GCP_REGISTRY_HOST: ${{ secrets.GCP_REGISTRY_HOST }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REPOSITORY: ${{ secrets.GCP_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "${GCP_REGISTRY_HOST}" = "asia-northeast3-docker.pkg.dev"
+          test "${GCP_PROJECT_ID}" = "patch2-the-new-era"
+          test "${GCP_REPOSITORY}" = "conalog"
+          tagged_image="${GCP_REGISTRY_HOST}/${GCP_PROJECT_ID}/${GCP_REPOSITORY}/grant-rauthy-launcher:${TAG}"
+          inspect_error=""
+          if inspect_error="$(docker buildx imagetools inspect "${tagged_image}" 2>&1)"; then
+            echo "::error::refusing to overwrite existing image tag ${tagged_image}"
+            exit 1
+          fi
+          case "${inspect_error}" in
+            *"not found"*|*"Not Found"*|*"manifest unknown"*) ;;
+            *)
+              echo "::error::could not prove image tag absence"
+              exit 1
+              ;;
+          esac
+
+  publish-rauthy-launcher-gar:
+    needs: launcher-tag-recheck
+    uses: ./.github/workflows/buildandpush.yaml
+    secrets: inherit
+    with:
+      application-name: grant-rauthy-launcher
+      context: ./deploy/rauthy-launcher
+      dockerfile: ./deploy/rauthy-launcher/Dockerfile
+      arch: linux/amd64
+      go-build-cache: true

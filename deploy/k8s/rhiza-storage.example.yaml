@@ -1,0 +1,18 @@
+# Apply separately after provisioning an existing shared S3 bucket and credentials.
+# Never reuse the legacy Hiqlite backup prefix as Rhiza's live object-store prefix.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grant-rhiza-storage
+  namespace: grant
+type: Opaque
+stringData:
+  GRANT_CLUSTER_MEMBERS: >-
+    [{"node_id":"grant-voter-0","peer_url":"quic://grant-voter-0.grant-headless:8100","token":"REPLACE_MEMBER_0_TOKEN"},{"node_id":"grant-voter-1","peer_url":"quic://grant-voter-1.grant-headless:8100","token":"REPLACE_MEMBER_1_TOKEN"},{"node_id":"grant-voter-2","peer_url":"quic://grant-voter-2.grant-headless:8100","token":"REPLACE_MEMBER_2_TOKEN"}]
+  RHIZA_OBJSTORE_PROVIDER: s3
+  RHIZA_OBJSTORE_ENDPOINT: https://s3.example.com
+  RHIZA_OBJSTORE_BUCKET: grant-native-rhiza
+  RHIZA_OBJSTORE_PREFIX: grant-v1
+  RHIZA_OBJSTORE_REGION: example-region-1
+  RHIZA_OBJSTORE_ACCESS_KEY: REPLACE_ACCESS_KEY
+  RHIZA_OBJSTORE_SECRET_KEY: REPLACE_SECRET_KEY

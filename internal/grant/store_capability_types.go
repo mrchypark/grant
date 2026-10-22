@@ -1,0 +1,198 @@
+package grant
+
+type HttpCapabilityResource struct {
+	ResourceType string                `json:"type"`
+	ID           HttpResourceExtractor `json:"id"`
+}
+type HttpCapability struct {
+	CapabilityID          string                     `json:"capabilityId"`
+	Version               uint64                     `json:"version"`
+	Enabled               bool                       `json:"enabled"`
+	AccessMode            HttpCapabilityAccessMode   `json:"accessMode"`
+	Method                string                     `json:"method"`
+	PathTemplate          string                     `json:"pathTemplate"`
+	ActionID              *string                    `json:"actionId"`
+	Resource              *HttpCapabilityResource    `json:"resource"`
+	Query                 HttpQueryPolicy            `json:"query"`
+	Request               HttpRequestPolicy          `json:"request"`
+	Response              HttpResponsePolicy         `json:"response"`
+	ContractDigest        string                     `json:"contractDigest"`
+	PathParameters        []HttpPathParameter        `json:"pathParameters,omitempty"`
+	RecordScope           *HttpRecordScopePolicy     `json:"recordScope,omitempty"`
+	Batch                 *HttpBatchPolicy           `json:"batch,omitempty"`
+	ResponseAuthorization *HttpResponseAuthorization `json:"responseAuthorization,omitempty"`
+}
+
+type HttpResponseResource struct {
+	Key           string                 `json:"key"`
+	ActionID      string                 `json:"actionId"`
+	ResourceType  string                 `json:"resourceType"`
+	IDField       string                 `json:"idField"`
+	IDFormat      string                 `json:"idFormat"`
+	IdentityField string                 `json:"identityField"`
+	IdentityValue string                 `json:"identityValue"`
+	Relations     []HttpResponseRelation `json:"relations"`
+}
+type HttpResponseRelation struct {
+	Field     string `json:"field"`
+	TargetKey string `json:"targetKey"`
+}
+type HttpResponseAuthorization struct {
+	RootKey        string `json:"rootKey"`
+	RecordsPointer string `json:"recordsPointer"`
+	ExpansionField string `json:"expansionField"`
+	QueryParameter string `json:"queryParameter"`
+	MaxDepth       uint64 `json:"maxDepth"`
+	MaxRecords     uint64 `json:"maxRecords"`
+}
+
+type HttpBatchPolicy struct {
+	Encoding             string              `json:"encoding"`
+	RequestsPointer      string              `json:"requestsPointer"`
+	MethodField          string              `json:"methodField"`
+	URLField             string              `json:"urlField"`
+	BodyField            string              `json:"bodyField"`
+	HeadersField         string              `json:"headersField"`
+	MaxOperations        uint64              `json:"maxOperations"`
+	AllowedCapabilityIDs []string            `json:"allowedCapabilityIds"`
+	Upserts              []HttpBatchUpsert   `json:"upserts,omitempty"`
+	Multipart            *HttpBatchMultipart `json:"multipart,omitempty"`
+}
+type HttpBatchUpsert struct {
+	Method             string `json:"method"`
+	PathTemplate       string `json:"pathTemplate"`
+	CreateCapabilityID string `json:"createCapabilityId"`
+	UpdateCapabilityID string `json:"updateCapabilityId"`
+	IDPointer          string `json:"idPointer"`
+}
+type HttpBatchMultipart struct {
+	PayloadField      string   `json:"payloadField"`
+	FileFieldPatterns []string `json:"fileFieldPatterns"`
+}
+type HttpRecordScopePolicy struct {
+	FilterParameter string                `json:"filterParameter"`
+	RowKey          string                `json:"rowKey"`
+	Grammar         string                `json:"grammar"`
+	MaxIDs          uint64                `json:"maxIds"`
+	MaxFilterBytes  uint64                `json:"maxFilterBytes"`
+	AllowedFields   []string              `json:"allowedFields"`
+	SortParameter   string                `json:"sortParameter,omitempty"`
+	Pagination      *HttpPaginationPolicy `json:"pagination,omitempty"`
+}
+type HttpPaginationPolicy struct {
+	PageParameter      string `json:"pageParameter,omitempty"`
+	PageSizeParameter  string `json:"pageSizeParameter,omitempty"`
+	SkipTotalParameter string `json:"skipTotalParameter,omitempty"`
+}
+type HttpPathParameter struct {
+	Name     string `json:"name"`
+	Format   string `json:"format"`
+	MaxBytes uint64 `json:"maxBytes"`
+}
+type HttpQueryParameter struct {
+	Name     string `json:"name"`
+	Format   string `json:"format"`
+	Required bool   `json:"required"`
+	MaxBytes uint64 `json:"maxBytes,omitempty"`
+	Repeated bool   `json:"repeated,omitempty"`
+}
+type HttpRequestPolicy struct {
+	Body           HttpRequestBodyMode `json:"body"`
+	MaxBytes       uint64              `json:"maxBytes"`
+	ForwardHeaders []string            `json:"forwardHeaders"`
+	Authorization  string              `json:"authorization,omitempty"`
+	ContentTypes   []string            `json:"contentTypes,omitempty"`
+}
+type HttpResponsePolicy struct {
+	MaxBytes       uint64             `json:"maxBytes"`
+	ForwardHeaders []string           `json:"forwardHeaders"`
+	Redirects      HttpRedirectPolicy `json:"redirects"`
+	ErrorStatuses  []int              `json:"errorStatuses,omitempty"`
+}
+type StageHttpCapabilityGeneration struct {
+	SchemaVersion            uint64                 `json:"schemaVersion"`
+	Generation               uint64                 `json:"generation"`
+	ExpectedLatestGeneration *uint64                `json:"expectedLatestGeneration"`
+	Capabilities             []HttpCapability       `json:"capabilities"`
+	ResponseResources        []HttpResponseResource `json:"responseResources,omitempty"`
+	CatalogDigest            string                 `json:"catalogDigest"`
+}
+type StagedHttpCapabilityGeneration struct {
+	Staged        bool   `json:"staged"`
+	ProviderID    string `json:"providerId"`
+	Generation    uint64 `json:"generation"`
+	CatalogDigest string `json:"catalogDigest"`
+	TotalCount    uint64 `json:"totalCount"`
+	EnabledCount  uint64 `json:"enabledCount"`
+	DisabledCount uint64 `json:"disabledCount"`
+}
+type ActivateHttpCapabilityGeneration struct {
+	ExpectedGeneration    *uint64 `json:"expectedGeneration"`
+	ExpectedCatalogDigest *string `json:"expectedCatalogDigest"`
+	TargetGeneration      uint64  `json:"targetGeneration"`
+	TargetCatalogDigest   string  `json:"targetCatalogDigest"`
+}
+type HttpCapabilityActivation struct {
+	ProviderID          string  `json:"providerId"`
+	ActivationReceiptID string  `json:"activationReceiptId"`
+	ActivationSequence  uint64  `json:"activationSequence"`
+	FromGeneration      *uint64 `json:"fromGeneration"`
+	ToGeneration        uint64  `json:"toGeneration"`
+	CatalogDigest       string  `json:"catalogDigest"`
+	ActivatedAt         string  `json:"activatedAt"`
+	ActivatedBy         string  `json:"activatedBy"`
+}
+type UpsertProviderPepClient struct {
+	ApplicationID string                     `json:"applicationId"`
+	Lifecycle     ProviderPepClientLifecycle `json:"lifecycle"`
+	ValidUntil    *string                    `json:"validUntil"`
+}
+type ProviderPepClient struct {
+	PepClientID   string  `json:"pepClientId"`
+	ApplicationID string  `json:"applicationId"`
+	ProviderID    string  `json:"providerId"`
+	Lifecycle     string  `json:"lifecycle"`
+	ValidUntil    *string `json:"validUntil"`
+	CreatedAt     string  `json:"createdAt"`
+	UpdatedAt     string  `json:"updatedAt"`
+}
+type ActiveHttpCapabilityCatalog struct {
+	SchemaVersion     uint64                 `json:"schemaVersion"`
+	ProviderID        string                 `json:"providerId"`
+	PepClientID       string                 `json:"pepClientId"`
+	Generation        uint64                 `json:"generation"`
+	CatalogDigest     string                 `json:"catalogDigest"`
+	Capabilities      []HttpCapability       `json:"capabilities"`
+	ResponseResources []HttpResponseResource `json:"responseResources,omitempty"`
+	IssuedAt          string                 `json:"issuedAt"`
+	ExpiresAt         string                 `json:"expiresAt"`
+}
+
+// AdminHttpCapabilityCatalog is durable registry state, without a PEP lease.
+type AdminHttpCapabilityCatalog struct {
+	SchemaVersion         uint64                 `json:"schemaVersion"`
+	ProviderID            string                 `json:"providerId"`
+	Generation            uint64                 `json:"generation"`
+	CatalogDigest         string                 `json:"catalogDigest"`
+	ActivatedAt           string                 `json:"activatedAt"`
+	ActivatedBy           string                 `json:"activatedBy"`
+	CapabilityCount       int                    `json:"capabilityCount"`
+	ResponseResourceCount int                    `json:"responseResourceCount"`
+	Capabilities          []HttpCapability       `json:"capabilities"`
+	ResponseResources     []HttpResponseResource `json:"responseResources,omitempty"`
+}
+type HttpCapabilityAccessMode = string
+type HttpRequestBodyMode = string
+type HttpRedirectPolicy = string
+type ProviderPepClientLifecycle = string
+type HttpResourceExtractor struct {
+	Kind    string `json:"kind"`
+	Name    string `json:"name,omitempty"`
+	Format  string `json:"format,omitempty"`
+	Pointer string `json:"pointer,omitempty"`
+	Value   string `json:"value,omitempty"`
+}
+type HttpQueryPolicy struct {
+	Mode       string               `json:"mode"`
+	Parameters []HttpQueryParameter `json:"parameters,omitempty"`
+}

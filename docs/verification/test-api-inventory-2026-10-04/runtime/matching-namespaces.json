@@ -1,0 +1,31 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+    "method": "namespace names only; bounded name filter grant|exposure|patch; other workloads not inspected",
+    "source": "kubectl get namespaces"
+  },
+  "namespaces": [
+    {
+      "name": "patch",
+      "phase": "Active",
+      "created": "2026-01-17T01:39:13Z"
+    },
+    {
+      "name": "patch-anomaly",
+      "phase": "Active",
+      "created": "2026-01-19T09:55:16Z"
+    },
+    {
+      "name": "patch-data-grant-exposure-go-v1",
+      "phase": "Active",
+      "created": "2026-09-08T18:20:26Z"
+    },
+    {
+      "name": "patch-notification",
+      "phase": "Active",
+      "created": "2026-01-19T09:55:16Z"
+    }
+  ]
+}

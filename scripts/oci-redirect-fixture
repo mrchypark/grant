@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_PATH=$(
+  if readlink -f "$0" >/dev/null 2>&1; then
+    readlink -f "$0"
+  elif realpath "$0" >/dev/null 2>&1; then
+    realpath "$0"
+  elif [ "${0#*/*}" != "$0" ]; then
+    printf '%s\n' "$0"
+  else
+    command -v "$0"
+  fi
+)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "${SCRIPT_PATH}")" && pwd)
+exec "${SCRIPT_DIR}/cached-go-module.sh" "${SCRIPT_PATH}" "$@"

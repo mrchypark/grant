@@ -1,0 +1,771 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "method": "read-only GET using existing master credential; credential omitted",
+    "source": "voter GET /api/v1/admin/providers/grant-management/actions"
+  },
+  "count": 76,
+  "actions": [
+    {
+      "id": "grant-management.admin.app.identity.bind",
+      "providerId": "grant-management",
+      "code": "admin.app.identity.bind",
+      "name": "admin.app.identity.bind",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.app.provision.verify",
+      "providerId": "grant-management",
+      "code": "admin.app.provision.verify",
+      "name": "admin.app.provision.verify",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.app.trust",
+      "providerId": "grant-management",
+      "code": "admin.app.trust",
+      "name": "admin.app.trust",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.backups.list",
+      "providerId": "grant-management",
+      "code": "admin.backups.list",
+      "name": "admin.backups.list",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.backups.list-s3",
+      "providerId": "grant-management",
+      "code": "admin.backups.list-s3",
+      "name": "admin.backups.list-s3",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.backups.trigger",
+      "providerId": "grant-management",
+      "code": "admin.backups.trigger",
+      "name": "admin.backups.trigger",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.catalog.activate",
+      "providerId": "grant-management",
+      "code": "admin.catalog.activate",
+      "name": "admin.catalog.activate",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.catalog.read",
+      "providerId": "grant-management",
+      "code": "admin.catalog.read",
+      "name": "admin.catalog.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.catalog.stage",
+      "providerId": "grant-management",
+      "code": "admin.catalog.stage",
+      "name": "admin.catalog.stage",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.import.patch-data-authority",
+      "providerId": "grant-management",
+      "code": "admin.import.patch-data-authority",
+      "name": "admin.import.patch-data-authority",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.org.providers.actions.read",
+      "providerId": "grant-management",
+      "code": "admin.org.providers.actions.read",
+      "name": "admin.org.providers.actions.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.organization.create",
+      "providerId": "grant-management",
+      "code": "admin.organization.create",
+      "name": "admin.organization.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.pep.upsert",
+      "providerId": "grant-management",
+      "code": "admin.pep.upsert",
+      "name": "admin.pep.upsert",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.actions.create",
+      "providerId": "grant-management",
+      "code": "admin.provider.actions.create",
+      "name": "admin.provider.actions.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.actions.delete",
+      "providerId": "grant-management",
+      "code": "admin.provider.actions.delete",
+      "name": "admin.provider.actions.delete",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.actions.read",
+      "providerId": "grant-management",
+      "code": "admin.provider.actions.read",
+      "name": "admin.provider.actions.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.actions.replace",
+      "providerId": "grant-management",
+      "code": "admin.provider.actions.replace",
+      "name": "admin.provider.actions.replace",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.actions.update",
+      "providerId": "grant-management",
+      "code": "admin.provider.actions.update",
+      "name": "admin.provider.actions.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.create",
+      "providerId": "grant-management",
+      "code": "admin.provider.create",
+      "name": "admin.provider.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.provider.update",
+      "providerId": "grant-management",
+      "code": "admin.provider.update",
+      "name": "admin.provider.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.admin.user.active",
+      "providerId": "grant-management",
+      "code": "admin.user.active",
+      "name": "admin.user.active",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.agreements.create",
+      "providerId": "grant-management",
+      "code": "agreements.create",
+      "name": "agreements.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.agreements.detail",
+      "providerId": "grant-management",
+      "code": "agreements.detail",
+      "name": "agreements.detail",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.agreements.patch",
+      "providerId": "grant-management",
+      "code": "agreements.patch",
+      "name": "agreements.patch",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.agreements.read",
+      "providerId": "grant-management",
+      "code": "agreements.read",
+      "name": "agreements.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.agreements.update",
+      "providerId": "grant-management",
+      "code": "agreements.update",
+      "name": "agreements.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.actions.add",
+      "providerId": "grant-management",
+      "code": "applications.actions.add",
+      "name": "applications.actions.add",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.actions.read",
+      "providerId": "grant-management",
+      "code": "applications.actions.read",
+      "name": "applications.actions.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.actions.remove",
+      "providerId": "grant-management",
+      "code": "applications.actions.remove",
+      "name": "applications.actions.remove",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.actions.replace",
+      "providerId": "grant-management",
+      "code": "applications.actions.replace",
+      "name": "applications.actions.replace",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.active",
+      "providerId": "grant-management",
+      "code": "applications.active",
+      "name": "applications.active",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.consent.delete",
+      "providerId": "grant-management",
+      "code": "applications.consent.delete",
+      "name": "applications.consent.delete",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.consent.read",
+      "providerId": "grant-management",
+      "code": "applications.consent.read",
+      "name": "applications.consent.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.consent.replace",
+      "providerId": "grant-management",
+      "code": "applications.consent.replace",
+      "name": "applications.consent.replace",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.create",
+      "providerId": "grant-management",
+      "code": "applications.create",
+      "name": "applications.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.delete",
+      "providerId": "grant-management",
+      "code": "applications.delete",
+      "name": "applications.delete",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.detail",
+      "providerId": "grant-management",
+      "code": "applications.detail",
+      "name": "applications.detail",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.grants.read",
+      "providerId": "grant-management",
+      "code": "applications.grants.read",
+      "name": "applications.grants.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.grants.revoke",
+      "providerId": "grant-management",
+      "code": "applications.grants.revoke",
+      "name": "applications.grants.revoke",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.read",
+      "providerId": "grant-management",
+      "code": "applications.read",
+      "name": "applications.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.applications.update",
+      "providerId": "grant-management",
+      "code": "applications.update",
+      "name": "applications.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.bindings.create",
+      "providerId": "grant-management",
+      "code": "bindings.create",
+      "name": "bindings.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.bindings.delete",
+      "providerId": "grant-management",
+      "code": "bindings.delete",
+      "name": "bindings.delete",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.bindings.read",
+      "providerId": "grant-management",
+      "code": "bindings.read",
+      "name": "bindings.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.create",
+      "providerId": "grant-management",
+      "code": "groups.create",
+      "name": "groups.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.delete",
+      "providerId": "grant-management",
+      "code": "groups.delete",
+      "name": "groups.delete",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.detail",
+      "providerId": "grant-management",
+      "code": "groups.detail",
+      "name": "groups.detail",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.members.add",
+      "providerId": "grant-management",
+      "code": "groups.members.add",
+      "name": "groups.members.add",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.members.read",
+      "providerId": "grant-management",
+      "code": "groups.members.read",
+      "name": "groups.members.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.members.remove",
+      "providerId": "grant-management",
+      "code": "groups.members.remove",
+      "name": "groups.members.remove",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.patch",
+      "providerId": "grant-management",
+      "code": "groups.patch",
+      "name": "groups.patch",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.read",
+      "providerId": "grant-management",
+      "code": "groups.read",
+      "name": "groups.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.groups.update",
+      "providerId": "grant-management",
+      "code": "groups.update",
+      "name": "groups.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.manage",
+      "providerId": "grant-management",
+      "code": "manage",
+      "name": "Grant management groups",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.members.enroll",
+      "providerId": "grant-management",
+      "code": "members.enroll",
+      "name": "members.enroll",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.members.read",
+      "providerId": "grant-management",
+      "code": "members.read",
+      "name": "members.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.members.remove",
+      "providerId": "grant-management",
+      "code": "members.remove",
+      "name": "members.remove",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.create",
+      "providerId": "grant-management",
+      "code": "organization.create",
+      "name": "organization.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.deactivate",
+      "providerId": "grant-management",
+      "code": "organization.deactivate",
+      "name": "organization.deactivate",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.detail",
+      "providerId": "grant-management",
+      "code": "organization.detail",
+      "name": "organization.detail",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.list",
+      "providerId": "grant-management",
+      "code": "organization.list",
+      "name": "organization.list",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.owner.read",
+      "providerId": "grant-management",
+      "code": "organization.owner.read",
+      "name": "organization.owner.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.owner.transfer",
+      "providerId": "grant-management",
+      "code": "organization.owner.transfer",
+      "name": "organization.owner.transfer",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.reactivate",
+      "providerId": "grant-management",
+      "code": "organization.reactivate",
+      "name": "organization.reactivate",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.organization.update",
+      "providerId": "grant-management",
+      "code": "organization.update",
+      "name": "organization.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.provider.list",
+      "providerId": "grant-management",
+      "code": "provider.list",
+      "name": "provider.list",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.role.actions.add",
+      "providerId": "grant-management",
+      "code": "role.actions.add",
+      "name": "role.actions.add",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.role.actions.read",
+      "providerId": "grant-management",
+      "code": "role.actions.read",
+      "name": "role.actions.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.role.actions.remove",
+      "providerId": "grant-management",
+      "code": "role.actions.remove",
+      "name": "role.actions.remove",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.role.actions.replace",
+      "providerId": "grant-management",
+      "code": "role.actions.replace",
+      "name": "role.actions.replace",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.role.delete",
+      "providerId": "grant-management",
+      "code": "role.delete",
+      "name": "role.delete",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.role.update",
+      "providerId": "grant-management",
+      "code": "role.update",
+      "name": "role.update",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.roles.create",
+      "providerId": "grant-management",
+      "code": "roles.create",
+      "name": "roles.create",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.roles.read",
+      "providerId": "grant-management",
+      "code": "roles.read",
+      "name": "roles.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.user.materialize",
+      "providerId": "grant-management",
+      "code": "user.materialize",
+      "name": "user.materialize",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    },
+    {
+      "id": "grant-management.user.read",
+      "providerId": "grant-management",
+      "code": "user.read",
+      "name": "user.read",
+      "description": null,
+      "grantableToApplications": true,
+      "visibilityGranting": false,
+      "riskLevel": "high"
+    }
+  ]
+}

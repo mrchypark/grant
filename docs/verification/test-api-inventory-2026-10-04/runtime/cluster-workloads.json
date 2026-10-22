@@ -1,0 +1,923 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:42:16Z",
+    "kst": "2026-10-04T20:42:16+0900",
+    "context": "gke_patch2-the-new-era_asia-northeast3_ied-cluster",
+    "namespace": "patch-data-grant-exposure-go-v1",
+    "method": "kubectl get; explicit context and namespace; allowlisted projection",
+    "source": "deployments,statefulsets,daemonsets,pods,services,ingresses,configmaps"
+  },
+  "items": [
+    {
+      "kind": "Deployment",
+      "name": "data-stack",
+      "generation": 26,
+      "created": "2026-09-12T11:38:34Z",
+      "desired": 1,
+      "observedGeneration": 26,
+      "ready": 1,
+      "available": 1,
+      "containers": [
+        {
+          "name": "patch-data",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b",
+          "ports": null,
+          "readinessProbe": {
+            "exec": {
+              "command": [
+                "wget",
+                "-q",
+                "-O",
+                "/dev/null",
+                "http://127.0.0.1:8090/api/health"
+              ]
+            },
+            "failureThreshold": 6,
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 3
+          },
+          "livenessProbe": {
+            "exec": {
+              "command": [
+                "wget",
+                "-q",
+                "-O",
+                "/dev/null",
+                "http://127.0.0.1:8090/api/health"
+              ]
+            },
+            "failureThreshold": 6,
+            "initialDelaySeconds": 30,
+            "periodSeconds": 10,
+            "successThreshold": 1,
+            "timeoutSeconds": 3
+          }
+        },
+        {
+          "name": "grant-learner",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296",
+          "ports": null,
+          "readinessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/readyz",
+              "port": 8086,
+              "scheme": "HTTP"
+            },
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          },
+          "livenessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/healthz",
+              "port": 8086,
+              "scheme": "HTTP"
+            },
+            "initialDelaySeconds": 30,
+            "periodSeconds": 10,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          }
+        },
+        {
+          "name": "exposure-data",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c",
+          "ports": [
+            {
+              "containerPort": 8082,
+              "name": "http-data",
+              "protocol": "TCP"
+            },
+            {
+              "containerPort": 8083,
+              "name": "admin-data",
+              "protocol": "TCP"
+            }
+          ],
+          "readinessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/readyz",
+              "port": 8083,
+              "scheme": "HTTP"
+            },
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          },
+          "livenessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/healthz",
+              "port": 8083,
+              "scheme": "HTTP"
+            },
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          }
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "restartPolicy": null
+        },
+        {
+          "name": "restore-litestream",
+          "image": "litestream/litestream:0.5.16",
+          "restartPolicy": null
+        },
+        {
+          "name": "litestream",
+          "image": "litestream/litestream:0.5.16",
+          "restartPolicy": "Always"
+        },
+        {
+          "name": "patch-data-initialize",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b",
+          "restartPolicy": null
+        }
+      ]
+    },
+    {
+      "kind": "Deployment",
+      "name": "grant-voter",
+      "generation": 23,
+      "created": "2026-09-12T11:38:34Z",
+      "desired": 1,
+      "observedGeneration": 23,
+      "ready": 1,
+      "available": 1,
+      "containers": [
+        {
+          "name": "grant-voter",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296",
+          "ports": null,
+          "readinessProbe": {
+            "exec": {
+              "command": [
+                "curl",
+                "--max-time",
+                "2",
+                "-fsS",
+                "-o",
+                "/dev/null",
+                "http://127.0.0.1:8080/readyz"
+              ]
+            },
+            "failureThreshold": 6,
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 3
+          },
+          "livenessProbe": {
+            "exec": {
+              "command": [
+                "curl",
+                "--max-time",
+                "2",
+                "-fsS",
+                "-o",
+                "/dev/null",
+                "http://127.0.0.1:8080/healthz"
+              ]
+            },
+            "failureThreshold": 6,
+            "initialDelaySeconds": 30,
+            "periodSeconds": 10,
+            "successThreshold": 1,
+            "timeoutSeconds": 3
+          }
+        },
+        {
+          "name": "exposure-management",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c",
+          "ports": [
+            {
+              "containerPort": 8084,
+              "name": "http-management",
+              "protocol": "TCP"
+            },
+            {
+              "containerPort": 8085,
+              "name": "admin-mgmt",
+              "protocol": "TCP"
+            }
+          ],
+          "readinessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/readyz",
+              "port": 8085,
+              "scheme": "HTTP"
+            },
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          },
+          "livenessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/healthz",
+              "port": 8085,
+              "scheme": "HTTP"
+            },
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          }
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "restartPolicy": null
+        }
+      ]
+    },
+    {
+      "kind": "Deployment",
+      "name": "patch-auth",
+      "generation": 11,
+      "created": "2026-09-12T11:38:34Z",
+      "desired": 1,
+      "observedGeneration": 11,
+      "ready": 1,
+      "available": 1,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "ports": null,
+          "readinessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/api/health",
+              "port": 8091,
+              "scheme": "HTTP"
+            },
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          },
+          "livenessProbe": {
+            "failureThreshold": 6,
+            "httpGet": {
+              "path": "/api/health",
+              "port": 8091,
+              "scheme": "HTTP"
+            },
+            "initialDelaySeconds": 30,
+            "periodSeconds": 10,
+            "successThreshold": 1,
+            "timeoutSeconds": 1
+          }
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "restartPolicy": null
+        },
+        {
+          "name": "restore-litestream",
+          "image": "litestream/litestream:0.5.16",
+          "restartPolicy": null
+        },
+        {
+          "name": "litestream",
+          "image": "litestream/litestream:0.5.16",
+          "restartPolicy": "Always"
+        },
+        {
+          "name": "patch-auth-initialize",
+          "image": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "restartPolicy": null
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "data-stack-6d5b859ff9-pgmpc",
+      "created": "2026-10-04T07:14:43Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "data",
+        "pod-template-hash": "6d5b859ff9",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Running",
+      "reason": null,
+      "ready": true,
+      "containers": [
+        {
+          "name": "exposure-data",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c"
+        },
+        {
+          "name": "grant-learner",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296"
+        },
+        {
+          "name": "patch-data",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b"
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "running"
+          ]
+        },
+        {
+          "name": "patch-data-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "data-stack-6d5b859ff9-swxhc",
+      "created": "2026-09-29T13:52:39Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "data",
+        "pod-template-hash": "6d5b859ff9",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Failed",
+      "reason": "Evicted",
+      "ready": false,
+      "containers": [
+        {
+          "name": "exposure-data",
+          "ready": false,
+          "restartCount": 1,
+          "imageID": ""
+        },
+        {
+          "name": "grant-learner",
+          "ready": false,
+          "restartCount": 1,
+          "imageID": ""
+        },
+        {
+          "name": "patch-data",
+          "ready": false,
+          "restartCount": 1,
+          "imageID": ""
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": false,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "patch-data-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-data@sha256:e0a3c463ab15b93297b6e3045d3fba3842bb5b8201cf4c0a6d0d10f2eb17113b",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "grant-voter-6bd88657fc-8j6vw",
+      "created": "2026-09-22T12:40:29Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "voter",
+        "pod-template-hash": "6bd88657fc",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Running",
+      "reason": null,
+      "ready": true,
+      "containers": [
+        {
+          "name": "exposure-management",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/exposure@sha256:6af2e07288a8977ac707aff7ee4a5a9336ffabc9f5931140b952298e9703af1c"
+        },
+        {
+          "name": "grant-voter",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/mrchypark/grant@sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296"
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "patch-auth-78ff85b9c5-4l22k",
+      "created": "2026-10-02T05:37:58Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "patch-auth",
+        "pod-template-hash": "78ff85b9c5",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Succeeded",
+      "reason": null,
+      "ready": false,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "ready": false,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335"
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": false,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "patch-auth-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "patch-auth-78ff85b9c5-cwxbr",
+      "created": "2026-10-01T13:37:58Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "patch-auth",
+        "pod-template-hash": "78ff85b9c5",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Succeeded",
+      "reason": null,
+      "ready": false,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "ready": false,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335"
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": false,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "patch-auth-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "patch-auth-78ff85b9c5-p78t6",
+      "created": "2026-10-02T21:33:02Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "patch-auth",
+        "pod-template-hash": "78ff85b9c5",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Failed",
+      "reason": "Evicted",
+      "ready": false,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "ready": false,
+          "restartCount": 1,
+          "imageID": ""
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": false,
+          "restartCount": 1,
+          "imageID": "",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "patch-auth-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "patch-auth-78ff85b9c5-tnwq6",
+      "created": "2026-10-04T10:37:55Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "patch-auth",
+        "pod-template-hash": "78ff85b9c5",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Running",
+      "reason": null,
+      "ready": true,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335"
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "running"
+          ]
+        },
+        {
+          "name": "patch-auth-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Pod",
+      "name": "patch-auth-78ff85b9c5-znkwv",
+      "created": "2026-10-03T13:22:58Z",
+      "labels": {
+        "app": "grant-stack",
+        "component": "patch-auth",
+        "pod-template-hash": "78ff85b9c5",
+        "topology.kubernetes.io/region": "asia-northeast3",
+        "topology.kubernetes.io/zone": "asia-northeast3-a"
+      },
+      "phase": "Failed",
+      "reason": "Evicted",
+      "ready": false,
+      "containers": [
+        {
+          "name": "patch-auth",
+          "ready": false,
+          "restartCount": 1,
+          "imageID": ""
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "prepare-storage",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "restore-litestream",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "litestream",
+          "ready": false,
+          "restartCount": 0,
+          "imageID": "docker.io/litestream/litestream@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954",
+          "state": [
+            "terminated"
+          ]
+        },
+        {
+          "name": "patch-auth-initialize",
+          "ready": true,
+          "restartCount": 0,
+          "imageID": "asia-northeast3-docker.pkg.dev/patch2-the-new-era/conalog/patch-auth@sha256:89adab664fa7f7be9457d8a5d1b1e31ca890e618b84cbcced60ed89975dfb335",
+          "state": [
+            "terminated"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "Service",
+      "name": "exposure",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.6.183",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8082,
+          "protocol": "TCP",
+          "targetPort": 8082
+        }
+      ],
+      "selector": {
+        "app": "grant-stack",
+        "component": "data"
+      },
+      "loadBalancer": {}
+    },
+    {
+      "kind": "Service",
+      "name": "grant",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.6.142",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080,
+          "protocol": "TCP",
+          "targetPort": 8086
+        }
+      ],
+      "selector": {
+        "app": "grant-stack",
+        "component": "data"
+      },
+      "loadBalancer": {}
+    },
+    {
+      "kind": "Service",
+      "name": "grant-management",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.15.192",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8084,
+          "protocol": "TCP",
+          "targetPort": 8084
+        }
+      ],
+      "selector": {
+        "app": "grant-stack",
+        "component": "voter"
+      },
+      "loadBalancer": {}
+    },
+    {
+      "kind": "Service",
+      "name": "grant-voter-runtime",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.1.155",
+      "ports": [
+        {
+          "name": "runtime",
+          "port": 8087,
+          "protocol": "TCP",
+          "targetPort": 8087
+        },
+        {
+          "name": "peer",
+          "port": 8088,
+          "protocol": "UDP",
+          "targetPort": 8088
+        }
+      ],
+      "selector": {
+        "app": "grant-stack",
+        "component": "voter"
+      },
+      "loadBalancer": {}
+    },
+    {
+      "kind": "Service",
+      "name": "patch-auth",
+      "type": "ClusterIP",
+      "clusterIP": "10.12.4.234",
+      "ports": [
+        {
+          "name": "http",
+          "port": 8091,
+          "protocol": "TCP",
+          "targetPort": 8091
+        }
+      ],
+      "selector": {
+        "app": "grant-stack",
+        "component": "patch-auth"
+      },
+      "loadBalancer": {}
+    },
+    {
+      "kind": "ConfigMap",
+      "name": "kube-root-ca.crt",
+      "created": "2026-09-08T18:20:26Z",
+      "keys": [
+        "ca.crt"
+      ]
+    },
+    {
+      "kind": "ConfigMap",
+      "name": "patch-auth-litestream",
+      "created": "2026-09-20T00:17:12Z",
+      "keys": [
+        "litestream.yml"
+      ]
+    },
+    {
+      "kind": "ConfigMap",
+      "name": "patch-data-litestream",
+      "created": "2026-09-20T00:17:12Z",
+      "keys": [
+        "litestream.yml"
+      ]
+    }
+  ]
+}

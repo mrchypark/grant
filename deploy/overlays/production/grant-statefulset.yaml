@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grant-voter
+spec:
+  template:
+    spec:
+      serviceAccountName: grant
+      automountServiceAccountToken: false
+      topologySpreadConstraints:
+        - $patch: replace
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: {app: grant, role: voter}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels: {app: grant, role: voter}
+      containers:
+        - name: grant
+          image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST
+          envFrom:
+            - $patch: replace
+            - configMapRef: {name: grant-production-config}
+            - secretRef: {name: grant-production-secrets}
+            - secretRef: {name: grant-rhiza-storage}

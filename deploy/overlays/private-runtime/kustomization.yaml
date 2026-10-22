@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../k8s
+  - runtime-service.yaml
+  - runtime-network-policy.yaml
+patches:
+  - target: {kind: StatefulSet, name: grant-voter}
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: grant-voter
+      spec:
+        template:
+          spec:
+            containers:
+              - name: grant
+                env:
+                  - name: GRANT_RUNTIME_BIND_ADDR
+                    value: 0.0.0.0:8200
+                  - name: GRANT_REMOTE_API_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-runtime-secret
+                        key: GRANT_REMOTE_API_SECRET
+                ports:
+                  - {name: runtime, containerPort: 8200, protocol: TCP}

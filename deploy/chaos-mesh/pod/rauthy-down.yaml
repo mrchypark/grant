@@ -1,0 +1,14 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: rauthy-down
+  namespace: grant-chaos
+spec:
+  action: pod-failure
+  mode: all
+  duration: 60s
+  selector:
+    namespaces:
+      - grant-chaos
+    labelSelectors:
+      app: rauthy

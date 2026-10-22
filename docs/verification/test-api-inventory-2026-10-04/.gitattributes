@@ -1,0 +1,2 @@
+# Trailing tabs preserve empty final columns in this tabular evidence.
+api-inventory.tsv whitespace=-blank-at-eol

@@ -1,0 +1,272 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:43:36Z",
+    "kst": "2026-10-04T20:43:36+0900",
+    "method": "read-only HTTP GET via owned loopback-only kubectl port-forwards; credential-free health/readiness and denial probes",
+    "source": "selected namespace active pods and services"
+  },
+  "count": 19,
+  "probes": [
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "learner",
+      "method": "GET",
+      "path": "/healthz",
+      "category": "health",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "status": "ok"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "learner",
+      "method": "GET",
+      "path": "/readyz",
+      "category": "readiness",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "status": "ok",
+        "readReady": true,
+        "writeReady": false,
+        "runtimeMode": "embedded",
+        "defaultReadConsistency": "local"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "data-exposure-admin",
+      "method": "GET",
+      "path": "/healthz",
+      "category": "health",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "status": "ok"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "data-exposure-admin",
+      "method": "GET",
+      "path": "/readyz",
+      "category": "readiness",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "ready": true
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "voter",
+      "method": "GET",
+      "path": "/healthz",
+      "category": "health",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "status": "ok"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "voter",
+      "method": "GET",
+      "path": "/readyz",
+      "category": "readiness",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "status": "ok",
+        "readReady": true,
+        "writeReady": true,
+        "runtimeMode": "embedded",
+        "defaultReadConsistency": "strong"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "management-exposure-admin",
+      "method": "GET",
+      "path": "/healthz",
+      "category": "health",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "status": "ok"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:50Z",
+      "kst": "2026-10-04T20:43:50+0900",
+      "component": "management-exposure-admin",
+      "method": "GET",
+      "path": "/readyz",
+      "category": "readiness",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "ready": true
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "patch-data-native",
+      "method": "GET",
+      "path": "/api/health",
+      "category": "health",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "message": "API is healthy.",
+        "code": 200
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "patch-auth-native",
+      "method": "GET",
+      "path": "/api/health",
+      "category": "health",
+      "credential": "none",
+      "httpStatus": 200,
+      "sanitizedResponse": {
+        "message": "API is healthy.",
+        "code": 200
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "data-exposure",
+      "method": "GET",
+      "path": "/api/collections/plants/records/__inventory_nonexistent__",
+      "category": "input-validation",
+      "credential": "none",
+      "httpStatus": 422,
+      "sanitizedResponse": {
+        "errorCode": "invalid_request"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "management-exposure",
+      "method": "GET",
+      "path": "/api/v1/providers",
+      "category": "denial",
+      "credential": "none",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "errorCode": "unauthorized"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "management-exposure",
+      "method": "GET",
+      "path": "/api/v1/admin/providers/patch-data/http-capability-active",
+      "category": "denial",
+      "credential": "none",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "errorCode": "unauthorized"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "patch-auth-native",
+      "method": "GET",
+      "path": "/api/collections",
+      "category": "denial",
+      "credential": "none",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "status": 401,
+        "message": "The request requires valid record authorization token."
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "patch-data-native",
+      "method": "GET",
+      "path": "/api/collections",
+      "category": "denial",
+      "credential": "none",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "status": 401,
+        "message": "The request requires valid record authorization token."
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "voter",
+      "method": "GET",
+      "path": "/api/v1/orgs/__inventory_nonexistent__/providers/patch-data/actions",
+      "category": "request-context-validation",
+      "credential": "none",
+      "httpStatus": 400,
+      "sanitizedResponse": {
+        "error": "missing x-organization-id header"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:43:51Z",
+      "kst": "2026-10-04T20:43:51+0900",
+      "component": "learner",
+      "method": "GET",
+      "path": "/api/v2/http-capabilities/catalog/patch-data",
+      "category": "denial",
+      "credential": "none",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "error": "unauthorized: missing x-grant-app-auth-key header"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:46:10Z",
+      "kst": "2026-10-04T20:46:10+0900",
+      "component": "data-exposure",
+      "method": "GET",
+      "path": "/api/collections/plants/records/inventory000001",
+      "category": "denial",
+      "credential": "none",
+      "headers": "none",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "errorCode": "unauthorized"
+      }
+    },
+    {
+      "utc": "2026-10-04T11:46:10Z",
+      "kst": "2026-10-04T20:46:10+0900",
+      "component": "voter",
+      "method": "GET",
+      "path": "/api/v1/orgs/inventory000001/providers/patch-data/actions",
+      "category": "denial",
+      "credential": "none",
+      "headers": "X-Organization-ID: synthetic inventory000001",
+      "httpStatus": 401,
+      "sanitizedResponse": {
+        "error": "unauthorized: missing bearer token"
+      }
+    }
+  ]
+}

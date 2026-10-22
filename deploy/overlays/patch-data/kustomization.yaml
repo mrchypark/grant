@@ -1,0 +1,130 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# IED-style Grant-only deployment. Patch Data is an internal dependency and
+# Rauthy resources and credentials are deliberately absent from this overlay.
+resources:
+  - ../../k8s
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: grant-config
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grant-config
+      data:
+        GRANT_AUTH_PROVIDER: pocketbase
+        GRANT_POCKETBASE_BASE_URL: http://patch-auth.patch.svc.cluster.local:8090
+        GRANT_POCKETBASE_APPLICATION_ID: patch-data-exposure
+        GRANT_RAUTHY_BASE_URL: null
+        GRANT_RAUTHY_INTROSPECT_PATH: null
+        GRANT_RAUTHY_USERINFO_PATH: null
+        GRANT_RAUTHY_CACHE_TTL_SECONDS: null
+  - target:
+      kind: ConfigMap
+      name: grant-lifecycle-state
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grant-lifecycle-state
+  - target:
+      kind: ConfigMap
+      name: lifecycle-gate
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: lifecycle-gate
+  - target:
+      kind: StatefulSet
+      name: grant-voter
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: grant-voter
+      spec:
+        template:
+          spec:
+            containers:
+              - name: grant
+                envFrom:
+                  - configMapRef:
+                      name: grant-config
+                  - secretRef:
+                      name: grant-rhiza-storage
+                env:
+                  - name: GRANT_RAUTHY_CLIENT_ID
+                    $patch: delete
+                  - name: GRANT_RAUTHY_CLIENT_SECRET
+                    $patch: delete
+                  - name: GRANT_MASTER_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: GRANT_MASTER_KEY
+                  - name: GRANT_APP_AUTH_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: grant-secrets
+                        key: GRANT_APP_AUTH_KEY
+  - target:
+      kind: ConfigMap
+      name: rauthy-bootstrap-renderer
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: rauthy-bootstrap-renderer
+  - target:
+      kind: StatefulSet
+      name: rauthy
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: rauthy
+  - target:
+      kind: Service
+      name: rauthy
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: rauthy
+  - target:
+      kind: Service
+      name: rauthy-headless
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: rauthy-headless
+  - target:
+      kind: PodDisruptionBudget
+      name: rauthy
+    patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: rauthy
+  - target:
+      kind: Secret
+      name: rauthy-config
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: rauthy-config

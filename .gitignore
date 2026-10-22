@@ -1,0 +1,23 @@
+# Rust build outputs
+/target
+debug
+*.pdb
+**/*.rs.bk
+**/mutants.out*/
+
+# Local runtime state
+/runtime
+/downloads
+/output
+/tmp
+/secrets
+/pb_data
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Local example/build artifacts

@@ -1,0 +1,17 @@
+{
+  "observation": {
+    "utc": "2026-10-04T11:46:03Z",
+    "kst": "2026-10-04T20:46:03+0900",
+    "method": "read-only Artifact Registry tag listing filtered to deployed immutable digest",
+    "source": "gcloud artifacts docker tags list mrchypark/grant"
+  },
+  "component": "grant",
+  "digest": "sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296",
+  "tags": [
+    {
+      "tag": "20260922-16020fe",
+      "version": "projects/patch2-the-new-era/locations/asia-northeast3/repositories/conalog/packages/grant/versions/sha256:2d5f035e4feab74cbfd662f68f799bea595852881df207fec64148851d459296"
+    }
+  ],
+  "limitation": "Tags identify registry associations observed at this time; tags are mutable. OCI revision labels, when present, are stronger source metadata."
+}

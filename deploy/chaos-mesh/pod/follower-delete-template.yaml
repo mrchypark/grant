@@ -1,0 +1,12 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: grant-voter-follower-delete
+  namespace: grant-chaos
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    pods:
+      grant-chaos:
+        - REPLACE_WITH_FOLLOWER_POD

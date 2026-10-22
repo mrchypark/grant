@@ -1,0 +1,929 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
+MODE=${1:-static}
+NAMESPACE=${NAMESPACE:-grant}
+GRANT_SMOKE_PORT=${GRANT_SMOKE_PORT:-18080}
+RAUTHY_SMOKE_PORT=${RAUTHY_SMOKE_PORT:-18081}
+GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
+GRANT_RAUTHY_CLIENT_SECRET=${GRANT_RAUTHY_CLIENT_SECRET:-devRauthyClientSecret0000000000000000000000000000000000000000000}
+GRANT_RAUTHY_CLIENT_READ_API_KEY=${GRANT_RAUTHY_CLIENT_READ_API_KEY:-grant-client-read\$devRauthyClientReadApiKeySecret00000000000000000000000000000000000}
+REPLACE_RAUTHY_POD=${REPLACE_RAUTHY_POD:-0}
+EXPECTED_RAUTHY_LAUNCHER_IMAGE=ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0-9d95f0f7513b7e26559a87d22d9fb90ccf4ee530@sha256:d1bf34bc156f7227d782c231c3bb0111d1cb8317017f1539f8ef22cdc10f2f7a
+TMP_DIR=
+PORT_FORWARD_PID=
+RAUTHY_PORT_FORWARD_PID=
+
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+cleanup() {
+  if [ -n "${RAUTHY_PORT_FORWARD_PID}" ]; then
+    kill "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${PORT_FORWARD_PID}" ]; then
+    kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${TMP_DIR}" ]; then
+    rm -rf "${TMP_DIR}"
+  fi
+}
+trap cleanup 0 HUP INT TERM
+
+assert_no_pvc_references() {
+  manifest=$1
+  label=$2
+  if grep -Eq '(^kind: PersistentVolumeClaim$|volumeClaimTemplates:|persistentVolumeClaim:|claimName:)' "${manifest}"; then
+    fail "${label} render contains a PVC reference"
+  fi
+  awk '
+    previous_empty_dir && /^[[:space:]]+name: rauthy-data$/ { found = 1 }
+    { previous_empty_dir = $0 ~ /^[[:space:]]*- emptyDir: \{\}$/ }
+    END { exit found ? 0 : 1 }
+  ' "${manifest}" \
+    || fail "${label} render does not use emptyDir for rauthy-data"
+}
+
+read_rauthy_launcher_image() {
+  awk '
+    BEGIN {
+      single_quote = sprintf("%c", 39)
+      double_quote = "\""
+    }
+    /^[[:space:]]*image:[[:space:]]*/ {
+      raw = $0
+      sub(/^[[:space:]]*image:[[:space:]]*/, "", raw)
+      sub(/[[:space:]]+$/, "", raw)
+      if (index(raw, "ghcr.io/mrchypark/grant-rauthy-launcher") == 0) next
+
+      quote = substr(raw, 1, 1)
+      if (quote == single_quote || quote == double_quote) {
+        if (length(raw) < 2 || substr(raw, length(raw), 1) != quote) {
+          invalid = 1
+          next
+        }
+        image = substr(raw, 2, length(raw) - 2)
+        if (index(image, single_quote) != 0 || index(image, double_quote) != 0) {
+          invalid = 1
+          next
+        }
+      } else {
+        image = raw
+        if (index(image, single_quote) != 0 || index(image, double_quote) != 0) {
+          invalid = 1
+          next
+        }
+      }
+      if (image == "" || image ~ /[[:space:]]/ ||
+          image !~ /^ghcr[.]io\/conalog\/grant-rauthy-launcher([:@]|$)/) {
+        invalid = 1
+        next
+      }
+      count++
+    }
+    END {
+      if (invalid || count != 1 || image == "") exit 1
+      print image
+    }
+  ' "$1"
+}
+
+assert_repository_rauthy_launcher_pin() {
+  repository_rauthy_image=$(read_rauthy_launcher_image "$1") || return 1
+  [ -n "${repository_rauthy_image}" ] \
+    && [ "${repository_rauthy_image}" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ]
+}
+
+assert_ha_contract() {
+  manifest=$1
+  label=$2
+  [ "$(grep -c '^  podManagementPolicy: Parallel$' "${manifest}" || true)" -eq 2 ] \
+    || fail "${label} must render two Parallel StatefulSets"
+  [ "$(grep -c '^  replicas: 3$' "${manifest}" || true)" -eq 2 ] \
+    || fail "${label} must render Grant and Rauthy at three replicas"
+  [ "$(grep -c '^  minAvailable: 2$' "${manifest}" || true)" -eq 2 ] \
+    || fail "${label} must render two quorum PDBs"
+  grep -q 'name: lifecycle-gate' "${manifest}" || fail "${label} is missing lifecycle gates"
+  grep -q 'command -v od' "${ROOT_DIR}/deploy/k8s/lifecycle-gate.sh" \
+    || fail "lifecycle gate does not fail closed when its byte-inspection tool is unavailable"
+  if grep -E 'image: (busybox|ghcr.io/sebadob/rauthy)' "${manifest}" | grep -v '@sha256:' >/dev/null; then
+    fail "${label} contains an unpinned third-party image"
+  fi
+  if grep -q 'image: ghcr.io/sebadob/rauthy' "${manifest}"; then
+    fail "${label} runs the official distroless Rauthy image without the static launcher"
+  fi
+  expected_rauthy_image=$(read_rauthy_launcher_image "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml") \
+    || fail "repository Rauthy launcher image is missing or ambiguous"
+  [ -n "${expected_rauthy_image}" ] \
+    || fail "repository Rauthy launcher image is empty"
+  grep -Fq "image: ${expected_rauthy_image}" "${manifest}" \
+    || fail "${label} does not use the repository Rauthy launcher image"
+  [ "$(grep -c 'image: ghcr.io/mrchypark/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
+    || fail "${label} must render exactly one Rauthy launcher image"
+  actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
+  [ "${actual_rauthy_image}" = "${expected_rauthy_image}" ] \
+    || fail "${label} overrides or corrupts the Rauthy launcher image pin"
+  grep -q '/usr/local/bin/rauthy-launcher' "${manifest}" \
+    || fail "${label} does not execute the static Rauthy launcher"
+  awk '
+    previous_rauthy && $0 == "        - serve" { found = 1 }
+    { previous_rauthy = $0 == "        - /app/rauthy" }
+    END { exit found ? 0 : 1 }
+  ' "${manifest}" \
+    || fail "${label} does not pass the required Rauthy serve subcommand"
+  grep -q 'name: rauthy-launcher-pull' "${manifest}" \
+    || fail "${label} does not reference the private GHCR pull Secret"
+}
+
+assert_recovery_role_resolution_policy() {
+  policy=${ROOT_DIR}/deploy/overlays/production/recovery-role-resolution-policy.example.json
+  jq -e '
+    .Version == "2012-10-17" and
+    any(.Statement[]?;
+      .Effect == "Allow" and .Action == "iam:GetRole" and
+      (.Resource | type == "array" and length == 3) and
+      all(.Resource[]; test("^arn:aws:iam::[0-9]{12}:role/.+")))
+  ' "${policy}" >/dev/null \
+    || fail "production recovery role-resolution policy does not grant scoped iam:GetRole"
+}
+
+assert_ci_local_placeholder_guard() {
+  placeholder_log="${TMP_DIR}/ci-local-placeholder.log"
+  if RAUTHY_IMAGE='ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST' \
+    bash "${ROOT_DIR}/scripts/ci-local.sh" >"${placeholder_log}" 2>&1; then
+    fail "ci-local accepted the unpublished Rauthy launcher placeholder"
+  fi
+  grep -q 'refusing local bootstrap before image pull' "${placeholder_log}" \
+    || fail "ci-local placeholder failure is not explicit or early"
+  grep -q 'Override RAUTHY_IMAGE with a published immutable image' "${placeholder_log}" \
+    || fail "ci-local placeholder failure does not explain the override"
+  if grep -q '\[phase\]' "${placeholder_log}"; then
+    fail "ci-local started a build or pull phase before rejecting the placeholder"
+  fi
+}
+
+assert_ci_local_registry_auth_contract() {
+  mock_bin="${TMP_DIR}/ci-local-mock-bin"
+  mock_log="${TMP_DIR}/ci-local-mock-commands.log"
+  run_log="${TMP_DIR}/ci-local-registry-path.log"
+  mkdir -p "${mock_bin}"
+
+  cat >"${mock_bin}/docker" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'docker %s\n' "$*" >>"${CI_LOCAL_MOCK_LOG}"
+EOF
+
+  cat >"${mock_bin}/sh" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'sh %s\n' "$*" >>"${CI_LOCAL_MOCK_LOG}"
+EOF
+
+  cat >"${mock_bin}/bash" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'bash %s\n' "$*" >>"${CI_LOCAL_MOCK_LOG}"
+EOF
+
+  cat >"${mock_bin}/noop" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "${mock_bin}/docker" "${mock_bin}/sh" "${mock_bin}/bash" "${mock_bin}/noop"
+  for command_name in kubectl curl jq vcluster; do
+    cp "${mock_bin}/noop" "${mock_bin}/${command_name}"
+  done
+
+  for public_image in \
+    docker.io/library/busybox:1.37 \
+    registry.example.test/custom/rauthy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    ghcr.io/mrchypark/grant-rauthy-launcher-evil:tag; do
+    : >"${mock_log}"
+    PATH="${mock_bin}:${PATH}" CI_LOCAL_MOCK_LOG="${mock_log}" \
+      RAUTHY_IMAGE="${public_image}" GHCR_USERNAME='' GHCR_TOKEN='' KEEP_CLUSTER=1 \
+      /bin/bash "${ROOT_DIR}/scripts/ci-local.sh" >"${run_log}" 2>&1
+    grep -Fqx "docker pull ${public_image}" "${mock_log}" \
+      || fail "ci-local did not use ambient Docker auth for public/custom Rauthy image ${public_image}"
+    if grep -Eq 'docker .* login |docker --context .* --config .* pull' "${mock_log}"; then
+      fail "ci-local used private launcher auth state for public/custom Rauthy image ${public_image}"
+    fi
+    grep -q '^bash .*vind-bootstrap.sh' "${mock_log}" \
+      || fail "ci-local public/custom image path did not reach cluster bootstrap"
+  done
+
+  for private_image in \
+    ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0 \
+    ghcr.io/mrchypark/grant-rauthy-launcher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    ghcr.io/mrchypark/grant-rauthy-launcher; do
+    : >"${mock_log}"
+    set +e
+    PATH="${mock_bin}:${PATH}" CI_LOCAL_MOCK_LOG="${mock_log}" \
+      RAUTHY_IMAGE="${private_image}" GHCR_USERNAME='' GHCR_TOKEN='' KEEP_CLUSTER=1 \
+      /bin/bash "${ROOT_DIR}/scripts/ci-local.sh" >"${run_log}" 2>&1
+    private_status=$?
+    set -e
+    [ "${private_status}" -ne 0 ] \
+      || fail "ci-local accepted private Rauthy launcher ${private_image} without GHCR credentials"
+    grep -q 'GHCR_USERNAME is required for the private Rauthy launcher image' "${run_log}" \
+      || fail "ci-local private launcher credential failure is not explicit for ${private_image}"
+    if grep -Fq "docker pull ${private_image}" "${mock_log}" \
+      || grep -q '^bash .*vind-bootstrap.sh' "${mock_log}"; then
+      fail "ci-local continued after private launcher authentication failed for ${private_image}"
+    fi
+  done
+}
+
+assert_gke_skaffold_registry_secret_contract() {
+  mock_bin="${TMP_DIR}/gke-mock-bin"
+  mock_log="${TMP_DIR}/gke-mock-commands.log"
+  missing_log="${TMP_DIR}/gke-missing-registry-credential.log"
+  success_log="${TMP_DIR}/gke-registry-secret.log"
+  config_path_file="${TMP_DIR}/gke-registry-config-path"
+  fixture_root="${TMP_DIR}/gke-published-fixture"
+  fixture_script="${fixture_root}/scripts/gke-skaffold-run.sh"
+  placeholder_root="${TMP_DIR}/gke-placeholder-fixture"
+  placeholder_script="${placeholder_root}/scripts/gke-skaffold-run.sh"
+  fixture_image='ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  placeholder_image='ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST'
+  mkdir -p "${mock_bin}" \
+    "${fixture_root}/scripts" "${fixture_root}/deploy/k8s" \
+    "${placeholder_root}/scripts" "${placeholder_root}/deploy/k8s"
+  cp "${ROOT_DIR}/scripts/gke-skaffold-run.sh" "${fixture_script}"
+  cp "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" "${fixture_root}/scripts/k8s-secret-helpers.sh"
+  sed "s|ghcr.io/mrchypark/grant-rauthy-launcher:[^[:space:]]*|${fixture_image}|" \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" >"${fixture_root}/deploy/k8s/rauthy-statefulset.yaml"
+  cp "${ROOT_DIR}/scripts/gke-skaffold-run.sh" "${placeholder_script}"
+  sed "s|ghcr.io/mrchypark/grant-rauthy-launcher:[^[:space:]]*|${placeholder_image}|" \
+    "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" >"${placeholder_root}/deploy/k8s/rauthy-statefulset.yaml"
+
+  cat >"${mock_bin}/docker" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'docker %s\n' "$*" >>"${GKE_MOCK_LOG}"
+
+if [ "${1:-}" = context ] && [ "${2:-}" = show ]; then
+  echo mock-docker-context
+  exit 0
+fi
+
+config_dir=
+previous=
+is_login=0
+for argument do
+  if [ "${previous}" = --config ]; then config_dir=${argument}; fi
+  if [ "${argument}" = login ]; then is_login=1; fi
+  previous=${argument}
+done
+if [ "${is_login}" = 1 ]; then
+  IFS= read -r supplied_token || true
+  [ "${supplied_token}" = "${GKE_EXPECTED_TOKEN}" ] || exit 91
+  [ -n "${config_dir}" ] || exit 92
+  mkdir -p "${config_dir}"
+  printf '%s\n' '{"auths":{"ghcr.io":{"auth":"mock-only"}}}' >"${config_dir}/config.json"
+  if [ -n "${GKE_MOCK_CONFIG_PATH_FILE:-}" ]; then
+    printf '%s\n' "${config_dir}" >"${GKE_MOCK_CONFIG_PATH_FILE}"
+  fi
+fi
+EOF
+
+  cat >"${mock_bin}/kubectl" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${GHCR_TOKEN+x}" = x ] || [ "${GHCR_USERNAME+x}" = x ]; then
+  echo 'raw GHCR credentials reached kubectl' >&2
+  exit 94
+fi
+printf 'kubectl %s\n' "$*" >>"${GKE_MOCK_LOG}"
+
+case " $* " in
+  *' apply -f - '*) cat >/dev/null ;;
+  *' create namespace '*) printf '%s\n' 'apiVersion: v1' 'kind: Namespace' ;;
+  *' create secret generic rauthy-launcher-pull '*)
+    config_path=
+    previous=
+    for argument do
+      case "${argument}" in
+        --from-file=.dockerconfigjson=*) config_path=${argument#--from-file=.dockerconfigjson=} ;;
+      esac
+      if [ "${previous}" = --from-file ]; then
+        case "${argument}" in .dockerconfigjson=*) config_path=${argument#*=} ;; esac
+      fi
+      previous=${argument}
+    done
+    [ -s "${config_path}" ] || exit 93
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret'
+    ;;
+  *' create secret generic grant-secrets '*)
+    if [ "${RAUTHY_REGISTRY_CONFIG_DIR+x}" = x ]; then
+      echo 'temporary registry config reached grant Secret creation' >&2
+      exit 96
+    fi
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret'
+    ;;
+esac
+EOF
+
+  cat >"${mock_bin}/skaffold" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${GHCR_TOKEN+x}" = x ] || [ "${GHCR_USERNAME+x}" = x ]; then
+  echo 'raw GHCR credentials reached skaffold' >&2
+  exit 95
+fi
+if [ "${RAUTHY_REGISTRY_CONFIG_DIR+x}" = x ]; then
+  echo 'temporary registry config path reached skaffold' >&2
+  exit 96
+fi
+printf 'skaffold %s\n' "$*" >>"${GKE_MOCK_LOG}"
+if [ "${GKE_MOCK_LONG_RUNNING:-0}" = 1 ]; then
+  : "${GKE_MOCK_CHILD_PID_FILE:?}"
+  : "${GKE_MOCK_CHILD_SIGNAL_FILE:?}"
+  printf '%s\n' "$$" >"${GKE_MOCK_CHILD_PID_FILE}"
+  if [ "${GKE_MOCK_IGNORE_SIGNALS:-0}" = 1 ]; then
+    trap '' HUP INT TERM
+  else
+    trap 'printf "%s\n" HUP >"${GKE_MOCK_CHILD_SIGNAL_FILE}"; exit 129' HUP
+    trap 'printf "%s\n" INT >"${GKE_MOCK_CHILD_SIGNAL_FILE}"; exit 130' INT
+    trap 'printf "%s\n" TERM >"${GKE_MOCK_CHILD_SIGNAL_FILE}"; exit 143' TERM
+  fi
+  while :; do sleep 1; done
+fi
+exit "${GKE_MOCK_SKAFFOLD_STATUS:-0}"
+EOF
+  chmod +x "${mock_bin}/docker" "${mock_bin}/kubectl" "${mock_bin}/skaffold"
+
+  : >"${mock_log}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' RAUTHY_IMAGE='' \
+    GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
+    bash "${placeholder_script}" >"${missing_log}" 2>&1
+  placeholder_status=$?
+  set -e
+  [ "${placeholder_status}" -ne 0 ] \
+    || fail "GKE Skaffold accepted the unpublished Rauthy launcher marker"
+  grep -q 'digest is unpublished; refusing GKE deployment before Docker or cluster access' "${missing_log}" \
+    || fail "GKE Skaffold placeholder failure is not explicit"
+  [ ! -s "${mock_log}" ] \
+    || fail "GKE Skaffold touched Docker or the cluster before rejecting the launcher placeholder"
+
+  : >"${mock_log}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' RAUTHY_IMAGE='' \
+    GHCR_USERNAME=ci-user GHCR_TOKEN='' \
+    bash "${fixture_script}" >"${missing_log}" 2>&1
+  missing_status=$?
+  set -e
+  if [ "${missing_status}" -eq 0 ]; then
+    fail "GKE Skaffold provisioning accepted missing private launcher credentials"
+  fi
+  if ! grep -q 'GHCR_TOKEN with read:packages is required' "${missing_log}"; then
+    sed -n '1,20p' "${missing_log}" >&2
+    fail "GKE Skaffold missing-credential failure is not explicit"
+  fi
+  [ ! -s "${mock_log}" ] \
+    || fail "GKE Skaffold touched Docker or the cluster before rejecting missing credentials"
+
+  : >"${mock_log}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
+    RAUTHY_IMAGE=docker.io/library/busybox:latest GHCR_USERNAME=ci-user GHCR_TOKEN=unused \
+    bash "${fixture_script}" >"${missing_log}" 2>&1
+  override_status=$?
+  set -e
+  [ "${override_status}" -ne 0 ] \
+    || fail "GKE Skaffold allowed the private manifest image to be bypassed"
+  grep -q 'RAUTHY_IMAGE cannot override it' "${missing_log}" \
+    || fail "GKE Skaffold image override failure is not explicit"
+  [ ! -s "${mock_log}" ] \
+    || fail "GKE Skaffold touched Docker or the cluster before rejecting an image override"
+
+  registry_token='gke-private-registry-token-sentinel'
+  : >"${mock_log}"
+  rm -f "${config_path_file}"
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
+    RAUTHY_IMAGE='' \
+    GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
+    bash "${fixture_script}" >"${success_log}" 2>&1
+
+  grep -q 'docker .* login .* --password-stdin' "${mock_log}" \
+    || fail "GKE Skaffold did not authenticate to GHCR through password stdin"
+  pull_secret_line=$(grep -n 'kubectl .* create secret generic rauthy-launcher-pull .*--type=kubernetes.io/dockerconfigjson' "${mock_log}" \
+    | head -n 1 | cut -d: -f1)
+  skaffold_line=$(grep -n '^skaffold .*run' "${mock_log}" | head -n 1 | cut -d: -f1)
+  if ! { [ -n "${pull_secret_line}" ] && [ -n "${skaffold_line}" ] \
+    && [ "${pull_secret_line}" -lt "${skaffold_line}" ]; }; then
+    sed -n '1,40p' "${mock_log}" >&2
+    fail "GKE Skaffold did not create the private launcher pull Secret before deployment"
+  fi
+  if grep -Fq "${registry_token}" "${mock_log}" "${success_log}"; then
+    fail "GKE Skaffold exposed the private registry token in argv or output"
+  fi
+  [ -s "${config_path_file}" ] \
+    || fail "GKE Skaffold success mock did not record the temporary registry config"
+  registry_config_dir=$(sed -n '1p' "${config_path_file}")
+  [ ! -e "${registry_config_dir}" ] \
+    || fail "GKE Skaffold did not clean the temporary registry config after success"
+
+  : >"${mock_log}"
+  rm -f "${config_path_file}"
+  set +e
+  PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+    NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+    SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
+    RAUTHY_IMAGE='' \
+    GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_SKAFFOLD_STATUS=47 \
+    GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
+    bash "${fixture_script}" >"${success_log}" 2>&1
+  failure_status=$?
+  set -e
+  [ "${failure_status}" -eq 47 ] \
+    || fail "GKE Skaffold normal failure status was not preserved: ${failure_status}"
+  registry_config_dir=$(sed -n '1p' "${config_path_file}")
+  [ -n "${registry_config_dir}" ] && [ ! -e "${registry_config_dir}" ] \
+    || fail "GKE Skaffold did not clean the temporary registry config after normal failure"
+
+  for signal_contract in HUP:129:0 INT:130:0 TERM:143:0 TERM:143:1; do
+    signal_name=${signal_contract%%:*}
+    signal_details=${signal_contract#*:}
+    expected_status=${signal_details%%:*}
+    ignore_signals=${signal_details#*:}
+    contract_label=${signal_name}
+    if [ "${ignore_signals}" = 1 ]; then contract_label=${signal_name}-ignored; fi
+    parent_pid_file="${TMP_DIR}/gke-runner-${contract_label}.pid"
+    child_pid_file="${TMP_DIR}/gke-skaffold-${contract_label}.pid"
+    child_signal_file="${TMP_DIR}/gke-skaffold-${contract_label}.signal"
+    watchdog_result="${TMP_DIR}/gke-watchdog-${contract_label}.result"
+    : >"${mock_log}"
+    rm -f "${config_path_file}" "${parent_pid_file}" "${child_pid_file}" \
+      "${child_signal_file}" "${watchdog_result}"
+
+    (
+      set +e
+      terminate_watchdog_processes() {
+        runner_to_stop=${1:-}
+        child_to_stop=${2:-}
+        [ -z "${runner_to_stop}" ] || kill -TERM "${runner_to_stop}" 2>/dev/null
+        [ -z "${child_to_stop}" ] || kill -TERM "${child_to_stop}" 2>/dev/null
+        cleanup_attempts=0
+        while [ "${cleanup_attempts}" -lt 10 ]; do
+          runner_alive=0
+          child_alive=0
+          [ -z "${runner_to_stop}" ] || kill -0 "${runner_to_stop}" 2>/dev/null || runner_alive=$?
+          [ -z "${child_to_stop}" ] || kill -0 "${child_to_stop}" 2>/dev/null || child_alive=$?
+          if { [ -z "${runner_to_stop}" ] || [ "${runner_alive}" -ne 0 ]; } \
+            && { [ -z "${child_to_stop}" ] || [ "${child_alive}" -ne 0 ]; }; then
+            return 0
+          fi
+          cleanup_attempts=$((cleanup_attempts + 1))
+          sleep 0.1
+        done
+        [ -z "${runner_to_stop}" ] || kill -KILL "${runner_to_stop}" 2>/dev/null
+        [ -z "${child_to_stop}" ] || kill -KILL "${child_to_stop}" 2>/dev/null
+      }
+
+      watchdog_attempts=0
+      while { [ ! -s "${parent_pid_file}" ] || [ ! -s "${child_pid_file}" ]; }; do
+        watchdog_attempts=$((watchdog_attempts + 1))
+        if [ "${watchdog_attempts}" -ge 100 ]; then
+          runner_pid=$(sed -n '1p' "${parent_pid_file}" 2>/dev/null)
+          skaffold_pid=$(sed -n '1p' "${child_pid_file}" 2>/dev/null)
+          terminate_watchdog_processes "${runner_pid}" "${skaffold_pid}"
+          printf '%s\n' start-timeout >"${watchdog_result}"
+          exit 1
+        fi
+        sleep 0.1
+      done
+      runner_pid=$(sed -n '1p' "${parent_pid_file}")
+      skaffold_pid=$(sed -n '1p' "${child_pid_file}")
+      registry_config_dir=$(sed -n '1p' "${config_path_file}")
+      if [ -z "${registry_config_dir}" ] || [ -e "${registry_config_dir}" ]; then
+        terminate_watchdog_processes "${runner_pid}" "${skaffold_pid}"
+        printf '%s\n' registry-config-retained >"${watchdog_result}"
+        exit 1
+      fi
+
+      # Only the tracked GKE runner receives the test signal. Its handler must
+      # forward the same signal to the long-running Skaffold child.
+      kill -s "${signal_name}" "${runner_pid}"
+      watchdog_attempts=0
+      while kill -0 "${runner_pid}" 2>/dev/null; do
+        watchdog_attempts=$((watchdog_attempts + 1))
+        if [ "${watchdog_attempts}" -ge 100 ]; then
+          terminate_watchdog_processes "${runner_pid}" "${skaffold_pid}"
+          printf '%s\n' exit-timeout >"${watchdog_result}"
+          exit 1
+        fi
+        sleep 0.1
+      done
+      printf '%s\n' exited >"${watchdog_result}"
+    ) &
+    watchdog_pid=$!
+
+    set +e
+    PATH="${mock_bin}:${PATH}" GKE_MOCK_LOG="${mock_log}" GKE_EXPECTED_TOKEN="${registry_token}" \
+      NAMESPACE=grant-chaos KUBE_CONTEXT=gke_ied-cluster \
+      SKAFFOLD_PROFILE=ied SKAFFOLD_MODULE=grant SKAFFOLD_EXTRA_ARGS='' \
+      RAUTHY_IMAGE='' \
+      GKE_MOCK_CONFIG_PATH_FILE="${config_path_file}" GKE_MOCK_LONG_RUNNING=1 \
+      GKE_MOCK_CHILD_PID_FILE="${child_pid_file}" GKE_MOCK_CHILD_SIGNAL_FILE="${child_signal_file}" \
+      GKE_MOCK_IGNORE_SIGNALS="${ignore_signals}" \
+      GHCR_USERNAME=ci-user GHCR_TOKEN="${registry_token}" \
+      bash -c 'set -m; bash "$2" & runner_pid=$!; printf "%s\n" "${runner_pid}" >"$1"; set +m; wait "${runner_pid}"; exit "$?"' \
+        gke-signal-runner "${parent_pid_file}" "${fixture_script}" >"${success_log}" 2>&1
+    signal_status=$?
+    wait "${watchdog_pid}"
+    watchdog_status=$?
+    set -e
+    if [ "${watchdog_status}" -ne 0 ] || ! grep -qx exited "${watchdog_result}"; then
+      fail "GKE Skaffold ${signal_name} watchdog failed: $(sed -n '1p' "${watchdog_result}" 2>/dev/null)"
+    fi
+    [ "${signal_status}" -eq "${expected_status}" ] \
+      || fail "GKE Skaffold ${contract_label} status was ${signal_status}, expected ${expected_status}"
+    skaffold_pid=$(sed -n '1p' "${child_pid_file}")
+    if [ "${ignore_signals}" = 0 ]; then
+      grep -qx "${signal_name}" "${child_signal_file}" \
+        || fail "GKE Skaffold did not forward ${signal_name} to its tracked child"
+    elif [ -s "${child_signal_file}" ]; then
+      fail "GKE Skaffold non-cooperating child unexpectedly handled ${signal_name}"
+    fi
+    if kill -0 "${skaffold_pid}" 2>/dev/null; then
+      fail "GKE Skaffold ${contract_label} handler left child ${skaffold_pid} running"
+    fi
+  done
+}
+
+verify_static() {
+  need bash
+  need kubectl
+  need grep
+  need jq
+  need openssl
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-kustomize.XXXXXX")
+
+  kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/base.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/ephemeral" >"${TMP_DIR}/ephemeral.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied" >"${TMP_DIR}/ied.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/patch-data" >"${TMP_DIR}/patch-data.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied-patch-data" >"${TMP_DIR}/ied-patch-data.yaml"
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/production" >"${TMP_DIR}/production.yaml"
+
+  assert_repository_rauthy_launcher_pin "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" \
+    || fail "repository Rauthy launcher image does not match the verified production pin"
+  placeholder_pin_fixture=${TMP_DIR}/rauthy-placeholder-pin.yaml
+  printf '%s\n' \
+    'image: ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:RAUTHY_LAUNCHER_IMAGE_DIGEST' \
+    >"${placeholder_pin_fixture}"
+  if (ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER=1; export ALLOW_UNPUBLISHED_RAUTHY_LAUNCHER; \
+      assert_repository_rauthy_launcher_pin "${placeholder_pin_fixture}"); then
+    fail "legacy unpublished-launcher environment bypassed the repository production pin"
+  fi
+  parser_empty_fixture=${TMP_DIR}/rauthy-parser-empty.yaml
+  printf '%s\n' 'image: docker.io/library/busybox:1.37' >"${parser_empty_fixture}"
+  if read_rauthy_launcher_image "${parser_empty_fixture}" >/dev/null 2>&1; then
+    fail "Rauthy launcher image parser accepted a manifest without the launcher repository"
+  fi
+  parser_single_quote_fixture=${TMP_DIR}/rauthy-parser-single-quote.yaml
+  parser_double_quote_fixture=${TMP_DIR}/rauthy-parser-double-quote.yaml
+  printf "image: '%s'\n" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_single_quote_fixture}"
+  printf 'image: "%s"\n' "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_double_quote_fixture}"
+  for parser_quoted_fixture in "${parser_single_quote_fixture}" "${parser_double_quote_fixture}"; do
+    parsed_quoted_image=$(read_rauthy_launcher_image "${parser_quoted_fixture}") \
+      || fail "Rauthy launcher image parser rejected a whole-value YAML quote"
+    [ "${parsed_quoted_image}" = "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" ] \
+      || fail "Rauthy launcher image parser changed a whole-value YAML quote"
+  done
+  parser_unclosed_fixture=${TMP_DIR}/rauthy-parser-unclosed.yaml
+  parser_mixed_fixture=${TMP_DIR}/rauthy-parser-mixed.yaml
+  parser_trailing_fixture=${TMP_DIR}/rauthy-parser-trailing.yaml
+  parser_multiple_fixture=${TMP_DIR}/rauthy-parser-multiple.yaml
+  parser_quoted_empty_fixture=${TMP_DIR}/rauthy-parser-quoted-empty.yaml
+  printf "image: '%s\n" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_unclosed_fixture}"
+  printf "image: '%s\"\n" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_mixed_fixture}"
+  printf 'image: "%s" junk\n' "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" >"${parser_trailing_fixture}"
+  printf 'image: %s\nimage: "%s"\n' \
+    "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" \
+    >"${parser_multiple_fixture}"
+  printf '%s\n' 'image: ""' >"${parser_quoted_empty_fixture}"
+  for parser_invalid_fixture in \
+    "${parser_unclosed_fixture}" "${parser_mixed_fixture}" "${parser_trailing_fixture}" \
+    "${parser_multiple_fixture}" "${parser_quoted_empty_fixture}"; do
+    if read_rauthy_launcher_image "${parser_invalid_fixture}" >/dev/null 2>&1; then
+      fail "Rauthy launcher image parser accepted malformed or ambiguous YAML"
+    fi
+  done
+
+  grep -q 'RAUTHY_BASE_IMAGE=ghcr.io/sebadob/rauthy:0.37.1@sha256:72b4734a7c52bd67cd544e7b72a4ab64932a7060844ef475fc2bb3d3da3074d9' \
+    "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
+    || fail "Rauthy launcher does not derive from the pinned official 0.37.1 image"
+  grep -q 'ENTRYPOINT \["/usr/local/bin/rauthy-launcher"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
+    || fail "Rauthy launcher image entrypoint contract is missing"
+  grep -q 'CMD \["/app/rauthy", "serve"\]' "${ROOT_DIR}/deploy/rauthy-launcher/Dockerfile" \
+    || fail "Rauthy launcher image does not preserve the official serve command"
+  if ! grep -q 'provenance: mode=max,version=v1' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || [ "$(grep -c 'driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" || :)" -ne 2 ] \
+    || ! grep -q 'EXPECTED_SOURCE_SHA:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'EXPECTED_BUILDER_ID:' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q "EXPECTED_BUILDER_MODE:.*prior-attempt.*current" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -Fq "EXPECTED_DIGEST: \${{ steps.digest.outputs.digest }}" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q "if: steps.preflight.outputs.tag_exists == 'false'" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q "if: steps.preflight.outputs.tag_exists == 'true'" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -Fq "test \"\${GITHUB_RUN_ATTEMPT}\" -gt 1" "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'run: sh scripts/verify-oci-attestations.sh' "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml" \
+    || ! grep -q 'fetch_blob' "${ROOT_DIR}/scripts/verify-oci-attestations.sh" \
+    || ! grep -q 'https://in-toto.io/Statement/v0.1' "${ROOT_DIR}/scripts/verify-oci-attestations.sh"; then
+    fail "Rauthy launcher publish does not verify portable OCI provenance and SBOM attestations"
+  fi
+  if grep -Eq 'attest-build-provenance|attestations:[[:space:]]*write|id-token:[[:space:]]*write' \
+    "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml"; then
+    fail "Rauthy launcher publish still depends on unsupported GitHub repository attestations"
+  fi
+  grep -q 'ca-certificates curl libcurl4 libssl3' "${ROOT_DIR}/Dockerfile" \
+    || fail "Grant runtime image is missing the restore readiness HTTP probe"
+  grep -q 'REQUIRED_BASE64_DOCKER_CONFIG_JSON' "${ROOT_DIR}/deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml" \
+    || fail "production private registry pull Secret example is missing"
+  grep -q -- '--password-stdin' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
+    || fail "private registry login must use password stdin"
+  grep -Fq "RAUTHY_DOCKER_CONTEXT=\$(docker context show)" "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
+    || fail "private registry auth does not preserve the active Docker context"
+  grep -Fq -- "docker --context \"\${RAUTHY_DOCKER_CONTEXT}\" --config \"\${RAUTHY_REGISTRY_CONFIG_DIR}\"" \
+    "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" \
+    || fail "private registry login does not bind the captured Docker context"
+  if grep -q 'export DOCKER_CONFIG' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"; then
+    fail "private registry auth globally overrides DOCKER_CONFIG"
+  fi
+  if grep -Eq -- '--password([ =]|$)|--from-literal=.*GHCR' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh"; then
+    fail "private registry credential is exposed through child argv"
+  fi
+  if grep -q 'command: \["/bin/sh", "/gate/restore-once.sh"\]' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml"; then
+    fail "Rauthy cannot use the shell restore wrapper from its distroless image"
+  fi
+  assert_no_pvc_references "${TMP_DIR}/base.yaml" base
+  assert_no_pvc_references "${TMP_DIR}/ephemeral.yaml" ephemeral
+  assert_no_pvc_references "${TMP_DIR}/ied.yaml" ied
+  assert_no_pvc_references "${TMP_DIR}/production.yaml" production
+  assert_ha_contract "${TMP_DIR}/base.yaml" base
+  assert_ha_contract "${TMP_DIR}/ephemeral.yaml" ephemeral
+  assert_ha_contract "${TMP_DIR}/ied.yaml" ied
+  if ! grep -q 'GRANT_AUTH_PROVIDER: pocketbase' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_POCKETBASE_BASE_URL: http://patch-auth.patch.svc.cluster.local:8090' "${TMP_DIR}/patch-data.yaml" \
+    || ! grep -q 'GRANT_POCKETBASE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay configuration is incomplete"
+  fi
+  if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay retains a Rauthy resource, configuration, or credential reference"
+  fi
+  if grep -Eq '^[[:space:]]+- secretRef:' "${TMP_DIR}/patch-data.yaml"; then
+    fail "Patch Data overlay broadly imports a Secret"
+  fi
+  for required_key in GRANT_MASTER_KEY GRANT_APP_AUTH_KEY HQL_SECRET_RAFT HQL_SECRET_API ENC_KEYS ENC_KEY_ACTIVE; do
+    if [ "$(grep -c "name: ${required_key}$" "${TMP_DIR}/patch-data.yaml" || true)" -ne 1 ] \
+      || [ "$(grep -c "key: ${required_key}$" "${TMP_DIR}/patch-data.yaml" || true)" -ne 1 ]; then
+      fail "Patch Data overlay does not bind exactly one required ${required_key} key"
+    fi
+  done
+  if ! cmp -s "${TMP_DIR}/patch-data.yaml" "${TMP_DIR}/ied-patch-data.yaml"; then
+    fail "ied-patch-data must compose the exact Patch Data Grant-only contract"
+  fi
+  assert_ha_contract "${TMP_DIR}/production.yaml" production
+
+  [ "$(grep -c 'whenUnsatisfiable: DoNotSchedule' "${TMP_DIR}/production.yaml" || true)" -eq 2 ] \
+    || fail "production must use hard topology spread"
+  [ "$(grep -c 'requiredDuringSchedulingIgnoredDuringExecution:' "${TMP_DIR}/production.yaml" || true)" -eq 2 ] \
+    || fail "production must use hard pod anti-affinity"
+  grep -q 'name: grant-recovery-state' "${TMP_DIR}/production.yaml" \
+    || fail "production must require the external recovery state"
+  grep -q 'name: grant-production-backup' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant backup references are missing"
+  grep -q 'name: rauthy-production-backup' "${TMP_DIR}/production.yaml" \
+    || fail "production Rauthy backup references are missing"
+  grep -q 'image: registry.invalid/grant@sha256:REQUIRED_PRODUCTION_DIGEST' "${TMP_DIR}/production.yaml" \
+    || fail "production template must retain an admission-invalid required image marker"
+  grep -Fq "image: ${EXPECTED_RAUTHY_LAUNCHER_IMAGE}" "${TMP_DIR}/production.yaml" \
+    || fail "production Rauthy launcher image is not digest-pinned"
+  if grep -Eq 'sha256:0{64}|grant\.example\.com|identity\.example\.com|kind: Ingress' "${TMP_DIR}/production.yaml"; then
+    fail "production render contains an unresolved digest, example host, or bundled public ingress"
+  fi
+  grep -q 'name: GRANT_APP_AUTH_KEY' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant app-auth key wiring is missing"
+  grep -q 'key: GRANT_APP_AUTH_KEY' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant app-auth Secret key wiring is missing"
+  for restore_setting in RESTORE_ONCE_HEALTH_URL RESTORE_ONCE_READY_URL RESTORE_ONCE_READY_TIMEOUT_SECONDS \
+    RESTORE_ONCE_READY_INTERVAL_SECONDS RESTORE_ONCE_READY_SUCCESSES RESTORE_ONCE_PROBE_TIMEOUT_SECONDS \
+    RESTORE_ONCE_SIGNAL_GRACE_SECONDS; do
+    grep -q "name: ${restore_setting}" "${TMP_DIR}/production.yaml" \
+      || fail "production Grant restore supervisor is missing ${restore_setting}"
+  done
+  awk '
+    $0 ~ /name: RESTORE_ONCE_READY_SUCCESSES$/ {
+      getline
+      if ($0 ~ /value: "3"$/) found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "${TMP_DIR}/production.yaml" \
+    || fail "production Grant restore supervisor must require three consecutive readiness successes"
+  if grep -E 'localhost|grant\.local|dev-rauthy|grant:local|SuperSecureSecret|AnotherSecureSecret' "${TMP_DIR}/production.yaml" >/dev/null; then
+    fail "production render contains a development fallback"
+  fi
+  grep -q 'KEYRING_GENERATION:' "${ROOT_DIR}/deploy/overlays/production/grant-production-config.example.yaml" \
+    || fail "Grant keyring generation binding is missing"
+  grep -q 'KEYRING_GENERATION:' "${ROOT_DIR}/deploy/overlays/production/rauthy-production-config.example.yaml" \
+    || fail "Rauthy keyring generation binding is missing"
+  if grep -n -- '--from-literal=.*[$][{]' "${ROOT_DIR}/scripts/k8s-secret-helpers.sh" >/dev/null; then
+    fail "Kubernetes secret helper exposes secret values through child argv"
+  fi
+
+  grant_bucket=$(sed -n 's/.*HQL_S3_BUCKET:[[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT_DIR}/deploy/overlays/production/grant-production-config.example.yaml")
+  rauthy_bucket=$(sed -n 's/.*HQL_S3_BUCKET:[[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT_DIR}/deploy/overlays/production/rauthy-production-config.example.yaml")
+  [ -n "${grant_bucket}" ] && [ -n "${rauthy_bucket}" ] && [ "${grant_bucket}" != "${rauthy_bucket}" ] \
+    || fail "Grant and Rauthy examples must use distinct backup buckets"
+  grep -Eq 'name: rauthy-bootstrap-renderer-[a-z0-9]+' "${TMP_DIR}/ephemeral.yaml" \
+    || fail "ephemeral render is missing the generated bootstrap renderer ConfigMap"
+  assert_ci_local_placeholder_guard
+  assert_ci_local_registry_auth_contract
+  "${ROOT_DIR}/scripts/verify-vind-bootstrap.sh"
+  assert_gke_skaffold_registry_secret_contract
+  assert_recovery_role_resolution_policy
+  "${ROOT_DIR}/scripts/verify-oci-attestations-tests.sh"
+  "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
+  "${ROOT_DIR}/scripts/verify-s3-object-history.sh"
+
+  echo "Kubernetes HA, lifecycle, backup, and restore profiles verified"
+}
+
+assert_live_storage() {
+  pvc_names=$(kubectl -n "${NAMESPACE}" get pvc -o name)
+  [ -z "${pvc_names}" ] || fail "ephemeral namespace contains PVCs: ${pvc_names}"
+
+  kubectl -n "${NAMESPACE}" get statefulset rauthy -o json \
+    | jq -e '(.spec.volumeClaimTemplates // []) | length == 0' >/dev/null \
+    || fail "Rauthy StatefulSet still has volumeClaimTemplates"
+  kubectl -n "${NAMESPACE}" get pod rauthy-0 -o json \
+    | jq -e '.spec.volumes[] | select(.name == "rauthy-data") | has("emptyDir")' >/dev/null \
+    || fail "Rauthy Pod does not use emptyDir for rauthy-data"
+}
+
+wait_for_grant() {
+  attempts=0
+  while [ "${attempts}" -lt 60 ]; do
+    if curl --max-time 4 -fsS "http://127.0.0.1:${GRANT_SMOKE_PORT}/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  fail "timed out waiting for Grant port-forward"
+}
+
+wait_for_rauthy() {
+  attempts=0
+  while [ "${attempts}" -lt 60 ]; do
+    if curl --max-time 4 -fsS "http://127.0.0.1:${RAUTHY_SMOKE_PORT}/auth/v1/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  fail "timed out waiting for direct Rauthy port-forward"
+}
+
+start_rauthy_forward() {
+  if [ -n "${RAUTHY_PORT_FORWARD_PID}" ]; then
+    kill "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+    wait "${RAUTHY_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
+  kubectl -n "${NAMESPACE}" port-forward service/rauthy "${RAUTHY_SMOKE_PORT}:8080" \
+    >"${TMP_DIR}/rauthy-port-forward.log" 2>&1 &
+  RAUTHY_PORT_FORWARD_PID=$!
+  wait_for_rauthy
+}
+
+assert_runtime() {
+  base_url="http://127.0.0.1:${GRANT_SMOKE_PORT}"
+  identity_url="http://127.0.0.1:${RAUTHY_SMOKE_PORT}"
+
+  curl --max-time 4 -fsS "${base_url}/healthz" \
+    | jq -e '.status == "ok"' >/dev/null \
+    || fail "Grant process is not healthy"
+  curl --max-time 4 -fsS "${base_url}/readyz" \
+    | jq -e '.status == "ok" and .readReady == true and .writeReady == true' >/dev/null \
+    || fail "Grant database is not ready"
+  curl --max-time 4 -fsS "${identity_url}/auth/v1/health" >/dev/null \
+    || fail "Rauthy health check failed"
+  curl --max-time 4 -fsS -H "Authorization: API-Key ${GRANT_RAUTHY_CLIENT_READ_API_KEY}" \
+    "${identity_url}/auth/v1/clients/${GRANT_RAUTHY_CLIENT_ID}" >/dev/null \
+    || fail "bootstrapped Rauthy client is unavailable"
+  curl --max-time 4 -fsS -u "${GRANT_RAUTHY_CLIENT_ID}:${GRANT_RAUTHY_CLIENT_SECRET}" \
+    -H 'content-type: application/x-www-form-urlencoded' \
+    --data 'token=known-invalid-token' \
+    "${identity_url}/auth/v1/oidc/introspect" \
+    | jq -e '.active == false' >/dev/null \
+    || fail "Rauthy introspection did not reject the invalid token"
+}
+
+# Each mock PATH is intentionally isolated so real verification keeps its tools.
+# shellcheck disable=SC2030,SC2031
+verify_runtime_probe_contract() {
+  mock_dir=$(mktemp -d "${TMPDIR:-/tmp}/grant-probe-contract.XXXXXX")
+  cat >"${mock_dir}/curl" <<'MOCK'
+#!/bin/sh
+for url do :; done
+case "$url" in
+  "http://127.0.0.1:${GRANT_SMOKE_PORT:-18080}/auth/"*) exit 1 ;;
+  */healthz) printf '{"status":"%s"}\n' "${MOCK_HEALTH_STATUS:-ok}" ;;
+  */readyz) printf '{"status":"ok","readReady":true,"writeReady":%s}\n' "${MOCK_WRITE_READY:-true}" ;;
+  */auth/v1/oidc/introspect) printf '{"active":false}\n' ;;
+  */auth/v1/health|*/auth/v1/clients/*) printf '{}\n' ;;
+  *) exit 1 ;;
+esac
+MOCK
+  chmod +x "${mock_dir}/curl"
+  mock_path="${mock_dir}:${PATH}"
+  (export PATH="${mock_path}" GRANT_SMOKE_PORT RAUTHY_SMOKE_PORT; assert_runtime) || { rm -r "${mock_dir}"; fail "runtime probe rejected split health/readiness contract"; }
+  if (export PATH="${mock_path}" MOCK_WRITE_READY=false; assert_runtime) >/dev/null 2>&1; then
+    rm -r "${mock_dir}"; fail "runtime probe accepted an unavailable quorum"
+  fi
+  if (export PATH="${mock_path}" MOCK_HEALTH_STATUS=down; assert_runtime) >/dev/null 2>&1; then
+    rm -r "${mock_dir}"; fail "runtime probe accepted an unhealthy process"
+  fi
+  rm -r "${mock_dir}"
+}
+
+verify_live() {
+  need kubectl
+  need curl
+  need jq
+  [ "${GRANT_SMOKE_PORT}" != "${RAUTHY_SMOKE_PORT}" ] || fail "Grant and Rauthy smoke ports must differ"
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-smoke.XXXXXX")
+
+  kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m
+  kubectl -n "${NAMESPACE}" rollout status statefulset/grant-voter --timeout=15m
+  assert_live_storage
+
+  kubectl -n "${NAMESPACE}" port-forward service/grant "${GRANT_SMOKE_PORT}:80" \
+    >"${TMP_DIR}/port-forward.log" 2>&1 &
+  PORT_FORWARD_PID=$!
+  wait_for_grant
+  start_rauthy_forward
+  assert_runtime
+
+  if [ "${REPLACE_RAUTHY_POD}" = "1" ]; then
+    old_uid=$(kubectl -n "${NAMESPACE}" get pod rauthy-0 -o jsonpath='{.metadata.uid}')
+    kubectl -n "${NAMESPACE}" delete pod rauthy-0 --wait=true
+    kubectl -n "${NAMESPACE}" rollout status statefulset/rauthy --timeout=15m
+    kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod/rauthy-0 --timeout=15m
+    new_uid=$(kubectl -n "${NAMESPACE}" get pod rauthy-0 -o jsonpath='{.metadata.uid}')
+    [ "${old_uid}" != "${new_uid}" ] || fail "Rauthy Pod was not replaced"
+    assert_live_storage
+    start_rauthy_forward
+    assert_runtime
+  fi
+
+  echo "Ephemeral Kubernetes runtime verified"
+}
+
+verify_native_static() {
+  need kubectl
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grant-native-kustomize.XXXXXX")
+  sh "${ROOT_DIR}/scripts/verify-rhiza-deployment.sh"
+  for overlay in ephemeral production ied; do
+    kubectl kustomize "${ROOT_DIR}/deploy/overlays/${overlay}" >"${TMP_DIR}/${overlay}.yaml"
+    assert_no_pvc_references "${TMP_DIR}/${overlay}.yaml" "${overlay}"
+    assert_ha_contract "${TMP_DIR}/${overlay}.yaml" "${overlay}"
+  done
+  kubectl kustomize "${ROOT_DIR}/deploy/overlays/patch-data" >"${TMP_DIR}/patch-data.yaml"
+  if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then fail "Patch Data native overlay retains Rauthy configuration"; fi
+  grep -q 'name: grant-rhiza-storage' "${TMP_DIR}/patch-data.yaml" || fail "Patch Data native storage is not configured"
+  sh "${ROOT_DIR}/scripts/verify-runtime-tools.sh"
+  bash "${ROOT_DIR}/scripts/verify-vind-bootstrap.sh"
+  sh "${ROOT_DIR}/scripts/verify-lifecycle-values.sh"
+  verify_runtime_probe_contract
+  echo "Native Grant and preserved Rauthy deployment profiles verified"
+}
+
+case "${MODE}" in
+  static) verify_native_static ;;
+  legacy-static) verify_static ;;
+  probe-contract) verify_runtime_probe_contract ;;
+  live) verify_live ;;
+  *) fail "usage: $0 [static|legacy-static|live|probe-contract]" ;;
+esac
