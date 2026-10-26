@@ -7,7 +7,7 @@ NAMESPACE="${NAMESPACE:-grant-chaos}"
 SKAFFOLD_PROFILE="${SKAFFOLD_PROFILE:-ied}"
 SKAFFOLD_MODULE="${SKAFFOLD_MODULE:-grant}"
 SKAFFOLD_EXTRA_ARGS="${SKAFFOLD_EXTRA_ARGS:-}"
-DEFAULT_RAUTHY_IMAGE="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")"
+DEFAULT_RAUTHY_IMAGE="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/mrchypark\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml")"
 
 if [[ -n "${RAUTHY_IMAGE:-}" && "${RAUTHY_IMAGE}" != "${DEFAULT_RAUTHY_IMAGE}" ]]; then
   echo "the GKE Skaffold deployment uses the Rauthy launcher image pinned in deploy/k8s/rauthy-statefulset.yaml; RAUTHY_IMAGE cannot override it" >&2

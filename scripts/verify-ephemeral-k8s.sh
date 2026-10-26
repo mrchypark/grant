@@ -222,6 +222,7 @@ EOF
   done
 
   for private_image in \
+    '' \
     ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0 \
     ghcr.io/mrchypark/grant-rauthy-launcher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
