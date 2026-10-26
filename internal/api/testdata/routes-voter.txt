@@ -91,4 +91,5 @@ PUT /api/v1/orgs/{organizationId}/owner
 PUT /api/v1/orgs/{organizationId}/owners/{userId}
 PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions
 PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}
+PUT /ops/orgless-bindings/{bindingId}
 PUT /ops/providers/{providerId}/enforcers/{pepClientId}

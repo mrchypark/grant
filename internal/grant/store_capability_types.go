@@ -21,6 +21,7 @@ type HttpCapability struct {
 	RecordScope           *HttpRecordScopePolicy     `json:"recordScope,omitempty"`
 	Batch                 *HttpBatchPolicy           `json:"batch,omitempty"`
 	ResponseAuthorization *HttpResponseAuthorization `json:"responseAuthorization,omitempty"`
+	OrganizationContext   string                     `json:"organizationContext,omitempty"`
 }
 
 type HttpResponseResource struct {

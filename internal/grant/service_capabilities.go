@@ -129,6 +129,9 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if CredentialDigest(token) != r.ProviderCredentialDigest {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential digest mismatch")
 	}
+	if org == "" && cap.OrganizationContext != "optional" {
+		return HttpCapabilityDecision{}, serviceError(400, "organization context is required")
+	}
 	orglessOnboarding := org == "" && managementOnboardingCapability(r.ProviderID, *cap)
 	trustedTenantManagement := false
 	tenantReactivation := managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath)
@@ -150,6 +153,8 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			}
 			c.UserID, c.OrganizationID = principal.UserID, org
 		}
+	} else if org == "" {
+		c, err = s.resolveOrglessApplicationContext(ctx, token)
 	} else {
 		c, err = s.resolveApplicationAuthorizationContext(ctx, token, org)
 	}
@@ -188,6 +193,12 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 		if err != nil {
 			return HttpCapabilityDecision{}, err
 		}
+	} else if org == "" {
+		allowed, err = s.orglessActionAllowed(ctx, c, r.ProviderID, *cap.ActionID, r.ResourceType, r.ResourceID)
+		if err != nil {
+			return HttpCapabilityDecision{}, err
+		}
+		reason = "orgless_explicit_binding"
 	} else if cap.RecordScope != nil {
 		scope, err = s.recordScopeDecision(ctx, r.ProviderID, *cap, c, r.CatalogGeneration, r.CatalogDigest, r.PEPClientID)
 		if err != nil {

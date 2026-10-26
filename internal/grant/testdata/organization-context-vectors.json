@@ -1,0 +1,130 @@
+[
+  {
+    "policy": "omitted",
+    "generation": {
+      "schemaVersion": 1,
+      "providerId": "inventory",
+      "generation": 1,
+      "capabilities": [
+        {
+          "capabilityId": "vector.read",
+          "version": 1,
+          "enabled": true,
+          "accessMode": "authorized",
+          "method": "GET",
+          "pathTemplate": "/items/{itemId}",
+          "actionId": "inventory.item.read",
+          "resource": {
+            "type": "item",
+            "id": {
+              "kind": "pathSegment",
+              "name": "itemId",
+              "format": "asciiToken"
+            }
+          },
+          "query": {
+            "mode": "none"
+          },
+          "request": {
+            "body": "none",
+            "maxBytes": 0,
+            "forwardHeaders": []
+          },
+          "response": {
+            "maxBytes": 4096,
+            "forwardHeaders": [],
+            "redirects": "deny"
+          },
+          "contractDigest": "sha256:dff00647c46093e40e72139bb379208b85bc7572d1371188d1a34b2d69aff1df"
+        }
+      ]
+    },
+    "catalogDigest": "sha256:c37b5c8351df45b710b9bf152e36a50884278de82f49c5035ec3105df813b890"
+  },
+  {
+    "policy": "required",
+    "generation": {
+      "schemaVersion": 1,
+      "providerId": "inventory",
+      "generation": 1,
+      "capabilities": [
+        {
+          "capabilityId": "vector.read",
+          "version": 1,
+          "enabled": true,
+          "accessMode": "authorized",
+          "method": "GET",
+          "pathTemplate": "/items/{itemId}",
+          "actionId": "inventory.item.read",
+          "resource": {
+            "type": "item",
+            "id": {
+              "kind": "pathSegment",
+              "name": "itemId",
+              "format": "asciiToken"
+            }
+          },
+          "query": {
+            "mode": "none"
+          },
+          "request": {
+            "body": "none",
+            "maxBytes": 0,
+            "forwardHeaders": []
+          },
+          "response": {
+            "maxBytes": 4096,
+            "forwardHeaders": [],
+            "redirects": "deny"
+          },
+          "contractDigest": "sha256:efdc773636ab420d1e390dd962ba72a747d0630007739b935eb0082d078a0e34",
+          "organizationContext": "required"
+        }
+      ]
+    },
+    "catalogDigest": "sha256:922745dbccd664134b96c105fdea21403d838c7d14eddacd20e7ee67cd29d5ed"
+  },
+  {
+    "policy": "optional",
+    "generation": {
+      "schemaVersion": 1,
+      "providerId": "inventory",
+      "generation": 1,
+      "capabilities": [
+        {
+          "capabilityId": "vector.read",
+          "version": 1,
+          "enabled": true,
+          "accessMode": "authorized",
+          "method": "GET",
+          "pathTemplate": "/items/{itemId}",
+          "actionId": "inventory.item.read",
+          "resource": {
+            "type": "item",
+            "id": {
+              "kind": "pathSegment",
+              "name": "itemId",
+              "format": "asciiToken"
+            }
+          },
+          "query": {
+            "mode": "none"
+          },
+          "request": {
+            "body": "none",
+            "maxBytes": 0,
+            "forwardHeaders": []
+          },
+          "response": {
+            "maxBytes": 4096,
+            "forwardHeaders": [],
+            "redirects": "deny"
+          },
+          "contractDigest": "sha256:f7fd6174f8c63210df3cd1ff8e861a34a75a254baeeb86798eccaea459da7d90",
+          "organizationContext": "optional"
+        }
+      ]
+    },
+    "catalogDigest": "sha256:8223ed911d6c4456e40b235eedc36eec839223ad43ec515ef8d403fd55e874a8"
+  }
+]

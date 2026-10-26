@@ -417,3 +417,53 @@ Owners GET ETag는 활성 owner membership의 정렬된 사용자 ID, membership
 본인 조직 생성은 검증된 사용자 ID로 `organizations`, owner 소속과 기존 Grant owner Binding을 생성하고, 해당 조직 자원에 대한 `role-system-management-owner` 개인 Binding을 같은 트랜잭션에서 추가한다. 이 전역 역할은 `roles.organization_id=NULL`이며 조직 API로 수정하거나 삭제할 수 없다. `role-system-` ID는 조직 역할 생성에 사용할 수 없다. Action은 등록된 조직 관리 경로로 제한하며 필요한 정의가 없거나 전역 역할에 허용 범위 밖 Action이 있으면 생성 전체를 거절한다. 플랫폼 Action이나 다른 조직 자원은 부여하지 않는다.
 
 관리 앱과 대상 조직을 분리하는 이유는 한 관리 앱을 통해 사용자가 본인이 속한 여러 조직을 관리할 수 있게 하기 위해서다. 정확한 조직 관리 capability에만 이 연결을 적용하며, 대상 조직 멤버십과 세부 Binding 판정은 생략하지 않는다. 기존 업무 앱의 일반적인 조직 일치 조건이나 데이터 Provider 권한을 완화하지 않는다. 새 테이블·컬럼 또는 외부 신원 canonical key 변경은 없다.
+
+### Organization context and explicit orgless grants
+
+`provider_http_capability_sets.canonical_json` now permits capability-level
+`organizationContext` with the exact values `required` and `optional`. Omission
+continues to serialize as omission and means required. Explicit policy is the
+last typed capability field, after `responseAuthorization`; it participates in
+both contract and generation digests. Only authorized capabilities can specify
+it, including disabled entries. Optional scoped/response authorization is
+rejected. An optional batch requires every referenced child, including both
+upsert branches, to explicitly declare optional context.
+
+**Relations:** `role_bindings.subject_organization_id=''` is reserved for explicit
+operator-owned orgless grants to one local user. It has no `organizations.id`
+relation; nonempty values retain the existing organization relation. The grant
+must have no agreement and must refer to a global role, the exact provider,
+resource type and resource ID. The role must contain the requested action.
+Application action admission and active user/application/provider/application-owner
+organization are checked independently. An absent request organization never
+becomes the application's owning organization. There is no membership, group,
+hierarchy, wildcard, or agreement fallback for these grants. A supplied request
+organization uses the existing tenant authorization evaluator, including consent.
+
+**Reason for the structure:** Optional context only admits evaluation; it grants
+no action. Existing normalized roles and bindings express explicit authorization
+without a second permission store. Orgless bindings act as an operator's direct
+user entitlement plus application admission; tenant consent records are scoped to
+nonempty organizations and are not borrowed into this mode. The master-key-only
+`PUT /ops/orgless-bindings/{bindingId}` accepts `subjectId`, `providerId`,
+`resourceType`, `resourceId`, `actionId`, and `state` (`active` or `disabled`).
+It atomically creates/reuses a reserved global `role-system-orgless-<action hash>`
+role containing exactly that action and creates/replaces the orgless binding.
+It refuses to overwrite an ordinary tenant binding. Tenant binding APIs cannot
+create an empty subject organization; tenant role APIs cannot create or mutate
+the reserved global role. Disable an existing orgless binding using the same
+operator API and its exact subject/provider/resource/action tuple. Revocation is
+idempotent and does not require an active user, provider, organization or a
+remaining/grantable action. Resource IDs are bounded exact UTF-8 values rather
+than identifier-name tokens, preserving supported brace and URN UUID forms.
+No table, column, or physical schema migration is introduced. Existing snapshot
+inventory and schema digests remain unchanged; role/binding rows are already
+included in backup and restore.
+
+Grant's four trusted management self-service capabilities explicitly declare
+optional context at capability version 2. Their separate domain policy admits a
+verified external identity before local materialization, only through the
+configured active first-party auto-approved management app and an admitted
+self-service action. The PDP remains read-only. This exception never changes
+transport policy or supplies an application organization to an absent request.
+Platform and tenant management protections remain separate Grant domain checks.

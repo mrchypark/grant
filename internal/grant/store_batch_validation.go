@@ -82,6 +82,9 @@ func validateBatchReferences(caps []HttpCapability) error {
 				if child.Request.Authorization != root.Request.Authorization || (child.Method == "DELETE" && child.Request.Body != "none") || (child.Method != "DELETE" && child.Request.Body != "json" && child.Request.Body != "opaque") {
 					return fmt.Errorf("incompatible batch child transport")
 				}
+				if root.OrganizationContext == "optional" && child.OrganizationContext != "optional" {
+					return fmt.Errorf("optional batch requires explicitly optional children")
+				}
 				found = true
 				allowed[id] = child
 			}

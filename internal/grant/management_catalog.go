@@ -209,6 +209,11 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 				HttpQueryParameter{Name: "limit", Format: "text", MaxBytes: 20},
 				HttpQueryParameter{Name: "q", Format: "text", MaxBytes: 1024})
 		}
+		if managementOnboardingCapability(provider, c) {
+			c.OrganizationContext = "optional"
+			// Policy changes require a new immutable capability version.
+			c.Version = 2
+		}
 		var err error
 		c.ContractDigest, err = HttpCapabilityContractDigest(c)
 		if err != nil {

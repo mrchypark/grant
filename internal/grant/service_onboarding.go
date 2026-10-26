@@ -135,5 +135,5 @@ func (s *Service) resolveOnboardingContext(ctx context.Context, token, action st
 	if identity.Provider == "goauthy" {
 		audience = app.ID
 	}
-	return applicationAuthorizationContext{UserID: "onboarding:" + sha256Text(string(key)), OrganizationID: app.OrganizationID, ApplicationID: app.ID, ExternalSubject: subject, ProviderAudience: audience}, nil
+	return applicationAuthorizationContext{UserID: "onboarding:" + sha256Text(string(key)), ApplicationID: app.ID, ExternalSubject: subject, ProviderAudience: audience}, nil
 }
