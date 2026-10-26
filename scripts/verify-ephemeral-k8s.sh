@@ -84,7 +84,7 @@ read_rauthy_launcher_image() {
         }
       }
       if (image == "" || image ~ /[[:space:]]/ ||
-          image !~ /^ghcr[.]io\/conalog\/grant-rauthy-launcher([:@]|$)/) {
+          image !~ /^ghcr[.]io\/mrchypark\/grant-rauthy-launcher([:@]|$)/) {
         invalid = 1
         next
       }
@@ -129,7 +129,7 @@ assert_ha_contract() {
     || fail "${label} does not use the repository Rauthy launcher image"
   [ "$(grep -c 'image: ghcr.io/mrchypark/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
     || fail "${label} must render exactly one Rauthy launcher image"
-  actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
+  actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/mrchypark\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
   [ "${actual_rauthy_image}" = "${expected_rauthy_image}" ] \
     || fail "${label} overrides or corrupts the Rauthy launcher image pin"
   grep -q '/usr/local/bin/rauthy-launcher' "${manifest}" \
