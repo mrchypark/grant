@@ -8,6 +8,11 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# Validate the generated config with real curl; mock only registry responses.
+REAL_CURL=$(command -v curl)
+printf '%s\n' "${REAL_CURL}" > "${TMP_DIR}/real-curl"
+printf 'curl config fixture\n' > "${TMP_DIR}/curl-body"
+
 mkdir -p "${TMP_DIR}/bin"
 cat > "${TMP_DIR}/bin/curl" <<'EOF'
 #!/bin/sh
@@ -15,17 +20,25 @@ set -eu
 
 [ "$#" -eq 2 ] && [ "$1" = --config ]
 config=$2
+fixture_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
+real_curl=$(cat "${fixture_dir}/real-curl")
+parser_config=$(mktemp "${fixture_dir}/curl-parser.XXXXXX")
+trap 'rm -f "${parser_config}"' EXIT HUP INT TERM
+sed '/^url = /d' "${config}" > "${parser_config}"
+"${real_curl}" --config "${parser_config}" --proto '=file' \
+  --url "file://${fixture_dir}/curl-body" > /dev/null
+rm -f "${parser_config}"
 if grep -Fq 'ghcr.io/token?service=ghcr.io' "${config}"; then
   printf '{"token":"mock-registry-reader-token"}\n'
   exit 0
 fi
 
-grep -qx 'no-body' "${config}" || {
+grep -qx 'head' "${config}" || {
   echo 'curl: (18) transfer closed with bytes remaining to read' >&2
   exit 18
 }
 if grep -q '^request = "HEAD"$' "${config}"; then
-  echo 'custom HEAD request must not replace curl no-body semantics' >&2
+  echo 'custom HEAD request must not replace curl head semantics' >&2
   exit 2
 fi
 grep -qx 'output = "/dev/null"' "${config}"
