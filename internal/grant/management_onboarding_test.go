@@ -48,13 +48,14 @@ func managementMaterializeFixture(t *testing.T, managementOrgID string) (context
 		t.Fatal(err)
 	}
 
-	// Set up PEP client for grant-management.
-	pepApp := s.cfg.Security.HTTPCapabilityPEPApplicationID
+	// Set up the PEP service identity independently of the management app.
+	s.cfg.Security.HTTPCapabilityPEPClientID = "mgmt-pep"
+	pepApp := s.cfg.Security.ManagementApplicationID
 	if pepApp == "" {
 		pepApp = "app-1"
-		s.cfg.Security.HTTPCapabilityPEPApplicationID = pepApp
+		s.cfg.Security.ManagementApplicationID = pepApp
 	}
-	if _, err := s.store.UpsertProviderPepClient(ctx, "grant-management", "mgmt-pep", "owner", UpsertProviderPepClient{ApplicationID: pepApp, Lifecycle: "active"}); err != nil {
+	if _, err := s.store.UpsertProviderPepClient(ctx, "grant-management", "mgmt-pep", "owner", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 

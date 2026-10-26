@@ -54,6 +54,94 @@ func TestSnapshotRestoreAndReopen(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestPEPIdentitySnapshotCompatibility(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := OpenStore(ctx, Config{Database: DatabaseConfig{DataDir: filepath.Join(root, "source")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err = s.Exec(ctx, "INSERT INTO service_providers(id,name,created_at,updated_at) VALUES('snapshot-provider','Snapshot',?,?)", nowString(), nowString()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.UpsertProviderPepClient(ctx, "snapshot-provider", "snapshot-pep", "operator", UpsertProviderPepClient{Lifecycle: "disabled"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.ExportSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SchemaDigest != canonicalSchemaDigest() || snapshot.SchemaDigest == legacySchemaDigestV4() {
+		t.Fatal("export does not identify the v5 schema")
+	}
+	for _, table := range snapshot.Tables {
+		if table.Name == "applications" && table.Count != 0 {
+			t.Fatal("PEP snapshot unexpectedly requires an application")
+		}
+	}
+	// The previous digest also labeled early v5 exports. Both those exports
+	// and actual v4 rows retain the same column layout and fit v5 constraints.
+	for _, version := range []struct{ name, digest string }{{"v5", canonicalSchemaDigest()}, {"v4", legacySchemaDigestV4()}} {
+		t.Run(version.name, func(t *testing.T) {
+			compatible := snapshot
+			compatible.SchemaDigest = version.digest
+			compatible.Digest, err = snapshotDigest(compatible)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{Database: DatabaseConfig{DataDir: filepath.Join(root, version.name)}}
+			if err = RestoreStoreSnapshot(ctx, cfg, compatible); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := OpenStore(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restored.Close()
+			pep, err := restored.ProviderPepClient(ctx, "snapshot-provider", "snapshot-pep")
+			if err != nil || pep.Lifecycle != "disabled" || pep.ApplicationID != "" {
+				t.Fatalf("independent PEP changed on restore: %#v %v", pep, err)
+			}
+		})
+	}
+	for _, digest := range []string{canonicalSchemaDigest(), legacySchemaDigestV4(), legacySchemaDigestV3()} {
+		for _, name := range []string{"provider_pep_clients", "provider_pep_client_receipts"} {
+			malformed := snapshot
+			malformed.SchemaDigest = digest
+			malformed.Tables = append([]SnapshotTable(nil), snapshot.Tables...)
+			for i := range malformed.Tables {
+				table := &malformed.Tables[i]
+				if table.Name != name {
+					continue
+				}
+				table.Columns = append([]string(nil), table.Columns...)
+				table.Columns[0] = "unexpected_column"
+				table.Digest, err = tableDigest(*table)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			malformed.Digest, err = snapshotDigest(malformed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = ValidateStoreSnapshot(malformed); err == nil || !strings.Contains(err.Error(), "PEP columns mismatch") {
+				t.Fatalf("wrong %s columns admitted for %s: %v", name, digest, err)
+			}
+		}
+	}
+	snapshot.SchemaDigest = "unknown-schema"
+	snapshot.Digest, err = snapshotDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = ValidateStoreSnapshot(snapshot); err == nil {
+		t.Fatal("unknown schema admitted")
+	}
+}
+
 func TestPrivateRuntimeAuthorizationAndStrongFailure(t *testing.T) {
 	ctx := context.Background()
 	secret := strings.Repeat("r", 40)

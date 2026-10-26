@@ -2,6 +2,7 @@ package adminui
 
 type Page struct {
 	Title, Description, Section, OrganizationID, ProviderID, Search, CSRF, Notice, Error, Detail, NextURL string
+	UserName, UserEmail                                                                                   string
 	Navigation                                                                                            []NavItem
 	Organizations, Providers                                                                              []Option
 	Columns                                                                                               []string

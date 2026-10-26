@@ -72,7 +72,12 @@ func TestReplicaFenceRevocationAndReadOnly(t *testing.T) {
 			t.Fatal("learner bootstrap accepted")
 		}
 	}
-	if _, e = voter.Exec(ctx, "UPDATE role_bindings SET state='revoked' WHERE id='binding-system-bootstrap-owner'"); e != nil {
+	now := nowString()
+	if e = voter.Transaction(ctx, []Statement{
+		{SQL: "INSERT INTO users(id,display_name,active,created_at) VALUES('fence-backup-owner','Backup owner',1,?)", Args: []any{now}},
+		{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES('fence-backup-membership','conalog-grant','fence-backup-owner','owner','active',?,?)", Args: []any{now, now}},
+		{SQL: "UPDATE organization_memberships SET membership_role='member',updated_at=? WHERE organization_id='conalog-grant' AND user_id='conalog-grant' AND membership_role='owner'", Args: []any{now}},
+	}); e != nil {
 		t.Fatal(e)
 	}
 	fence, e := voter.db.Query(ctx, rhiza.QueryRequest{SQL: "SELECT 1", Consistency: rhiza.ConsistencyLinearizable})

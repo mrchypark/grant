@@ -34,12 +34,13 @@ func (s *Store) GetUserWithConsistency(ctx context.Context, id string, c ReadCon
 	return decodeRow[User](rows[0])
 }
 func (s *Store) SetUserActive(ctx context.Context, id string, active bool) (User, error) {
-	n, e := s.Exec(ctx, "UPDATE users SET active=? WHERE id=?", active, id)
-	if e != nil {
-		return User{}, e
+	stmts := []Statement{}
+	if !active {
+		stmts = append(stmts, assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM organization_memberships own JOIN organizations o ON o.id=own.organization_id WHERE own.user_id=? AND own.status='active' AND own.membership_role='owner' AND o.inactivated_at IS NULL AND (SELECT COUNT(*) FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=own.organization_id AND m.status='active' AND m.membership_role='owner' AND u.active=1)=1)", id))
 	}
-	if n == 0 {
-		return User{}, fmt.Errorf("user not found: %s", id)
+	stmts = append(stmts, Statement{SQL: "UPDATE users SET active=? WHERE id=?", Args: []any{active, id}, ExpectedRowsAffected: requireOne()})
+	if e := lifecycleError(s.Transaction(ctx, stmts)); e != nil {
+		return User{}, e
 	}
 	return s.GetUserWithConsistency(ctx, id, ReadStrong)
 }
@@ -194,7 +195,6 @@ func (s *Store) BootstrapOwnerAtomic(ctx context.Context, c OwnerBootstrapComman
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM users WHERE id=?) OR EXISTS(SELECT 1 FROM users WHERE id=? AND active=1)", id, id),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=? AND user_id=? AND (membership_role<>'owner' OR status<>'active'))", org, id),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=? AND user_id<>? AND membership_role='owner')", org, id),
-		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=? AND subject_organization_id=? AND provider_id='grant' AND resource_type='organization' AND resource_id=? AND role_id='role-system-bootstrap-owner' AND state<>'active')", id, org, org),
 	}
 	if c.ReservedUserID != "" {
 		ss = append(ss, assertion("SELECT 1 FROM users WHERE id=? AND active=1", id), assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider=? AND issuer=? AND collection_id=? AND external_user_id<>?)", id, in.Provider, in.Issuer, in.CollectionID, in.ExternalUserID))
@@ -204,8 +204,7 @@ func (s *Store) BootstrapOwnerAtomic(ctx context.Context, c OwnerBootstrapComman
 		Statement{SQL: "INSERT INTO user_identities(id,user_id,provider,issuer,collection_id,external_user_id,email_snapshot,display_name_snapshot,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,issuer,collection_id,external_user_id) DO NOTHING", Args: []any{requestID(), id, in.Provider, in.Issuer, in.CollectionID, in.ExternalUserID, in.Email, in.DisplayName, now, now, now}},
 		Statement{SQL: "INSERT INTO organizations(id,name,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING", Args: []any{org, org, now, now}},
 		Statement{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?) ON CONFLICT(organization_id,user_id) DO NOTHING", Args: []any{requestID(), org, id, now, now}},
-		Statement{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user',?,?,'grant','organization',?,'role-system-bootstrap-owner','active',?,?,?) ON CONFLICT(subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id) DO NOTHING", Args: []any{requestID(), id, org, org, id, now, now}},
-		assertion("SELECT 1 FROM role_bindings WHERE subject_type='user' AND subject_id=? AND subject_organization_id=? AND provider_id='grant' AND resource_type='organization' AND resource_id=? AND role_id='role-system-bootstrap-owner' AND state='active'", id, org, org))
+	)
 	if e = s.Transaction(ctx, ss); e != nil {
 		return out, capabilityWriteError(e)
 	}

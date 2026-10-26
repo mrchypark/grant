@@ -172,7 +172,7 @@ func TestConcretePlantCollectionAliases(t *testing.T) {
 
 func TestRecordScopeRechecksPEPInsideFence(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{Security: SecurityConfig{HTTPCapabilityPEPApplicationID: "pep-app"}, Database: DatabaseConfig{DataDir: t.TempDir()}}
+	cfg := Config{Security: SecurityConfig{HTTPCapabilityPEPClientID: "replacement-pep", ManagementApplicationID: "pep-app"}, Database: DatabaseConfig{DataDir: t.TempDir()}}
 	store, e := OpenStore(ctx, cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -185,7 +185,7 @@ func TestRecordScopeRechecksPEPInsideFence(t *testing.T) {
 	if e = store.InsertApplicationWithRedirectURI(ctx, app, nil); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = store.UpsertProviderPepClient(ctx, "grant", "replacement-pep", "master", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); e != nil {
+	if _, e = store.UpsertProviderPepClient(ctx, "grant", "replacement-pep", "master", UpsertProviderPepClient{Lifecycle: "active"}); e != nil {
 		t.Fatal(e)
 	}
 	c := HttpCapability{CapabilityID: "health", Version: 1, Enabled: true, AccessMode: "public_authn", Method: "GET", PathTemplate: "/health", Query: HttpQueryPolicy{Mode: "none"}, Request: HttpRequestPolicy{Body: "none", ForwardHeaders: []string{}}, Response: HttpResponsePolicy{MaxBytes: 1024, ForwardHeaders: []string{}, Redirects: "deny"}}

@@ -65,7 +65,7 @@ func capabilityCatalogAssertion(provider string, generation uint64, count int64)
 }
 
 func (s *Store) UpsertProviderPepClient(ctx context.Context, p, id, actor string, in UpsertProviderPepClient) (ProviderPepClient, error) {
-	if !capabilityToken(p) || !capabilityToken(id) || !capabilityToken(in.ApplicationID) || (in.Lifecycle != "active" && in.Lifecycle != "disabled" && in.Lifecycle != "deleted") {
+	if !capabilityToken(p) || !capabilityToken(id) || (in.Lifecycle != "active" && in.Lifecycle != "disabled" && in.Lifecycle != "deleted") {
 		return ProviderPepClient{}, serviceError(422, "invalid PEP client")
 	}
 	if in.ValidUntil != nil {
@@ -77,9 +77,9 @@ func (s *Store) UpsertProviderPepClient(ctx context.Context, p, id, actor string
 		in.ValidUntil = &v
 	}
 	now := nowString()
-	ss := []Statement{assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM applications WHERE id=? AND active=1 AND provisioning_status='ready') AND NOT EXISTS(SELECT 1 FROM provider_pep_clients WHERE pep_client_id=? AND (provider_id<>? OR application_id<>?)) AND NOT EXISTS(SELECT 1 FROM provider_pep_clients WHERE application_id=? AND pep_client_id<>?)", p, in.ApplicationID, id, p, in.ApplicationID, in.ApplicationID, id),
-		{SQL: "INSERT INTO provider_pep_clients(pep_client_id,application_id,provider_id,lifecycle,valid_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(pep_client_id) DO UPDATE SET lifecycle=excluded.lifecycle,valid_until=excluded.valid_until,updated_at=excluded.updated_at", Args: []any{id, in.ApplicationID, p, in.Lifecycle, in.ValidUntil, now, now}},
-		{SQL: "INSERT INTO provider_pep_client_receipts(receipt_id,pep_client_id,application_id,provider_id,lifecycle,valid_until,changed_at,changed_by) VALUES(?,?,?,?,?,?,?,?)", Args: []any{requestID(), id, in.ApplicationID, p, in.Lifecycle, in.ValidUntil, now, actor}}}
+	ss := []Statement{assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND NOT EXISTS(SELECT 1 FROM provider_pep_clients WHERE pep_client_id=? AND provider_id<>?)", p, id, p),
+		{SQL: "INSERT INTO provider_pep_clients(pep_client_id,application_id,provider_id,lifecycle,valid_until,created_at,updated_at) VALUES(?,NULL,?,?,?,?,?) ON CONFLICT(pep_client_id) DO UPDATE SET lifecycle=excluded.lifecycle,valid_until=excluded.valid_until,updated_at=excluded.updated_at", Args: []any{id, p, in.Lifecycle, in.ValidUntil, now, now}},
+		{SQL: "INSERT INTO provider_pep_client_receipts(receipt_id,pep_client_id,application_id,provider_id,lifecycle,valid_until,changed_at,changed_by) VALUES(?,?,NULL,?,?,?,?,?)", Args: []any{requestID(), id, p, in.Lifecycle, in.ValidUntil, now, actor}}}
 	if e := s.Transaction(ctx, ss); e != nil {
 		return ProviderPepClient{}, capabilityWriteError(e)
 	}
@@ -94,20 +94,6 @@ func (s *Store) ProviderPepClient(ctx context.Context, p, id string) (ProviderPe
 		return ProviderPepClient{}, serviceError(403, "provider PEP client not found")
 	}
 	return decodeRow[ProviderPepClient](r[0])
-}
-func (s *Store) ProviderPepClientForApplication(ctx context.Context, p, app string) (ProviderPepClient, error) {
-	r, e := s.Query(ctx, ReadStrong, "SELECT pc.* FROM provider_pep_clients pc JOIN service_providers sp ON sp.id=pc.provider_id AND sp.active=1 JOIN applications a ON a.id=pc.application_id AND a.active=1 AND a.provisioning_status='ready' WHERE pc.provider_id=? AND pc.application_id=?", p, app)
-	if e != nil {
-		return ProviderPepClient{}, e
-	}
-	if len(r) != 1 {
-		return ProviderPepClient{}, serviceError(403, "provider PEP client not found")
-	}
-	v, e := decodeRow[ProviderPepClient](r[0])
-	if e != nil {
-		return v, e
-	}
-	return v, requireActivePEP(v, time.Now())
 }
 func requireActivePEP(v ProviderPepClient, at time.Time) error {
 	if v.Lifecycle != "active" {
@@ -131,7 +117,7 @@ func (s *Store) ActivateHttpCapabilityGeneration(ctx context.Context, p, actor s
 	}
 	at := time.Now().UTC()
 	cutoff := at.Format("2006-01-02T15:04:05.000000000Z")
-	r, e := s.Query(ctx, ReadStrong, "SELECT pc.* FROM provider_pep_clients pc JOIN applications a ON a.id=pc.application_id AND a.active=1 AND a.provisioning_status='ready' WHERE pc.provider_id=? AND pc.lifecycle='active' AND (pc.valid_until IS NULL OR pc.valid_until>?) ORDER BY pc.pep_client_id", p, cutoff)
+	r, e := s.Query(ctx, ReadStrong, "SELECT pc.* FROM provider_pep_clients pc JOIN service_providers sp ON sp.id=pc.provider_id AND sp.active=1 WHERE pc.provider_id=? AND pc.lifecycle='active' AND (pc.valid_until IS NULL OR pc.valid_until>?) ORDER BY pc.pep_client_id", p, cutoff)
 	if e != nil {
 		return out, e
 	}
@@ -143,7 +129,7 @@ func (s *Store) ActivateHttpCapabilityGeneration(ctx context.Context, p, actor s
 		return out, e
 	}
 	receipt := requestID()
-	ss := []Statement{assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM provider_http_capability_sets WHERE provider_id=? AND generation=? AND catalog_digest=?) AND ((? IS NULL AND NOT EXISTS(SELECT 1 FROM provider_http_capability_active WHERE provider_id=?)) OR EXISTS(SELECT 1 FROM provider_http_capability_active WHERE provider_id=? AND generation=? AND catalog_digest=?)) AND EXISTS(SELECT 1 FROM provider_pep_clients pc JOIN applications a ON a.id=pc.application_id WHERE pc.provider_id=? AND pc.pep_client_id=? AND pc.lifecycle='active' AND pc.valid_until IS ? AND (pc.valid_until IS NULL OR pc.valid_until>?) AND a.active=1 AND a.provisioning_status='ready')", p, p, in.TargetGeneration, in.TargetCatalogDigest, in.ExpectedGeneration, p, p, in.ExpectedGeneration, in.ExpectedCatalogDigest, p, pep.PepClientID, pep.ValidUntil, cutoff),
+	ss := []Statement{assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND EXISTS(SELECT 1 FROM provider_http_capability_sets WHERE provider_id=? AND generation=? AND catalog_digest=?) AND ((? IS NULL AND NOT EXISTS(SELECT 1 FROM provider_http_capability_active WHERE provider_id=?)) OR EXISTS(SELECT 1 FROM provider_http_capability_active WHERE provider_id=? AND generation=? AND catalog_digest=?)) AND EXISTS(SELECT 1 FROM provider_pep_clients pc WHERE pc.provider_id=? AND pc.pep_client_id=? AND pc.lifecycle='active' AND pc.valid_until IS ? AND (pc.valid_until IS NULL OR pc.valid_until>?) )", p, p, in.TargetGeneration, in.TargetCatalogDigest, in.ExpectedGeneration, p, p, in.ExpectedGeneration, in.ExpectedCatalogDigest, p, pep.PepClientID, pep.ValidUntil, cutoff),
 		{SQL: "INSERT INTO provider_http_capability_activations(activation_receipt_id,provider_id,activation_sequence,from_generation,to_generation,catalog_digest,activated_at,activated_by) SELECT ?,?,COALESCE((SELECT MAX(activation_sequence) FROM provider_http_capability_activations WHERE provider_id=?),0)+1,(SELECT generation FROM provider_http_capability_active WHERE provider_id=?),?,?,?,?", Args: []any{receipt, p, p, p, in.TargetGeneration, in.TargetCatalogDigest, cutoff, actor}},
 		{SQL: "INSERT INTO provider_http_capability_active(provider_id,generation,catalog_digest,activated_at,activated_by) VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET generation=excluded.generation,catalog_digest=excluded.catalog_digest,activated_at=excluded.activated_at,activated_by=excluded.activated_by", Args: []any{p, in.TargetGeneration, in.TargetCatalogDigest, cutoff, actor}}}
 	// Staged generations may outlive their action registrations. Check all
@@ -203,7 +189,7 @@ func (s *Store) ActiveHttpCapabilityCatalog(ctx context.Context, p, pepID string
 	if e = requireActivePEP(pep, time.Now()); e != nil {
 		return out, e
 	}
-	r, e := s.Query(ctx, ReadStrong, "WITH RECURSIVE catalog AS (SELECT s.canonical_json,a.catalog_digest FROM provider_http_capability_active a JOIN provider_http_capability_sets s ON s.provider_id=a.provider_id AND s.generation=a.generation AND s.catalog_digest=a.catalog_digest JOIN service_providers sp ON sp.id=a.provider_id AND sp.active=1 JOIN applications app ON app.id=? AND app.active=1 AND app.provisioning_status='ready' WHERE a.provider_id=?), chunks(payload,remaining,catalog_digest,ordinal) AS (SELECT substr(canonical_json,1,60000),substr(canonical_json,60001),catalog_digest,0 FROM catalog UNION ALL SELECT substr(remaining,1,60000),substr(remaining,60001),catalog_digest,ordinal+1 FROM chunks WHERE remaining<>'') SELECT payload,catalog_digest FROM chunks ORDER BY ordinal", pep.ApplicationID, p)
+	r, e := s.Query(ctx, ReadStrong, "WITH RECURSIVE catalog AS (SELECT s.canonical_json,a.catalog_digest FROM provider_http_capability_active a JOIN provider_http_capability_sets s ON s.provider_id=a.provider_id AND s.generation=a.generation AND s.catalog_digest=a.catalog_digest JOIN service_providers sp ON sp.id=a.provider_id AND sp.active=1 WHERE a.provider_id=?), chunks(payload,remaining,catalog_digest,ordinal) AS (SELECT substr(canonical_json,1,60000),substr(canonical_json,60001),catalog_digest,0 FROM catalog UNION ALL SELECT substr(remaining,1,60000),substr(remaining,60001),catalog_digest,ordinal+1 FROM chunks WHERE remaining<>'') SELECT payload,catalog_digest FROM chunks ORDER BY ordinal", p)
 	if e != nil {
 		return out, e
 	}

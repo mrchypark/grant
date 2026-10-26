@@ -26,11 +26,19 @@ func (s *Service) BindApplicationIdentityAdmin(ctx context.Context, org, id stri
 	if a.ProvisioningStatus == "ready" && ptrValue(a.RauthyClientID) != clientID {
 		return Application{}, serviceError(409, "ready application identity cannot be rebound")
 	}
-	if s.cfg.Auth.ProviderMode != "rauthy" {
+	verify := s.verifyRauthyIdentityBinding
+	switch s.cfg.Auth.ProviderMode {
+	case "rauthy":
+		if s.cfg.Auth.Rauthy.ClientReadAPIKey == "" {
+			return Application{}, serviceError(503, "identity client verification is not configured")
+		}
+	case "goauthy":
+		if s.cfg.Auth.Goauthy == nil {
+			return Application{}, serviceError(503, "identity client verification is not configured")
+		}
+		verify = s.verifyGoauthyIdentityBinding
+	default:
 		return Application{}, serviceError(409, "configured identity provider does not support client binding verification")
-	}
-	if s.cfg.Auth.Rauthy.ClientReadAPIKey == "" {
-		return Application{}, serviceError(503, "identity client verification is not configured")
 	}
 	if err := s.applicationMutationAvailable(ctx, id); err != nil {
 		return Application{}, err
@@ -39,7 +47,7 @@ func (s *Service) BindApplicationIdentityAdmin(ctx context.Context, org, id stri
 	if err != nil {
 		return Application{}, err
 	}
-	if err := s.verifyRauthyIdentityBinding(ctx, *a, clientID, uri); err != nil {
+	if err := verify(ctx, *a, clientID, uri); err != nil {
 		return Application{}, err
 	}
 	out, err := s.store.BindApplicationIdentity(ctx, *a, clientID, uri)

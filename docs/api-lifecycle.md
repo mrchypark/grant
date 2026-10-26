@@ -43,7 +43,7 @@ Grant 변경을 검증한 후 관리 카탈로그를 새 세대로 생성하고,
 
 | 요청 | 입력과 효과 |
 |---|---|
-| `POST /api/v1/admin/orgs` | `id`, `name`, `ownerUserId`. 기존 활성 사용자에게 새 조직의 owner 소속과 `role-system-bootstrap-owner`의 해당 조직 Binding을 함께 생성한다. IdP 계정은 만들지 않는다. 중복 조직 ID는 409다. |
+| `POST /api/v1/admin/orgs` | `id`, `name`, `ownerUserId`. 기존 활성 사용자에게 새 조직의 canonical owner 소속을 생성한다. IdP 계정은 만들지 않는다. 중복 조직 ID는 409다. |
 | `GET /api/v1/orgs` | 현재 사용자의 활성 소속 조직 목록. 조직 비활성 상태도 조회 결과에 보일 수 있다. |
 | `GET /api/v1/orgs/{organizationId}` | 조직 프로필을 조회한다. |
 | `PATCH /api/v1/orgs/{organizationId}` | `name`만 수정한다. |
@@ -51,7 +51,7 @@ Grant 변경을 검증한 후 관리 카탈로그를 새 세대로 생성하고,
 | `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding` | `clientId`로 기존 IdP 클라이언트를 검증하여 연결한다. 빈 값·null은 거부한다. |
 | `PATCH /api/v1/orgs/{organizationId}/groups/{groupId}` | `name`, `description`을 부분 수정한다. |
 | `PATCH /api/v1/orgs/{organizationId}/agreements/{agreementId}` | `title`, `agreementType`, `referenceNo`, `status`, `startsAt`, `endsAt`을 부분 수정한다. 상태·기간 변경은 grantor만 허용한다. 당사자 조직은 변경할 수 없다. |
-| `PATCH /api/v1/orgs/{organizationId}/apps/{applicationId}` | `name`, `description`만 수정한다. IdP 설정·소유 조직·trust는 변경하지 않는다. |
+| `PATCH /api/v1/orgs/{organizationId}/apps/{applicationId}` | `name`을 수정하거나 identity binding 전 미연결 앱의 `redirectUri`를 설정한다. `redirectUri`는 create와 같은 URL 검증을 거치며 null로 지울 수 없다. ready/bound·platform-managed 앱에서는 변경할 수 없다. IdP client·secret, application type, 소유 조직·trust와 기타 메타데이터는 변경하지 않는다. |
 | `PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/active` | 필수 boolean `active`로 이용 상태를 설정한다. 비활성화 시 기존 활성 동의를 철회하며 재활성화로 동의가 복원되지 않는다. |
 | `DELETE /api/v1/orgs/{organizationId}/apps/{applicationId}` | 앱의 동의·동의 Action·요청 Action·redirect manifest를 함께 제거한다. IdP 클라이언트는 삭제하지 않는다. |
 | `PATCH /api/v1/orgs/{organizationId}/roles/{roleId}` | 조직 역할의 `name`, `description`을 부분 수정한다. |
@@ -68,11 +68,13 @@ Grant 변경을 검증한 후 관리 카탈로그를 새 세대로 생성하고,
 
 ## IdP 연결의 검증 범위
 
-새 앱은 Rauthy 모드에서 `unprovisioned`, client ID 없음으로 저장한다. 운영자가 IdP에 별도로 만든 client ID를 플랫폼 관리 API에 전달한다. 현재 연결 검증 어댑터는 Rauthy만 지원하며 설정된 origin의 client read API로 ID·이름·활성 상태·클라이언트 종류·redirect manifest·flow·public PKCE를 확인한다. Grant는 외부 클라이언트를 생성하거나 갱신하지 않는다.
+새 앱은 Rauthy와 Goauthy 모드에서 `unprovisioned`, client ID 없음으로 저장한다. Rauthy는 기존 client의 ID·이름·활성 상태·종류·redirect manifest·flow·public PKCE를 읽기 전용으로 검증한다. Goauthy는 설정된 application과 introspection/expected client ID가 모두 일치하는 confidential bootstrap client만 지원하며, 기존 Basic 자격 증명으로 `GET /oidc/client-configuration`을 읽는다. 정확한 redirect 목록, 허용 scope와 flow, resource를 포함한 `audience`, 정확히 `[resource]`인 `default_aud`, 응답 원문의 SHA-256 ETag와 `Cache-Control: no-store`를 검증한다. Grant는 외부 클라이언트를 생성하거나 갱신하지 않는다.
 
-`GRANT_RAUTHY_CLIENT_READ_API_KEY`는 연결 검증에만 필요하다. 키가 없으면 해당 요청은 503이며 정상 토큰 검증을 위한 시작 조건은 아니다. Goauthy 등 지원하지 않는 모드의 연결 요청은 409로 거절하고 Rauthy로 대체 호출하지 않는다. PocketBase 모드는 이전처럼 client ID 없이 ready이며 이 연결 API를 사용하지 않는다.
+`GRANT_RAUTHY_CLIENT_READ_API_KEY`는 Rauthy 연결 검증에만 필요하며 없으면 해당 요청은 503이다. Goauthy는 기존 introspection client 자격 증명을 사용하며 별도 client-read API key를 요구하지 않는다. PocketBase 모드는 이전처럼 client ID 없이 ready이며 이 연결 API를 사용하지 않는다.
 
-검증 결과는 검증한 로컬 manifest·소속·상태가 여전히 같을 때만 원자적으로 저장한다. 다른 앱에 연결된 client ID, 준비된 앱의 다른 ID로 재연결, 비활성 조직·앱은 거절한다. 실패 시 ready로 바꾸지 않는다. 기존 검증 완료 데이터와 `rauthy_client_id` 컬럼은 보존하며 이름만 일반화하는 DB 변경은 수행하지 않는다. 새로운 API 이름이 Goauthy 지원을 의미하지 않는다.
+검증 결과는 검증한 로컬 manifest·소속·상태가 여전히 같을 때만 원자적으로 저장한다. 다른 앱에 연결된 client ID, 준비된 앱의 다른 ID로 재연결, 비활성 조직·앱은 거절한다. 실패 시 ready로 바꾸지 않는다. 기존 검증 완료 데이터와 `rauthy_client_id` 컬럼은 보존하며 이름만 일반화하는 DB 변경은 수행하지 않는다.
+
+내부 PEP 서비스는 application이 아니다. 배포는 `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`로 정확한 PEP identity를 고정하고, master 전용 `/ops/providers/{providerId}/enforcers/{pepClientId}`로 provider binding을 등록한다. 요청 body에는 `lifecycle`과 선택적 `validUntil`만 있으며 `applicationId`는 허용하지 않는다. 기존 user/application management checks는 `GRANT_MANAGEMENT_APPLICATION_ID`를 사용한다. `GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID`는 이 application ID의 deprecated alias일 뿐 PEP identity fallback이 아니며, 새 설정과 값이 다르면 시작을 거부한다. 일반 사용자 앱은 기존 읽기 전용 verifier, trust, consent 절차를 그대로 따른다.
 
 이 문서는 코드 계약이다. IED 반영 여부는 별도의 배포·실기능 검증 기록으로 확인해야 한다.
 
@@ -108,11 +110,17 @@ grantee의 전체 PUT은 보존한 기간이라도 정규화 때문에 판정 �
 
 ## 조직 소유권 이전
 
-`GET /api/v1/orgs/{organizationId}/owner`는 조직 프로필 조회 권한을 확인하고 `organizationId`, `ownerUserId`와 ETag를 반환한다. 현재 owner는 `PUT /api/v1/orgs/{organizationId}/owner`에 `{"ownerUserId":"새 사용자 ID"}`와 GET에서 받은 `If-Match`를 보내 소유권을 이전한다. 일반 메타데이터 PATCH로 owner를 바꿀 수 없다.
+canonical owner는 활성 `organization_memberships.membership_role=owner`다. 여러 owner를 지원하는 `GET /api/v1/orgs/{organizationId}/owners`는 `{"organizationId":"…","owners":[{"userId":"…"}]}`와 ETag를 반환한다. GET도 활성 owner만 호출할 수 있고 `organization.profile.read`가 필요하다. `PUT`과 `DELETE /api/v1/orgs/{organizationId}/owners/{userId}`는 body 없이 `If-Match`를 요구하며 최신 owner envelope와 ETag를 반환한다. 변경은 활성 owner와 `organization.permission.manage`가 필요하다. 누락 tag는 428, stale tag는 412, 마지막 활성 owner 제거는 409다. PUT으로 기존 owner를 다시 추가하는 것은 idempotent이며 ETag를 바꾸지 않는다.
 
-현재 owner에게 관리 권한이 있어야 하고 두 사용자 모두 활성 사용자이자 해당 활성 조직의 활성 구성원이어야 한다. 대상의 자동 가입이나 사용자 생성은 하지 않는다. `If-Match`가 없으면 428, 변경된 ETag이면 412, 현재 owner가 아닌 호출자 또는 관리 권한이 철회된 owner이면 403이다. 같은 사용자에게 이전하거나 대상이 존재하지 않거나 비활성인 경우는 400이다. owner가 없거나 여러 명인 조직은 409로 거절한다.
+기존 `GET/PUT /api/v1/orgs/{organizationId}/owner`는 단일 owner 조직에만 호환된다. 여러 활성 owner가 있으면 409로 거절하며 잘못된 단일 owner 이전을 성공 처리하지 않는다. 일반 metadata PATCH로 owner를 바꿀 수 없다.
 
-이전 owner는 일반 member가 되고 Grant의 기본 owner 역할 Binding을 잃는다. 새 owner는 owner 소속과 기본 역할 Binding을 원자적으로 받는다. 온보딩에서 만든 `role-system-management-owner`의 해당 조직 Binding이 이전 owner에게 있으면 그 Binding도 새 owner에게 옮기고 원본을 제거한다. 이때 비활성 상태와 Agreement 제한을 그대로 보존하며, 원래 없는 관리 owner Binding을 새로 만들지 않는다. 이전 owner에게 독립적으로 부여한 다른 역할과 그룹·동의는 보존하므로 모든 권한을 철회하려면 별도의 구성원 제거가 필요하다. owner 제거는 여전히 거절되며 먼저 이 경로로 이전해야 한다. 동시 요청 중 하나만 성공하며, 이전 후 같은 사람에게 돌아와도 이전 ETag를 재사용할 수 없다.
+legacy 이전은 현재 단일 owner에게 관리 권한이 있어야 하고 두 사용자 모두 활성 사용자이자 해당 활성 조직의 활성 구성원이어야 한다. 대상의 자동 가입이나 사용자 생성은 하지 않는다. `If-Match`가 없으면 428, 변경된 ETag이면 412, 현재 owner가 아닌 호출자 또는 관리 권한이 철회된 owner이면 403이다. 같은 사용자에게 이전하거나 대상이 존재하지 않거나 비활성인 경우는 400이다. owner가 없거나 여러 명인 조직은 409로 거절한다.
+
+owner 판정은 membership에서 계산하며 owner 전용 system-role binding은 authority source가 아니다. demotion은 membership만 변경하고 무관한 기존 delegated binding은 보존한다. role/binding 편집으로 owner를 만들거나 owner 관리 권한을 제거할 수 없다. owner 권한은 해당 조직의 관리 action에만 적용되며 플랫폼 wildcard 또는 application admission을 부여하지 않는다.
+
+## 조직 범위 Operable 사용자 정의 Action
+
+`POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions`는 `operable` provider에 한해 `code`, `name`, `description`, `riskLevel`을 받는다. `PATCH .../actions/{actionId}`는 `name`, `description`, `riskLevel`만 받고 DELETE는 본문이 없다. 세 mutation 모두 active owner와 `organization.permission.manage`가 필요하다. `code`는 `custom.org-<organization-id의 소문자 SHA-256 64자리 hex>.<feature>.<definition-id>.<operation>` 형식이고, DB ID는 `operable.` + code로 생성한다. 이 namespace 검증은 create/edit/delete transaction에서 조직 owner 재검사와 함께 수행된다. built-in 및 role/application/active HTTP catalog가 참조하는 action은 409로 보호한다. 이 경로는 provider 관리 UI/API나 platform action, application admission을 제공하지 않는다.
 
 ## 조직 없는 온보딩과 조직 생성
 
@@ -141,8 +149,8 @@ PDP, `GET /api/v1/me`, 일반 인증 조회는 provider·issuer·collection·sub
 
 - `grant-management` Provider와 새 카탈로그의 모든 Action 정의가 등록되어 있어야 한다. 보호된 조직 관리 owner 역할을 구성하는 Action이 하나라도 없으면 본인 조직 생성은 원자적으로 거절된다. 신원 반영과 조직 생성은 별개이므로 로컬 사용자만 존재하고 조직은 없는 상태가 정상적으로 남을 수 있다.
 - 설정된 관리 앱에 네 온보딩 Action(`user.materialize`, `user.read`, `organization.list`, `organization.create`)과 제공할 조직 관리 Action을 `grant-management.` 접두사로 명시적으로 등록해야 한다. 앱 등록 자체가 Action 부여를 대신하지 않는다.
-- 관리 앱은 active/ready 및 first-party/auto-approve 상태여야 하고 그 앱 조직도 활성 상태여야 한다. 설정된 활성 enforcer가 그 앱과 Provider를 연결해야 한다. 다른 앱을 임의로 first-party로 올리는 절차가 아니다.
-- PocketBase 배포를 유지한다면 인증 설정의 application ID와 HTTP capability의 PEP application ID가 동일한 관리 앱을 가리켜야 한다. PocketBase 모드는 client ID 없이 ready인 기존 계약을 유지하며 Rauthy identity-binding을 호출하지 않는다. Rauthy로 전환할 경우 검증된 client ID와 token client의 일치가 필요하다.
+- user/application policy를 담당하는 관리 앱은 active/ready 및 first-party/auto-approve 상태여야 하고 그 앱 조직도 활성 상태여야 한다. 앱에 필요한 management Action과 사용자 consent는 기존처럼 검증한다.
+- HTTP capability service identity는 이 관리 앱과 별도로 `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`로 고정하고 Provider별로 등록한다. PocketBase 인증 설정의 application ID는 기존 managed user app을 계속 가리킨다. PocketBase 모드는 client ID 없이 ready인 기존 계약을 유지하며 Rauthy identity-binding을 호출하지 않는다. Rauthy로 전환할 경우 검증된 client ID와 token client의 일치가 필요하다.
 
 기존 first-party/auto-approve 앱의 Action 변경은 일반 Action 수정 API에서 차단된다. 따라서 기존 앱에 새 Action을 추가할 때는 private Grant 제어 경로와 운영자 인증을 확보하고, 현재 trust·Action 집합·ETag를 저장한 뒤 작업한다. master 권한의 trust API로 해당 관리 앱만 일시적으로 untrusted로 바꾸고, 앱 조직의 관리 권한을 가진 Bearer로 현재 집합에 새 Action을 병합하여 조건부 교체한다. master key만으로 조직 앱 Action API를 호출하는 것은 아니다. 교체 결과를 읽어 확인한 후 원래의 trusted 상태를 복원한다. 이 구간에서는 공개 관리 경로가 거절될 수 있으므로 전환 시간을 계획한다. 기존 관계없는 Action을 제거하지 않고, 실패나 결과 불명 시 저장 상태를 확인하여 복구하며 무조건 재시도하지 않는다.
 

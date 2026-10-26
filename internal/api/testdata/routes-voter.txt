@@ -7,6 +7,8 @@ DELETE /api/v1/orgs/{organizationId}/bindings/{bindingId}
 DELETE /api/v1/orgs/{organizationId}/groups/{groupId}
 DELETE /api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}
 DELETE /api/v1/orgs/{organizationId}/members/{userId}
+DELETE /api/v1/orgs/{organizationId}/owners/{userId}
+DELETE /api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}
 DELETE /api/v1/orgs/{organizationId}/roles/{roleId}
 DELETE /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}
 GET /api/v1/admin/providers/{providerId}/actions
@@ -29,6 +31,7 @@ GET /api/v1/orgs/{organizationId}/groups/{groupId}
 GET /api/v1/orgs/{organizationId}/groups/{groupId}/members
 GET /api/v1/orgs/{organizationId}/members
 GET /api/v1/orgs/{organizationId}/owner
+GET /api/v1/orgs/{organizationId}/owners
 GET /api/v1/orgs/{organizationId}/providers/{providerId}/actions
 GET /api/v1/orgs/{organizationId}/roles
 GET /api/v1/orgs/{organizationId}/roles/{roleId}/actions
@@ -43,6 +46,7 @@ PATCH /api/v1/orgs/{organizationId}
 PATCH /api/v1/orgs/{organizationId}/agreements/{agreementId}
 PATCH /api/v1/orgs/{organizationId}/apps/{applicationId}
 PATCH /api/v1/orgs/{organizationId}/groups/{groupId}
+PATCH /api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}
 PATCH /api/v1/orgs/{organizationId}/roles/{roleId}
 POST /api/v1/admin/bootstrap/owner
 POST /api/v1/admin/identity-links/goauthy
@@ -66,6 +70,7 @@ POST /api/v1/orgs/{organizationId}/deactivate
 POST /api/v1/orgs/{organizationId}/groups
 POST /api/v1/orgs/{organizationId}/reactivate
 POST /api/v1/orgs/{organizationId}/roles
+POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions
 POST /api/v2/http-capabilities/decide
 POST /ops/backups
 POST /ops/migrations/patch-data-authority
@@ -83,6 +88,7 @@ PUT /api/v1/orgs/{organizationId}/groups/{groupId}
 PUT /api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}
 PUT /api/v1/orgs/{organizationId}/members/{userId}
 PUT /api/v1/orgs/{organizationId}/owner
+PUT /api/v1/orgs/{organizationId}/owners/{userId}
 PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions
 PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}
 PUT /ops/providers/{providerId}/enforcers/{pepClientId}

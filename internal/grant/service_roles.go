@@ -83,6 +83,9 @@ func (s *Service) CreateRoleBindingAuthorized(ctx context.Context, user, org str
 	if in.SubjectOrganizationID != org {
 		return RoleBinding{}, serviceError(403, fmt.Sprintf("forbidden: role binding subject organization %s does not match path organization %s", in.SubjectOrganizationID, org))
 	}
+	if in.RoleID == "role-system-bootstrap-owner" || in.RoleID == "role-system-management-owner" {
+		return RoleBinding{}, serviceError(409, "system owner roles are assigned only by active organization membership")
+	}
 	vals := []string{in.ID, in.SubjectID, in.ProviderID, in.ResourceType, in.ResourceID, in.RoleID}
 	labels := []string{"id", "subjectId", "providerId", "resourceType", "resourceId", "roleId"}
 	for i := range vals {
@@ -107,6 +110,11 @@ func (s *Service) DeleteRoleBindingAuthorized(ctx context.Context, user, org, id
 	}
 	if _, err := serviceRow[RoleBinding](ctx, s, ReadStrong, "SELECT * FROM role_bindings WHERE id=? AND subject_organization_id=?", id, org); err != nil {
 		return err
+	}
+	if rows, err := s.store.Query(ctx, ReadStrong, "SELECT role_id FROM role_bindings WHERE id=? AND subject_organization_id=?", id, org); err != nil {
+		return err
+	} else if len(rows) == 1 && (rowString(rows[0], "role_id") == "role-system-bootstrap-owner" || rowString(rows[0], "role_id") == "role-system-management-owner") {
+		return serviceError(409, "system owner roles are assigned only by active organization membership")
 	}
 	return lifecycleError(s.store.Transaction(ctx, []Statement{
 		lifecycleActorGuard(user, org, "organization.permission.manage"),

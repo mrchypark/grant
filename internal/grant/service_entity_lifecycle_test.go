@@ -105,17 +105,107 @@ func TestLifecycleApplicationRevocationAndSafeDeletion(t *testing.T) {
 		t.Fatalf("crossorg %v", err)
 	}
 	lifecycleExec(t, ctx, s, "INSERT INTO provider_pep_clients(pep_client_id,application_id,provider_id,lifecycle,created_at,updated_at) VALUES('life-pep','life-app','grant','disabled',?,?)", nowString(), nowString())
-	if err := s.DeleteApplicationAuthorized(ctx, "owner", "owner", "life-app"); ErrorStatus(err) != 409 {
-		t.Fatalf("referenced deletion %v", err)
-	}
-	lifecycleExec(t, ctx, s, "DELETE FROM provider_pep_clients WHERE pep_client_id='life-pep'")
+	lifecycleExec(t, ctx, s, "INSERT INTO provider_pep_client_receipts(receipt_id,pep_client_id,application_id,provider_id,lifecycle,changed_at,changed_by) VALUES('life-pep-receipt','life-pep','life-app','grant','disabled',?,'test')", nowString())
 	if err := s.DeleteApplicationAuthorized(ctx, "owner", "owner", "life-app"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("application deletion must not affect independently registered PEP: %v", err)
+	}
+	if lifecycleCount(t, ctx, s, "SELECT * FROM provider_pep_clients WHERE pep_client_id='life-pep' AND lifecycle='disabled'") != 1 {
+		t.Fatal("application deletion removed or changed PEP lifecycle")
+	}
+	if lifecycleCount(t, ctx, s, "SELECT * FROM provider_pep_client_receipts WHERE receipt_id='life-pep-receipt' AND application_id='life-app'") != 1 {
+		t.Fatal("application deletion removed historical PEP receipt")
 	}
 	for _, q := range []string{"SELECT * FROM applications WHERE id='life-app'", "SELECT * FROM application_grants WHERE application_id='life-app'", "SELECT * FROM application_grant_actions WHERE application_grant_id='life-consent'", "SELECT * FROM application_actions WHERE application_id='life-app'"} {
 		if lifecycleCount(t, ctx, s, q) != 0 {
 			t.Fatal("orphan", q)
 		}
+	}
+}
+
+func TestLifecycleApplicationRedirectPatchIsPreBindingOnly(t *testing.T) {
+	ctx, s := serviceFixture(t)
+	lifecycleApp(t, ctx, s)
+	callback := "https://operable.dev.conalog.com/oauth/callback"
+	updated, err := s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{
+		RedirectURI: PatchText{Present: true, Value: &callback},
+	})
+	if err != nil || updated.ProvisioningStatus != "unprovisioned" || updated.RauthyClientID != nil {
+		t.Fatalf("redirect patch changed binding state: %+v %v", updated, err)
+	}
+	read, err := s.GetApplicationDetailAuthorized(ctx, "owner", "owner", "life-app", ReadStrong)
+	if err != nil || read.RedirectURI == nil || *read.RedirectURI != callback {
+		t.Fatalf("redirect missing after patch: %+v %v", read, err)
+	}
+
+	name := "Renamed"
+	updated, err = s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{Name: &name})
+	if err != nil || updated.Name != name {
+		t.Fatalf("name patch failed: %+v %v", updated, err)
+	}
+	read, err = s.GetApplicationDetailAuthorized(ctx, "owner", "owner", "life-app", ReadStrong)
+	if err != nil || read.RedirectURI == nil || *read.RedirectURI != callback {
+		t.Fatalf("omitted redirectUri was not preserved: %+v %v", read, err)
+	}
+
+	for _, patch := range []PatchText{{Present: true}, {Present: true, Value: ptr("")}, {Present: true, Value: ptr("https://operable.dev.conalog.com/oauth/callback?next=elsewhere")}} {
+		if _, err = s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{RedirectURI: patch}); ErrorStatus(err) != 400 {
+			t.Fatalf("invalid redirect patch accepted: %+v err=%v", patch, err)
+		}
+	}
+	read, err = s.GetApplicationDetailAuthorized(ctx, "owner", "owner", "life-app", ReadStrong)
+	if err != nil || read.RedirectURI == nil || *read.RedirectURI != callback {
+		t.Fatalf("rejected patch changed redirectUri: %+v %v", read, err)
+	}
+
+	app, err := s.store.GetApplicationWithConsistency(ctx, "life-app", ReadStrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.store.BindApplicationIdentity(ctx, app, "bound-client", read.RedirectURI); err != nil {
+		t.Fatal("test bind", err)
+	}
+	changed := "https://operable.dev.conalog.com/other"
+	if _, err = s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{RedirectURI: PatchText{Present: true, Value: &changed}}); ErrorStatus(err) != 409 {
+		t.Fatalf("bound app redirect changed: %v", err)
+	}
+}
+
+func TestLifecycleApplicationRedirectPatchRejectsPlatformManagedApp(t *testing.T) {
+	ctx, s := serviceFixture(t)
+	lifecycleApp(t, ctx, s)
+	lifecycleExec(t, ctx, s, "UPDATE applications SET first_party=1,consent_policy='auto_approve' WHERE id='life-app'")
+	callback := "https://operable.dev.conalog.com/oauth/callback"
+	if _, err := s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{RedirectURI: PatchText{Present: true, Value: &callback}}); ErrorStatus(err) != 409 {
+		t.Fatalf("platform app redirect changed: %v", err)
+	}
+	if lifecycleCount(t, ctx, s, "SELECT * FROM application_redirect_uris WHERE application_id='life-app'") != 0 {
+		t.Fatal("platform app redirect manifest changed")
+	}
+}
+
+func TestLifecycleApplicationRedirectPatchRespectsSecurityLeaseAndBindSnapshot(t *testing.T) {
+	ctx, s := serviceFixture(t)
+	lifecycleApp(t, ctx, s)
+	callback := "https://operable.dev.conalog.com/oauth/callback"
+	lifecycleExec(t, ctx, s, "UPDATE applications SET security_mutation_token='lease',security_mutation_expires_at='9999-01-01T00:00:00Z' WHERE id='life-app'")
+	if _, err := s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{RedirectURI: PatchText{Present: true, Value: &callback}}); ErrorStatus(err) != 409 {
+		t.Fatalf("redirect changed under security lease: %v", err)
+	}
+	lifecycleExec(t, ctx, s, "UPDATE applications SET security_mutation_token=NULL,security_mutation_expires_at=NULL WHERE id='life-app'")
+
+	app, err := s.store.GetApplicationWithConsistency(ctx, "life-app", ReadStrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.PatchApplicationMetadataAuthorized(ctx, "owner", "owner", "life-app", ApplicationMetadataPatch{RedirectURI: PatchText{Present: true, Value: &callback}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.store.BindApplicationIdentity(ctx, app, "stale-client", nil); err == nil {
+		t.Fatal("binding with stale redirect snapshot succeeded")
+	}
+	bound, err := s.store.GetApplicationWithConsistency(ctx, "life-app", ReadStrong)
+	if err != nil || bound.ProvisioningStatus != "unprovisioned" || bound.RauthyClientID != nil {
+		t.Fatalf("failed stale bind changed app: %+v %v", bound, err)
 	}
 }
 
@@ -161,7 +251,7 @@ func TestLifecycleMutationGuardRechecksAuthorityInsideTransaction(t *testing.T) 
 	ctx, s := serviceFixture(t)
 	guard := lifecycleActorGuard("owner", "owner", "organization.application.manage")
 	// Simulate revocation between the service's initial authorization and its write.
-	lifecycleExec(t, ctx, s, "UPDATE role_bindings SET state='disabled' WHERE subject_type='user' AND subject_id='owner'")
+	lifecycleExec(t, ctx, s, "UPDATE organization_memberships SET membership_role='member',updated_at=? WHERE organization_id='owner' AND user_id='owner'", nowString())
 	err := s.store.Transaction(ctx, []Statement{guard, {SQL: "UPDATE users SET display_name='should-not-write' WHERE id='owner'"}})
 	if err == nil {
 		t.Fatal("transaction accepted stale authority")

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -188,7 +189,7 @@ func ReadStoreSnapshot(path string) (StoreSnapshot, error) {
 	return s, ValidateStoreSnapshot(s)
 }
 func ValidateStoreSnapshot(s StoreSnapshot) error {
-	if s.Version != 1 || (s.SchemaDigest != canonicalSchemaDigest() && s.SchemaDigest != legacySchemaDigestV3()) {
+	if s.Version != 1 || (s.SchemaDigest != canonicalSchemaDigest() && s.SchemaDigest != legacySchemaDigestV4() && s.SchemaDigest != legacySchemaDigestV3()) {
 		return fmt.Errorf("snapshot schema mismatch")
 	}
 	expected := applicationTables()
@@ -198,6 +199,18 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 	for i, t := range s.Tables {
 		if t.Name != expected[i] || int64(len(t.Rows)) != t.Count {
 			return fmt.Errorf("snapshot count/inventory mismatch")
+		}
+		// V5 changes PEP constraints but preserves the v3/v4 column layout.
+		// Check it before admitting either current or legacy rows for restore.
+		var pepColumns []string
+		switch t.Name {
+		case "provider_pep_clients":
+			pepColumns = []string{"pep_client_id", "application_id", "provider_id", "lifecycle", "valid_until", "created_at", "updated_at"}
+		case "provider_pep_client_receipts":
+			pepColumns = []string{"receipt_id", "pep_client_id", "application_id", "provider_id", "lifecycle", "valid_until", "changed_at", "changed_by"}
+		}
+		if pepColumns != nil && !slices.Equal(t.Columns, pepColumns) {
+			return fmt.Errorf("snapshot PEP columns mismatch: %s", t.Name)
 		}
 		for _, r := range t.Rows {
 			if len(r) != len(t.Columns) {

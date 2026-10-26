@@ -31,6 +31,7 @@ func lifecycleCall(t *testing.T, s *Server, method, path, body, org string, mast
 func TestLifecycleProviderHTTPContracts(t *testing.T) {
 	s := managementTestServer(t)
 	lifecycleCall(t, s, "POST", "/api/v1/admin/providers", `{"id":"lifecycle-provider","name":"Original","description":"preserve","active":true}`, "mgmt-org", true, 201)
+	lifecycleCall(t, s, "PUT", "/api/v1/admin/orgs/mgmt-org/apps/app-1/internal-admission", "", "mgmt-org", true, 404)
 	lifecycleCall(t, s, "POST", "/api/v1/admin/providers", `{"id":"lifecycle-provider","name":"Overwrite","active":false}`, "mgmt-org", true, 409)
 	// Existing create permission cannot authorize the new update action.
 	lifecycleCall(t, s, "PATCH", "/api/v1/admin/providers/lifecycle-provider", `{"name":"Denied"}`, "mgmt-org", false, 403)
@@ -61,6 +62,15 @@ func TestLifecycleProviderHTTPContracts(t *testing.T) {
 	}
 	lifecycleCall(t, s, "POST", "/api/v1/admin/orgs/mgmt-org/apps/app-1/provisioning/verify", "", "mgmt-org", true, 404)
 	lifecycleCall(t, s, "PUT", "/api/v1/admin/orgs/mgmt-org/apps/app-1/identity-binding", `{"clientId":"external"}`, "mgmt-org", false, 403)
+}
+
+func TestPepRegistrationHasNoApplicationField(t *testing.T) {
+	s, store := managementTestServerWithStore(t)
+	lifecycleCall(t, s, "PUT", "/ops/providers/grant-management/enforcers/lifecycle-pep", `{"lifecycle":"active","validUntil":null}`, "", true, 200)
+	if _, err := store.GetApplicationWithConsistency(context.Background(), "lifecycle-pep", grant.ReadStrong); err == nil {
+		t.Fatal("PEP registration created or required an application")
+	}
+	lifecycleCall(t, s, "PUT", "/ops/providers/grant-management/enforcers/legacy-pep", `{"applicationId":"app-1","lifecycle":"active"}`, "", true, 422)
 }
 
 func TestLifecycleOrganizationAndMetadataHTTP(t *testing.T) {
@@ -96,6 +106,57 @@ func TestLifecycleOrganizationAndMetadataHTTP(t *testing.T) {
 	lifecycleCall(t, s, "POST", "/api/v1/orgs/created-org/roles", `{"id":"lifecycle-role","code":"role","name":"Role"}`, "created-org", false, 201)
 	lifecycleCall(t, s, "PATCH", "/api/v1/orgs/created-org/roles/lifecycle-role", `{"name":"Renamed"}`, "created-org", false, 200)
 	lifecycleCall(t, s, "DELETE", "/api/v1/orgs/created-org/roles/lifecycle-role", "", "created-org", false, 204)
+}
+
+func TestLifecycleApplicationRedirectPatchHTTP(t *testing.T) {
+	s, store := managementTestServerWithStore(t)
+	ctx := context.Background()
+	now := "2025-01-01T00:00:00Z"
+	if _, err := store.Exec(ctx, "INSERT INTO applications(id,organization_id,slug,name,application_type,app_type,first_party,consent_policy,active,provisioning_status,created_by_user_id,created_at,updated_at) VALUES('patch-app','owner','patch-app','Original','confidential','web',0,'explicit',1,'unprovisioned','owner',?,?)", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Exec(ctx, "INSERT INTO applications(id,organization_id,slug,name,application_type,app_type,first_party,consent_policy,active,provisioning_status,created_by_user_id,created_at,updated_at) VALUES('patch-ready','owner','patch-ready','Ready','confidential','web',0,'explicit',1,'ready','owner',?,?)", now, now); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/orgs/owner/apps/patch-app"
+	for _, body := range []string{
+		`{"redirectUri":null}`,
+		`{"redirectUri":""}`,
+		`{"redirectUri":"https://operable.dev.conalog.com/callback?unsafe=1"}`,
+		`{"applicationType":"public"}`,
+		`{"active":false}`,
+		`{"clientId":"attacker"}`,
+		`{"description":"not part of this patch contract"}`,
+		`{"redirectUri":"https://one.example/cb","redirectUri":"https://two.example/cb"}`,
+	} {
+		want := 422
+		if strings.Contains(body, `"redirectUri":""`) || strings.Contains(body, "unsafe=1") {
+			want = 400
+		}
+		lifecycleCall(t, s, "PATCH", path, body, "owner", false, want)
+	}
+	callback := "https://operable.dev.conalog.com/oauth/callback"
+	w := lifecycleCall(t, s, "PATCH", path, `{"redirectUri":"https://operable.dev.conalog.com/oauth/callback"}`, "owner", false, 200)
+	var patched grant.Application
+	if err := json.Unmarshal(w.Body.Bytes(), &patched); err != nil || patched.Name != "Original" || patched.ProvisioningStatus != "unprovisioned" {
+		t.Fatalf("unexpected patch result: %+v %v %s", patched, err, w.Body.String())
+	}
+
+	// Existing metadata PATCH behavior stays partial: changing the name must not
+	// remove the callback installed above.
+	lifecycleCall(t, s, "PATCH", path, `{"name":"Renamed"}`, "owner", false, 200)
+	w = lifecycleCall(t, s, "GET", path, "", "owner", false, 200)
+	var detail struct {
+		grant.Application
+		RedirectURI *string `json:"redirectUri"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail.Name != "Renamed" || detail.RedirectURI == nil || *detail.RedirectURI != callback {
+		t.Fatalf("omitted redirectUri changed: %+v %v %s", patched, err, w.Body.String())
+	}
+
+	lifecycleCall(t, s, "PATCH", path, `{"redirectUri":"https://operable.dev.conalog.com/another"}`, "mgmt-org", false, 403)
+	// Ready/bound applications cannot have their callback changed through this route.
+	lifecycleCall(t, s, "PATCH", "/api/v1/orgs/owner/apps/patch-ready", `{"redirectUri":"https://operable.dev.conalog.com/oauth/callback"}`, "owner", false, 409)
 }
 
 func TestLifecycleHTTPMemberRemovalRevokesAccess(t *testing.T) {

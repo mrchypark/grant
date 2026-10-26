@@ -60,7 +60,7 @@ func TestIdentityBindingVerifiedAndFailClosed(t *testing.T) {
 	if err != nil || a.ProvisioningStatus != "unprovisioned" || a.RauthyClientID != nil {
 		t.Fatal("failed verification mutated app", a, err)
 	}
-	for _, mode := range []string{"goauthy", "pocketbase", ""} {
+	for _, mode := range []string{"pocketbase", ""} {
 		before := calls
 		s.cfg.Auth.ProviderMode = mode
 		_, err = s.BindApplicationIdentityAdmin(ctx, "owner", "client", IdentityBindingInput{ClientID: "external-client"})

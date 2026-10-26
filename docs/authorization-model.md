@@ -16,7 +16,7 @@
 
 일반 요청에서 조직 소속과 역할·리소스 권한은 Grant의 로컬 권한 데이터가 결정한다. 인증 성공 자체가 조직 가입이나 관리자 권한을 뜻하지 않는다. master 인증 owner bootstrap은 별도 관리 동작이다. `GRANT_POCKETBASE_APPLICATION_ID`는 검증된 토큰을 사용할 Grant 애플리케이션 설정이며 폐기된 Exposure 전용 API와 무관하다.
 
-구현 근거: [공급자 설정](../internal/grant/config.go), [외부 토큰 검증](../internal/grant/auth_external.go), [내부 identity·조직 검증](../internal/grant/auth_current.go). Grant의 `/auth`, `/auth/v1`, `/auth/v1/*` 프록시는 제거했다. IdP 요청은 Gateway에서 직접 라우팅한다. 앱 identity-binding의 외부 클라이언트 검증은 현재 Rauthy 읽기 전용 어댑터만 지원하며 Goauthy로 자동 확대하지 않는다.
+구현 근거: [공급자 설정](../internal/grant/config.go), [외부 토큰 검증](../internal/grant/auth_external.go), [내부 identity·조직 검증](../internal/grant/auth_current.go). Grant의 `/auth`, `/auth/v1`, `/auth/v1/*` 프록시는 제거했다. IdP 요청은 Gateway에서 직접 라우팅한다. 앱 identity-binding은 Rauthy 또는 Goauthy 읽기 전용 verifier를 사용한다. Goauthy는 기존 introspection Basic 자격 증명으로 설정된 bootstrap client의 `/oidc/client-configuration`을 읽으며 별도 client-read API key를 요구하지 않는다.
 
 ## 핵심 객체
 
@@ -31,6 +31,8 @@
 - `agreements`: 조직 간 권한 부여의 근거다.
 - `applications`: 조직 내부 또는 first-party application이다.
 - `application_grants`: 사용자가 application에 동의한 action subset이다.
+
+`organization_memberships`의 active owner 소속 집합이 canonical ownership이다. Owner membership은 해당 organization의 management action만 허용하며, platform action이나 application admission을 우회하지 않는다. Legacy system-owner role binding은 stale 상태여도 비-owner에게 권한을 주지 않는다. owner add/remove는 membership snapshot ETag와 last-active-owner 조건을 transaction 안에서 검사한다. Operable 사용자 정의 Action은 조직별 SHA-256 namespace를 사용해 global provider catalog에서 교차 조직 수정을 막는다.
 
 ## Role Binding Scope
 
@@ -101,7 +103,7 @@ application은 조직이 만든 실행 주체다. 조직 owner/관리자는 appl
 
 application이 사용할 수 있는 action은 `application_actions`에 먼저 등록되어야 하며, `application_grant_actions`는 그 subset만 허용된다.
 
-현재 release는 redirect URI 변경이나 client secret 회전 API를 노출하지 않는다. 앱 생성은 IdP client ID를 발급하지 않는다. Rauthy 모드에서는 client ID 없는 unprovisioned 객체와 선택적 단일 redirectUri manifest를 저장한다. 플랫폼 운영자가 `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding`에 기존 `clientId`를 전달하면 설정된 Rauthy 읽기 전용 어댑터가 ID, 이름, 활성·confidential 상태, redirect URI, flow와 public PKCE S256을 검증한다. 검증 당시의 로컬 manifest와 상태가 여전히 같은 경우에만 원자적으로 ready와 client ID를 저장한다. 다른 앱의 client ID 중복이나 ready 앱의 다른 ID로 재연결은 거절한다. URI는 canonical HTTPS 또는 포트를 명시한 loopback IP HTTP만 허용한다. Grant는 IdP 클라이언트를 생성·수정·삭제하지 않는다. `GRANT_RAUTHY_CLIENT_READ_API_KEY`는 이 검증에만 필요하며 없으면 연결 요청은 503이다. 정상 토큰 검증에는 해당 관리 API 키가 필요하지 않다.
+현재 release는 identity binding 전 미연결 앱의 redirect URI 설정을 지원하며 client secret 회전 API는 제공하지 않는다. 앱 생성은 IdP client ID를 발급하지 않는다. Rauthy와 Goauthy 모드에서는 client ID 없는 unprovisioned 객체와 선택적 단일 redirectUri manifest를 저장한다. 플랫폼 identity-binding API는 provider의 읽기 전용 어댑터로 기존 client를 검증한다. Goauthy는 설정된 application과 introspection/expected client ID가 모두 일치하는 활성 confidential bootstrap client만 지원한다. 정확한 redirect 목록과 필요한 scope·flow, resource를 포함한 허용 `audience`, 정확히 `[resource]`인 `default_aud`, 응답 원문의 ETag와 `no-store`를 검증한다. 검증한 로컬 manifest와 상태가 여전히 같을 때만 client ID와 ready를 원자 저장하며 중복 ID나 ready 앱의 다른 ID로 재연결은 거절한다. URI는 canonical HTTPS 또는 포트를 명시한 loopback IP HTTP만 허용한다. Grant는 외부 클라이언트를 변경하지 않는다. Rauthy만 별도 `GRANT_RAUTHY_CLIENT_READ_API_KEY`가 필요하며 Goauthy는 기존 introspection 자격 증명을 사용한다.
 
 trusted auto-approve는 `first_party = true`와 `consent_policy = auto_approve`가 모두 성립할 때만 적용한다. 조직 application API는 두 신뢰 필드를 입력받지 않으며 master trust API만 승격/해제한다. trusted application은 조직 경로에서 보안 설정을 바꿀 수 없다.
 
@@ -178,7 +180,7 @@ Rauthy 일반 로그인도 정확한 identity 매핑만 재사용하며 이메�
 
 ## 조직과 앱의 수명주기
 
-새 조직 생성은 플랫폼 권한으로 기존 활성 사용자를 owner로 지정하며 소속과 해당 조직 owner Binding을 원자 생성한다. 조직 관리자는 그룹·앱·역할의 메타데이터를 PATCH할 수 있지만 식별자·소유 조직·IdP 연결·trust를 이 경로로 변경할 수 없다. 새 경로·입력은 [수명주기 계약](api-lifecycle.md)을 따른다.
+새 조직 생성은 플랫폼 권한으로 기존 활성 사용자를 owner로 지정하며 소속을 원자 생성한다. 조직 관리자는 그룹·앱·역할의 메타데이터를 PATCH할 수 있지만 식별자·소유 조직·IdP 연결·trust를 이 경로로 변경할 수 없다. 새 경로·입력은 [수명주기 계약](api-lifecycle.md)을 따른다.
 
 구성원 제거는 inactive 소속 기록을 남기고 개인 Binding·그룹 소속·앱 동의를 철회한다. 재가입 시 개인 부여는 복원되지 않으며 현재 조직 전체 권한만 다시 적용될 수 있다. owner는 이 경로로 제거할 수 없다. 앱 비활성화도 기존 동의를 철회하므로 활성화 후 새 동의가 필요하다. first-party 앱의 상태 변경·삭제는 조직 API에서 금지하며 배포 enforcer가 참조한 앱 삭제는 409다. 역할 삭제는 Binding을 먼저 제거해야 한다. 조직 관리자는 `DELETE .../app-grants/{grantId}`로 다른 구성원의 조직 내 동의를 철회할 수 있다.
 

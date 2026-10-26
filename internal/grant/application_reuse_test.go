@@ -66,7 +66,7 @@ func TestBulkApplicationActionsRecheckActorInTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lifecycleExec(t, ctx, s, "UPDATE role_bindings SET state='disabled' WHERE subject_id='owner'")
+	lifecycleExec(t, ctx, s, "UPDATE organization_memberships SET membership_role='member' WHERE user_id='owner' AND organization_id='owner'")
 	if _, err = s.store.replaceApplicationActions(ctx, target, "owner", []string{"organization.profile.read"}); err == nil {
 		t.Fatal("revoked actor changed actions")
 	}
@@ -82,9 +82,7 @@ func TestRemovedAdminReenrollsAsMemberWithoutAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycleExec(t, ctx, s, "UPDATE organization_memberships SET membership_role='admin' WHERE user_id='admin' AND organization_id='owner'")
-	if _, err := s.CreateRoleBindingAuthorized(ctx, "owner", "owner", CreateRoleBindingInput{ID: "admin-role-binding", SubjectType: "user", SubjectID: "admin", SubjectOrganizationID: "owner", ProviderID: "grant", ResourceType: "organization", ResourceID: "owner", RoleID: "role-system-bootstrap-owner", State: "active"}); err != nil {
-		t.Fatal(err)
-	}
+	lifecycleExec(t, ctx, s, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES('admin-role-binding','user','admin','owner','grant','organization','owner','role-system-bootstrap-owner','active','owner',?,?)", nowString(), nowString())
 	if err := s.RemoveOrganizationMemberAuthorized(ctx, "owner", "owner", "admin"); err != nil {
 		t.Fatal(err)
 	}

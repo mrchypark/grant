@@ -2,7 +2,10 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -48,6 +51,44 @@ func TestPrivateMigrationValidationStatus(t *testing.T) {
 	if !strings.Contains(repeat.Body.String(), `"applied":false`) {
 		t.Fatalf("valid import not idempotent: %s", repeat.Body.String())
 	}
+}
+
+func TestOwnerScopedOperableActionHTTPContract(t *testing.T) {
+	s := managementTestServer(t)
+	if _, err := s.service.UpsertServiceProviderAdmin(context.Background(), grant.ServiceProvider{ID: "operable", Name: "Operable", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	org := "mgmt-org"
+	digest := sha256.Sum256([]byte(org))
+	code := fmt.Sprintf("custom.org-%x.calendar.event.create", digest)
+	call := func(method, path, body string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer tok")
+		r.Header.Set("X-Organization-ID", org)
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s %s: got %d want %d: %s", method, path, w.Code, want, w.Body.String())
+		}
+		return w
+	}
+	path := "/api/v1/orgs/" + org + "/providers/operable/actions"
+	created := call("POST", path, `{"code":"`+code+`","name":"Create event","riskLevel":"medium"}`, 201)
+	var action grant.Action
+	if err := json.Unmarshal(created.Body.Bytes(), &action); err != nil {
+		t.Fatal(err)
+	}
+	if action.ID != "operable."+code || action.GrantableToApplications || action.VisibilityGranting {
+		t.Fatalf("unexpected action: %+v", action)
+	}
+	item := path + "/" + action.ID
+	call("PATCH", item, `{"name":"Renamed"}`, 200)
+	call("DELETE", item, "", 204)
+	call("POST", "/api/v1/orgs/"+org+"/providers/grant/actions", `{"code":"`+code+`","name":"Invalid provider","riskLevel":"low"}`, 404)
 }
 
 func TestProviderActionHTTPPreconditionsAndPatch(t *testing.T) {
@@ -101,7 +142,7 @@ func TestPrivateOpsCannotUseManagementBearer(t *testing.T) {
 		{"GET", "/ops/backups", ""},
 		{"POST", "/ops/backups", ""},
 		{"POST", "/ops/migrations/patch-data-authority", `{"manifestVersion":"grant.patch-data-authority.v1","generation":"1","ledgerDigest":"x","manifestDigest":"x","users":[],"organizations":[],"memberships":[],"hierarchyEdges":[],"plantBindings":[],"applicationAssignments":[]}`},
-		{"PUT", "/ops/providers/grant-management/enforcers/pep", `{"applicationId":"app-1","lifecycle":"active"}`},
+		{"PUT", "/ops/providers/grant-management/enforcers/pep", `{"lifecycle":"active"}`},
 	} {
 		r := httptest.NewRequest(endpoint.method, endpoint.path, strings.NewReader(endpoint.body))
 		r.Header.Set("Authorization", "Bearer tok")

@@ -149,7 +149,7 @@ func TestBatchPolicyAndOperationBounds(t *testing.T) {
 
 func TestBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
 	ctx := context.WithValue(context.Background(), replicaIdentityKey{}, ExternalIdentity{Provider: "rauthy", ExternalUserID: "batch-user", ClientID: "batch-client", Active: true})
-	cfg := Config{Database: DatabaseConfig{DataDir: t.TempDir()}, Auth: AuthConfig{ProviderMode: "rauthy"}, Security: SecurityConfig{HTTPCapabilityPEPApplicationID: "batch-app"}}
+	cfg := Config{Database: DatabaseConfig{DataDir: t.TempDir()}, Auth: AuthConfig{ProviderMode: "rauthy"}, Security: SecurityConfig{HTTPCapabilityPEPClientID: "batch-pep", ManagementApplicationID: "batch-app"}}
 	store, err := OpenStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
 	if _, err = svc.ReplaceProviderActionsAdmin(ctx, "patch-data", actions); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.UpsertProviderPepClient(ctx, "patch-data", "batch-pep", "conalog-grant", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); err != nil {
+	if _, err = store.UpsertProviderPepClient(ctx, "patch-data", "batch-pep", "conalog-grant", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.StageHttpCapabilityGeneration(ctx, "patch-data", stage); err != nil {

@@ -179,7 +179,7 @@ func TestLegacyV3SnapshotRejectsGoauthyIdentityRows(t *testing.T) {
 
 func TestGoauthyApplicationContextsUseIssuerQualifiedSubject(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{Security: SecurityConfig{HTTPCapabilityPEPApplicationID: "ied-management"}, Auth: AuthConfig{ProviderMode: "goauthy", Goauthy: &GoauthyConfig{Issuer: testGoauthyIssuer, ApplicationID: "ied-management"}}, Database: DatabaseConfig{DataDir: t.TempDir()}}
+	cfg := Config{Security: SecurityConfig{ManagementApplicationID: "ied-management"}, Auth: AuthConfig{ProviderMode: "goauthy", Goauthy: &GoauthyConfig{Issuer: testGoauthyIssuer, ApplicationID: "ied-management"}}, Database: DatabaseConfig{DataDir: t.TempDir()}}
 	store, err := OpenStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
