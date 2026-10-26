@@ -109,7 +109,7 @@ spec:
               mountPath: /bootstrap
       containers:
         - name: rauthy
-          image: ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0-9d95f0f7513b7e26559a87d22d9fb90ccf4ee530@sha256:d1bf34bc156f7227d782c231c3bb0111d1cb8317017f1539f8ef22cdc10f2f7a
+          image: ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.37.1-91212a40741e2be07ab5dc0570073f92d4ce2f50@sha256:d8e8b71ae7d19b3fba395a36e14ed0639ceb4ef770fc59bc8e4f1372221e6b93
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/rauthy-launcher"]
           args: ["/app/rauthy", "serve"]
