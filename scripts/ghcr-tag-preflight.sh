@@ -98,7 +98,7 @@ registry_token="$(jq -er '.token // .access_token' "${token_response}")"
 {
   printf 'silent\n'
   printf 'show-error\n'
-  printf 'no-body\n'
+  printf 'head\n'
   printf 'output = "/dev/null"\n'
   printf 'write-out = "%%{http_code}"\n'
   printf 'header = "Authorization: Bearer %s"\n' "${registry_token}"
