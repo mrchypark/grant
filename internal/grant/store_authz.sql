@@ -63,6 +63,13 @@
                              AND rb.resource_type = req.resource_type
                              AND rb.resource_id = req.resource_id
                              AND rb.state = 'active'
+                             AND (rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner') OR EXISTS (
+                                 SELECT 1 FROM organization_memberships owner_membership
+                                 WHERE owner_membership.user_id = req.user_id
+                                   AND owner_membership.organization_id = req.organization_id
+                                   AND owner_membership.status = 'active'
+                                   AND owner_membership.membership_role = 'owner'
+                             ))
                             JOIN role_actions ra
                               ON ra.role_id = rb.role_id
                              AND ra.action_id = req.action_id
@@ -92,6 +99,13 @@
                              AND rb.resource_type = req.resource_type
                              AND rb.resource_id = req.resource_id
                              AND rb.state = 'active'
+                             AND (rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner') OR EXISTS (
+                                 SELECT 1 FROM organization_memberships owner_membership
+                                 WHERE owner_membership.user_id = req.user_id
+                                   AND owner_membership.organization_id = req.organization_id
+                                   AND owner_membership.status = 'active'
+                                   AND owner_membership.membership_role = 'owner'
+                             ))
                             JOIN role_actions ra
                               ON ra.role_id = rb.role_id
                              AND ra.action_id = req.action_id
@@ -120,6 +134,13 @@
                              AND rb.resource_type = req.resource_type
                              AND rb.resource_id = req.resource_id
                              AND rb.state = 'active'
+                             AND (rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner') OR EXISTS (
+                                 SELECT 1 FROM organization_memberships owner_membership
+                                 WHERE owner_membership.user_id = req.user_id
+                                   AND owner_membership.organization_id = req.organization_id
+                                   AND owner_membership.status = 'active'
+                                   AND owner_membership.membership_role = 'owner'
+                             ))
                             JOIN role_actions ra
                               ON ra.role_id = rb.role_id
                              AND ra.action_id = req.action_id
@@ -138,6 +159,30 @@
                                 AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
                                 AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
                             )
+
+                            UNION
+
+                            -- Owner authority comes from the active membership role. It is
+                            -- limited to declared actions on that same organization.
+                            SELECT DISTINCT req.idx
+                            FROM eligible_requested req
+                            JOIN organization_memberships om
+                              ON om.organization_id = req.organization_id
+                             AND om.user_id = req.user_id
+                             AND om.status = 'active'
+                             AND om.membership_role = 'owner'
+                            JOIN role_actions ra
+                              ON ra.role_id = CASE req.provider_id
+                                  WHEN 'grant' THEN 'role-system-bootstrap-owner'
+                                  WHEN 'grant-management' THEN 'role-system-management-owner'
+                              END
+                             AND ra.action_id = req.action_id
+                            JOIN actions act
+                              ON act.id = ra.action_id
+                             AND act.provider_id = req.provider_id
+                            WHERE req.resource_type = 'organization'
+                              AND req.resource_id = req.organization_id
+                              AND req.provider_id IN ('grant', 'grant-management')
                         ),
                         trusted_application_allowed AS (
                             SELECT DISTINCT req.idx

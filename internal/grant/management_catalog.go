@@ -121,6 +121,12 @@ var managementRoutes = []ManagementRoute{
 	// Append new routes to preserve existing capability IDs, which include the index.
 	{Method: "GET", Path: "/api/v1/admin/users", ActionCode: "admin.users.read", Platform: true},
 	{Method: "GET", Path: "/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}", ActionCode: "admin.catalog.read", Platform: true},
+	{Method: "GET", Path: "/api/v1/orgs/{organizationId}/owners", ActionCode: "owners.read"},
+	{Method: "PUT", Path: "/api/v1/orgs/{organizationId}/owners/{userId}", ActionCode: "owners.add"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/owners/{userId}", ActionCode: "owners.remove"},
+	{Method: "POST", Path: "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", ActionCode: "custom.actions.create"},
+	{Method: "PATCH", Path: "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", ActionCode: "custom.actions.update"},
+	{Method: "DELETE", Path: "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", ActionCode: "custom.actions.delete"},
 }
 
 // ManagementRoutes returns a copy of the complete sorted registry of
@@ -202,6 +208,11 @@ func ManagementCatalog(generation uint64, previous *uint64) (StageHttpCapability
 				HttpQueryParameter{Name: "cursor", Format: "text", MaxBytes: 1024},
 				HttpQueryParameter{Name: "limit", Format: "text", MaxBytes: 20},
 				HttpQueryParameter{Name: "q", Format: "text", MaxBytes: 1024})
+		}
+		if managementOnboardingCapability(provider, c) {
+			c.OrganizationContext = "optional"
+			// Policy changes require a new immutable capability version.
+			c.Version = 2
 		}
 		var err error
 		c.ContractDigest, err = HttpCapabilityContractDigest(c)
@@ -295,6 +306,7 @@ func isBodyRoute(path string) bool {
 		"/api/v1/orgs/{organizationId}/deactivate",
 		"/api/v1/orgs/{organizationId}/reactivate",
 		"/api/v1/orgs/{organizationId}/members/{userId}",
+		"/api/v1/orgs/{organizationId}/owners/{userId}",
 		"/api/v1/orgs/{organizationId}/groups/{groupId}/members/{userId}",
 		"/api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}",
 		"/api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}":

@@ -21,6 +21,7 @@ type HttpCapability struct {
 	RecordScope           *HttpRecordScopePolicy     `json:"recordScope,omitempty"`
 	Batch                 *HttpBatchPolicy           `json:"batch,omitempty"`
 	ResponseAuthorization *HttpResponseAuthorization `json:"responseAuthorization,omitempty"`
+	OrganizationContext   string                     `json:"organizationContext,omitempty"`
 }
 
 type HttpResponseResource struct {
@@ -143,13 +144,12 @@ type HttpCapabilityActivation struct {
 	ActivatedBy         string  `json:"activatedBy"`
 }
 type UpsertProviderPepClient struct {
-	ApplicationID string                     `json:"applicationId"`
-	Lifecycle     ProviderPepClientLifecycle `json:"lifecycle"`
-	ValidUntil    *string                    `json:"validUntil"`
+	Lifecycle  ProviderPepClientLifecycle `json:"lifecycle"`
+	ValidUntil *string                    `json:"validUntil"`
 }
 type ProviderPepClient struct {
 	PepClientID   string  `json:"pepClientId"`
-	ApplicationID string  `json:"applicationId"`
+	ApplicationID string  `json:"applicationId,omitempty"`
 	ProviderID    string  `json:"providerId"`
 	Lifecycle     string  `json:"lifecycle"`
 	ValidUntil    *string `json:"validUntil"`

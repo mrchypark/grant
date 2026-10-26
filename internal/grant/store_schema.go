@@ -19,7 +19,39 @@ var indexesSQL string
 //go:embed store_schema_goauthy_v4.sql
 var goauthySchemaV4SQL string
 
+const pepIdentityMigrationSQL = `ALTER TABLE provider_pep_clients RENAME TO provider_pep_clients_application_v1;
+ALTER TABLE provider_pep_client_receipts RENAME TO provider_pep_client_receipts_application_v1;
+CREATE TABLE provider_pep_clients (
+ pep_client_id TEXT PRIMARY KEY,
+ application_id TEXT,
+ provider_id TEXT NOT NULL,
+ lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'disabled', 'deleted')),
+ valid_until TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ FOREIGN KEY (provider_id) REFERENCES service_providers(id)
+);
+CREATE TABLE provider_pep_client_receipts (
+ receipt_id TEXT PRIMARY KEY,
+ pep_client_id TEXT NOT NULL,
+ application_id TEXT,
+ provider_id TEXT NOT NULL,
+ lifecycle TEXT NOT NULL,
+ valid_until TEXT,
+ changed_at TEXT NOT NULL,
+ changed_by TEXT NOT NULL
+);
+INSERT INTO provider_pep_clients SELECT * FROM provider_pep_clients_application_v1;
+INSERT INTO provider_pep_client_receipts SELECT * FROM provider_pep_client_receipts_application_v1;
+DROP TABLE provider_pep_clients_application_v1;
+DROP TABLE provider_pep_client_receipts_application_v1;
+CREATE INDEX idx_provider_pep_clients_provider_lifecycle ON provider_pep_clients (provider_id, lifecycle, valid_until);`
+
 func canonicalSchemaDigest() string {
+	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL + pepIdentityMigrationSQL))
+}
+
+func legacySchemaDigestV4() string {
 	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL))
 }
 
@@ -32,7 +64,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return e
 	}
 	var migrations []rhiza.Migration
-	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}} {
+	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}} {
 		var stmts []Statement
 		for _, q := range strings.Split(group.sql, ";") {
 			if strings.TrimSpace(q) != "" {

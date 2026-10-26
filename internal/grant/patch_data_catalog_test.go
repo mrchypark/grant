@@ -40,7 +40,7 @@ func TestPatchDataCatalogStageAndIndependentAuthority(t *testing.T) {
 	if err = store.InsertApplicationWithRedirectURI(ctx, app, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.UpsertProviderPepClient(ctx, "patch-data", "catalog-pep", "conalog-grant", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); err != nil {
+	if _, err = store.UpsertProviderPepClient(ctx, "patch-data", "catalog-pep", "conalog-grant", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.StageHttpCapabilityGeneration(ctx, "patch-data", stage); err != nil {

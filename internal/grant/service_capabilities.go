@@ -41,25 +41,16 @@ func (s *Service) SetProviderPepClientAdmin(ctx context.Context, provider, pep s
 	return s.store.UpsertProviderPepClient(ctx, provider, pep, ManagementActorFromContext(ctx), v)
 }
 func (s *Service) configuredPEP(ctx context.Context, provider string) (ProviderPepClient, error) {
-	app := s.cfg.Security.HTTPCapabilityPEPApplicationID
-	if app == "" {
-		return ProviderPepClient{}, serviceError(503, "HTTP capability PEP application is not configured")
+	pepID := s.cfg.Security.HTTPCapabilityPEPClientID
+	if pepID == "" {
+		return ProviderPepClient{}, serviceError(503, "HTTP capability PEP client is not configured")
 	}
-	pep, err := s.store.ProviderPepClientForApplication(ctx, provider, app)
+	pep, err := s.store.ProviderPepClient(ctx, provider, pepID)
 	if err != nil {
 		return ProviderPepClient{}, err
 	}
-	if pep.Lifecycle != "active" {
-		return ProviderPepClient{}, serviceError(403, "forbidden: PEP client is not active")
-	}
-	if pep.ValidUntil != nil {
-		expiry, err := time.Parse(time.RFC3339Nano, *pep.ValidUntil)
-		if err != nil {
-			return ProviderPepClient{}, serviceError(503, "provider PEP expiry is invalid")
-		}
-		if !expiry.After(time.Now()) {
-			return ProviderPepClient{}, serviceError(403, "forbidden: PEP client is expired")
-		}
+	if err = requireActivePEP(pep, time.Now()); err != nil {
+		return ProviderPepClient{}, err
 	}
 	return pep, nil
 }
@@ -138,11 +129,14 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if CredentialDigest(token) != r.ProviderCredentialDigest {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential digest mismatch")
 	}
+	if org == "" && cap.OrganizationContext != "optional" {
+		return HttpCapabilityDecision{}, serviceError(400, "organization context is required")
+	}
 	orglessOnboarding := org == "" && managementOnboardingCapability(r.ProviderID, *cap)
 	trustedTenantManagement := false
 	tenantReactivation := managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath)
 	if org != "" && managementOrganizationCapability(r.ProviderID, *cap) {
-		app, e := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.HTTPCapabilityPEPApplicationID, ReadStrong)
+		app, e := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.ManagementApplicationID, ReadStrong)
 		if e == nil && app.FirstParty && app.ConsentPolicy == "auto_approve" && app.OrganizationID != org {
 			trustedTenantManagement = true
 		}
@@ -159,6 +153,8 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			}
 			c.UserID, c.OrganizationID = principal.UserID, org
 		}
+	} else if org == "" {
+		c, err = s.resolveOrglessApplicationContext(ctx, token)
 	} else {
 		c, err = s.resolveApplicationAuthorizationContext(ctx, token, org)
 	}
@@ -197,6 +193,12 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 		if err != nil {
 			return HttpCapabilityDecision{}, err
 		}
+	} else if org == "" {
+		allowed, err = s.orglessActionAllowed(ctx, c, r.ProviderID, *cap.ActionID, r.ResourceType, r.ResourceID)
+		if err != nil {
+			return HttpCapabilityDecision{}, err
+		}
+		reason = "orgless_explicit_binding"
 	} else if cap.RecordScope != nil {
 		scope, err = s.recordScopeDecision(ctx, r.ProviderID, *cap, c, r.CatalogGeneration, r.CatalogDigest, r.PEPClientID)
 		if err != nil {

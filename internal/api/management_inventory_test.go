@@ -17,6 +17,7 @@ func TestManagementCatalogCoversRegisteredRoutes(t *testing.T) {
 		"POST /ops/backups":                                       true,
 		"POST /ops/migrations/patch-data-authority":               true,
 		"PUT /ops/providers/{providerId}/enforcers/{pepClientId}": true,
+		"PUT /ops/orgless-bindings/{bindingId}":                   true,
 		"POST /api/v1/authz/check":                                true,
 		"POST /api/v1/authz/batch-check":                          true,
 		"POST /api/v1/authz/filter":                               true,

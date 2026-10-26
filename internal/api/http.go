@@ -155,6 +155,9 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 		}
 		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" || auth == "http-decision" {
 			q.bearer, err = bearerToken(r)
+			if err == nil && auth == "http-decision" && len(r.Header.Values("x-organization-id")) > 1 {
+				err = failure(400, "multiple x-organization-id headers")
+			}
 			if err == nil {
 				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || (auth == "inactive" && s.service.AuthProviderMode() == "pocketbase"))
 			}

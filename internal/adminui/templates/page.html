@@ -30,6 +30,14 @@
       <a class="nav-link{{if eq .ID $current}} is-current{{end}}" href="{{queryHref .Href $}}"{{if eq .ID $current}} aria-current="page"{{end}} hx-get="{{queryHref .Href $}}" hx-target="#admin-content" hx-swap="outerHTML" hx-push-url="true">{{.Label}}</a>
     {{end}}
   </nav>
+  <div class="user-info">
+    {{if .UserName}}
+      <span class="user-name">{{.UserName}}</span>
+      {{if .UserEmail}}<span class="user-email">{{.UserEmail}}</span>{{end}}
+    {{else if .UserEmail}}
+      <span class="user-email">{{.UserEmail}}</span>
+    {{end}}
+  </div>
   <form class="logout-form" method="post" action="/logout">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <button type="submit" class="logout-button">로그아웃</button>

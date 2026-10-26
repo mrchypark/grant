@@ -84,8 +84,8 @@ func (s *Server) lifecycleRoutes() {
 	s.route("PATCH", "/api/v1/orgs/{organizationId}/agreements/{agreementId}", "user", true, 200, lifecycleBody([]string{"title", "agreementType", "status"}, func(r *request, v grant.PatchAgreementInput) (any, error) {
 		return s.service.PatchAgreementAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("agreementId"), v)
 	}))
-	s.route("PATCH", "/api/v1/orgs/{organizationId}/apps/{applicationId}", "user", true, 200, lifecycleBody([]string{"name"}, func(r *request, v grant.MetadataPatch) (any, error) {
-		return s.service.PatchApplicationAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), v)
+	s.route("PATCH", "/api/v1/orgs/{organizationId}/apps/{applicationId}", "user", true, 200, lifecycleBody([]string{"name", "redirectUri"}, func(r *request, v grant.ApplicationMetadataPatch) (any, error) {
+		return s.service.PatchApplicationMetadataAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("applicationId"), v)
 	}))
 	s.route("PUT", "/api/v1/orgs/{organizationId}/apps/{applicationId}/active", "user", true, 200, body(true, func(r *request, v struct {
 		Active *bool `json:"active"`

@@ -371,11 +371,11 @@ func TestManagementLifecycleContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stage.Capabilities) != 71 {
-		t.Fatalf("management capabilities = %d, want 71", len(stage.Capabilities))
+	if len(stage.Capabilities) != 77 {
+		t.Fatalf("management capabilities = %d, want 77", len(stage.Capabilities))
 	}
-	if len(actions) != 71 {
-		t.Fatalf("actions = %d, want 70 fine actions + legacy", len(actions))
+	if len(actions) != 77 {
+		t.Fatalf("actions = %d, want 77", len(actions))
 	}
 	seen := map[string]bool{}
 	for _, a := range actions {
@@ -389,10 +389,16 @@ func TestManagementLifecycleContracts(t *testing.T) {
 		"PATCH /api/v1/admin/providers/{providerId}": "admin.provider.update",
 		"POST /api/v1/admin/orgs":                    "admin.organization.create",
 		"PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding": "admin.app.identity.bind",
-		"GET /api/v1/orgs":                                      "organization.list",
-		"GET /api/v1/orgs/{organizationId}":                     "organization.detail",
-		"PATCH /api/v1/orgs/{organizationId}":                   "organization.update",
-		"DELETE /api/v1/orgs/{organizationId}/members/{userId}": "members.remove",
+		"GET /api/v1/orgs":                                                               "organization.list",
+		"GET /api/v1/orgs/{organizationId}":                                              "organization.detail",
+		"PATCH /api/v1/orgs/{organizationId}":                                            "organization.update",
+		"DELETE /api/v1/orgs/{organizationId}/members/{userId}":                          "members.remove",
+		"GET /api/v1/orgs/{organizationId}/owners":                                       "owners.read",
+		"PUT /api/v1/orgs/{organizationId}/owners/{userId}":                              "owners.add",
+		"DELETE /api/v1/orgs/{organizationId}/owners/{userId}":                           "owners.remove",
+		"POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions":              "custom.actions.create",
+		"PATCH /api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}":  "custom.actions.update",
+		"DELETE /api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}": "custom.actions.delete",
 	}
 	for _, cap := range stage.Capabilities {
 		if strings.Contains(cap.PathTemplate, "provisioning/verify") {
@@ -402,7 +408,7 @@ func TestManagementLifecycleContracts(t *testing.T) {
 			if cap.ActionID == nil || *cap.ActionID != "grant-management."+action {
 				t.Fatalf("wrong action %+v", cap)
 			}
-			if (cap.Method == "POST" || cap.Method == "PATCH" || cap.Method == "PUT") && cap.Request.Body != "json" {
+			if (cap.Method == "POST" || cap.Method == "PATCH" || cap.Method == "PUT") && cap.Request.Body != "json" && !strings.Contains(cap.PathTemplate, "/owners/") {
 				t.Fatalf("missing JSON policy %+v", cap)
 			}
 			delete(expected, cap.Method+" "+cap.PathTemplate)

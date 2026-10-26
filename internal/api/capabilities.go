@@ -3,6 +3,9 @@ package api
 import "github.com/mrchypark/grant/internal/grant"
 
 func (s *Server) capabilityRoutes() {
+	s.route("PUT", "/ops/orgless-bindings/{bindingId}", "master", true, 200, body(true, func(r *request, v grant.OrglessUserBinding) (any, error) {
+		return s.service.SetOrglessUserBindingAdmin(r.Context(), r.PathValue("bindingId"), v)
+	}))
 	s.route("GET", "/api/v1/admin/providers/{providerId}/http-capability-active", "master", true, 200, func(r *request) (any, error) {
 		return s.service.ActiveHttpCapabilityCatalogAdmin(r.Context(), r.PathValue("providerId"))
 	})

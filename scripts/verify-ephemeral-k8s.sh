@@ -10,7 +10,7 @@ GRANT_RAUTHY_CLIENT_ID=${GRANT_RAUTHY_CLIENT_ID:-grant}
 GRANT_RAUTHY_CLIENT_SECRET=${GRANT_RAUTHY_CLIENT_SECRET:-devRauthyClientSecret0000000000000000000000000000000000000000000}
 GRANT_RAUTHY_CLIENT_READ_API_KEY=${GRANT_RAUTHY_CLIENT_READ_API_KEY:-grant-client-read\$devRauthyClientReadApiKeySecret00000000000000000000000000000000000}
 REPLACE_RAUTHY_POD=${REPLACE_RAUTHY_POD:-0}
-EXPECTED_RAUTHY_LAUNCHER_IMAGE=ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0-9d95f0f7513b7e26559a87d22d9fb90ccf4ee530@sha256:d1bf34bc156f7227d782c231c3bb0111d1cb8317017f1539f8ef22cdc10f2f7a
+EXPECTED_RAUTHY_LAUNCHER_IMAGE=ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.37.1-91212a40741e2be07ab5dc0570073f92d4ce2f50@sha256:d8e8b71ae7d19b3fba395a36e14ed0639ceb4ef770fc59bc8e4f1372221e6b93
 TMP_DIR=
 PORT_FORWARD_PID=
 RAUTHY_PORT_FORWARD_PID=
@@ -84,7 +84,7 @@ read_rauthy_launcher_image() {
         }
       }
       if (image == "" || image ~ /[[:space:]]/ ||
-          image !~ /^ghcr[.]io\/conalog\/grant-rauthy-launcher([:@]|$)/) {
+          image !~ /^ghcr[.]io\/mrchypark\/grant-rauthy-launcher([:@]|$)/) {
         invalid = 1
         next
       }
@@ -129,7 +129,7 @@ assert_ha_contract() {
     || fail "${label} does not use the repository Rauthy launcher image"
   [ "$(grep -c 'image: ghcr.io/mrchypark/grant-rauthy-launcher' "${manifest}" || true)" -eq 1 ] \
     || fail "${label} must render exactly one Rauthy launcher image"
-  actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/conalog\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
+  actual_rauthy_image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr.io\/mrchypark\/grant-rauthy-launcher[^[:space:]]*\).*/\1/p' "${manifest}")
   [ "${actual_rauthy_image}" = "${expected_rauthy_image}" ] \
     || fail "${label} overrides or corrupts the Rauthy launcher image pin"
   grep -q '/usr/local/bin/rauthy-launcher' "${manifest}" \
@@ -222,6 +222,7 @@ EOF
   done
 
   for private_image in \
+    '' \
     ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     ghcr.io/mrchypark/grant-rauthy-launcher:rauthy-0.36.0 \
     ghcr.io/mrchypark/grant-rauthy-launcher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \

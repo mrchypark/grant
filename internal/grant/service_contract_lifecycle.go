@@ -182,6 +182,8 @@ func (s *Service) createOrganization(ctx context.Context, in CreateOrganizationI
 		assertion("SELECT 1 FROM roles WHERE id='role-system-bootstrap-owner' AND organization_id IS NULL"),
 		{SQL: "INSERT INTO organizations(id,name,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING", Args: []any{in.ID, in.Name, now, now}, ExpectedRowsAffected: requireOne()},
 		{SQL: "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?)", Args: []any{requestID(), in.ID, in.OwnerUserID, now, now}},
+		// Retain the historical system-owner binding as immutable audit provenance.
+		// Authorization treats membership as canonical and rejects this binding for non-owners.
 		{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user',?,?,'grant','organization',?,'role-system-bootstrap-owner','active',?,?,?)", Args: []any{requestID(), in.OwnerUserID, in.ID, in.ID, ManagementActorFromContext(ctx), now, now}},
 	}
 	err = s.store.Transaction(ctx, append(statements, extra...))

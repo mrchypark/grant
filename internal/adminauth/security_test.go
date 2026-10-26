@@ -28,6 +28,7 @@ type issuerFixture struct {
 	expiresIn       int
 	tokenErrorBody  string
 	clientAuthValid bool
+	omitUserinfo    bool
 }
 
 func newIssuerFixture(t *testing.T) *issuerFixture {
@@ -36,9 +37,13 @@ func newIssuerFixture(t *testing.T) *issuerFixture {
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"issuer": f.server.URL, "authorization_endpoint": f.server.URL + "/authorize", "token_endpoint": f.server.URL + "/token",
-			})
+			metadata := map[string]string{
+				"issuer": f.server.URL, "authorization_endpoint": f.server.URL + "/authorize", "token_endpoint": f.server.URL + "/token", "userinfo_endpoint": f.server.URL + "/userinfo",
+			}
+			if f.omitUserinfo {
+				delete(metadata, "userinfo_endpoint")
+			}
+			_ = json.NewEncoder(w).Encode(metadata)
 		case "/token":
 			f.tokenCalls++
 			_ = r.ParseForm()
@@ -57,6 +62,12 @@ func newIssuerFixture(t *testing.T) *issuerFixture {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": testAccessToken, "token_type": "Bearer", "expires_in": f.expiresIn, "id_token": "must-not-be-trusted"})
+		case "/userinfo":
+			if r.Header.Get("Authorization") != "Bearer "+testAccessToken {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"sub": "user-123", "email": "admin@example.test", "name": "Admin User"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -339,5 +350,67 @@ func TestAdminAuthRejectsUnsafeConfiguration(t *testing.T) {
 		if _, err := New(cfg, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})); err == nil {
 			t.Fatalf("unsafe configuration accepted: %+v", cfg)
 		}
+	}
+}
+
+func TestAdminAuthStoresUserinfoInSession(t *testing.T) {
+	f := newIssuerFixture(t)
+	var gotSubject, gotEmail, gotName string
+	h, err := New(Config{Issuer: f.server.URL, ClientID: testClientID, ClientSecret: testClientSecret, PublicURL: testPublicURL}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSubject = Subject(r.Context())
+		gotEmail = Email(r.Context())
+		gotName = Name(r.Context())
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRecorder()
+	h.ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/login", nil))
+	location, err := url.Parse(login.Header().Get("Location"))
+	if err != nil || login.Code != http.StatusFound {
+		t.Fatalf("login failed: status=%d err=%v", login.Code, err)
+	}
+	f.challenge = location.Query().Get("code_challenge")
+	callback := httptest.NewRequest(http.MethodGet, "/oauth/callback?"+url.Values{"code": {"test-code"}, "state": {location.Query().Get("state")}}.Encode(), nil)
+	for _, cookie := range login.Result().Cookies() {
+		callback.AddCookie(cookie)
+	}
+	result := httptest.NewRecorder()
+	h.ServeHTTP(result, callback)
+	if result.Code != http.StatusSeeOther {
+		t.Fatalf("callback status=%d", result.Code)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	for _, cookie := range result.Result().Cookies() {
+		request.AddCookie(cookie)
+	}
+	page := httptest.NewRecorder()
+	h.ServeHTTP(page, request)
+	if page.Code != http.StatusOK {
+		t.Fatalf("page status=%d", page.Code)
+	}
+	if gotSubject != "user-123" || gotEmail != "admin@example.test" || gotName != "Admin User" {
+		t.Fatalf("unexpected userinfo: subject=%q email=%q name=%q", gotSubject, gotEmail, gotName)
+	}
+}
+
+func TestAdminAuthLoginWithoutUserinfoMetadata(t *testing.T) {
+	f := newIssuerFixture(t)
+	f.omitUserinfo = true
+	called := false
+	h := f.handler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if AccessToken(r.Context()) != testAccessToken || Subject(r.Context()) != "" || Email(r.Context()) != "" || Name(r.Context()) != "" {
+			t.Error("unexpected session without optional userinfo")
+		}
+	}))
+	location, transaction := beginLogin(t, h, f)
+	cookie := completeLogin(t, h, f, location.Query().Get("state"), "", transaction)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !called {
+		t.Fatalf("authenticated handler not reached: status=%d", w.Code)
 	}
 }

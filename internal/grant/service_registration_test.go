@@ -117,7 +117,7 @@ func TestActiveRegistryReferencesAndAdminReadback(t *testing.T) {
 	if err = s.store.InsertApplicationWithRedirectURI(ctx, app, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.SetProviderPepClientAdmin(ctx, "patch-data", "registry-pep", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); err != nil {
+	if _, err = s.SetProviderPepClientAdmin(ctx, "patch-data", "registry-pep", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.StageHttpCapabilityGenerationAdmin(ctx, "patch-data", stage); err != nil {
@@ -154,7 +154,7 @@ func TestActiveRegistryReferencesAndAdminReadback(t *testing.T) {
 	if err != nil || len(got) != len(actions) {
 		t.Fatal("rejected registry changed", got, err)
 	}
-	if _, err = s.SetProviderPepClientAdmin(ctx, "patch-data", "registry-pep", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "disabled"}); err != nil {
+	if _, err = s.SetProviderPepClientAdmin(ctx, "patch-data", "registry-pep", UpsertProviderPepClient{Lifecycle: "disabled"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.UpsertServiceProviderAdmin(ctx, ServiceProvider{ID: "patch-data", Name: "Patch", Active: false}); err != nil {

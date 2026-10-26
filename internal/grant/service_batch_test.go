@@ -148,8 +148,16 @@ func TestBatchPolicyAndOperationBounds(t *testing.T) {
 }
 
 func TestBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
+	testBatchDecisionRequiresRootAndEveryChild(t, false)
+}
+
+func TestOrglessBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
+	testBatchDecisionRequiresRootAndEveryChild(t, true)
+}
+
+func testBatchDecisionRequiresRootAndEveryChild(t *testing.T, orgless bool) {
 	ctx := context.WithValue(context.Background(), replicaIdentityKey{}, ExternalIdentity{Provider: "rauthy", ExternalUserID: "batch-user", ClientID: "batch-client", Active: true})
-	cfg := Config{Database: DatabaseConfig{DataDir: t.TempDir()}, Auth: AuthConfig{ProviderMode: "rauthy"}, Security: SecurityConfig{HTTPCapabilityPEPApplicationID: "batch-app"}}
+	cfg := Config{Database: DatabaseConfig{DataDir: t.TempDir()}, Auth: AuthConfig{ProviderMode: "rauthy"}, Security: SecurityConfig{HTTPCapabilityPEPClientID: "batch-pep", ManagementApplicationID: "batch-app"}}
 	store, err := OpenStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -174,10 +182,34 @@ func TestBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if orgless {
+		optional := map[string]bool{}
+		for _, c := range stage.Capabilities {
+			if c.Batch != nil {
+				optional[c.CapabilityID] = true
+				for _, id := range c.Batch.AllowedCapabilityIDs {
+					optional[id] = true
+				}
+			}
+		}
+		for i := range stage.Capabilities {
+			if optional[stage.Capabilities[i].CapabilityID] {
+				stage.Capabilities[i].OrganizationContext = "optional"
+				stage.Capabilities[i].ContractDigest, err = HttpCapabilityContractDigest(stage.Capabilities[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		stage.CatalogDigest, err = HttpCapabilityCatalogDigest("patch-data", stage)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err = svc.ReplaceProviderActionsAdmin(ctx, "patch-data", actions); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.UpsertProviderPepClient(ctx, "patch-data", "batch-pep", "conalog-grant", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); err != nil {
+	if _, err = store.UpsertProviderPepClient(ctx, "patch-data", "batch-pep", "conalog-grant", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.StageHttpCapabilityGeneration(ctx, "patch-data", stage); err != nil {
@@ -192,25 +224,54 @@ func TestBatchDecisionRequiresRootAndEveryChild(t *testing.T) {
 	if _, err = store.Exec(ctx, "INSERT INTO role_actions(role_id,action_id) SELECT 'role-system-bootstrap-owner',id FROM actions WHERE provider_id='patch-data'"); err != nil {
 		t.Fatal(err)
 	}
-	_, root, byID := batchFixture(t)
+	byID := map[string]HttpCapability{}
+	for _, c := range stage.Capabilities {
+		byID[c.CapabilityID] = c
+	}
+	root := byID["patch-data.batch"]
 	input := batchEvidenceInput(t, stage, root, []HttpBatchChild{batchEvidenceChild(byID["files.update.0"], 0, "aaaaaaaaaaaaaaa"), batchEvidenceChild(byID["files.delete.0"], 1, "bbbbbbbbbbbbbbb")})
 	check := func(want bool) {
 		t.Helper()
-		decision, e := svc.DecideHttpCapability(ctx, "token", "conalog-grant", input)
+		org := "conalog-grant"
+		if orgless {
+			org = ""
+		}
+		decision, e := svc.DecideHttpCapability(ctx, "token", org, input)
 		if e != nil || decision.Allowed != want || decision.BatchDigest != input.BatchDigest {
 			t.Fatal("batch decision", want, decision, e)
 		}
 	}
 	check(false)
 	for i, pair := range [][2]string{{"batch", "patch-data"}, {"files", "aaaaaaaaaaaaaaa"}, {"files", "bbbbbbbbbbbbbbb"}} {
-		if _, err = store.Exec(ctx, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user','conalog-grant','conalog-grant','patch-data',?,?,'role-system-bootstrap-owner','active','conalog-grant','now','now')", pair[1], pair[0], pair[1]); err != nil {
+		if orgless {
+			action := *root.ActionID
+			if i > 0 {
+				action = *byID[input.BatchChildren[i-1].CapabilityID].ActionID
+			}
+			_, err = svc.SetOrglessUserBindingAdmin(ctx, pair[1], OrglessUserBinding{SubjectID: "conalog-grant", ProviderID: "patch-data", ResourceType: pair[0], ResourceID: pair[1], ActionID: action, State: "active"})
+		} else {
+			_, err = store.Exec(ctx, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user','conalog-grant','conalog-grant','patch-data',?,?,'role-system-bootstrap-owner','active','conalog-grant','now','now')", pair[1], pair[0], pair[1])
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 		check(i == 2)
+	}
+	if orgless {
+		if _, err = store.Exec(ctx, "UPDATE role_bindings SET state='disabled' WHERE id='patch-data'"); err != nil {
+			t.Fatal(err)
+		}
+		check(false)
+		if _, err = store.Exec(ctx, "UPDATE role_bindings SET state='active' WHERE id='patch-data'"); err != nil {
+			t.Fatal(err)
+		}
+		check(true)
 	}
 	if _, err = store.Exec(ctx, "UPDATE role_bindings SET state='revoked' WHERE id='bbbbbbbbbbbbbbb'"); err != nil {
 		t.Fatal(err)
 	}
 	check(false)
-	t.Run("response-fence", func(t *testing.T) { testResponseDecisionInGrant(t, ctx, svc, stage) })
+	if !orgless {
+		t.Run("response-fence", func(t *testing.T) { testResponseDecisionInGrant(t, ctx, svc, stage) })
+	}
 }

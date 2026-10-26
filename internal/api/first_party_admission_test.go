@@ -38,7 +38,7 @@ func TestFirstPartyAdmissionMasterOnly(t *testing.T) {
 	if _, ok := grant.LookupManagementRoute("PUT", "/api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}"); ok {
 		t.Fatal("operational endpoint entered management catalog")
 	}
-	if n := len(grant.ManagementRoutes()); n != 71 {
-		t.Fatalf("management routes=%d", n)
+	if n := len(grant.ManagementRoutes()); n != 77 {
+		t.Fatalf("management routes=%d, want 77", n)
 	}
 }

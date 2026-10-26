@@ -73,7 +73,12 @@ a { color: var(--grant-blue); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 :focus-visible { outline: 3px solid #5c9db2; outline-offset: 2px; }
 
+.user-info { display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; border-top: 1px solid var(--grant-line); margin-top: auto; }
+.user-name { font-size: 13px; font-weight: 600; color: var(--grant-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-email { font-size: 11px; color: var(--grant-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 @media (max-width: 760px) {
+  .user-info { min-width: 0; max-width: 22vw; margin: 0; border: 0; padding: 0 6px; }
   .sidebar { position: sticky; inset: 0 0 auto; width: auto; height: auto; flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--grant-line); padding: 8px 14px; }
   .brand { flex: 0 0 auto; font-size: 15px; }
   .brand-mark { width: 27px; height: 27px; }

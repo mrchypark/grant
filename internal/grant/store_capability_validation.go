@@ -4,9 +4,70 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"strings"
 )
+
+// Decode at the model boundary as catalogs also enter through publishers and storage.
+func (c *HttpCapability) UnmarshalJSON(data []byte) error {
+	type plain HttpCapability
+	d := json.NewDecoder(bytes.NewReader(data))
+	start, err := d.Token()
+	if err != nil || start != json.Delim('{') {
+		return fmt.Errorf("capability must be an object")
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return err
+		}
+		name := key.(string)
+		if seen[name] || (strings.EqualFold(name, "organizationContext") && name != "organizationContext") {
+			return fmt.Errorf("duplicate or aliased capability field %s", name)
+		}
+		seen[name] = true
+		var raw json.RawMessage
+		if err = d.Decode(&raw); err != nil {
+			return err
+		}
+		if name == "organizationContext" {
+			var policy string
+			if err = json.Unmarshal(raw, &policy); err != nil || (policy != "required" && policy != "optional") {
+				return fmt.Errorf("invalid organizationContext")
+			}
+		}
+	}
+	if _, err = d.Token(); err != nil {
+		return err
+	}
+	if _, err = d.Token(); err != io.EOF {
+		return fmt.Errorf("trailing capability data")
+	}
+	var decoded plain
+	if err = decodeContractPatch(data, &decoded); err != nil {
+		return err
+	}
+	if err = validateOrganizationContext(HttpCapability(decoded)); err != nil {
+		return err
+	}
+	*c = HttpCapability(decoded)
+	return nil
+}
+
+func validateOrganizationContext(c HttpCapability) error {
+	if c.OrganizationContext != "" && c.OrganizationContext != "required" && c.OrganizationContext != "optional" {
+		return fmt.Errorf("invalid organizationContext")
+	}
+	if c.OrganizationContext != "" && c.AccessMode != "authorized" {
+		return fmt.Errorf("organizationContext requires authorized access")
+	}
+	if c.OrganizationContext == "optional" && (c.RecordScope != nil || c.ResponseAuthorization != nil) {
+		return fmt.Errorf("optional organizationContext cannot use scoped or response authorization")
+	}
+	return nil
+}
 
 func (h HttpQueryPolicy) MarshalJSON() ([]byte, error) {
 	if h.Mode == "none" {
@@ -160,6 +221,9 @@ func pathVariables(s string) ([]string, error) {
 	return v, nil
 }
 func validateCapability(c HttpCapability) error {
+	if err := validateOrganizationContext(c); err != nil {
+		return err
+	}
 	if err := validateResponsePolicy(c); err != nil {
 		return err
 	}

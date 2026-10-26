@@ -45,12 +45,16 @@ type Config struct {
 type endpoints struct {
 	authorize string
 	token     string
+	userinfo  string
 }
 
 type session struct {
 	token   string
 	csrf    string
 	expires time.Time
+	subject string
+	email   string
+	name    string
 }
 
 type login struct {
@@ -76,6 +80,9 @@ type contextKey uint8
 const (
 	tokenKey contextKey = iota
 	csrfKey
+	subjectKey
+	emailKey
+	nameKey
 )
 
 // AccessToken returns the session's OAuth access token, if authenticated.
@@ -88,6 +95,24 @@ func AccessToken(ctx context.Context) string {
 func CSRFToken(ctx context.Context) string {
 	token, _ := ctx.Value(csrfKey).(string)
 	return token
+}
+
+// Subject returns the session's OAuth subject, if authenticated.
+func Subject(ctx context.Context) string {
+	subject, _ := ctx.Value(subjectKey).(string)
+	return subject
+}
+
+// Email returns the session's user email, if authenticated.
+func Email(ctx context.Context) string {
+	email, _ := ctx.Value(emailKey).(string)
+	return email
+}
+
+// Name returns the session's user name, if authenticated.
+func Name(ctx context.Context) string {
+	name, _ := ctx.Value(nameKey).(string)
+	return name
 }
 
 func New(cfg Config, next http.Handler) (http.Handler, error) {
@@ -171,6 +196,7 @@ func (s *server) discover(ctx context.Context) error {
 		Issuer                string `json:"issuer"`
 		AuthorizationEndpoint string `json:"authorization_endpoint"`
 		TokenEndpoint         string `json:"token_endpoint"`
+		UserinfoEndpoint      string `json:"userinfo_endpoint"`
 	}
 	if err := s.getJSON(req, &document); err != nil {
 		return errors.New("issuer metadata unavailable or invalid")
@@ -186,7 +212,15 @@ func (s *server) discover(ctx context.Context) error {
 	if err != nil {
 		return errors.New("invalid token endpoint")
 	}
-	s.endpoints = endpoints{authorize: authorize.String(), token: token.String()}
+	var userinfo string
+	if document.UserinfoEndpoint != "" {
+		u, err := endpointURL(document.UserinfoEndpoint, s.issuer)
+		if err != nil {
+			return errors.New("invalid userinfo endpoint")
+		}
+		userinfo = u.String()
+	}
+	s.endpoints = endpoints{authorize: authorize.String(), token: token.String(), userinfo: userinfo}
 	return nil
 }
 
@@ -308,6 +342,9 @@ func (s *server) serve(next http.Handler, w http.ResponseWriter, r *http.Request
 	}
 	ctx := context.WithValue(r.Context(), tokenKey, current.token)
 	ctx = context.WithValue(ctx, csrfKey, current.csrf)
+	ctx = context.WithValue(ctx, subjectKey, current.subject)
+	ctx = context.WithValue(ctx, emailKey, current.email)
+	ctx = context.WithValue(ctx, nameKey, current.name)
 	r = r.WithContext(ctx)
 	if r.URL.Path == "/logout" {
 		s.mu.Lock()
@@ -413,6 +450,11 @@ func (s *server) callback(w http.ResponseWriter, r *http.Request) {
 		s.failCallback(w)
 		return
 	}
+	info, err := s.fetchUserinfo(r.Context(), token)
+	if err != nil {
+		s.failCallback(w)
+		return
+	}
 	sid, err := randomValue(32)
 	if err != nil {
 		s.failCallback(w)
@@ -439,7 +481,7 @@ func (s *server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(s.sessions, transaction.oldSession)
-	s.sessions[sid] = session{token: token, csrf: csrf, expires: expires}
+	s.sessions[sid] = session{token: token, csrf: csrf, expires: expires, subject: info.Subject, email: info.Email, name: info.Name}
 	s.mu.Unlock()
 	s.setCookie(w, sessionCookie, sid, time.Until(expires))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -470,6 +512,30 @@ func (s *server) exchange(ctx context.Context, code, verifier string) (string, t
 		expires = time.Now().Add(time.Duration(*response.ExpiresIn) * time.Second)
 	}
 	return response.AccessToken, expires, nil
+}
+
+type userinfoResponse struct {
+	Subject string `json:"sub"`
+	Email   string `json:"email"`
+	Name    string `json:"name"`
+}
+
+func (s *server) fetchUserinfo(ctx context.Context, token string) (userinfoResponse, error) {
+	// Profile display is optional for issuers that do not advertise UserInfo.
+	if s.endpoints.userinfo == "" {
+		return userinfoResponse{}, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.endpoints.userinfo, nil)
+	if err != nil {
+		return userinfoResponse{}, errors.New("userinfo request failed")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	var info userinfoResponse
+	if err := s.getJSON(req, &info); err != nil || strings.TrimSpace(info.Subject) == "" {
+		return userinfoResponse{}, errors.New("userinfo request failed")
+	}
+	return info, nil
 }
 
 func (s *server) sessionCookie(r *http.Request) (string, bool) {

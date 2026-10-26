@@ -126,11 +126,13 @@ func loadRelatedWithSession(t *testing.T, apiTransport relatedRoundTripper, key,
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			body, _ := json.Marshal(map[string]string{
-				"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
+				"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "userinfo_endpoint": issuer + "/userinfo",
 			})
 			return relatedResponse(r, http.StatusOK, string(body)), nil
 		case "/token":
 			return relatedResponse(r, http.StatusOK, `{"access_token":"related-access-token","token_type":"Bearer","expires_in":300}`), nil
+		case "/userinfo":
+			return relatedResponse(r, http.StatusOK, `{"sub":"user-1","email":"admin@example.test","name":"Admin User"}`), nil
 		default:
 			return relatedResponse(r, http.StatusNotFound, `{}`), nil
 		}

@@ -119,7 +119,12 @@ func (s *Service) batchDecision(ctx context.Context, token, org string, input Ht
 		if pep.PepClientID != input.PEPClientID || catalog.Generation != input.CatalogGeneration || catalog.CatalogDigest != input.CatalogDigest {
 			return false, serviceError(403, "forbidden: stale batch catalog or PEP")
 		}
-		current, err := s.resolveApplicationAuthorizationContext(ctx, token, org)
+		var current applicationAuthorizationContext
+		if org == "" {
+			current, err = s.resolveOrglessApplicationContext(ctx, token)
+		} else {
+			current, err = s.resolveApplicationAuthorizationContext(ctx, token, org)
+		}
 		if err != nil {
 			return false, err
 		}
@@ -145,6 +150,18 @@ func (s *Service) batchDecision(ctx context.Context, token, org string, input Ht
 			return false, err
 		}
 		checks = append([]AuthorizationCheck{{Action: *root.ActionID, Resource: AuthorizationResource{ProviderID: input.ProviderID, ResourceType: input.ResourceType, ID: input.ResourceID}}}, checks...)
+		if org == "" {
+			if root.OrganizationContext != "optional" {
+				return false, serviceError(403, "batch requires organization")
+			}
+			for _, check := range checks {
+				allowed, e := s.orglessActionAllowed(ctx, current, check.Resource.ProviderID, check.Action, check.Resource.ResourceType, check.Resource.ID)
+				if e != nil || !allowed {
+					return false, e
+				}
+			}
+			return true, nil
+		}
 		for i := range checks {
 			checks[i].Subject = AuthorizationSubject{SubjectType: "user", ID: current.UserID, OrganizationID: current.OrganizationID}
 		}
