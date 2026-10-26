@@ -68,6 +68,14 @@ func TestServiceActionCatalogCoarseAndAtomic(t *testing.T) {
 }
 func TestServiceLocalUserKillSwitch(t *testing.T) {
 	ctx, s := serviceFixture(t)
+	ownershipMember(t, ctx, s, "backup-owner")
+	snapshot, err := s.ListOrganizationOwnersAuthorized(ctx, "owner", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ChangeOrganizationOwnerAuthorized(ctx, "owner", "owner", "backup-owner", snapshot.ETag, true); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.store.SetUserActive(ctx, "owner", false); err != nil {
 		rows, readErr := s.store.Query(ctx, ReadStrong, "SELECT id,active FROM users")
 		t.Fatalf("set active: %v; users=%v readErr=%v", err, rows, readErr)

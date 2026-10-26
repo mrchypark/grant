@@ -16,7 +16,16 @@ type MetadataPatch struct {
 type ApplicationPatch struct {
 	Name        *string   `json:"name"`
 	Description PatchText `json:"description"`
+	RedirectURI PatchText `json:"redirectUri"`
 	Active      *bool     `json:"active"`
+}
+
+// ApplicationMetadataPatch is intentionally narrower than application create:
+// redirectUri may be set before identity binding, but identity and security
+// metadata remain immutable through this user route.
+type ApplicationMetadataPatch struct {
+	Name        *string   `json:"name"`
+	RedirectURI PatchText `json:"redirectUri"`
 }
 
 func lifecycleActorGuard(user, org, action string) Statement {
@@ -56,8 +65,27 @@ func (s *Service) patchApplicationLifecycle(ctx context.Context, user, org, id s
 	if err != nil {
 		return Application{}, err
 	}
-	if in.Name == nil && !in.Description.Present && in.Active == nil {
+	if in.Name == nil && !in.Description.Present && !in.RedirectURI.Present && in.Active == nil {
 		return Application{}, serviceError(400, "at least one patch field is required")
+	}
+	var redirectURI *string
+	var previousRedirectURI *string
+	if in.RedirectURI.Present {
+		if in.RedirectURI.Value == nil {
+			return Application{}, serviceError(400, "redirectUri must not be null")
+		}
+		canonical, canonicalErr := CanonicalRedirectURI(*in.RedirectURI.Value)
+		if canonicalErr != nil {
+			return Application{}, canonicalErr
+		}
+		redirectURI = &canonical
+		if a.FirstParty || a.ProvisioningStatus != "unprovisioned" || a.RauthyClientID != nil {
+			return Application{}, serviceError(409, "redirectUri can only change before identity binding")
+		}
+		previousRedirectURI, err = s.applicationRedirect(ctx, id, ReadStrong)
+		if err != nil {
+			return Application{}, err
+		}
 	}
 	if in.Active != nil && a.FirstParty {
 		return Application{}, serviceError(403, "platform-managed applications cannot change lifecycle through organization APIs")
@@ -70,6 +98,24 @@ func (s *Service) patchApplicationLifecycle(ctx context.Context, user, org, id s
 		return Application{}, err
 	}
 	guards := []Statement{lifecycleActorGuard(user, org, "organization.application.manage"), assertion("SELECT 1 FROM applications WHERE id=? AND organization_id=? AND (security_mutation_token IS NULL OR security_mutation_expires_at<=?)", id, org, nowString())}
+	if in.RedirectURI.Present {
+		uriCount := 0
+		var previousURI any
+		if previousRedirectURI != nil {
+			uriCount = 1
+			previousURI = *previousRedirectURI
+		}
+		now := nowString()
+		guards = append(guards,
+			assertion("SELECT 1 FROM applications WHERE id=? AND organization_id=? AND first_party=0 AND provisioning_status='unprovisioned' AND rauthy_client_id IS NULL AND (security_mutation_token IS NULL OR security_mutation_expires_at<=?)", id, org, now),
+			assertion("SELECT 1 WHERE (SELECT COUNT(*) FROM application_redirect_uris WHERE application_id=?)=? AND NOT EXISTS(SELECT 1 FROM application_redirect_uris WHERE application_id=? AND redirect_uri IS NOT ?)", id, uriCount, id, previousURI),
+		)
+		ss = append(ss,
+			Statement{SQL: "UPDATE applications SET updated_at=? WHERE id=? AND organization_id=? AND first_party=0 AND provisioning_status='unprovisioned' AND rauthy_client_id IS NULL AND (security_mutation_token IS NULL OR security_mutation_expires_at<=?)", Args: []any{now, id, org, now}, ExpectedRowsAffected: requireOne()},
+			Statement{SQL: "DELETE FROM application_redirect_uris WHERE application_id=?", Args: []any{id}},
+			Statement{SQL: "INSERT INTO application_redirect_uris(application_id,redirect_uri,created_at) VALUES(?,?,?)", Args: []any{id, *redirectURI, now}},
+		)
+	}
 	if in.Active != nil {
 		guards = append(guards, assertion("SELECT 1 FROM applications WHERE id=? AND first_party=0", id))
 		ss = append(ss, Statement{SQL: "UPDATE applications SET active=?,updated_at=? WHERE id=? AND organization_id=?", Args: []any{*in.Active, nowString(), id, org}, ExpectedRowsAffected: requireOne()})
@@ -94,17 +140,9 @@ func (s *Service) DeleteApplicationAuthorized(ctx context.Context, user, org, id
 	if err = s.applicationMutationAvailable(ctx, id); err != nil {
 		return err
 	}
-	refs, err := s.store.Query(ctx, ReadStrong, "SELECT pep_client_id FROM provider_pep_clients WHERE application_id=?", id)
-	if err != nil {
-		return err
-	}
-	if len(refs) > 0 {
-		return serviceError(409, "application is referenced by a deployment enforcer")
-	}
 	return lifecycleError(s.store.Transaction(ctx, []Statement{
 		lifecycleActorGuard(user, org, "organization.application.manage"),
 		assertion("SELECT 1 FROM applications WHERE id=? AND organization_id=? AND first_party=0 AND (security_mutation_token IS NULL OR security_mutation_expires_at<=?)", id, org, nowString()),
-		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM provider_pep_clients WHERE application_id=?)", id),
 		{SQL: "DELETE FROM application_grant_actions WHERE application_grant_id IN(SELECT id FROM application_grants WHERE application_id=?)", Args: []any{id}},
 		{SQL: "DELETE FROM application_grants WHERE application_id=?", Args: []any{id}},
 		{SQL: "DELETE FROM application_actions WHERE application_id=?", Args: []any{id}},
@@ -194,6 +232,10 @@ func (s *Service) RevokeApplicationGrantAuthorized(ctx context.Context, user, or
 
 func (s *Service) PatchApplicationAuthorized(ctx context.Context, user, org, id string, in MetadataPatch) (Application, error) {
 	return s.patchApplicationLifecycle(ctx, user, org, id, ApplicationPatch{Name: in.Name, Description: in.Description})
+}
+
+func (s *Service) PatchApplicationMetadataAuthorized(ctx context.Context, user, org, id string, in ApplicationMetadataPatch) (Application, error) {
+	return s.patchApplicationLifecycle(ctx, user, org, id, ApplicationPatch{Name: in.Name, RedirectURI: in.RedirectURI})
 }
 
 func (s *Service) SetApplicationActiveAuthorized(ctx context.Context, user, org, id string, active bool) (Application, error) {

@@ -158,6 +158,13 @@ func TestOrglessHTTPOnboardingAndOwnOrganization(t *testing.T) {
 		t.Fatal(ownerResponse.Code, ownerResponse.Body.String())
 	}
 	call("POST", "/api/v1/orgs/new-org/groups", `{"id":"old-owner-group","name":"No"}`, "new-org", 403)
+	now := "2026-10-25T00:00:00Z"
+	if _, err = store.Exec(ctx, "INSERT INTO users(id,display_name,active,created_at) VALUES('backup-owner','Backup owner',1,?)", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Exec(ctx, "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES('backup-owner-membership','new-org','backup-owner','owner','active',?,?)", now, now); err != nil {
+		t.Fatal(err)
+	}
 	beforeInactive := counts()
 	if _, err := svc.SetUserActiveAdmin(ctx, ensured["userId"], false); err != nil {
 		t.Fatal(err)

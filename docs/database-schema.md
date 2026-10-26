@@ -58,7 +58,7 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 ### `organization_memberships`
 
-사용자와 조직의 소속 관계. `(organization_id, user_id)`는 unique다.
+사용자와 조직의 소속 관계. `(organization_id, user_id)`는 unique다. 활성 `membership_role='owner'`인 row와 active user/org가 조합된 집합이 canonical owner다. owner는 여러 명일 수 있으며 별도 owner role binding은 ownership source가 아니다. owner 변경은 ETag 기반 snapshot과 last-active-owner 가드를 같은 transaction에서 확인한다.
 
 ### `patch_data_authority_imports`, `patch_data_authority_import_entities`, `organization_hierarchy_edges`
 
@@ -86,7 +86,9 @@ Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 
 
 ### `provider_pep_clients`, `provider_pep_client_receipts`
 
-Exposure 같은 PEP service identity와 provider를 연결한다. `pep_client_id`는 전역 primary key, `application_id`는 전역 unique라 둘 중 하나를 다른 provider로 재결합할 수 없다. binding은 active/disabled/deleted lifecycle과 선택적 RFC3339 expiry를 가지며, active/ready application만 fetch·decision에 사용할 수 있다. application auth key가 나타내는 application ID는 `GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID`에 명시하고 Grant가 그 application으로 binding을 역조회한다. 따라서 요청 body나 provider path가 PEP identity를 선택하지 못한다. 모든 lifecycle 변경은 `provider_pep_client_receipts`에 별도 receipt를 추가하며 capability history를 변경하지 않는다.
+V5 rebuilds both tables while retaining every existing binding and receipt. It removes the application foreign key, uniqueness, and NOT NULL constraints, and recreates `idx_provider_pep_clients_provider_lifecycle`. The provider foreign key and global PEP primary key remain. New bindings and receipts use NULL application metadata. This separates service identity from application lifecycle without rewriting historical evidence. Snapshot exports use the V5 schema digest; restores also accept V3/V4 digests after validating the preserved PEP column layout.
+
+Exposure 같은 PEP service identity와 provider를 연결한다. `pep_client_id`는 전역 primary key라 다른 provider에 재결합할 수 없다. binding은 active/disabled/deleted lifecycle과 선택적 RFC3339 expiry를 가지며, application row와 독립적으로 fetch·decision에 사용할 수 있다. `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`가 service auth key의 정확한 identity를 고정하며 요청 body나 provider path가 이를 선택하지 못한다. 기존 `application_id` 열은 migration 전 binding/receipt 보존을 위한 nullable 역사 메타데이터이며 runtime 조회나 application lifecycle에 사용하지 않는다. PEP upsert body는 `lifecycle`과 선택적 `validUntil`을 받으며 `applicationId`는 거부한다. 모든 lifecycle 변경은 `provider_pep_client_receipts`에 별도 receipt를 추가하며 capability history를 변경하지 않는다.
 
 ### `actions`, `roles`, `role_actions`, `role_bindings`
 
@@ -117,9 +119,9 @@ API/OAuth application와 사용자 consent grant. active grant unique 제약과 
 
 **릴레이션과 구조의 이유:** 이 운영 API는 기존 `application_actions` 관계만 추가하며 테이블이나 컬럼을 추가하지 않는다. 기존 action 연결, role 권한, 사용자 consent grant, trust 설정, identity 연결을 변경하지 않는다. 따라서 이미 신뢰된 앱에 필요한 capability 하나를 허용하면서 사용자의 별도 권한 검증을 유지한다. 조직 API의 trusted application action 변경은 계속 403으로 거부한다.
 
-PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, `rauthy_client_id = NULL`을 저장한다. 별도 OIDC client 생성 절차가 없기 때문이다. 이 상태는 인증 연동 준비만 뜻하며, `first_party = 0`과 `consent_policy = explicit` 및 application action·사용자 권한 검증은 그대로 유지한다. 아래 Rauthy client 생성·검증 절차는 Rauthy 모드에 적용된다.
+PocketBase 모드에서는 조직 앱 생성 시 `provisioning_status = ready`, `rauthy_client_id = NULL`을 저장한다. 별도 OIDC client 생성 절차가 없기 때문이다. Rauthy와 Goauthy 모드에서는 provider client를 확인할 때까지 앱은 unprovisioned다. 이 상태는 인증 연동 준비만 뜻하며, `first_party = 0`과 `consent_policy = explicit` 및 application action·사용자 권한 검증은 그대로 유지한다.
 
-`applications.rauthy_client_id`는 호환성을 위해 보존한 기존 컬럼명이다. Rauthy 모드의 새 조직 앱 생성은 IdP client ID를 발급하지 않고 NULL과 unprovisioned 상태를 저장한다. 운영자가 IdP에 생성한 기존 client ID를 플랫폼 PUT identity-binding에 전달하면 설정된 Rauthy 읽기 전용 어댑터가 manifest를 검증한다. 성공 시 검증한 로컬 상태가 변하지 않았는지 트랜잭션에서 다시 확인하고 client ID와 ready를 원자 저장한다. 기존 ready 연결 및 unprovisioned 예약 데이터는 보존한다. 준비된 앱을 다른 client ID로 재연결할 수 없다. Grant는 외부 클라이언트 생성·수정·삭제나 secret 발급·회전을 수행하지 않는다.
+`applications.rauthy_client_id`는 호환성을 위해 보존한 기존 컬럼명이다. Rauthy와 Goauthy 모드의 새 조직 앱 생성은 IdP client ID를 발급하지 않고 NULL과 unprovisioned 상태를 저장한다. 플랫폼 PUT identity-binding의 읽기 전용 어댑터가 manifest를 검증한다. Goauthy는 설정된 application의 confidential bootstrap client만 지원하며 기존 introspection Basic 자격 증명으로 `/oidc/client-configuration`을 읽는다. 허용 `audience`에 resource가 포함되고 `default_aud`가 정확히 `[resource]`여야 한다. 성공 시 검증한 로컬 상태가 변하지 않았는지 트랜잭션에서 다시 확인하고 client ID와 ready를 원자 저장한다. 기존 검증 완료 데이터는 보존하며 준비된 앱을 다른 client ID로 재연결할 수 없다. Grant는 외부 클라이언트나 secret을 변경하지 않는다.
 
 `applications.rauthy_client_id`는 Rauthy client와 연결된 실제 값에 대해 전역 partial unique index를 가진다. legacy row의 `NULL`, 빈 문자열, SQLite 기본 `TRIM` 기준의 ASCII space-only 문자열은 미연결 값으로 보아 index와 migration 중복 검사에서 제외한다. 기본 `TRIM`이 제거하지 않는 탭 등의 문자는 실제 client id 문자로 간주해 unique 제약을 적용한다. application authz는 토큰에서 검증한 비어 있지 않은 `client_id`를 이 컬럼의 `ready` application에 정확히 하나 매핑하며, 같은 조직의 active/ready application이 아니면 fail closed한다.
 
@@ -233,7 +235,7 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 - `provider_http_capability_sets.provider_id` -> `service_providers.id`
 - `provider_http_capability_active.(provider_id, generation)` -> `provider_http_capability_sets.(provider_id, generation)`
 - `provider_pep_clients.provider_id` -> `service_providers.id`
-- `provider_pep_clients.application_id` -> `applications.id`
+- `provider_pep_clients.application_id`는 nullable 역사 메타데이터이며 V5부터 `applications.id` 외래 키와 unique 제약이 없다. `provider_pep_client_receipts.application_id`도 nullable이다.
 - `roles.organization_id` -> `organizations.id`
 - `role_actions.role_id` -> `roles.id`
 - `role_actions.action_id` -> `actions.id`
@@ -373,9 +375,9 @@ Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 
 
 이번 변경은 테이블·컬럼·인덱스나 canonical key를 추가하지 않으며, 기존 row의 수명주기와 연결 의미를 다음처럼 명시한다. HTTP 계약은 [API 수명주기](api-lifecycle.md)에 있다.
 
-- 조직 생성은 `organizations`, owner `organization_memberships`, 해당 조직 자원에 대한 `role-system-bootstrap-owner`의 개인 `role_bindings`를 같은 트랜잭션으로 생성한다. 플랫폼 생성은 명시한 기존 활성 사용자를 owner로 삼고, 본인 생성은 검증된 현재 사용자를 새 조직의 owner로 삼는다. 어느 경로도 IdP 계정을 만들거나 기존 조직의 소유자를 덮어쓰지 않는다.
+- 조직 생성은 `organizations`와 owner `organization_memberships`를 같은 트랜잭션으로 생성한다. 플랫폼 생성은 명시한 기존 활성 사용자를 owner로 삼고, 본인 생성은 검증된 현재 사용자를 새 조직의 owner로 삼는다. 어느 경로도 IdP 계정을 만들거나 기존 조직의 소유자를 덮어쓰지 않는다.
 - 구성원 제거는 `organization_memberships.status=inactive`로 이력을 남긴다. 해당 소속의 `group_memberships`, 해당 사용자와 소속 조직의 개인 `role_bindings`를 제거하고 조직 내 활성 `application_grants`를 revoked로 전환한다. owner 제거는 거절한다. 재등록은 기존 소속 row를 재활성화하지만 제거한 개인 권한·그룹·동의는 복원하지 않는다. 조직 전체 Binding은 제거 대상이 아니므로 재가입 후 적용될 수 있다.
-- 앱 비활성화는 기존 동의를 철회한다. 재활성화는 ready 연결이나 동의를 새로 만들어 주지 않는다. 앱 삭제는 grant actions, grants, requested actions, redirect manifest와 application을 함께 지운다. `provider_pep_clients` 참조가 있으면 삭제를 거절하고, first-party 앱의 조직 단위 상태 변경·삭제도 거절한다. 외부 IdP 클라이언트는 변경하지 않는다.
+- 앱 비활성화는 기존 동의를 철회한다. 재활성화는 ready 연결이나 동의를 새로 만들어 주지 않는다. 앱 삭제는 grant actions, grants, requested actions, redirect manifest와 application을 함께 지운다. PEP binding의 역사 메타데이터는 앱 삭제를 막지 않으며 PEP lifecycle에도 영향을 주지 않는다. first-party 앱의 조직 단위 상태 변경·삭제는 거절한다. 외부 IdP 클라이언트는 변경하지 않는다.
 - 역할 삭제는 어떤 상태의 Binding이든 참조가 있으면 409다. 참조가 없을 때 `role_action_field_views`, `role_actions`, `roles`를 함께 제거한다. 조직 API는 전역 시스템 역할을 수정·삭제하지 않는다.
 - 조직 관리자의 동의 철회는 row를 삭제하지 않고 `status`, `revoked_at`, `revoked_by_user_id`를 기록한다. 과거 Action 연결이 남아도 활성 동의가 아니므로 권한 판정에 사용되지 않는다.
 - identity binding은 기존 `rauthy_client_id`를 외부에서 할당한 검증 대상 client ID로 사용한다. 검증된 이름·종류·redirect manifest·상태와 조직 활성 여부·보안 변경 lease·전역 client ID 유일성을 트랜잭션으로 다시 검사한다. 이미 ready인 다른 연결로 교체하지 않는다. 기존 저장 데이터와 유일성 인덱스는 유지한다.
@@ -386,7 +388,7 @@ Patch Data `af6b560`의 최신 snapshot과 인증 분리 브랜치를 통합한 
 
 Agreement의 새 생성·PUT·PATCH는 RFC3339 입력을 검증하고 UTC 소수점 이하 정확히 9자리의 고정 폭 문자열로 저장한다. 판정 시각도 같은 형식이며 시작·종료를 포함하는 비교를 수행한다. 별도 여유 시간은 없다. 기존 row는 일괄 이관하지 않으며 유효한 offset 표현을 포함한 비정규 기존 기간도 권한 판정에서는 거절한다. 권한 있는 grantor의 명시적 PATCH로 정규화한다. Binding 생성과 사용자·그룹·조직 주체의 모든 평가 경로가 같은 검사를 적용한다. null 경계는 무제한이며 다른 시각 필드의 저장 형식은 바꾸지 않는다.
 
-초기 조직 owner Binding의 `created_by_user_id`는 `ManagementActorFromContext`에서 얻은 실제 운영 행위자를 기록한다. `subject_id`는 지정된 owner이며 두 필드는 서로 다른 의미다. 감사 컬럼이나 canonical key는 바꾸지 않는다.
+조직 생성은 기존 operator provenance를 보존하기 위해 owner system-role binding을 audit mirror로 기록한다. 이 mirror는 membership을 대체하지 않으며 evaluator가 active owner membership과 정확한 organization scope를 확인하지 않으면 권한을 주지 않는다. demotion/removal 때 지우며, 그 밖의 role binding 감사 주체와 감사 컬럼 의미는 바꾸지 않는다.
 
 구성원 제거 시 owner 외의 `membership_role`은 member로 내리고 status를 inactive로 남긴다. 앱 Action 집합의 조건부 변경 snapshot에는 `applications.id`, `organization_id`, `created_at`도 포함하여 삭제·재생성된 앱에 이전 ETag를 사용할 수 없도록 한다. 공개 응답 배열과 DB 컬럼 구성은 바꾸지 않는다.
 
@@ -400,11 +402,11 @@ Agreement의 새 생성·PUT·PATCH는 RFC3339 입력을 검증하고 UTC 소수
 
 ### 조직 소유권 이전의 릴레이션과 구조의 이유
 
-조직의 owner는 `organization_memberships.membership_role=owner`인 유일한 소속 관계로 표현한다. 이전 API는 현재 owner와 대상 사용자가 모두 활성 사용자이자 해당 활성 조직의 활성 구성원이어야 한다. 현재 owner에게 `organization.permission.manage` 권한도 필요하며, 이 권한과 단일 owner 및 활성 상태를 트랜잭션 안에서 다시 검사한다. owner 소속만 남고 관리 Binding이 철회된 사용자는 이전을 통해 권한을 복구할 수 없다.
+조직 owner는 `organization_memberships.membership_role=owner`인 활성 소속 관계의 집합이다. owner HTTP API는 active owner에 한해 노출되며 GET은 `organization.profile.read`, mutation은 `organization.permission.manage`를 요구한다. 이전 단일 owner API는 multi-owner 조직에서 409를 반환한다. owner membership은 해당 조직의 등록된 management action만 평가하며 플랫폼 wildcard나 application admission은 포함하지 않는다. legacy owner system-role binding은 비-owner에게 절대 authority를 주지 않으며 일반 binding API로 설정할 수 없다.
 
-이전 트랜잭션은 이전 owner의 소속을 member로 내리고 대상의 소속을 owner로 변경한다. 이전 owner의 해당 조직 자원에 대한 `role-system-bootstrap-owner` 개인 Binding을 제거하고 대상에게 같은 owner Binding을 활성 상태로 부여한다. 추가로 이전 owner에게 `role-system-management-owner`의 해당 조직 Binding이 있으면 상태와 Agreement 제한을 보존하여 대상에게 옮기고 원본을 제거한다. 해당 Binding이 없으면 새로 부여하지 않는다. 다른 역할의 Binding, 그룹 소속, 앱 동의는 이 작업에서 변경하지 않는다. 소유권 이전은 이전 사용자의 모든 접근 권한을 철회하는 API가 아니다.
+Owner mutation은 organization ETag snapshot, 대상의 active membership, active owner count와 actor 권한을 transaction 안에서 검사한다. Owner membership 자체만 소유권을 의미하며 system-owner role binding은 그 의미를 만들지 않는다. 일반 delegated role binding, group membership과 app consent는 owner demotion만으로 제거하지 않는다.
 
-owner GET의 ETag에는 조직 ID, owner 사용자 ID, 소속 ID와 소속 갱신 시각을 포함한다. PUT은 읽은 ETag와 트랜잭션 시점의 owner를 비교하여 동시 이전과 이전 후 되돌리기 과정에서 오래된 요청이 적용되지 않도록 한다. owner가 없거나 여러 명인 기존 데이터는 409로 거절하며 임의 owner를 선택하거나 새로 만들지 않는다. 새 테이블·컬럼·인덱스는 없으며, 시작 시 seed가 이전 owner를 복원하지 않는 기존 규칙을 유지한다.
+Owners GET ETag는 활성 owner membership의 정렬된 사용자 ID, membership ID와 갱신 시각을 포함한다. PUT/DELETE는 현재 ETag를 다시 검사하며, 마지막 활성 owner 제거는 409다. 다중 owner는 지원되고 legacy 단일 owner endpoint만 다중 owner에서 409를 반환한다. 새 테이블·컬럼·인덱스는 없다.
 
 ### 조직 없는 온보딩의 릴레이션과 구조의 이유
 

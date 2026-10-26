@@ -111,13 +111,6 @@ func (s *Store) ListApplicationRedirectURIsWithConsistency(ctx context.Context, 
 	}
 	return decodeRows[ApplicationRedirectUri](r)
 }
-func (s *Store) MarkApplicationProvisioningReady(ctx context.Context, id, org string) (Application, error) {
-	_, e := s.Execute(ctx, requestID(), Statement{SQL: "UPDATE applications SET provisioning_status='ready',updated_at=? WHERE id=? AND organization_id=? AND active=1", Args: []any{nowString(), id, org}, ExpectedRowsAffected: requireOne()})
-	if e != nil {
-		return Application{}, e
-	}
-	return s.GetApplicationWithConsistency(ctx, id, ReadStrong)
-}
 func (s *Store) SetApplicationTrust(ctx context.Context, id, org string, trusted bool) (Application, error) {
 	now := nowString()
 	policy := "explicit"

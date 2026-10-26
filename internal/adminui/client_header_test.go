@@ -81,10 +81,16 @@ func requestWithHeaderTestSession(t *testing.T, next http.Handler, path string) 
 	issuer := "https://issuer.example.test"
 	transport := relatedRoundTripper(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/.well-known/openid-configuration" {
-			body, _ := json.Marshal(map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token"})
+			body, _ := json.Marshal(map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "userinfo_endpoint": issuer + "/userinfo"})
 			return relatedResponse(r, http.StatusOK, string(body)), nil
 		}
-		return relatedResponse(r, http.StatusOK, `{"access_token":"header-test-token","token_type":"Bearer","expires_in":300}`), nil
+		if r.URL.Path == "/token" {
+			return relatedResponse(r, http.StatusOK, `{"access_token":"header-test-token","token_type":"Bearer","expires_in":300}`), nil
+		}
+		if r.URL.Path == "/userinfo" {
+			return relatedResponse(r, http.StatusOK, `{"sub":"user-1","email":"admin@example.test","name":"Admin User"}`), nil
+		}
+		return relatedResponse(r, http.StatusNotFound, `{}`), nil
 	})
 	auth, err := adminauth.New(adminauth.Config{Issuer: issuer, ClientID: "admin-ui", ClientSecret: "test-secret", PublicURL: "https://admin.example.test", HTTPClient: &http.Client{Transport: transport}}, next)
 	if err != nil {
@@ -112,4 +118,19 @@ func requestWithHeaderTestSession(t *testing.T, next http.Handler, path string) 
 	response := httptest.NewRecorder()
 	auth.ServeHTTP(response, request)
 	return response
+}
+
+func TestAdminErrorPagePreservesUserProfile(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	ui, err := New(Config{APIURL: proxy.URL, ManagementOrganizationID: "management-org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := requestWithHeaderTestSession(t, ui, "/providers")
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "Admin User") || !strings.Contains(response.Body.String(), "admin@example.test") {
+		t.Fatalf("error page lost profile: status=%d body=%s", response.Code, response.Body.String())
+	}
 }

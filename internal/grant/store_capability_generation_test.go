@@ -69,7 +69,7 @@ func TestHttpCapabilityGenerationAdminStoredLifecycle(t *testing.T) {
 	if err := store.InsertApplicationWithRedirectURI(ctx, app, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.UpsertProviderPepClient(ctx, "grant", "generation-pep", "operator", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); err != nil {
+	if _, err := store.UpsertProviderPepClient(ctx, "grant", "generation-pep", "operator", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ActivateHttpCapabilityGeneration(ctx, "grant", "operator", ActivateHttpCapabilityGeneration{TargetGeneration: 1, TargetCatalogDigest: stage.CatalogDigest}); err != nil {

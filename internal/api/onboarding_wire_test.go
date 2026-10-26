@@ -23,7 +23,7 @@ func TestOnboardingHTTPDecisionAndManagementFlow(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"token": "tok", "record": map[string]any{"id": "newuser12345678", "collectionId": "users", "collectionName": "users", "name": "New user"}})
 	}))
 	defer idp.Close()
-	cfg := grant.Config{Security: grant.SecurityConfig{BootstrapUserID: "seed", MasterKey: "master", AppAuthKey: "app-key", HTTPCapabilityPEPApplicationID: "onboarding-app"}, Auth: grant.AuthConfig{ProviderMode: "pocketbase", PocketBase: &grant.PocketBaseConfig{BaseURL: idp.URL, Collection: "users", ApplicationID: "onboarding-app"}}, Database: grant.DatabaseConfig{DataDir: t.TempDir(), DefaultReadConsistency: grant.ReadStrong}}
+	cfg := grant.Config{Security: grant.SecurityConfig{BootstrapUserID: "seed", MasterKey: "master", AppAuthKey: "app-key", HTTPCapabilityPEPClientID: "onboarding-pep", ManagementApplicationID: "onboarding-app"}, Auth: grant.AuthConfig{ProviderMode: "pocketbase", PocketBase: &grant.PocketBaseConfig{BaseURL: idp.URL, Collection: "users", ApplicationID: "onboarding-app"}}, Database: grant.DatabaseConfig{DataDir: t.TempDir(), DefaultReadConsistency: grant.ReadStrong}}
 	store, err := grant.OpenStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +56,7 @@ func TestOnboardingHTTPDecisionAndManagementFlow(t *testing.T) {
 	if _, err = svc.SetApplicationTrustAdmin(ctx, "seed", "onboarding-app", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = svc.SetProviderPepClientAdmin(ctx, "grant-management", "onboarding-pep", grant.UpsertProviderPepClient{ApplicationID: "onboarding-app", Lifecycle: "active"}); err != nil {
+	if _, err = svc.SetProviderPepClientAdmin(ctx, "grant-management", "onboarding-pep", grant.UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = svc.StageHttpCapabilityGenerationAdmin(ctx, "grant-management", stage); err != nil {
@@ -170,6 +170,13 @@ func TestOnboardingHTTPDecisionAndManagementFlow(t *testing.T) {
 	decision("GET", "/api/v1/orgs/self-created", "self-created", "", 403, false)
 	decision("POST", "/api/v1/orgs/self-created/reactivate", "self-created", "", 200, true)
 	call("POST", "/api/v1/orgs/self-created/reactivate", "self-created", "", false, 200)
+	now := "2026-10-25T00:00:00Z"
+	if _, err = store.Exec(ctx, "INSERT INTO users(id,display_name,active,created_at) VALUES('backup-owner','Backup owner',1,?)", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Exec(ctx, "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES('backup-owner-membership','self-created','backup-owner','owner','active',?,?)", now, now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = svc.SetUserActiveAdmin(ctx, local.UserID, false); err != nil {
 		t.Fatal(err)
 	}

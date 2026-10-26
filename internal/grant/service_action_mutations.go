@@ -2,9 +2,132 @@ package grant
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"regexp"
 	"strings"
 )
+
+var customOperableActionCode = regexp.MustCompile(`^custom\.org-[0-9a-f]{64}\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z][a-z0-9-]*$`)
+
+func operableCustomNamespace(org string) string {
+	digest := sha256.Sum256([]byte(org))
+	return "custom.org-" + hex.EncodeToString(digest[:]) + "."
+}
+
+type CustomActionInput struct {
+	Code        string  `json:"code"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	RiskLevel   string  `json:"riskLevel"`
+}
+
+type CustomActionPatch struct {
+	Name        *string   `json:"name"`
+	Description PatchText `json:"description"`
+	RiskLevel   *string   `json:"riskLevel"`
+}
+
+func (s *Service) ownerActionMutationGuard(ctx context.Context, user, org, provider string) ([]Statement, error) {
+	if provider != "operable" {
+		return nil, serviceError(404, "service provider not found")
+	}
+	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.permission.manage", "manage custom actions", ReadStrong); err != nil {
+		return nil, err
+	}
+	if !s.isActiveOrganizationOwner(ctx, user, org) {
+		return nil, serviceError(403, "only an active organization owner can manage custom actions")
+	}
+	return []Statement{
+		lifecycleActorGuard(user, org, "organization.permission.manage"),
+		assertion("SELECT 1 FROM organization_memberships m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.organization_id WHERE m.organization_id=? AND m.user_id=? AND m.membership_role='owner' AND m.status='active' AND u.active=1 AND o.inactivated_at IS NULL", org, user),
+		assertion("SELECT 1 FROM service_providers WHERE id='operable' AND active=1"),
+	}, nil
+}
+
+func (s *Service) CreateOperableCustomActionAuthorized(ctx context.Context, user, org string, in CustomActionInput) (Action, error) {
+	guard, err := s.ownerActionMutationGuard(ctx, user, org, "operable")
+	if err != nil {
+		return Action{}, err
+	}
+	if !customOperableActionCode.MatchString(in.Code) || !strings.HasPrefix(in.Code, operableCustomNamespace(org)) {
+		return Action{}, serviceError(400, "code must be custom.org-<sha256-of-organization-id>.<feature>.<definition-id>.<operation> for this organization")
+	}
+	in.Name, err = required("name", in.Name)
+	if err != nil {
+		return Action{}, err
+	}
+	if !enumValue(in.RiskLevel, "low", "medium", "high", "critical") {
+		return Action{}, serviceError(400, "invalid riskLevel")
+	}
+	in.Description = optionalText(in.Description)
+	id := "operable." + in.Code
+	now := nowString()
+	stmts := append(guard, assertion("SELECT 1 WHERE (SELECT COUNT(*) FROM actions WHERE provider_id='operable')<999"), Statement{SQL: "INSERT INTO actions(id,provider_id,code,name,description,risk_level,visibility_granting,grantable_to_applications,created_at,updated_at) VALUES(?,'operable',?,?,?,?,0,0,?,?)", Args: []any{id, in.Code, in.Name, in.Description, in.RiskLevel, now, now}, ExpectedRowsAffected: requireOne()})
+	if err = s.store.Transaction(ctx, stmts); err != nil {
+		return Action{}, capabilityWriteError(lifecycleError(err))
+	}
+	return serviceRow[Action](ctx, s, ReadStrong, "SELECT * FROM actions WHERE id=? AND provider_id='operable'", id)
+}
+
+func (s *Service) PatchOperableCustomActionAuthorized(ctx context.Context, user, org, id string, in CustomActionPatch) (Action, error) {
+	guard, err := s.ownerActionMutationGuard(ctx, user, org, "operable")
+	if err != nil {
+		return Action{}, err
+	}
+	if in.Name == nil && !in.Description.Present && in.RiskLevel == nil {
+		return Action{}, serviceError(400, "no fields to patch")
+	}
+	var sets []string
+	var args []any
+	if in.Name != nil {
+		value, e := required("name", *in.Name)
+		if e != nil {
+			return Action{}, e
+		}
+		sets = append(sets, "name=?")
+		args = append(args, value)
+	}
+	if in.Description.Present {
+		sets = append(sets, "description=?")
+		args = append(args, optionalText(in.Description.Value))
+	}
+	if in.RiskLevel != nil {
+		if !enumValue(*in.RiskLevel, "low", "medium", "high", "critical") {
+			return Action{}, serviceError(400, "invalid riskLevel")
+		}
+		sets = append(sets, "risk_level=?")
+		args = append(args, *in.RiskLevel)
+	}
+	sets = append(sets, "updated_at=?")
+	args = append(args, nowString(), id)
+	namespace := operableCustomNamespace(org)
+	guard = append(guard, assertion("SELECT 1 FROM actions WHERE id=? AND provider_id='operable' AND code GLOB ? AND code=?", id, namespace+"*", strings.TrimPrefix(id, "operable.")))
+	args = append(args, "operable")
+	guard = append(guard, Statement{SQL: "UPDATE actions SET " + strings.Join(sets, ",") + " WHERE id=? AND provider_id=? AND code GLOB ?", Args: append(args, namespace+"*"), ExpectedRowsAffected: requireOne()})
+	if err = s.store.Transaction(ctx, guard); err != nil {
+		return Action{}, capabilityWriteError(lifecycleError(err))
+	}
+	return serviceRow[Action](ctx, s, ReadStrong, "SELECT * FROM actions WHERE id=? AND provider_id='operable'", id)
+}
+
+func (s *Service) DeleteOperableCustomActionAuthorized(ctx context.Context, user, org, id string) error {
+	guard, err := s.ownerActionMutationGuard(ctx, user, org, "operable")
+	if err != nil {
+		return err
+	}
+	const refs = `SELECT 1 FROM provider_http_capability_sets c JOIN json_tree(c.canonical_json) ref ON ref.key='actionId' WHERE c.provider_id='operable' AND ref.value=?`
+	guard = append(guard, assertion("SELECT 1 FROM actions WHERE id=? AND provider_id='operable' AND code GLOB ?", id, operableCustomNamespace(org)+"*"), assertion("SELECT 1 WHERE NOT EXISTS("+refs+")", id))
+	for _, table := range []string{"application_grant_actions", "application_actions", "role_actions"} {
+		guard = append(guard, assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM "+table+" WHERE action_id=?)", id))
+	}
+	guard = append(guard, Statement{SQL: "DELETE FROM actions WHERE id=? AND provider_id='operable' AND code GLOB ?", Args: []any{id, operableCustomNamespace(org) + "*"}, ExpectedRowsAffected: requireOne()})
+	if err = s.store.Transaction(ctx, guard); err != nil {
+		return capabilityWriteError(lifecycleError(err))
+	}
+	return nil
+}
 
 func (s *Service) SetRoleAction(ctx context.Context, user, org, role, action string, present bool) error {
 	if _, err := s.RoleActionsSnapshot(ctx, user, org, role); err != nil {

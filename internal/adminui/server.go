@@ -125,7 +125,7 @@ func (s *server) view(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, key, org, provider, http.StatusBadGateway, err.Error())
 		return
 	}
-	page := Page{Title: res.title, Description: res.description, Section: key, OrganizationID: org, ProviderID: provider, Search: r.URL.Query().Get("q"), CSRF: adminauth.CSRFToken(r.Context()), Columns: res.columns, Rows: rows, Forms: formsFor(key), Navigation: navigation(), Organizations: orgOptions, Providers: s.providerOptions(r)}
+	page := Page{Title: res.title, Description: res.description, Section: key, OrganizationID: org, ProviderID: provider, Search: r.URL.Query().Get("q"), CSRF: adminauth.CSRFToken(r.Context()), Columns: res.columns, Rows: rows, Forms: formsFor(key), Navigation: navigation(), Organizations: orgOptions, Providers: s.providerOptions(r), UserName: adminauth.Name(r.Context()), UserEmail: adminauth.Email(r.Context())}
 	if key == "http" {
 		if noActiveCatalog {
 			page.Notice = "이 프로바이더에는 아직 활성 HTTP 기능 세대가 없습니다. 새 세대를 생성하고 검토한 뒤 최초 활성화를 진행할 수 있습니다."
@@ -629,7 +629,7 @@ func (s *server) renderError(w http.ResponseWriter, r *http.Request, key, org, p
 	if provider == "" {
 		provider = "grant-management"
 	}
-	page := Page{Title: res.title, Description: res.description, Section: key, OrganizationID: org, ProviderID: provider, Search: r.URL.Query().Get("q"), CSRF: adminauth.CSRFToken(r.Context()), Error: message, Columns: res.columns, Forms: formsFor(key), Navigation: navigation(), Organizations: s.orgOptions(r), Providers: s.providerOptions(r)}
+	page := Page{Title: res.title, Description: res.description, Section: key, OrganizationID: org, ProviderID: provider, Search: r.URL.Query().Get("q"), CSRF: adminauth.CSRFToken(r.Context()), Error: message, Columns: res.columns, Forms: formsFor(key), Navigation: navigation(), Organizations: s.orgOptions(r), Providers: s.providerOptions(r), UserName: adminauth.Name(r.Context()), UserEmail: adminauth.Email(r.Context())}
 	for i := range page.Forms {
 		page.Forms[i].Hidden["section"] = key
 		page.Forms[i].Hidden["org"] = org

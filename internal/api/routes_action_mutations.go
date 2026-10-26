@@ -53,6 +53,24 @@ func (s *Server) actionMutationRoutes() {
 	s.route("DELETE", "/api/v1/admin/providers/{providerId}/actions/{actionId}", "master", true, 204, func(r *request) (any, error) {
 		return nil, s.service.DeleteProviderAction(r.Context(), r.PathValue("providerId"), r.PathValue("actionId"))
 	})
+	s.route("POST", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", "user", true, 201, lifecycleBody([]string{"code", "name", "riskLevel"}, func(r *request, v grant.CustomActionInput) (any, error) {
+		if r.PathValue("providerId") != "operable" {
+			return nil, failure(404, "service provider not found")
+		}
+		return s.service.CreateOperableCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, v)
+	}))
+	s.route("PATCH", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", "user", true, 200, lifecycleBody(nil, func(r *request, v grant.CustomActionPatch) (any, error) {
+		if r.PathValue("providerId") != "operable" {
+			return nil, failure(404, "service provider not found")
+		}
+		return s.service.PatchOperableCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("actionId"), v)
+	}))
+	s.route("DELETE", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", "user", true, 204, func(r *request) (any, error) {
+		if r.PathValue("providerId") != "operable" {
+			return nil, failure(404, "service provider not found")
+		}
+		return nil, s.service.DeleteOperableCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("actionId"))
+	})
 }
 
 func providerActionValue(provider string, a providerAction) grant.Action {

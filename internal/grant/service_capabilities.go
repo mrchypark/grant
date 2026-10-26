@@ -41,25 +41,16 @@ func (s *Service) SetProviderPepClientAdmin(ctx context.Context, provider, pep s
 	return s.store.UpsertProviderPepClient(ctx, provider, pep, ManagementActorFromContext(ctx), v)
 }
 func (s *Service) configuredPEP(ctx context.Context, provider string) (ProviderPepClient, error) {
-	app := s.cfg.Security.HTTPCapabilityPEPApplicationID
-	if app == "" {
-		return ProviderPepClient{}, serviceError(503, "HTTP capability PEP application is not configured")
+	pepID := s.cfg.Security.HTTPCapabilityPEPClientID
+	if pepID == "" {
+		return ProviderPepClient{}, serviceError(503, "HTTP capability PEP client is not configured")
 	}
-	pep, err := s.store.ProviderPepClientForApplication(ctx, provider, app)
+	pep, err := s.store.ProviderPepClient(ctx, provider, pepID)
 	if err != nil {
 		return ProviderPepClient{}, err
 	}
-	if pep.Lifecycle != "active" {
-		return ProviderPepClient{}, serviceError(403, "forbidden: PEP client is not active")
-	}
-	if pep.ValidUntil != nil {
-		expiry, err := time.Parse(time.RFC3339Nano, *pep.ValidUntil)
-		if err != nil {
-			return ProviderPepClient{}, serviceError(503, "provider PEP expiry is invalid")
-		}
-		if !expiry.After(time.Now()) {
-			return ProviderPepClient{}, serviceError(403, "forbidden: PEP client is expired")
-		}
+	if err = requireActivePEP(pep, time.Now()); err != nil {
+		return ProviderPepClient{}, err
 	}
 	return pep, nil
 }
@@ -142,7 +133,7 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	trustedTenantManagement := false
 	tenantReactivation := managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath)
 	if org != "" && managementOrganizationCapability(r.ProviderID, *cap) {
-		app, e := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.HTTPCapabilityPEPApplicationID, ReadStrong)
+		app, e := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.ManagementApplicationID, ReadStrong)
 		if e == nil && app.FirstParty && app.ConsentPolicy == "auto_approve" && app.OrganizationID != org {
 			trustedTenantManagement = true
 		}

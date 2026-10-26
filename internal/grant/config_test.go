@@ -40,6 +40,33 @@ func TestConfigManagementOrganizationIDUnset(t *testing.T) {
 	}
 }
 
+func TestManagementAndPEPIdentitiesUseSeparateConfig(t *testing.T) {
+	t.Setenv("GRANT_MASTER_KEY", "master-key")
+	t.Setenv("GRANT_APP_AUTH_KEY", "app-key")
+	t.Setenv("GRANT_AUTH_PROVIDER", "pocketbase")
+	t.Setenv("GRANT_POCKETBASE_BASE_URL", "http://127.0.0.1:9999")
+	t.Setenv("GRANT_POCKETBASE_APPLICATION_ID", "app-id")
+	t.Setenv("GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID", "exposure-pep")
+	t.Setenv("GRANT_MANAGEMENT_APPLICATION_ID", "management-app")
+	t.Setenv("GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID", "")
+	cfg, err := ConfigFromEnv()
+	if err != nil || cfg.Security.HTTPCapabilityPEPClientID != "exposure-pep" || cfg.Security.ManagementApplicationID != "management-app" {
+		t.Fatalf("independent identities not loaded: %+v %v", cfg.Security, err)
+	}
+
+	t.Setenv("GRANT_MANAGEMENT_APPLICATION_ID", "")
+	t.Setenv("GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID", "legacy-management-app")
+	cfg, err = ConfigFromEnv()
+	if err != nil || cfg.Security.ManagementApplicationID != "legacy-management-app" || cfg.Security.HTTPCapabilityPEPClientID != "exposure-pep" {
+		t.Fatalf("deprecated app alias changed PEP identity: %+v %v", cfg.Security, err)
+	}
+
+	t.Setenv("GRANT_MANAGEMENT_APPLICATION_ID", "management-app")
+	if _, err = ConfigFromEnv(); err == nil {
+		t.Fatal("conflicting management application settings accepted")
+	}
+}
+
 func TestLoadDatabaseConfigMembership(t *testing.T) {
 	legacy := `[{"node_id":"n1","peer_url":"quic://n1:8100","token":"token1"},{"node_id":"n2","peer_url":"quic://n2:8100","token":"token2"}]`
 	public := []rhiza.Member{

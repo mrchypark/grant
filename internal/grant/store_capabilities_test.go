@@ -6,7 +6,108 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestPEPServiceIdentityIsIndependentOfApplicationOAuthClientID(t *testing.T) {
+	ctx := context.Background()
+	s, err := OpenStore(ctx, Config{Database: DatabaseConfig{DataDir: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnsureBootstrapData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	oauthClientID := "grant-user-login"
+	app := Application{ID: "grant-internal", OrganizationID: "conalog-grant", Slug: "grant-internal", Name: "Grant internal PEP", ApplicationType: "confidential", AppType: "internal", FirstParty: true, ConsentPolicy: "auto_approve", Active: true, ProvisioningStatus: "ready", RauthyClientID: &oauthClientID, CreatedByUserID: "conalog-grant"}
+	if err := s.InsertApplicationWithRedirectURI(ctx, app, nil); err != nil {
+		t.Fatal(err)
+	}
+	pep, err := s.UpsertProviderPepClient(ctx, "grant", "grant-service-pep", "master", UpsertProviderPepClient{Lifecycle: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.GetApplicationWithConsistency(ctx, app.ID, ReadStrong)
+	if err != nil || pep.PepClientID == stored.ID || pep.PepClientID == ptrValue(stored.RauthyClientID) || ptrValue(stored.RauthyClientID) != oauthClientID {
+		t.Fatalf("PEP identity and user OAuth client must remain separate: pep=%+v app=%+v err=%v", pep, stored, err)
+	}
+}
+
+func TestPEPBindingAndCatalogDoNotRequireAnApplication(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{Security: SecurityConfig{HTTPCapabilityPEPClientID: "exposure-pep"}, Database: DatabaseConfig{DataDir: t.TempDir()}}
+	s, err := OpenStore(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err = s.EnsureBootstrapData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, s)
+	if _, err = s.UpsertProviderPepClient(ctx, "grant", "exposure-pep", "operator", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
+		t.Fatal("PEP registration required an application", err)
+	}
+	rows, err := s.Query(ctx, ReadStrong, "SELECT COUNT(*) AS n FROM applications WHERE id='exposure-pep'")
+	if err != nil || rowInt(rows[0], "n") != 0 {
+		t.Fatalf("fixture unexpectedly created PEP application: %v %v", rows, err)
+	}
+
+	cap := HttpCapability{CapabilityID: "health", Version: 1, Enabled: true, AccessMode: "public_authn", Method: "GET", PathTemplate: "/health", Query: HttpQueryPolicy{Mode: "none"}, Request: HttpRequestPolicy{Body: "none", ForwardHeaders: []string{}}, Response: HttpResponsePolicy{MaxBytes: 1024, ForwardHeaders: []string{}, Redirects: "deny"}}
+	cap.ContractDigest, err = HttpCapabilityContractDigest(cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := StageHttpCapabilityGeneration{SchemaVersion: 1, Generation: 1, Capabilities: []HttpCapability{cap}}
+	generation.CatalogDigest, err = HttpCapabilityCatalogDigest("grant", generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.StageHttpCapabilityGeneration(ctx, "grant", generation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ActivateHttpCapabilityGeneration(ctx, "grant", "operator", ActivateHttpCapabilityGeneration{TargetGeneration: 1, TargetCatalogDigest: generation.CatalogDigest}); err != nil {
+		t.Fatal(err)
+	}
+	if catalog, err := svc.ActiveHttpCapabilityCatalog(ctx, "grant"); err != nil || catalog.PepClientID != "exposure-pep" || catalog.CatalogDigest != generation.CatalogDigest {
+		t.Fatalf("application-free PEP catalog fetch failed: %+v %v", catalog, err)
+	}
+
+	if _, err = svc.decideHttpCapability(ctx, "token", "owner", HttpCapabilityDecisionInput{ProviderID: "grant", PEPClientID: "different-pep"}); ErrorStatus(err) != 403 {
+		t.Fatalf("body PEP identity mismatch accepted: %v", err)
+	}
+	if _, err = svc.UpsertServiceProviderAdmin(ctx, ServiceProvider{ID: "other-provider", Name: "Other", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.UpsertProviderPepClient(ctx, "other-provider", "exposure-pep", "operator", UpsertProviderPepClient{Lifecycle: "active"}); ErrorStatus(err) != 409 {
+		t.Fatalf("PEP identity rebound across providers: %v", err)
+	}
+	svc.cfg.Security.HTTPCapabilityPEPClientID = "unregistered-pep"
+	if _, err = svc.ActiveHttpCapabilityCatalog(ctx, "grant"); ErrorStatus(err) != 403 {
+		t.Fatalf("unregistered PEP accepted: %v", err)
+	}
+	svc.cfg.Security.HTTPCapabilityPEPClientID = "exposure-pep"
+	if _, err = s.UpsertProviderPepClient(ctx, "grant", "exposure-pep", "operator", UpsertProviderPepClient{Lifecycle: "disabled"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.ActiveHttpCapabilityCatalog(ctx, "grant"); ErrorStatus(err) != 403 {
+		t.Fatalf("disabled PEP accepted: %v", err)
+	}
+	expired := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err = s.UpsertProviderPepClient(ctx, "grant", "exposure-pep", "operator", UpsertProviderPepClient{Lifecycle: "active", ValidUntil: &expired}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.ActiveHttpCapabilityCatalog(ctx, "grant"); ErrorStatus(err) != 403 {
+		t.Fatalf("expired PEP accepted: %v", err)
+	}
+	if _, err = s.UpsertProviderPepClient(ctx, "grant", "exposure-pep", "operator", UpsertProviderPepClient{Lifecycle: "deleted"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.ActiveHttpCapabilityCatalog(ctx, "grant"); ErrorStatus(err) != 403 {
+		t.Fatalf("deleted PEP accepted: %v", err)
+	}
+}
 
 func TestCapabilityLifecycleAndSnapshot(t *testing.T) {
 	ctx := context.Background()
@@ -22,14 +123,14 @@ func TestCapabilityLifecycleAndSnapshot(t *testing.T) {
 	if e = s.InsertApplicationWithRedirectURI(ctx, app, nil); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.UpsertProviderPepClient(ctx, "grant", "pep", "master", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); e != nil {
+	if _, e = s.UpsertProviderPepClient(ctx, "grant", "pep", "master", UpsertProviderPepClient{Lifecycle: "active"}); e != nil {
 		t.Fatal(e)
 	}
 	app.ID, app.Slug = "pep-app-2", "pep-app-2"
 	if e = s.InsertApplicationWithRedirectURI(ctx, app, nil); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.UpsertProviderPepClient(ctx, "grant", "pep-2", "master", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "active"}); e != nil {
+	if _, e = s.UpsertProviderPepClient(ctx, "grant", "pep-2", "master", UpsertProviderPepClient{Lifecycle: "active"}); e != nil {
 		t.Fatal(e)
 	}
 	app.ID = "pep-app"
@@ -74,7 +175,7 @@ func TestCapabilityLifecycleAndSnapshot(t *testing.T) {
 	if e = RestoreStoreSnapshot(ctx, Config{Database: DatabaseConfig{DataDir: filepath.Join(t.TempDir(), "restored")}}, snap); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.UpsertProviderPepClient(ctx, "grant", "pep", "master", UpsertProviderPepClient{ApplicationID: app.ID, Lifecycle: "disabled"}); e != nil {
+	if _, e = s.UpsertProviderPepClient(ctx, "grant", "pep", "master", UpsertProviderPepClient{Lifecycle: "disabled"}); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = s.ActiveHttpCapabilityCatalog(ctx, "grant", "pep"); e == nil {

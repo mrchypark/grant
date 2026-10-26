@@ -80,6 +80,7 @@ func actorRecheckFixture(t *testing.T) (context.Context, *Service, *Service, *ac
 	if err = local.EnsureBootstrapData(ctx); err != nil {
 		t.Fatal(err)
 	}
+	seedActorRecheckDelegate(t, ctx, local)
 	gate := &actorRecheckGate{reached: make(chan struct{}, 1), resume: make(chan struct{})}
 	gate.next = local.RuntimeHandler()
 	server := httptest.NewServer(gate)
@@ -89,6 +90,22 @@ func actorRecheckFixture(t *testing.T) (context.Context, *Service, *Service, *ac
 	remoteCfg.Database.RemoteNodes = []string{server.URL}
 	remote := &Store{cfg: remoteCfg}
 	return ctx, NewService(localCfg, local), NewService(remoteCfg, remote), gate
+}
+
+// Actor-recheck cases use an ordinary delegated role, not owner-mirror authority,
+// so disabling the binding remains a meaningful revocation test.
+func seedActorRecheckDelegate(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	now := nowString()
+	stmts := []Statement{
+		{SQL: "UPDATE organization_memberships SET membership_role='member',updated_at=? WHERE organization_id='owner' AND user_id='owner'", Args: []any{now}},
+		{SQL: "INSERT INTO roles(id,organization_id,code,name,created_at,updated_at) VALUES('actor-recheck-admin','owner','actor-recheck-admin','Actor recheck delegated role',?,?) ON CONFLICT(id) DO NOTHING", Args: []any{now, now}},
+		{SQL: "INSERT INTO role_actions(role_id,action_id) SELECT 'actor-recheck-admin',id FROM actions WHERE provider_id='grant' AND code IN('organization.application.manage','organization.profile.read','organization.member.manage','organization.group.manage','organization.role.manage','organization.permission.manage') ON CONFLICT DO NOTHING"},
+		{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES('actor-recheck-admin-binding','user','owner','owner','grant','organization','owner','actor-recheck-admin','active','owner',?,?) ON CONFLICT(id) DO NOTHING", Args: []any{now, now}},
+	}
+	if err := store.Transaction(ctx, stmts); err != nil {
+		t.Fatalf("seed delegated recheck actor: %v", err)
+	}
 }
 
 func localActorRecheckConfig(t *testing.T) Config {
@@ -145,6 +162,7 @@ func actorClusterRecheckFixture(t *testing.T, localCfg Config) (context.Context,
 	if err := direct.EnsureBootstrapData(ctx); err != nil {
 		t.Fatalf("bootstrap cluster owner: %v", err)
 	}
+	seedActorRecheckDelegate(t, ctx, direct)
 	assertStrongClusterRows(t, ctx, direct, "SELECT id FROM users WHERE id='owner' AND display_name='Owner' AND active=1", 1)
 	for _, voter := range voterURLs {
 		if err := assertStrongClusterRead(ctx, direct, voter); err != nil {
@@ -216,6 +234,9 @@ func cleanupClusterActorData(t *testing.T, ctx context.Context, store *Store) {
 	t.Helper()
 	now := nowString()
 	statements := []Statement{
+		{SQL: "DELETE FROM role_bindings WHERE id='actor-recheck-admin-binding'"},
+		{SQL: "DELETE FROM role_actions WHERE role_id='actor-recheck-admin'"},
+		{SQL: "DELETE FROM roles WHERE id='actor-recheck-admin'"},
 		{SQL: "DELETE FROM group_memberships WHERE group_id LIKE 'race-%'"},
 		{SQL: "DELETE FROM role_bindings WHERE id LIKE 'race-%' OR id LIKE 'cross-%' OR subject_id='delegate' OR subject_organization_id='receiver' OR resource_id='receiver'"},
 		{SQL: "DELETE FROM role_actions WHERE role_id LIKE 'race-%' OR role_id LIKE 'cross-%'"},
@@ -226,6 +247,7 @@ func cleanupClusterActorData(t *testing.T, ctx context.Context, store *Store) {
 		{SQL: "DELETE FROM users WHERE id LIKE 'race-%' OR id='delegate'"},
 		{SQL: "DELETE FROM organizations WHERE id='receiver'"},
 		{SQL: "UPDATE organizations SET inactivated_at=NULL,updated_at=? WHERE id='owner'", Args: []any{now}},
+		{SQL: "UPDATE organization_memberships SET membership_role='owner',status='active',updated_at=? WHERE organization_id='owner' AND user_id='owner'", Args: []any{now}},
 		{SQL: "UPDATE role_bindings SET state='active',updated_at=? WHERE id='binding-system-bootstrap-owner'", Args: []any{now}},
 		{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES('binding-system-bootstrap-owner','user','owner','owner','grant','organization','owner','role-system-bootstrap-owner','active','owner',?,?) ON CONFLICT(id) DO NOTHING", Args: []any{now, now}},
 	}
@@ -358,13 +380,16 @@ func TestLifecycleActorRechecksRejectRevokedActors(t *testing.T) {
 		{
 			name: "create role binding",
 			setup: func(t *testing.T, ctx context.Context, s *Service) {
+				if _, err := s.CreateRoleAuthorized(ctx, "owner", "owner", CreateRoleInput{ID: "race-create-role", Code: "race-create-role", Name: "Race create role"}); err != nil {
+					t.Fatal(err)
+				}
 				lifecycleExec(t, ctx, s, "INSERT INTO users(id,display_name,active,created_at) VALUES('race-bind-target','Target',1,?)", nowString())
 				if _, err := s.EnrollOrganizationMemberAuthorized(ctx, "owner", "owner", "race-bind-target"); err != nil {
 					t.Fatal(err)
 				}
 			},
 			call: func(ctx context.Context, s *Service) error {
-				_, err := s.CreateRoleBindingAuthorized(ctx, "owner", "owner", CreateRoleBindingInput{ID: "race-create-binding", SubjectType: "user", SubjectID: "race-bind-target", SubjectOrganizationID: "owner", ProviderID: "grant", ResourceType: "organization", ResourceID: "owner", RoleID: "role-system-bootstrap-owner", State: "disabled"})
+				_, err := s.CreateRoleBindingAuthorized(ctx, "owner", "owner", CreateRoleBindingInput{ID: "race-create-binding", SubjectType: "user", SubjectID: "race-bind-target", SubjectOrganizationID: "owner", ProviderID: "grant", ResourceType: "organization", ResourceID: "owner", RoleID: "race-create-role", State: "disabled"})
 				return err
 			},
 			check: func(t *testing.T, ctx context.Context, s *Service) {
@@ -454,9 +479,9 @@ func TestLifecycleActorRechecksRejectRevokedActors(t *testing.T) {
 			result := make(chan error, 1)
 			go func() { result <- tc.call(ctx, remote) }()
 			waitActorRecheck(t, ctx, gate.reached, "final transaction")
-			lifecycleExec(t, ctx, local, "UPDATE role_bindings SET state='disabled' WHERE subject_type='user' AND subject_id='owner' AND subject_organization_id='owner'")
+			lifecycleExec(t, ctx, local, "UPDATE role_bindings SET state='disabled',updated_at=? WHERE id='actor-recheck-admin-binding'", nowString())
 			if os.Getenv(actorClusterOptInEnv) == "1" {
-				assertStrongClusterRows(t, ctx, local.store, "SELECT id FROM role_bindings WHERE id='binding-system-bootstrap-owner' AND state='disabled'", 1)
+				assertStrongClusterRows(t, ctx, local.store, "SELECT id FROM role_bindings WHERE id='actor-recheck-admin-binding' AND state='disabled'", 1)
 			}
 			gate.release()
 			select {
@@ -471,7 +496,7 @@ func TestLifecycleActorRechecksRejectRevokedActors(t *testing.T) {
 				t.Fatalf("waiting for rejected transaction: %v", ctx.Err())
 			}
 			if os.Getenv(actorClusterOptInEnv) == "1" {
-				assertStrongClusterRows(t, ctx, local.store, "SELECT id FROM role_bindings WHERE id='binding-system-bootstrap-owner' AND state='disabled'", 1)
+				assertStrongClusterRows(t, ctx, local.store, "SELECT id FROM role_bindings WHERE id='actor-recheck-admin-binding' AND state='disabled'", 1)
 			}
 			tc.check(t, ctx, local)
 			if os.Getenv(actorClusterOptInEnv) == "1" {
@@ -593,7 +618,8 @@ func TestLifecycleActorRechecksRequiredActionOnly(t *testing.T) {
 				}
 			}
 			tc.setup(t, ctx, local)
-			lifecycleExec(t, ctx, local, "DELETE FROM role_bindings WHERE subject_type='user' AND subject_id='owner' AND subject_organization_id='owner' AND role_id='role-system-bootstrap-owner'")
+			lifecycleExec(t, ctx, local, "DELETE FROM role_bindings WHERE id='actor-recheck-admin-binding'")
+			lifecycleExec(t, ctx, local, "UPDATE organization_memberships SET membership_role='member',updated_at=? WHERE organization_id='owner' AND user_id='owner'", nowString())
 			gate.arm()
 			result := make(chan error, 1)
 			go func() { result <- tc.call(ctx, remote) }()

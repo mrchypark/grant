@@ -39,9 +39,8 @@ func (s *Service) LinkGoauthyIdentityAdmin(ctx context.Context, in GoauthyIdenti
 	return s.store.LinkGoauthyIdentityToExistingUser(ctx, in)
 }
 
-// This protected system role contains only registered tenant-management actions.
-// Ownership transfer moves an existing binding and preserves restrictions;
-// it must not create or restore rights for organizations without that binding.
+// This protected system role declares tenant-management actions for active
+// owner memberships; the evaluator applies it only to the owner's organization.
 func managementOwnerBindingStatements(org, user, actor string) []Statement {
 	ids := []string{}
 	for _, r := range managementRoutes {
@@ -57,7 +56,6 @@ func managementOwnerBindingStatements(org, user, actor string) []Statement {
 		assertion("SELECT 1 FROM roles WHERE id='role-system-management-owner' AND organization_id IS NULL"),
 		assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM role_actions WHERE role_id='role-system-management-owner' AND action_id NOT IN(SELECT value FROM json_each(?)))", j),
 		{SQL: "INSERT INTO role_actions(role_id,action_id) SELECT 'role-system-management-owner',value FROM json_each(?) WHERE 1 ON CONFLICT(role_id,action_id) DO NOTHING", Args: []any{j}},
-		{SQL: "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user',?,?,'grant-management','organization',?,'role-system-management-owner','active',?,?,?) ON CONFLICT(subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id) DO UPDATE SET state='active',agreement_id=NULL,updated_at=excluded.updated_at", Args: []any{requestID(), user, org, org, actor, now, now}},
 	}
 }
 
@@ -93,7 +91,7 @@ func (s *Service) resolveOnboardingContext(ctx context.Context, token, action st
 	if err != nil {
 		return applicationAuthorizationContext{}, err
 	}
-	app, err := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.HTTPCapabilityPEPApplicationID, ReadStrong)
+	app, err := s.store.GetApplicationWithConsistency(ctx, s.cfg.Security.ManagementApplicationID, ReadStrong)
 	if err != nil {
 		return applicationAuthorizationContext{}, serviceError(403, "onboarding application unavailable")
 	}

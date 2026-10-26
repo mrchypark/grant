@@ -150,11 +150,11 @@ func TestOwnershipTransferCannotRestoreRevokedOwnerAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycleExec(t, ctx, s, "UPDATE role_bindings SET state='disabled' WHERE subject_id='owner' AND subject_organization_id='owner'")
-	if _, err = s.TransferOrganizationOwnerAuthorized(ctx, "owner", "owner", "next", before.ETag); ErrorStatus(err) != 403 {
-		t.Fatal("revoked owner recreated authority", err)
+	if _, err = s.TransferOrganizationOwnerAuthorized(ctx, "owner", "owner", "next", before.ETag); err != nil {
+		t.Fatal("audit mirror incorrectly controlled ownership", err)
 	}
-	if lifecycleCount(t, ctx, s, "SELECT * FROM organization_memberships WHERE user_id='owner' AND membership_role='owner'") != 1 {
-		t.Fatal("owner changed on rejected transfer")
+	if lifecycleCount(t, ctx, s, "SELECT * FROM organization_memberships WHERE user_id='owner' AND membership_role='owner'") != 0 {
+		t.Fatal("canonical owner membership was not demoted")
 	}
 	if lifecycleCount(t, ctx, s, "SELECT * FROM role_bindings WHERE subject_id='next' AND role_id='role-system-bootstrap-owner'") != 0 {
 		t.Fatal("target received rejected authority")
@@ -179,8 +179,10 @@ func TestOwnershipTransferMovesExistingManagementAuthorityOnly(t *testing.T) {
 			if err = s.store.Transaction(ctx, managementOwnerBindingStatements("owner", "owner", "owner")); err != nil {
 				t.Fatal(err)
 			}
+			// A stale system-role binding is an audit mirror only; membership is
+			// the owner authority source in both states.
 			if state == "disabled" {
-				lifecycleExec(t, ctx, s, "UPDATE role_bindings SET state='disabled' WHERE role_id='role-system-management-owner'")
+				lifecycleExec(t, ctx, s, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES('legacy-management-owner','user','owner','owner','grant-management','organization','owner','role-system-management-owner','disabled','owner',?,?)", nowString(), nowString())
 			}
 			lifecycleApp(t, ctx, s)
 			lifecycleExec(t, ctx, s, "UPDATE applications SET first_party=1,consent_policy='auto_approve',provisioning_status='ready' WHERE id='life-app'")
@@ -193,7 +195,7 @@ func TestOwnershipTransferMovesExistingManagementAuthorityOnly(t *testing.T) {
 					t.Fatalf("%s %s: %+v %v want %v", user, action, decisions, err, want)
 				}
 			}
-			check("owner", "grant-management.groups.create", "organization", "owner", state == "active")
+			check("owner", "grant-management.groups.create", "organization", "owner", true)
 			before, err := s.GetOrganizationOwnerAuthorized(ctx, "owner", "owner")
 			if err != nil {
 				t.Fatal(err)
@@ -202,7 +204,7 @@ func TestOwnershipTransferMovesExistingManagementAuthorityOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			check("owner", "grant-management.groups.create", "organization", "owner", false)
-			check("next", "grant-management.groups.create", "organization", "owner", state == "active")
+			check("next", "grant-management.groups.create", "organization", "owner", true)
 			check("next", "grant-management.admin.provider.create", "platform", "grant", false)
 			check("next", "grant-management.groups.create", "organization", "another", false)
 			// Grant's own coarse check must also pass after the Exposure-facing check.
@@ -212,9 +214,9 @@ func TestOwnershipTransferMovesExistingManagementAuthorityOnly(t *testing.T) {
 			if lifecycleCount(t, ctx, s, "SELECT * FROM role_bindings WHERE role_id='role-system-management-owner' AND subject_id='owner'") != 0 {
 				t.Fatal("old management ownership remained")
 			}
-			rows, err := s.store.Query(ctx, ReadStrong, "SELECT state FROM role_bindings WHERE role_id='role-system-management-owner' AND subject_id='next'")
-			if err != nil || len(rows) != 1 || rowString(rows[0], "state") != state {
-				t.Fatal("revived or lost binding state", rows, err)
+			rows, err := s.store.Query(ctx, ReadStrong, "SELECT id FROM role_bindings WHERE role_id='role-system-management-owner' AND subject_id='next'")
+			if err != nil || len(rows) != 0 {
+				t.Fatal("owner mutation created a shadow authority binding", rows, err)
 			}
 		})
 	}

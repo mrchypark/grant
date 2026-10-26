@@ -78,6 +78,41 @@ func TestProviderCreatePatchStaleETag(t *testing.T) {
 	}
 }
 
+func TestOperableCustomActionsAreOwnerAndOrganizationScoped(t *testing.T) {
+	ctx, s := serviceFixture(t)
+	if _, err := s.UpsertServiceProviderAdmin(ctx, ServiceProvider{ID: "operable", Name: "Operable", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	ownershipMember(t, ctx, s, "next-owner")
+	if _, err := s.CreateOrganizationAdmin(ctx, CreateOrganizationInput{ID: "other-org", Name: "Other", OwnerUserID: "next-owner"}); err != nil {
+		t.Fatal(err)
+	}
+	code := operableCustomNamespace("owner") + "calendar.event.create"
+	a, err := s.CreateOperableCustomActionAuthorized(ctx, "owner", "owner", CustomActionInput{Code: code, Name: "Create event", RiskLevel: "medium"})
+	if err != nil || a.ID != "operable."+code || a.GrantableToApplications || a.VisibilityGranting {
+		t.Fatalf("created action: %+v %v", a, err)
+	}
+	patch := CustomActionPatch{Name: stringPtr("Create calendar event")}
+	if _, err = s.PatchOperableCustomActionAuthorized(ctx, "next-owner", "other-org", a.ID, patch); ErrorStatus(err) != 409 {
+		t.Fatalf("cross-org patch: %v", err)
+	}
+	if err = s.DeleteOperableCustomActionAuthorized(ctx, "next-owner", "other-org", a.ID); ErrorStatus(err) != 409 {
+		t.Fatalf("cross-org delete: %v", err)
+	}
+	updated, err := s.PatchOperableCustomActionAuthorized(ctx, "owner", "owner", a.ID, patch)
+	if err != nil || updated.Name != *patch.Name {
+		t.Fatalf("patch: %+v %v", updated, err)
+	}
+	if _, err = s.CreateOperableCustomActionAuthorized(ctx, "owner", "owner", CustomActionInput{Code: operableCustomNamespace("other-org") + "calendar.event.create", Name: "Wrong scope", RiskLevel: "low"}); ErrorStatus(err) != 400 {
+		t.Fatalf("cross-org namespace accepted: %v", err)
+	}
+	if err = s.DeleteOperableCustomActionAuthorized(ctx, "owner", "owner", a.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func stringPtr(s string) *string { return &s }
+
 func TestBootstrapOwnerAtomicReservedUserIDRejectsSecondSubject(t *testing.T) {
 	ctx, s := serviceFixture(t)
 	ident1 := ExternalIdentityMaterialization{Provider: "pocketbase", Issuer: "https://auth.example.test", CollectionID: "users_id", ExternalUserID: "pb-res1", DisplayName: "Res1"}
@@ -112,7 +147,7 @@ func TestDeleteProviderActionProtectsActiveCatalog(t *testing.T) {
 	if _, err = s.ReplaceProviderActionsAdmin(ctx, "grant-management", actions); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.SetProviderPepClientAdmin(ctx, "grant-management", "catalog-pep", UpsertProviderPepClient{ApplicationID: "catalog-pep-app", Lifecycle: "active"}); err != nil {
+	if _, err = s.SetProviderPepClientAdmin(ctx, "grant-management", "catalog-pep", UpsertProviderPepClient{Lifecycle: "active"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.StageHttpCapabilityGenerationAdmin(ctx, "grant-management", stage); err != nil {
