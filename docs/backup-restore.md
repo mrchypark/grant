@@ -2,9 +2,9 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
-## Rhiza v0.19.0 upgrade compatibility guide
+## Rhiza v0.20.0 upgrade compatibility guide
 
-Grant selects Rhiza v0.19.0 and latticedb-go v0.11.3 as an upgrade candidate. Production deployment and migration have not been completed.
+Grant selects Rhiza v0.20.0 and latticedb-go v0.11.3. Production deployment and migration have not been completed. The v0.20 dependency upgrade preserves Grant's canonical snapshot format and SQL schema. See [runtime-modes.md](runtime-modes.md#rhiza-v020-compatibility) for the new Local archive behavior and its downgrade restrictions.
 
 Rhiza v0.19.0 advances SQL execution policy to 7 and changes protected QLog/WAL compatibility. It refuses old SQL history, materializations and checkpoints; mixed-version peers and downgrade after activation are unsupported. This requires logical migration to a fresh cluster, not a rolling binary upgrade. Keep the old binary, data directories, object namespace and recovery evidence available until cutover is verified. See the [upstream SQL execution policy compatibility boundary](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/sql-execution-policy.md) for the exact documented constraints.
 
@@ -15,6 +15,39 @@ Before these logical cutover steps, require either a Rhiza Operator integration 
 3. Verify imported Grant rows and authorization behavior before switching traffic. Keep the old installation intact to resolve outcomes from its history; do not copy QLog/WAL segments, physical checkpoints, receipts, applied slots or migration history into the new cluster.
 
 This migration uses the existing logical snapshot and coordinated restore commands; no automatic or in-place Rhiza storage migration is available. The standalone `migrate-restore` path is limited to a fresh isolated local single-voter destination.
+
+## Single-instance Local archive recovery
+
+Rhiza v0.20.0 supports automatic archive restore for one Grant instance configured
+with `Local: true`, a stable `NodeID` and `ClusterID`, and an archive outside its
+local data directory. Use `ObjStoreDurability: "before-ack"` explicitly. Keep one
+writer for that archive, including during recovery. On startup, `OpenStore` restores
+missing local data before returning; no canonical snapshot import is required.
+This path does not use the Rhiza recovery Operator, which requires at least three
+voters and does not support Local mode. See [the Operator constraints](rhiza-operator.md).
+
+Run the actual Grant store/service regression fixture with:
+
+```sh
+go test ./internal/grant -run '^TestServiceLocalArchiveTotalLoss$' -count=1 -v -timeout 2m
+go test -race ./internal/grant -run '^TestServiceLocalArchiveTotalLoss$' -count=1 -timeout 2m
+```
+
+The fixture uses only temporary directories and a separate filesystem archive.
+It creates users, an organization, a role/action binding and an ownership transfer,
+closes the store, deletes its complete local directory, and lets normal Grant
+startup restore it. Across two loss cycles it checks ownership identity/revision,
+allowed and denied authorization decisions, denial of the former owner's writes,
+and new group writes and reads. The second loss also verifies a write made after
+the first recovery. Test cleanup closes the store and removes the disposable data
+and archive; existing `rhiza-data` is never used.
+
+This verifies clean-close total-directory-loss recovery through Grant's Go service
+and native store, without a public HTTP server. It does not verify abrupt process
+termination or prove archive durability before close. A filesystem archive on the
+same physical disk cannot protect against losing that disk. S3, GCS and Azure
+adapter contracts, Kubernetes recovery, external identity-provider behavior and
+production-cloud parity are not covered by this fixture.
 
 ## Existing Hiqlite authority data
 
