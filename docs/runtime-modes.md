@@ -17,20 +17,20 @@ and consistent local schema reads; it reports `writeReady: false` because replic
 
 ## Configuration
 
-Grant selects Rhiza v0.20.0 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+Grant selects Rhiza v0.21.0 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
 
-### Rhiza v0.20 compatibility
+### Rhiza v0.21 compatibility
 
-The [v0.20.0 release](https://github.com/mrchypark/rhiza/releases/tag/v0.20.0)
-keeps the native APIs used by Grant and the peer FlatBuffers schema from v0.19.0.
-Both releases use SQL execution policy 7, and the WAL/QLog schemas are unchanged.
-This dependency upgrade does not change Grant's SQL schema or canonical snapshot
-format. Quiesce writers for an upgrade and preserve recovery evidence; the upstream
-policy excludes downgrade after activation. This does not qualify rolling upgrades,
-mixed-version clusters or an in-place production migration. The older policy
-migration guide remains applicable to stores predating policy 7.
+The [v0.21.0 release](https://github.com/mrchypark/rhiza/releases/tag/v0.21.0)
+uses an archive format incompatible with pre-v0.21 archives. There is no automatic
+migration, adoption, or deletion of old archives. Use a new, empty `DataDir` and a
+new, independent archive directory or object-store namespace only. Preserve all
+existing data and archives unchanged; do not bootstrap a sibling namespace inside
+a rejected archive. Grant's SQL schema and canonical snapshot format are unchanged;
+that does not establish physical storage or archive compatibility. Rolling upgrades,
+mixed-version clusters, downgrade and in-place production migration are unverified.
 
-Explicit `GRANT_RHIZA_CONFIG_JSON` configuration with `Local: true` can now use
+Explicit `GRANT_RHIZA_CONFIG_JSON` configuration with `Local: true` can use
 Rhiza's automatic object-store backup and restore. This is separate from Grant's
 canonical JSON snapshot export/import. Local archives require one writer, including
 during offline restore; missing local data can restore before `Open` returns.
@@ -38,16 +38,18 @@ An empty durability policy defaults to before-ack in this mode, while an explici
 `async` policy permits acknowledged writes ahead of backup. Environment-derived
 native configuration defaults to `async`, so select before-ack explicitly when needed.
 Checkpoint retention defaults to three snapshots, with a 15-minute checkpoint
-interval, hourly GC, and a 24-hour GC grace period. Local archive HEAD v2 uses a
-protocol marker to exclude writers or collectors that ignore retention metadata;
-do not assume downgrade compatibility. Divergent or unverifiable histories fail
+interval, hourly GC, and a 24-hour GC grace period. The fixed archive HEAD catalog
+rejects unsupported formats rather than upgrading or adopting them. Divergent or unverifiable histories fail
 startup while preserving evidence. See the upstream
-[Local storage contract](https://github.com/mrchypark/rhiza/blob/v0.20.0/docs/embedded-object-storage.md).
+[Local storage contract](https://github.com/mrchypark/rhiza/blob/v0.21.0/docs/embedded-object-storage.md).
 
-HA archive publication also gains completed-batch rechecks, and supervised Azure
-startup requires a pre-provisioned container before WAL admission. Ordinary
-unsupervised Azure provisioning is unchanged. Grant's default configuration does
-not enable `Local` or supervised fencing. Existing lost-WAL voter safeguards still
+Filesystem Local recovery uses a process-lifetime owner lock on the same host,
+supported on Linux and macOS only. Use a dedicated archive root outside `DataDir`;
+the root and its parent must remain trusted and stable, without rename, replacement,
+remount or external removal while in use. The advisory lock does not fence external
+filesystem mutation. Remote maintenance tokens are not cleared based on age or
+process state. Grant's default configuration does not enable `Local` or supervised
+fencing. Existing lost-WAL voter safeguards still
 apply; upgrading the module does not authorize deleting or reusing a voter directory.
 
 The ordinary embedded configuration accepts Grant aliases for the current candidate. The optional Operator deployment instead uses only native `RHIZA_*` values for generation-owned topology: `RHIZA_NODE_ID`, `RHIZA_DATA_DIR`, `RHIZA_CLUSTER_ID`, `RHIZA_CLUSTER_MEMBERS`, `RHIZA_PEER_TOKENS`, `RHIZA_ADMIN_TOKEN`, `RHIZA_PEER_ADDR`, `RHIZA_BIND_ADDR`, and `RHIZA_ENABLE_RECONFIGURATION`. In that mode, Grant rejects nonempty `GRANT_DATA_DIR`, `GRANT_NODE_ID`, `GRANT_CLUSTER_ID`, `GRANT_PEER_ADDR`, `GRANT_CLUSTER_MEMBERS`, `GRANT_RHIZA_CONFIG_JSON`, `GRANT_RHIZA_REPLICA_CONFIG_JSON`, `GRANT_REMOTE_NODES`, and `GRANT_CLUSTER_RESTORE_SNAPSHOT`. `GRANT_RUNTIME_MODE=embedded`, `GRANT_LOCAL_NODE_ROLE=voter`, `GRANT_RUNTIME_BIND_ADDR`, `GRANT_REMOTE_API_SECRET`, and `GRANT_READ_FENCE_KEY` remain allowed with their existing validation; the runtime secret and fence key must remain distinct from native Rhiza admin and peer credentials. Native `RHIZA_LEARNER` controls learner admission. Three native members start concurrently; the old Grant Hiqlite ordinal-zero lifecycle gate is not used. Rauthy's separate lifecycle remains unchanged.
@@ -74,8 +76,8 @@ Production migration requires either a Rhiza Operator integration with trusted
 external fencing or an approved persistent-storage strategy that retains each
 voter's original disk and WAL. Lost-WAL replacement requires a fresh learner,
 fencing and membership reconfiguration when quorum survives, or Operator-managed
-whole-generation recovery. See the upstream [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.20.0/docs/recovery.md)
-and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.20.0/docs/embedded-operator.md).
+whole-generation recovery. See the upstream [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.21.0/docs/recovery.md)
+and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.21.0/docs/embedded-operator.md).
 The isolated fixture uses disposable local Versity Gateway; production recovery
 must be rehearsed before traffic cutover.
 

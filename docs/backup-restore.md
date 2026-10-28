@@ -2,9 +2,9 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
-## Rhiza v0.20.0 upgrade compatibility guide
+## Rhiza v0.21.0 upgrade compatibility guide
 
-Grant selects Rhiza v0.20.0 and latticedb-go v0.11.3. Production deployment and migration have not been completed. The v0.20 dependency upgrade preserves Grant's canonical snapshot format and SQL schema. See [runtime-modes.md](runtime-modes.md#rhiza-v020-compatibility) for the new Local archive behavior and its downgrade restrictions.
+Grant selects Rhiza v0.21.0 and latticedb-go v0.11.3. Production deployment and migration have not been completed. Grant's canonical snapshot format and SQL schema are unchanged, but pre-v0.21 archives are incompatible and have no automatic migration. Use a new, empty `DataDir` and a new independent archive only; preserve existing data and archives. See [runtime-modes.md](runtime-modes.md#rhiza-v021-compatibility).
 
 Rhiza v0.19.0 advances SQL execution policy to 7 and changes protected QLog/WAL compatibility. It refuses old SQL history, materializations and checkpoints; mixed-version peers and downgrade after activation are unsupported. This requires logical migration to a fresh cluster, not a rolling binary upgrade. Keep the old binary, data directories, object namespace and recovery evidence available until cutover is verified. See the [upstream SQL execution policy compatibility boundary](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/sql-execution-policy.md) for the exact documented constraints.
 
@@ -18,7 +18,17 @@ This migration uses the existing logical snapshot and coordinated restore comman
 
 ## Single-instance Local archive recovery
 
-Rhiza v0.20.0 supports automatic archive restore for one Grant instance configured
+The v0.21 archive format is incompatible with pre-v0.21 archives, with no automatic
+migration. Start only with a new, empty `DataDir` and a new independent archive
+directory or object-store namespace. Preserve existing data and archives unchanged.
+Automatic recovery below applies only to a compatible v0.21 archive created there.
+Filesystem maintenance and recovery require a dedicated, trusted, stable archive
+root and parent outside `DataDir` on the same Linux or macOS host. Do not rename,
+replace, remount or externally remove them while in use. Stop the old process
+before offline restore or copying files; a Pod deletion response is not proof of
+termination. Remote maintenance tokens cannot be cleared based on age or process state.
+
+Rhiza v0.21.0 supports automatic archive restore for one Grant instance configured
 with `Local: true`, a stable `NodeID` and `ClusterID`, and an archive outside its
 local data directory. Use `ObjStoreDurability: "before-ack"` explicitly. Keep one
 writer for that archive, including during recovery. On startup, `OpenStore` restores
