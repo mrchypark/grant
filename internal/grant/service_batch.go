@@ -2,7 +2,9 @@ package grant
 
 import (
 	"context"
+	"errors"
 	"github.com/mrchypark/rhiza"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -106,12 +108,61 @@ func validateBatchEvidence(root HttpCapability, catalog ActiveHttpCapabilityCata
 	return checks, nil
 }
 
+// Keep diagnostics out of Error(), which is also the public HTTP message.
+type batchFenceError struct {
+	public error
+	cause  error
+}
+
+func (e *batchFenceError) Error() string   { return e.public.Error() }
+func (e *batchFenceError) Unwrap() []error { return []error{e.public, e.cause} }
+
+func logBatchFailure(ctx context.Context, stage string, started time.Time, err error) {
+	var public *Error
+	if ctx.Err() == nil && errors.As(err, &public) && public.Status < 500 {
+		return
+	}
+	state := "not_done"
+	switch ctx.Err() {
+	case context.Canceled:
+		state = "canceled"
+	case context.DeadlineExceeded:
+		state = "deadline_exceeded"
+	}
+	deadline, present := ctx.Deadline()
+	remaining := int64(0)
+	if present {
+		remaining = time.Until(deadline).Milliseconds()
+	}
+	slog.Warn("batch decision failed", "stage", stage, "elapsed_ms", time.Since(started).Milliseconds(),
+		"context_state", state, "deadline_present", present, "deadline_remaining_ms", remaining, "configured_budget_ms", 3000)
+}
+
+type batchReadDiagnostic struct {
+	ctx   context.Context
+	stage string
+}
+
+func (d batchReadDiagnostic) finish(started time.Time, err error) {
+	if err == nil {
+		return
+	}
+	if scope := readScope(d.ctx); scope != nil && scope.changed {
+		d.stage = "read_fence"
+	}
+	logBatchFailure(d.ctx, d.stage, started, err)
+}
+
 func (s *Service) batchDecision(ctx context.Context, token, org string, input HttpCapabilityDecisionInput, principal applicationAuthorizationContext) (bool, string, error) {
+	started := time.Now()
+	diagnostic := batchReadDiagnostic{ctx: ctx, stage: "read_fence"}
 	read := func(ctx context.Context) (bool, error) {
+		diagnostic.ctx, diagnostic.stage = ctx, "pep"
 		pep, err := s.configuredPEP(ctx, input.ProviderID)
 		if err != nil {
 			return false, err
 		}
+		diagnostic.stage = "catalog"
 		catalog, err := s.ActiveHttpCapabilityCatalog(ctx, input.ProviderID)
 		if err != nil {
 			return false, err
@@ -119,6 +170,7 @@ func (s *Service) batchDecision(ctx context.Context, token, org string, input Ht
 		if pep.PepClientID != input.PEPClientID || catalog.Generation != input.CatalogGeneration || catalog.CatalogDigest != input.CatalogDigest {
 			return false, serviceError(403, "forbidden: stale batch catalog or PEP")
 		}
+		diagnostic.stage = "principal"
 		var current applicationAuthorizationContext
 		if org == "" {
 			current, err = s.resolveOrglessApplicationContext(ctx, token)
@@ -131,6 +183,7 @@ func (s *Service) batchDecision(ctx context.Context, token, org string, input Ht
 		if current.UserID != principal.UserID || current.OrganizationID != principal.OrganizationID || current.ApplicationID != principal.ApplicationID || current.ExternalSubject != principal.ExternalSubject || current.ProviderAudience != principal.ProviderAudience {
 			return false, serviceError(403, "forbidden: batch principal changed")
 		}
+		diagnostic.stage = "evidence"
 		var root *HttpCapability
 		for i := range catalog.Capabilities {
 			cap := &catalog.Capabilities[i]
@@ -150,6 +203,7 @@ func (s *Service) batchDecision(ctx context.Context, token, org string, input Ht
 			return false, err
 		}
 		checks = append([]AuthorizationCheck{{Action: *root.ActionID, Resource: AuthorizationResource{ProviderID: input.ProviderID, ResourceType: input.ResourceType, ID: input.ResourceID}}}, checks...)
+		diagnostic.stage = "authorization"
 		if org == "" {
 			if root.OrganizationContext != "optional" {
 				return false, serviceError(403, "batch requires organization")
@@ -191,11 +245,17 @@ func (s *Service) batchDecision(ctx context.Context, token, org string, input Ht
 		defer cancel()
 		fence, e := s.store.db.Query(ctx, rhiza.QueryRequest{SQL: "SELECT 1", Consistency: rhiza.ConsistencyLinearizable})
 		if e != nil {
-			return false, "", serviceError(503, "batch quorum fence failed")
+			logBatchFailure(ctx, "quorum_fence", started, e)
+			return false, "", &batchFenceError{public: serviceError(503, "batch quorum fence failed"), cause: e}
 		}
+		diagnostic.ctx = ctx
 		allowed, err = readAtFence(ctx, s, fence.AppliedSlot, read)
+		diagnostic.finish(started, err)
 	}
 	if err != nil {
+		if readScope(ctx) != nil {
+			diagnostic.finish(started, err)
+		}
 		return false, "", err
 	}
 	if !allowed {
