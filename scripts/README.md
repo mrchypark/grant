@@ -52,3 +52,15 @@
 GitHub Actions의 `.github/workflows/e2e-local.yml`은 shell 문법/ShellCheck 목록과 로컬 검증 진입점을 관리하고, `rauthy-launcher-image.yml`은 GHCR preflight 및 OCI attestation verifier를 호출한다. 문서의 일반 로컬 진입점은 `README.md`, `docs/local-development.md`, `docs/runtime-modes.md`에 있다.
 
 이번 정리는 서로 다른 두 Go 명령의 중복된 캐시 빌드 launcher만 `cached-go-module.sh`로 통합했다. 명령 이름, 각 Go module, 캐시 경로 형식, 환경 변수(`CODEX_GO_SCRIPT_CACHE`, `CODEX_GO_BUILD_PKG`, `CACHED_GO_REBUILD`, `CACHED_GO_DEBUG`)는 유지하고, 두 module의 `go build`는 모두 `-trimpath`를 사용하도록 맞췄다. 소스 파일·Go 환경·build package가 바뀌면 해시가 달라져 새 바이너리를 만들고, `CACHED_GO_REBUILD=1`은 강제로 다시 빌드한다. 실제 실행 경로에서 사용되지 않던 AWS principal helper와 그 전용 verifier도 함께 제거했다. VIND/GKE 배포 경로, S3 처리와 검증 fixture, 그리고 은퇴한 Hiqlite 명령 shim은 호출 계약이 달라 통합하지 않았다.
+
+`sh scripts/verify-standalone-deployment.sh` renders the standalone overlay, checks
+the release image/init/PVC contract, exercises rendered ConfigFromEnv through a
+temporary Go overlay, and runs TestRestoreLocalStorageEntrypoint. It does not
+build/import an image or apply to a cluster. Requires kubectl, yq, jq and Go.
+
+`IMAGE_NAME=grant:container-verify sh scripts/verify-standalone-container.sh` runs
+init/main, same-DataDir reuse and clean data-loss recovery through the real API.
+Requires a local native AMD64 Docker daemon, curl and jq. It uses only owned data
+volumes and an independent filesystem archive, removes its containers/volumes,
+and preserves logs in `LOG_DIR` (or a printed temporary directory). It does not
+establish cloud-provider parity or crash recovery.

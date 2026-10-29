@@ -41,6 +41,14 @@ func OpenStoreWithOperator(ctx context.Context, cfg Config, start func(http.Hand
 
 func effectiveRhizaConfig(d DatabaseConfig) (rhiza.Config, error) {
 	c := d.Rhiza
+	c.DataDir = d.DataDir
+	if d.DataDir != "" {
+		dir, err := filepath.Abs(d.DataDir)
+		if err != nil {
+			return c, err
+		}
+		c.DataDir = dir
+	}
 	if c.NodeID == "" {
 		c.NodeID = d.NodeID
 	}
@@ -64,30 +72,41 @@ func effectiveRhizaConfig(d DatabaseConfig) (rhiza.Config, error) {
 	return c, nil
 }
 
-func openStore(ctx context.Context, cfg Config, restoring bool, startOperator func(http.Handler) error) (*Store, error) {
+func localStoragePreflight(cfg Config, restoring bool) error {
 	if cfg.Database.DataDir == "" {
-		return nil, fmt.Errorf("Grant data directory is required")
+		return fmt.Errorf("Grant data directory is required")
 	}
 	dir, err := filepath.Abs(cfg.Database.DataDir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if cfg.Database.LegacyDataDir != "" {
 		old, e := filepath.Abs(cfg.Database.LegacyDataDir)
 		if e != nil {
-			return nil, e
+			return e
 		}
 		if dir == old {
-			return nil, fmt.Errorf("legacy Hiqlite directory requires explicit export and separate Rhiza restore")
+			return fmt.Errorf("legacy Hiqlite directory requires explicit export and separate Rhiza restore")
 		}
 	}
 	for _, name := range []string{"state_machine", "raft", "raft_log"} {
 		if _, e := os.Stat(filepath.Join(dir, name)); e == nil {
-			return nil, fmt.Errorf("legacy Hiqlite state detected; refusing to create Rhiza files")
+			return fmt.Errorf("legacy Hiqlite state detected; refusing to create Rhiza files")
+		} else if !os.IsNotExist(e) {
+			return e
 		}
 	}
 	if _, e := os.Stat(filepath.Join(dir, "grant-restore-pending.json")); e == nil && !restoring {
-		return nil, fmt.Errorf("incomplete Grant restore: isolated directory cannot serve until verified")
+		return fmt.Errorf("incomplete Grant restore: isolated directory cannot serve until verified")
+	} else if e != nil && !os.IsNotExist(e) {
+		return e
+	}
+	return nil
+}
+
+func openStore(ctx context.Context, cfg Config, restoring bool, startOperator func(http.Handler) error) (*Store, error) {
+	if err := localStoragePreflight(cfg, restoring); err != nil {
+		return nil, err
 	}
 	restoreSnapshot, err := clusterRestorePreflight(ctx, cfg)
 	if err != nil {
@@ -97,7 +116,7 @@ func openStore(ctx context.Context, cfg Config, restoring bool, startOperator fu
 	if err != nil {
 		return nil, err
 	}
-	c.DataDir = dir
+	dir := c.DataDir
 	s := &Store{cfg: cfg}
 	if cfg.Database.RuntimeMode == "remote" {
 		return s, nil
