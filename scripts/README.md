@@ -62,7 +62,9 @@ build/import an image or apply to a cluster. Requires kubectl, yq, jq and Go.
 init/main, same-DataDir reuse and clean data-loss recovery through the real API.
 Requires a local native AMD64 Docker daemon, curl and jq. It uses only owned data
 volumes and an independent filesystem archive, removes its containers/volumes,
-and preserves logs in `LOG_DIR` (or a printed temporary directory). It does not
+and preserves logs in `LOG_DIR` (or a printed temporary directory). Archive root
+`/archive/root` and its sibling owner anchor share the writable `/archive` volume;
+the container root filesystem remains read-only. It does not
 establish cloud-provider parity or crash recovery.
 
 `sh scripts/verify-standalone-container-ownership.sh` checks the container contract's

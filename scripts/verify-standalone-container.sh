@@ -49,6 +49,7 @@ new_volume() {
 archive="$owner-archive"
 new_volume "$archive"
 # Root-only setup reproduces fsGroup ownership; init and main always run as 10001.
+# Rhiza's owner anchor lives beside the archive root, inside the writable volume.
 prepare() {
  data=$1
  new_volume "$data"
@@ -56,7 +57,7 @@ prepare() {
  cid=$(docker create --name "$name" --label "grant.verify.owner=$owner" --network none --read-only --cap-drop ALL --cap-add CHOWN \
   --security-opt no-new-privileges --memory 64m --cpus 1 --pids-limit 32 --user 0:0 \
   -v "$data:/data" -v "$archive:/archive" --entrypoint /bin/sh "$image" \
-  -c 'chown 10001:10001 /data /archive')
+  -c 'mkdir -p /archive/root && chown 10001:10001 /data /archive /archive/root')
  containers="$containers $cid"
  docker start -a "$cid"
 }
@@ -74,7 +75,7 @@ run_grant() {
   -e GRANT_DATA_DIR=/var/lib/grant/rhiza -e GRANT_BACKUP_DIR=/var/lib/grant/backups \
   -e GRANT_NODE_ID=standalone-contract -e GRANT_CLUSTER_ID="$owner" -e GRANT_PEER_ADDR= \
   -e "GRANT_RHIZA_CONFIG_JSON={\"Local\":true,\"NodeID\":\"standalone-contract\",\"ClusterID\":\"$owner\",\"Members\":[],\"PeerAddr\":\"\"}" \
-  -e RHIZA_OBJSTORE_PROVIDER=filesystem -e RHIZA_OBJSTORE_DIR=/archive \
+  -e RHIZA_OBJSTORE_PROVIDER=filesystem -e RHIZA_OBJSTORE_DIR=/archive/root \
   -e RHIZA_OBJSTORE_DURABILITY=before-ack "$image" "$@")
  containers="$containers $cid"
  docker start "$cid" >/dev/null

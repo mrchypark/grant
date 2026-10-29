@@ -43,6 +43,25 @@ case "$1 $2" in
     echo foreign > "$FIXTURE/container-$name"
     exit 17 ;;
   esac
+  # The filesystem owner anchor must share the writable archive volume.
+  case "$name" in
+   *-permissions)
+    [ "$last" = 'mkdir -p /archive/root && chown 10001:10001 /data /archive /archive/root' ] || {
+     echo 'archive root and parent must be prepared inside the writable volume' >&2; exit 97;
+    } ;;
+   *)
+    archive_dir=''; archive_mount=''; readonly=false
+    for arg do
+     case "$arg" in
+      RHIZA_OBJSTORE_DIR=*) archive_dir=${arg#RHIZA_OBJSTORE_DIR=} ;;
+      *:/archive) archive_mount=$arg ;;
+      --read-only) readonly=true ;;
+     esac
+    done
+    [ "$archive_dir" = /archive/root ] && [ -n "$archive_mount" ] && [ "$readonly" = true ] || {
+     echo 'archive root must be below its mount with read-only container filesystem' >&2; exit 97;
+    } ;;
+  esac
   case "$name" in *-permissions) id=created-prepare ;; *) id=created-init ;; esac
   printf '%s\n' "${label#grant.verify.owner=}" > "$FIXTURE/container-$id"
   echo "$id" ;;
@@ -72,6 +91,7 @@ for scenario in prepare-collision run-collision volume-collision valid-cleanup o
  else
   fixture_code=$?
  fi
+ if [ "$fixture_code" -eq 97 ]; then cat "$fixture/output" >&2; exit 1; fi
  # Names involved in collisions must never be logged or removed.
  if grep -E '^(container-rm|logs) grant-standalone-' "$fixture/actions"; then
   cat "$fixture/output" >&2; exit 1
