@@ -17,13 +17,14 @@ and consistent local schema reads; it reports `writeReady: false` because replic
 
 ## Configuration
 
-Grant selects Rhiza v0.21.0 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+Grant selects Rhiza v0.21.1 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
 
 ### Rhiza v0.21 compatibility
 
-The [v0.21.0 release](https://github.com/mrchypark/rhiza/releases/tag/v0.21.0)
+The [v0.21.1 release](https://github.com/mrchypark/rhiza/releases/tag/v0.21.1)
+retains the v0.21.0 archive format: v0.21.0 → v0.21.1 needs no format migration. It
 uses an archive format incompatible with pre-v0.21 archives. There is no automatic
-migration, adoption, or deletion of old archives. Use a new, empty `DataDir` and a
+migration, adoption, or deletion of old archives. For pre-v0.21 sources use a new, empty `DataDir` and a
 new, independent archive directory or object-store namespace only. Preserve all
 existing data and archives unchanged; do not bootstrap a sibling namespace inside
 a rejected archive. Grant's SQL schema and canonical snapshot format are unchanged;
@@ -41,7 +42,7 @@ Checkpoint retention defaults to three snapshots, with a 15-minute checkpoint
 interval, hourly GC, and a 24-hour GC grace period. The fixed archive HEAD catalog
 rejects unsupported formats rather than upgrading or adopting them. Divergent or unverifiable histories fail
 startup while preserving evidence. See the upstream
-[Local storage contract](https://github.com/mrchypark/rhiza/blob/v0.21.0/docs/embedded-object-storage.md).
+[Local storage contract](https://github.com/mrchypark/rhiza/blob/v0.21.1/docs/embedded-object-storage.md).
 
 Filesystem Local recovery uses a process-lifetime owner lock on the same host,
 supported on Linux and macOS only. Use a dedicated archive root outside `DataDir`;
@@ -76,8 +77,8 @@ Production migration requires either a Rhiza Operator integration with trusted
 external fencing or an approved persistent-storage strategy that retains each
 voter's original disk and WAL. Lost-WAL replacement requires a fresh learner,
 fencing and membership reconfiguration when quorum survives, or Operator-managed
-whole-generation recovery. See the upstream [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.21.0/docs/recovery.md)
-and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.21.0/docs/embedded-operator.md).
+whole-generation recovery. See the upstream [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.21.1/docs/recovery.md)
+and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.21.1/docs/embedded-operator.md).
 The isolated fixture uses disposable local Versity Gateway; production recovery
 must be rehearsed before traffic cutover.
 

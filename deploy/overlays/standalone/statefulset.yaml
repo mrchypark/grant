@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grant-standalone
+spec:
+  serviceName: grant-standalone-headless
+  replicas: 1
+  updateStrategy: {type: OnDelete}
+  persistentVolumeClaimRetentionPolicy: {whenDeleted: Retain, whenScaled: Retain}
+  selector:
+    matchLabels: {app: grant, role: standalone}
+  template:
+    metadata:
+      labels: {app: grant, role: standalone}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64, kubernetes.io/os: linux}
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: restore-local-storage
+          image: ghcr.io/mrchypark/grant:v0.4.0
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/grant, restore-local-storage]
+          envFrom:
+            - secretRef: {name: grant-secrets}
+            - secretRef: {name: grant-rhiza-storage}
+            - configMapRef: {name: grant-standalone-config}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/grant}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: grant
+          image: ghcr.io/mrchypark/grant:v0.4.0
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/grant]
+          envFrom:
+            - secretRef: {name: grant-secrets}
+            - secretRef: {name: grant-rhiza-storage}
+            - configMapRef: {name: grant-standalone-config}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: http, containerPort: 8080}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/grant}
+            - {name: tmp, mountPath: /tmp}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 3
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 10Gi}

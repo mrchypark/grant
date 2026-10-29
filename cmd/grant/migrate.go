@@ -79,5 +79,19 @@ func commandLine(ctx context.Context) (bool, error) {
 	if len(os.Args) == 1 {
 		return false, nil
 	}
+	if os.Args[1] == "restore-local-storage" {
+		if len(os.Args) != 2 {
+			return true, fmt.Errorf("usage: grant restore-local-storage")
+		}
+		cfg, err := grant.ConfigFromEnv()
+		if err != nil {
+			return true, err
+		}
+		if err := grant.RestoreLocalStorage(ctx, cfg); err != nil {
+			return true, err
+		}
+		_, err = fmt.Fprintln(os.Stdout, "Grant local storage recovery completed")
+		return true, err
+	}
 	return true, migration(ctx, os.Args[1], os.Args[2:])
 }

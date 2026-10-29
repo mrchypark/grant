@@ -86,10 +86,34 @@ jobs:
       - name: Verify native quorum and fresh-cluster restore
         run: sh scripts/verify-go-three-voter.sh
 
+      - name: Install pinned standalone render tools
+        run: |
+          curl -fSL --retry 3 --connect-timeout 20 --max-time 180 -o kubectl https://dl.k8s.io/release/v1.35.3/bin/linux/amd64/kubectl
+          curl -fSL --retry 3 --connect-timeout 20 --max-time 180 -o kubectl.sha256 https://dl.k8s.io/release/v1.35.3/bin/linux/amd64/kubectl.sha256
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+          curl -fSL --retry 3 --connect-timeout 20 --max-time 180 -o yq https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
+          chmod +x kubectl yq
+          sudo mv kubectl yq /usr/local/bin/
+          rm kubectl.sha256
+
+      - name: Verify standalone manifests and configuration
+        run: |
+          sh scripts/verify-standalone-container-ownership.sh
+          sh scripts/verify-standalone-deployment.sh
+
       - name: Verify native AMD64 container under production security limits
         run: |
           docker build --platform linux/amd64 --label org.opencontainers.image.revision="${GITHUB_SHA}" -t grant:container-verify .
           IMAGE_NAME=grant:container-verify sh scripts/verify-go-container.sh
+          IMAGE_NAME=grant:container-verify LOG_DIR="$RUNNER_TEMP/standalone-container-logs" sh scripts/verify-standalone-container.sh
+
+      - name: Preserve standalone container logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: standalone-container-logs
+          path: ${{ runner.temp }}/standalone-container-logs
+          if-no-files-found: ignore
 
   local-bootstrap:
     if: ${{ !inputs.publish_rauthy_launcher_gar }}
@@ -209,6 +233,9 @@ jobs:
             scripts/verify-docs.sh
             scripts/verify-rhiza-deployment.sh
             scripts/verify-go-container.sh
+            scripts/verify-standalone-container.sh
+            scripts/verify-standalone-container-ownership.sh
+            scripts/verify-standalone-deployment.sh
             scripts/ghcr-tag-preflight.sh
             scripts/verify-ghcr-tag-preflight.sh
             scripts/materialize-s3-restore.sh
