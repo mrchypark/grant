@@ -64,3 +64,8 @@ Requires a local native AMD64 Docker daemon, curl and jq. It uses only owned dat
 volumes and an independent filesystem archive, removes its containers/volumes,
 and preserves logs in `LOG_DIR` (or a printed temporary directory). It does not
 establish cloud-provider parity or crash recovery.
+
+`sh scripts/verify-standalone-container-ownership.sh` checks the container contract's
+cleanup with a small fake Docker command: name/volume collisions, successful
+creation followed by startup failure, and changed ownership. Requires POSIX sh;
+it never contacts a Docker daemon. CI runs it before the real container contract.

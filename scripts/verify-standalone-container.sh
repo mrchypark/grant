@@ -11,19 +11,25 @@ case "$(docker info --format '{{.Architecture}}')" in
  amd64|x86_64) ;; *) echo 'requires native AMD64 daemon; emulation is not deployment proof' >&2; exit 1 ;;
 esac
 [ "$(docker image inspect "$image" --format '{{.Architecture}}')" = amd64 ]
-# Every name is owned by this invocation. Never delete an existing volume.
+# Track only created container IDs and volumes whose owner label matches.
 owner="grant-standalone-$(date +%s)-$$"
 containers=''
 volumes=''
 cleanup() {
  code=$?
  trap - EXIT HUP INT TERM
- for name in $containers; do
-  docker logs "$name" > "$log_dir/$name.log" 2>&1 || true
-  if ! docker rm -f "$name" >/dev/null 2>&1; then echo "cleanup failed: container $name" >&2; code=1; fi
-  if docker container inspect "$name" >/dev/null 2>&1; then echo "container remains: $name" >&2; code=1; fi
+ for id in $containers; do
+  if [ "$(docker container inspect -f '{{index .Config.Labels "grant.verify.owner"}}' "$id" 2>/dev/null)" != "$owner" ]; then
+   echo "refusing cleanup: container $id ownership unverified" >&2; code=1; continue
+  fi
+  docker logs "$id" > "$log_dir/$id.log" 2>&1 || true
+  if ! docker rm -f "$id" >/dev/null 2>&1; then echo "cleanup failed: container $id" >&2; code=1; fi
+  if docker container inspect "$id" >/dev/null 2>&1; then echo "container remains: $id" >&2; code=1; fi
  done
  for name in $volumes; do
+  if [ "$(docker volume inspect -f '{{index .Labels "grant.verify.owner"}}' "$name" 2>/dev/null)" != "$owner" ]; then
+   echo "refusing cleanup: volume $name ownership unverified" >&2; code=1; continue
+  fi
   if ! docker volume rm "$name" >/dev/null 2>&1; then echo "cleanup failed: volume $name" >&2; code=1; fi
   if docker volume inspect "$name" >/dev/null 2>&1; then echo "volume remains: $name" >&2; code=1; fi
  done
@@ -35,6 +41,9 @@ new_volume() {
  name=$1
  if docker volume inspect "$name" >/dev/null 2>&1; then echo "refusing existing volume: $name" >&2; exit 1; fi
  docker volume create --label "grant.verify.owner=$owner" "$name" >/dev/null
+ if [ "$(docker volume inspect -f '{{index .Labels "grant.verify.owner"}}' "$name")" != "$owner" ]; then
+  echo "refusing volume: $name ownership unverified" >&2; exit 1
+ fi
  volumes="$volumes $name"
 }
 archive="$owner-archive"
@@ -44,16 +53,16 @@ prepare() {
  data=$1
  new_volume "$data"
  name="$data-permissions"
- containers="$containers $name"
- docker run --name "$name" --network none --read-only --cap-drop ALL --cap-add CHOWN \
+ cid=$(docker create --name "$name" --label "grant.verify.owner=$owner" --network none --read-only --cap-drop ALL --cap-add CHOWN \
   --security-opt no-new-privileges --memory 64m --cpus 1 --pids-limit 32 --user 0:0 \
   -v "$data:/data" -v "$archive:/archive" --entrypoint /bin/sh "$image" \
-  -c 'chown 10001:10001 /data /archive'
+  -c 'chown 10001:10001 /data /archive')
+ containers="$containers $cid"
+ docker start -a "$cid"
 }
 run_grant() {
  name=$1; data=$2; shift 2
- containers="$containers $name"
- docker run -d --name "$name" --platform linux/amd64 \
+ cid=$(docker create --name "$name" --label "grant.verify.owner=$owner" --platform linux/amd64 \
   --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
   --memory 512m --cpus 1 --pids-limit 256 \
   --tmpfs /tmp:rw,uid=10001,gid=10001,size=64m \
@@ -66,11 +75,14 @@ run_grant() {
   -e GRANT_NODE_ID=standalone-contract -e GRANT_CLUSTER_ID="$owner" -e GRANT_PEER_ADDR= \
   -e "GRANT_RHIZA_CONFIG_JSON={\"Local\":true,\"NodeID\":\"standalone-contract\",\"ClusterID\":\"$owner\",\"Members\":[],\"PeerAddr\":\"\"}" \
   -e RHIZA_OBJSTORE_PROVIDER=filesystem -e RHIZA_OBJSTORE_DIR=/archive \
-  -e RHIZA_OBJSTORE_DURABILITY=before-ack "$image" "$@" >/dev/null
+  -e RHIZA_OBJSTORE_DURABILITY=before-ack "$image" "$@")
+ containers="$containers $cid"
+ docker start "$cid" >/dev/null
 }
 init_storage() {
  name=$1; data=$2
  run_grant "$name" "$data" restore-local-storage
+ name=$cid
  i=0
  while [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ]; do
   i=$((i+1)); [ "$i" -lt 120 ] || { echo 'init timed out' >&2; return 1; }; sleep 1
@@ -80,6 +92,7 @@ init_storage() {
 start_main() {
  name=$1; data=$2
  run_grant "$name" "$data"
+ name=$cid
  port=$(docker inspect "$name" | jq -r '.[0].NetworkSettings.Ports["8080/tcp"][0].HostPort')
  url="http://127.0.0.1:$port"
  i=0
@@ -89,6 +102,7 @@ start_main() {
  done
  curl --max-time 10 -fsS "$url/healthz" | jq -e '.status=="ok"' >/dev/null
  docker inspect "$name" | jq -e '.[0] | .Config.User=="10001:10001" and .HostConfig.ReadonlyRootfs and (.State.OOMKilled|not)' >/dev/null
+ main_cid=$cid
 }
 stop_main() {
  docker stop --time 60 "$1" >/dev/null
@@ -107,16 +121,16 @@ read_marker
 code=$(curl --max-time 10 -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
  --data '{"id":"reject","name":"Reject","active":true}' "$url/api/v1/admin/providers")
 [ "$code" = 401 ]
-stop_main "$owner-main-original"
+stop_main "$main_cid"
 # Reopen exactly the same DataDir, then model clean disk loss with a NEW volume.
 init_storage "$owner-init-reuse" "$original"
 start_main "$owner-main-reuse" "$original"
 read_marker
-stop_main "$owner-main-reuse"
+stop_main "$main_cid"
 fresh="$owner-data-fresh"
 prepare "$fresh"
 init_storage "$owner-init-restore" "$fresh"
 start_main "$owner-main-restored" "$fresh"
 read_marker
-stop_main "$owner-main-restored"
+stop_main "$main_cid"
 printf '%s\n' 'Standalone init/main shared DataDir, reuse and clean data-loss archive recovery passed (not crash recovery)'
