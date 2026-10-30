@@ -1,10 +1,11 @@
 # grant
 
-`grant`는 조직, 애플리케이션, 서비스 provider와 resource scope에 대한 권한을 관리하는 Go 1.27.3 서비스다. 저장소는 Rhiza v0.21.1의 native Go API를 사용하며 cgo를 사용하지 않는다. 로그인과 외부 identity 확인은 Rauthy 또는 PocketBase(patch-auth)가 담당한다.
+`grant`는 조직, 애플리케이션, 서비스 provider와 resource scope에 대한 권한을 관리하는 Go 1.27.3 서비스다. 저장소는 Rhiza v0.21.2의 native Go API를 사용하며 cgo를 사용하지 않는다. 로그인과 외부 identity 확인은 Rauthy 또는 PocketBase(patch-auth)가 담당한다.
 
 For one retained-PVC Local instance with application-owned Open/Close init, see
 [the standalone guide](docs/single-node.md). The overlay targets the forthcoming
-`ghcr.io/mrchypark/grant:v0.4.0` image and will not work before publication is verified.
+`ghcr.io/mrchypark/grant:v0.4.1` image with Rhiza v0.21.2. Verify image publication
+before using this tag.
 
 `organizations.id`가 tenant의 기본 키이며, `role_bindings`는 `provider_id + resource_type + resource_id` 범위에 role을 부여한다. 공개 권한 API는 allow/deny를 반환한다. 폐기된 field-view 기능은 활성화하지 않는다.
 
