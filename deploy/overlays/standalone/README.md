@@ -2,7 +2,7 @@
 
 Follow the [single-node guide](../../../docs/single-node.md) for mandatory local
 image publication, external auth/storage secrets, retained disk and writer exclusion.
-Both containers target `ghcr.io/mrchypark/grant:v0.4.0` (`IfNotPresent`).
+Both containers target `ghcr.io/mrchypark/grant:v0.4.1` (`IfNotPresent`), with Rhiza v0.21.2.
 This forthcoming tag will not work before publication is verified. No digest is
 claimed; v0.3.0 does not contain the required command.
 

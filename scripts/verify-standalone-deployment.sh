@@ -28,7 +28,7 @@ jq -e '
   $p.initContainers[0].volumeMounts == $p.containers[0].volumeMounts and
   $p.containers[0].command == ["/usr/local/bin/grant"] and
   all(($p.initContainers + $p.containers)[];
-    .image == "ghcr.io/mrchypark/grant:v0.4.0" and .imagePullPolicy == "IfNotPresent" and
+    .image == "ghcr.io/mrchypark/grant:v0.4.1" and .imagePullPolicy == "IfNotPresent" and
     .envFrom == $p.containers[0].envFrom and
     .securityContext.readOnlyRootFilesystem == true and
     any(.volumeMounts[]; .name == "data" and .mountPath == "/var/lib/grant")) and

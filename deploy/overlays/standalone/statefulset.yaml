@@ -24,7 +24,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       initContainers:
         - name: restore-local-storage
-          image: ghcr.io/mrchypark/grant:v0.4.0
+          image: ghcr.io/mrchypark/grant:v0.4.1
           imagePullPolicy: IfNotPresent
           command: [/usr/local/bin/grant, restore-local-storage]
           envFrom:
@@ -40,7 +40,7 @@ spec:
             - {name: tmp, mountPath: /tmp}
       containers:
         - name: grant
-          image: ghcr.io/mrchypark/grant:v0.4.0
+          image: ghcr.io/mrchypark/grant:v0.4.1
           imagePullPolicy: IfNotPresent
           command: [/usr/local/bin/grant]
           envFrom:

@@ -1,22 +1,23 @@
 # Standalone Local Kubernetes
 
-`deploy/overlays/standalone` runs one Grant process with Rhiza v0.21.1 Local
-storage. It contains no Operator or HA membership. Do not combine it with the
+Current source selects Rhiza v0.21.2 Local storage. The standalone overlay runs
+one Grant process and targets the v0.4.1 release candidate.
+It contains no Operator or HA membership. Do not combine it with the
 HA base or Operator overlay. Grant's `voter` role selects its writable API;
 Local mode has one stable identity and no peer replication.
 
 ## Image prerequisite
 
-Both containers target `ghcr.io/mrchypark/grant:v0.4.0` with `IfNotPresent`.
-**This forthcoming tag will not work before the release owner publishes and
-verifies the image.** No digest or completed publication is claimed here.
+Both containers target `ghcr.io/mrchypark/grant:v0.4.1` with `IfNotPresent`.
+This forthcoming patch release selects Rhiza v0.21.2; v0.4.0 contains v0.21.1.
+Verify publication and the image source revision before using the new tag.
 For isolated testing, build the candidate and explicitly override both images in
 a separate local customization before importing it into the selected cluster:
 
 ```sh
-docker build --platform linux/amd64 -t grant:standalone-v0211-local .
+docker build --platform linux/amd64 -t grant:standalone-v0212-local .
 # For an explicitly selected kind cluster:
-kind load docker-image grant:standalone-v0211-local --name YOUR_CLUSTER
+kind load docker-image grant:standalone-v0212-local --name YOUR_CLUSTER
 ```
 
 For another runtime, use its supported local-image import mechanism on every
@@ -24,7 +25,7 @@ eligible node. Rebuild and reimport after source changes; `IfNotPresent` can reu
 a stale tag. The existing Dockerfile includes `cmd/grant` automatically.
 The published `ghcr.io/mrchypark/grant:v0.3.0` image embeds Rhiza v0.21.0 and
 has no `restore-local-storage` command; it cannot run this overlay.
-Building/releasing v0.4.0 and verifying publication belong to the release owner.
+Release publication follows review approval and successful candidate verification.
 
 ## Shared configuration and storage
 
@@ -73,8 +74,8 @@ must pass. Startup/liveness use `/healthz`. SIGTERM reaches Grant directly; the
 60-second grace period includes its 30-second HTTP drain and store close, without
 a measured guarantee for every storage latency.
 
-This follows the [upstream init guide](https://github.com/mrchypark/rhiza/blob/v0.21.1/docs/local-init-container-recovery.md)
-(source commit `66e2416b52e3d64aa86134b7b0c8b70c5ace88be`), using
+This follows the [upstream init guide](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/local-init-container-recovery.md)
+(source commit `8acb6da35a4c6fc83fa14ecec2fe2b64370fa4bd`), using
 the public Open/Close contract. The sample's optional disposable data volume does
 not change this overlay's retained-PVC design.
 
@@ -93,7 +94,7 @@ ReadWriteOnce and `OnDelete` do not fence a partitioned writer. Never force-dele
 a pod or clear an uncertain maintenance token based on age. Preserve data,
 archives and errors if startup fails. Do not migrate HA into Local mode.
 
-v0.21.1 uses the same archive format as v0.21.0, with no format migration between
+v0.21.2 uses the same archive format as v0.21.0, with no format migration between
 them. Older incompatible archives still fail closed without automatic migration.
 For an older installation, preserve its data/archive and use a separately
 validated migration plan; never delete it to bypass rejection.
@@ -106,8 +107,8 @@ scripts/verify-standalone-deployment.sh
 scripts/verify-rhiza-deployment.sh
 ```
 
-A future authorized rollout must explicitly select context/namespace, satisfy
-the image publication prerequisite and confirm writer exclusion before starting
+A future authorized rollout must explicitly select context/namespace, verify
+the selected image's version and confirm writer exclusion before starting
 the replacement. `OnDelete` retains existing pods after template changes; retain
 the PVC and archive during the controlled replacement. Replacement causes downtime.
 Namespace deletion and storage reclaim policy require separate protection.
@@ -131,6 +132,18 @@ container security/resource limits and preserves logs.
 
 No cluster apply, volume attachment, fencing or real external
 auth/cloud integration is claimed. The filesystem recovery fixture is not an
-all-provider pass. No adapters changed. The known upstream S3 failure is recorded
-in the [v0.21.1 release](https://github.com/mrchypark/rhiza/releases/tag/v0.21.1);
-this change does not resolve it or establish S3/GCS/Azure production parity.
+all-provider pass. No adapters changed. The historical S3 failure reported for
+[v0.21.1](https://github.com/mrchypark/rhiza/releases/tag/v0.21.1) remains evidence;
+upgrading alone does not prove that failure permanently resolved in Grant.
+The [v0.21.2 release](https://github.com/mrchypark/rhiza/releases/tag/v0.21.2)
+addresses Local maintenance release reconciliation only when stable remote readback
+proves the exact expected free control at a changed object version. Work errors,
+cancellation and uncertain operations remain fail-closed; the upload timeout is
+unchanged. This cannot clear an already orphaned held remote token and changes no
+archive format or public API. Upstream reports CI run 40838063324 passing all three
+pinned emulator SDK adapter contracts, each with 19 passes, 0 failures and 2 skips.
+Those upstream results do not qualify Grant's cloud integrations or establish
+S3/GCS/Azure production parity. The `e2e-local` CI workflow runs the full race
+suite and native AMD64 container tests under production security/resource limits.
+Verify successful checks for the release's source revision before rollout;
+a local cross-build alone does not establish native image runtime qualification.
