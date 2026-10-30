@@ -143,5 +143,7 @@ unchanged. This cannot clear an already orphaned held remote token and changes n
 archive format or public API. Upstream reports CI run 40838063324 passing all three
 pinned emulator SDK adapter contracts, each with 19 passes, 0 failures and 2 skips.
 Those upstream results do not qualify Grant's cloud integrations or establish
-S3/GCS/Azure production parity. Local Docker is ARM64; a Linux/amd64 cross-build
-does not establish native AMD64 image runtime verification.
+S3/GCS/Azure production parity. The `e2e-local` CI workflow runs the full race
+suite and native AMD64 container tests under production security/resource limits.
+Verify successful checks for the release's source revision before rollout;
+a local cross-build alone does not establish native image runtime qualification.
