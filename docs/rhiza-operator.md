@@ -1,9 +1,25 @@
 # Embedded Rhiza Operator
 
-`deploy/overlays/rhiza-operator` connects Grant's embedded Rhiza v0.21.2 runtime to the upstream namespace-scoped recovery Operator. It is an optional fresh-cluster deployment contract, not a live deployment command and not an in-place upgrade for an existing v0.12 store.
+`deploy/overlays/rhiza-operator` is the existing optional v1alpha1 deployment contract. Source now selects the Rhiza v0.22.0 integration candidate; this overlay is **not qualified** with that runtime. It is not a live deployment command or an in-place upgrade for an existing store.
+
+v0.22.0 HA cluster/recovery CRDs serve/store v1alpha2 only, with no v1alpha1
+conversion or migration. The separate fence CRD still uses v1alpha1. Keep this
+overlay's v0.19.0 controller and vendored CRDs unchanged during the dependency
+assessment; do not treat an upstream v1alpha1 guide example as an upgrade recipe.
+The qualified managed SQL reference host is a private path, not a general recovery
+engine for embedded Grant. Its no-PVC Deployment, prepared recovery and two init
+containers require separate application integration and isolated storage bindings.
+
+Exact-release upstream main CI, performance and the managed reference contract,
+kubelet and provider workflows passed. Separate HA Kubernetes Chaos Mesh
+[run 41271300293](https://github.com/mrchypark/rhiza/actions/runs/41271300293)
+failed qualification. Its readiness/init-gate timeout does not establish a root
+cause or prove fault recovery. Neither upstream reference results nor Grant's
+clean-close Local recovery tests qualify this overlay or remove the v1alpha1
+migration boundary.
 
 One Grant instance in native `Local` mode cannot use this recovery Operator.
-Upstream v0.21.2 enforces `voterCount >= 3` in both the
+The historical v0.21.2 topology contract enforces `voterCount >= 3` in both the
 [CRD](https://github.com/mrchypark/rhiza/blob/v0.21.2/deploy/operator/cluster-crd.yaml)
 and the controller's adoption and bootstrap validation in
 [`automatic.go`](https://github.com/mrchypark/rhiza/blob/v0.21.2/pkg/operator/automatic.go).
@@ -14,7 +30,7 @@ still three Grant instances. For the supported one-instance archive recovery pat
 see [the Local recovery verification](backup-restore.md#single-instance-local-archive-recovery).
 
 The optional controller image remains pinned to v0.19.0. Its compatibility with
-the v0.21.2 embedded runtime is **unverified**; this module upgrade does not qualify
+the v0.22.0 embedded runtime is **unverified**; this module upgrade does not qualify
 that controller/runtime combination or upgrade the deployed controller.
 
 The rendered default namespace is `grant`. For an IED composition, transform the whole overlay to the target namespace and provision the same secrets there; do not combine it with a broad recovery-port policy. The shared `grant-lifecycle-state` ConfigMap remains Rauthy-only lifecycle input and is not read by this controller.

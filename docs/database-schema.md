@@ -20,7 +20,7 @@
 
 ### Rhiza 저장 형식 호환성
 
-현재 선택 버전은 Rhiza v0.21.2과 latticedb-go v0.11.3이며, 업그레이드 후보 상태다. Rhiza v0.19.0의 SQL 실행 정책 7은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
+현재 선택 버전은 Rhiza v0.22.0과 latticedb-go v0.11.3이며, 업그레이드 후보 상태다. Rhiza v0.19.0의 SQL 실행 정책 7은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
 
 ### 1차 단순 배포 기준
 

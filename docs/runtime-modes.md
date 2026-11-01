@@ -17,7 +17,42 @@ and consistent local schema reads; it reports `writeReady: false` because replic
 
 ## Configuration
 
-Grant selects Rhiza v0.21.2 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+Grant selects Rhiza v0.22.0 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+
+### Rhiza v0.22 integration boundary
+
+Source selects [v0.22.0](https://github.com/mrchypark/rhiza/releases/tag/v0.22.0),
+commit `f2366c899c7829feccf3d631336420542a6ca7d8`. This is an isolated integration
+candidate, not rollout qualification. The published v0.4.1 image still contains
+v0.21.2. Exact-release upstream main CI, performance, publication, v1alpha2,
+managed kubelet and provider checks have passed. Separate HA Kubernetes Chaos Mesh
+[run 41271300293](https://github.com/mrchypark/rhiza/actions/runs/41271300293)
+failed qualification; upstream is not all green, and Grant HA remains unqualified.
+
+Grant continues to use the ordinary native API. It does not opt into
+`PreparedStartup`, the private managed SQL reference host, or `ResolveExecute`.
+Durability confirmation through `ResolveExecute` may publish existing data;
+it is not a pure read or a canonical-state proof for Grant's fences.
+
+The new managed HA cluster/recovery CRDs serve/store v1alpha2 only, with no
+v1alpha1 conversion or migration. Grant's optional v1alpha1 overlay and v0.19.0
+controller remain unchanged and unqualified with this runtime. The reference
+host's prepared recovery, two init containers, no-PVC topology and append-only
+storage guarantees do not apply to Grant's existing deployment. See
+[the Operator boundary](rhiza-operator.md).
+
+The Local archive format version remains 2, with no increment from v0.21.2.
+Separate CGO=0 Grant test executables on Darwin/ARM64 demonstrated v0.21.2 to
+v0.22.0 retained-data reopen and direct restoration of an untouched old filesystem
+archive after clean Close, preserving authority and ownership revision. This
+bounded evidence does not qualify abrupt crash recovery, rolling upgrade, mixed
+versions, downgrade, cloud storage or the Linux/AMD64 image. Existing Local
+ownership, before-ack durability, independent
+archive namespace and fail-closed maintenance-token conditions remain mandatory.
+Missing managed authority is an error, not permission to bootstrap over an archive.
+For Local storage, a ClusterID change can instead select an empty separate archive
+namespace on both tested versions; successful init alone does not prove recovery.
+Preserve the expected cluster/namespace and verify recovered business authority.
 
 ### Rhiza v0.21 compatibility
 
@@ -50,7 +85,7 @@ Checkpoint retention defaults to three snapshots, with a 15-minute checkpoint
 interval, hourly GC, and a 24-hour GC grace period. The fixed archive HEAD catalog
 rejects unsupported formats rather than upgrading or adopting them. Divergent or unverifiable histories fail
 startup while preserving evidence. See the upstream
-[Local storage contract](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/embedded-object-storage.md).
+[Local storage contract](https://github.com/mrchypark/rhiza/blob/v0.22.0/docs/embedded-object-storage.md).
 
 Filesystem Local recovery uses a process-lifetime owner lock on the same host,
 supported on Linux and macOS only. Use a dedicated archive root outside `DataDir`;
