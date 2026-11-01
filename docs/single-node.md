@@ -1,7 +1,8 @@
 # Standalone Local Kubernetes
 
-Current source selects Rhiza v0.21.2 Local storage. The standalone overlay runs
-one Grant process and targets the v0.4.1 release candidate.
+Current source selects Rhiza v0.22.0 as an integration candidate. The standalone
+overlay runs one Grant process and retains the published v0.4.1 image with Rhiza
+v0.21.2. This source update does not rebuild that image or qualify a rollout.
 It contains no Operator or HA membership. Do not combine it with the
 HA base or Operator overlay. Grant's `voter` role selects its writable API;
 Local mode has one stable identity and no peer replication.
@@ -9,15 +10,15 @@ Local mode has one stable identity and no peer replication.
 ## Image prerequisite
 
 Both containers target `ghcr.io/mrchypark/grant:v0.4.1` with `IfNotPresent`.
-This forthcoming patch release selects Rhiza v0.21.2; v0.4.0 contains v0.21.1.
-Verify publication and the image source revision before using the new tag.
+That published release selects Rhiza v0.21.2; v0.4.0 contains v0.21.1.
+The overlay does not run this source's v0.22.0 candidate without an image override.
 For isolated testing, build the candidate and explicitly override both images in
 a separate local customization before importing it into the selected cluster:
 
 ```sh
-docker build --platform linux/amd64 -t grant:standalone-v0212-local .
+docker build --platform linux/amd64 -t grant:standalone-v022-local .
 # For an explicitly selected kind cluster:
-kind load docker-image grant:standalone-v0212-local --name YOUR_CLUSTER
+kind load docker-image grant:standalone-v022-local --name YOUR_CLUSTER
 ```
 
 For another runtime, use its supported local-image import mechanism on every
@@ -74,8 +75,8 @@ must pass. Startup/liveness use `/healthz`. SIGTERM reaches Grant directly; the
 60-second grace period includes its 30-second HTTP drain and store close, without
 a measured guarantee for every storage latency.
 
-This follows the [upstream init guide](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/local-init-container-recovery.md)
-(source commit `8acb6da35a4c6fc83fa14ecec2fe2b64370fa4bd`), using
+This follows the [upstream init guide](https://github.com/mrchypark/rhiza/blob/v0.22.0/docs/local-init-container-recovery.md)
+(source commit `f2366c899c7829feccf3d631336420542a6ca7d8`), using
 the public Open/Close contract. The sample's optional disposable data volume does
 not change this overlay's retained-PVC design.
 
@@ -94,10 +95,20 @@ ReadWriteOnce and `OnDelete` do not fence a partitioned writer. Never force-dele
 a pod or clear an uncertain maintenance token based on age. Preserve data,
 archives and errors if startup fails. Do not migrate HA into Local mode.
 
-v0.21.2 uses the same archive format as v0.21.0, with no format migration between
-them. Older incompatible archives still fail closed without automatic migration.
+v0.22.0 retains Local archive format version 2 from v0.21.x. Isolated CGO=0 Grant
+fixtures passed clean-close v0.21.2 to v0.22.0 retained-data reopen and direct old
+filesystem-archive recovery with authority/ownership continuity. This does not
+qualify rolling upgrade, mixed-version HA, downgrade or abrupt crash recovery.
+Older incompatible archives still
+fail closed without automatic migration.
 For an older installation, preserve its data/archive and use a separately
 validated migration plan; never delete it to bypass rejection.
+
+Keep the expected ClusterID and archive namespace unchanged. A ClusterID-only
+change can select an empty separate namespace and succeed on both tested versions;
+init success is not proof of recovery. Verify expected business authority and
+ownership revision afterward. Wrong NodeID at the original archive was refused.
+See [the recovery caveat](backup-restore.md#single-instance-local-archive-recovery).
 
 These commands render and verify locally without applying to a cluster:
 
@@ -129,6 +140,13 @@ and a fresh data volume restores the marker from the same archive. The original
 data volume survives until verification cleanup. This models clean data loss,
 not a crash or a Chaos Mesh experiment. Linux CI runs this under the existing
 container security/resource limits and preserves logs.
+
+The v0.22.0 managed HA reference host is a separate path. Its two init containers,
+no-PVC topology and prepared recovery do not replace this retained-PVC Local
+procedure or qualify Grant's v1alpha1 Operator overlay. See
+[the integration boundary](runtime-modes.md#rhiza-v022-integration-boundary).
+Native AMD64 image tests from the earlier v0.4.1 release do not qualify this
+v0.22.0 source candidate; a cross-build alone is not image runtime verification.
 
 No cluster apply, volume attachment, fencing or real external
 auth/cloud integration is claimed. The filesystem recovery fixture is not an
