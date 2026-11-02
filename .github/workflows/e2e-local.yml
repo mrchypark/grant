@@ -42,7 +42,9 @@ jobs:
   go-verification:
     if: ${{ !inputs.publish_rauthy_launcher_gar }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -67,6 +69,22 @@ jobs:
 
       - name: Verify runtime tool packaging
         run: sh scripts/verify-runtime-tools.sh
+
+      - name: Verify independent S3 GCS and Azure process recovery
+        timeout-minutes: 30
+        run: sh scripts/verify-independent-environment.sh dr
+        env:
+          TMPDIR: ${{ runner.temp }}
+
+      - name: Preserve independent environment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: independent-environment-evidence
+          path: |
+            ${{ runner.temp }}/grant-independent-environment.*
+            ${{ runner.temp }}/grant-independent-evidence.*
+          if-no-files-found: ignore
 
       - name: Build Go executables
         run: CGO_ENABLED=0 go build ./cmd/...
@@ -224,6 +242,8 @@ jobs:
             scripts/verify-runtime-tools.sh
             scripts/verify-go-cli-contract.sh
             scripts/verify-go-three-voter.sh
+            scripts/verify-independent-environment.sh
+            scripts/verify-independent-object-dr.sh
             scripts/oci-redirect-fixture
             scripts/replica-members
             scripts/verify-oci-attestations.sh
