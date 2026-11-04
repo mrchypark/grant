@@ -107,6 +107,7 @@ jobs:
           docker build --platform linux/amd64 --label org.opencontainers.image.revision="${GITHUB_SHA}" -t grant:container-verify .
           IMAGE_NAME=grant:container-verify sh scripts/verify-go-container.sh
           IMAGE_NAME=grant:container-verify LOG_DIR="$RUNNER_TEMP/standalone-container-logs" sh scripts/verify-standalone-container.sh
+          IMAGE_NAME=grant:container-verify OBJECT_STORE_DURABILITY=async LOG_DIR="$RUNNER_TEMP/standalone-container-logs/async" sh scripts/verify-standalone-container.sh
 
       - name: Preserve standalone container logs
         if: always()

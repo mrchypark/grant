@@ -68,7 +68,11 @@ image; Grant owns both entrypoint and image.
 
 The main `/usr/local/bin/grant` opens the same store, validates its binding and
 reconciles history. Equal histories do not blindly download again. Keep archive
-configuration active in main; do not switch to async after init. Init success is
+configuration active in main, including the selected durability. This retained-PVC
+overlay still selects before-ack. The v0.4.1 init command requires before-ack;
+the v0.7.0 source candidate additionally accepts explicit async for profiles that
+select it, with possible loss of acknowledged but unarchived writes after data loss.
+Missing or unsupported durability still fails before storage opens. Init success is
 not readiness: main must finish storage and service initialization, and `/readyz`
 must pass. Startup/liveness use `/healthz`. SIGTERM reaches Grant directly; the
 60-second grace period includes its 30-second HTTP drain and store close, without

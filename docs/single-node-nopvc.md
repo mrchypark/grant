@@ -13,11 +13,17 @@ until the chosen image, remote archive and operational fencing procedure qualify
 
 Render deploy/overlays/standalone-nopvc separately in an approved namespace. Do not
 apply it over an existing PVC StatefulSet or combine it with standalone/HA overlays.
-The old PVC overlay is unchanged. Both init and main retain v0.4.1 (Rhiza v0.21.2),
-IfNotPresent, the same envFrom order, mounts, UID/GID 10001, read-only root filesystem,
-dropped capabilities and disabled service-account token automount. Source tests
-against Rhiza v0.22.1 do not qualify that published image. Override both images only
-in an independently reviewed customization with a verified immutable image.
+The old PVC overlay is unchanged. This profile overrides both init and main to
+ghcr.io/mrchypark/grant:v0.7.0 (Rhiza v0.21.2), reserved for the feature release
+containing this PR's async restore-command change. v0.6.2 is reserved for the
+separate helper PR. v0.7.0 is not yet published: do not apply this profile until
+the exact reviewed source is released under that tag and image publication/source
+revision is verified. v0.4.1's restore command requires before-ack and cannot run
+this async profile. Both containers retain IfNotPresent, the same envFrom order,
+mounts, UID/GID 10001, read-only root filesystem, dropped capabilities and disabled
+service-account token automount. Source tests against Rhiza v0.22.1 do not qualify
+this release candidate. Override both images only in an independently reviewed
+customization with a verified immutable image.
 
 Provision grant-secrets with distinct GRANT_MASTER_KEY and GRANT_APP_AUTH_KEY,
 GRANT_AUTH_PROVIDER and the complete selected identity-provider configuration.
@@ -55,6 +61,14 @@ Replication intervals are not a guaranteed recovery-point bound. Before-ack is
 available when explicitly selected, but does not establish external writer fencing
 or qualify recovery. Init success does not prove that the latest acknowledged
 authority was recovered; compare it against independently retained evidence.
+
+This PR's generic restore-local-storage command accepts explicit async or
+before-ack, matching Rhiza Local Open's archive-restore support. Init and main
+must keep the same selected durability and archive identity. The command retains
+the Local-only topology, legacy/pending-restore evidence, ownership and cancellation
+checks, and propagates Open/Close errors. It starts no Grant SQL or services.
+Missing or unsupported durability is rejected before opening storage. This change
+permits async archive reconciliation; it does not make unarchived writes recoverable.
 
 ## Writer exclusion and node failure
 

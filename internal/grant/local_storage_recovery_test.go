@@ -16,7 +16,14 @@ func recoveryConfig(t *testing.T) Config {
 }
 
 func TestRestoreLocalStorageNoGrantSQL(t *testing.T) {
+	for _, durability := range []rhiza.ObjectStoreDurability{rhiza.ObjectStoreDurabilityBeforeAck, rhiza.ObjectStoreDurabilityAsync} {
+		t.Run(string(durability), func(t *testing.T) { testRestoreLocalStorageNoGrantSQL(t, durability) })
+	}
+}
+
+func testRestoreLocalStorageNoGrantSQL(t *testing.T, durability rhiza.ObjectStoreDurability) {
 	cfg := recoveryConfig(t)
+	cfg.Database.Rhiza.ObjStoreDurability = durability
 	// Grant's directory overrides a conflicting SDK directory in both opens.
 	cfg.Database.Rhiza.DataDir = filepath.Join(t.TempDir(), "unused")
 	ctx := context.Background()
@@ -58,7 +65,7 @@ func TestRestoreLocalStorageRejectsBeforeOpen(t *testing.T) {
 	}{
 		{"not-local", func(c *Config) { c.Database.Rhiza.Local = false }},
 		{"default-durability", func(c *Config) { c.Database.Rhiza.ObjStoreDurability = "" }},
-		{"async", func(c *Config) { c.Database.Rhiza.ObjStoreDurability = rhiza.ObjectStoreDurabilityAsync }},
+		{"invalid-durability", func(c *Config) { c.Database.Rhiza.ObjStoreDurability = "sync" }},
 		{"no-store", func(c *Config) { c.Database.Rhiza.ObjStoreProvider = "" }},
 		{"remote", func(c *Config) { c.Database.RuntimeMode = "remote" }},
 		{"split", func(c *Config) { c.Database.RuntimeMode = "split" }},
