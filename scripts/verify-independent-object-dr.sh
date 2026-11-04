@@ -105,6 +105,7 @@ platform=$(native_docker version --format '{{.Server.Platform.Name}}') || { echo
 server_os=$(native_docker info --format '{{.OperatingSystem}}') || { echo 'UNVERIFIED: cannot establish native Docker server OS' >&2; exit 1; }
 independent_native_server "$platform" "$server_os" || { echo 'UNVERIFIED: unknown Docker server identity requires owner review' >&2; exit 1; }
 printf '%s\n%s\n%s\n%s\n' "$context_name" "$endpoint" "$platform" "$server_os" > "$evidence/native-daemon.txt"
+native_docker version --format '{{.Server.Os}}/{{.Server.Arch}}' > "$evidence/native-platform.txt"
 cd "$root"
 git rev-parse HEAD > "$evidence/source-sha.txt"
 git diff HEAD --binary > "$work/source-diff"

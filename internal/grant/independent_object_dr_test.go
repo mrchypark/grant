@@ -34,8 +34,9 @@ import (
 // Immutable official multi-platform release indexes; Docker selects the host platform.
 var independentImages = []struct{ name, image string }{
 	{"s3", "floci/floci@sha256:e0b292df4dc9559b7b1bf4f51bdda4bb8e269276236438cd03cae661260ea8a9"},
-	{"gcs", "floci/floci-gcp@sha256:3defb6e4b037c9ea0555e719c38ea5840159c15145a1872dc651b0c6bc9b2bbb"},
-	{"azure", "floci/floci-az@sha256:6a48e35207f041f05aeede4ecba6291e0b26a0f18675a82d6465ddb8fbef00ce"},
+	// floci-gcp 0.11.0 and floci-az 0.15.0 release indexes, not ARM64 child manifests.
+	{"gcs", "floci/floci-gcp@sha256:eae9683d806ceb643bcb36aee97cdb8cad13c3e2959cd053bf40e481994fde12"},
+	{"azure", "floci/floci-az@sha256:530635d603223e120adbf9221a97560cffc6991d65fa0c72d0f79d1097974c89"},
 }
 
 type independentFixture struct {
@@ -79,7 +80,18 @@ func (f *independentFixture) command(timeout time.Duration, name string, args ..
 	return c.CombinedOutput()
 }
 func (f *independentFixture) docker(args ...string) ([]byte, error) {
-	return f.command(60*time.Second, "docker", args...)
+	ctx, cancel := context.WithTimeout(f.ctx, 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = f.env
+	stderr, err := os.OpenFile(filepath.Join(f.logs, "docker.stderr.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer stderr.Close()
+	cmd.Stderr = stderr
+	// Docker warnings must never become part of a CID or other parsed stdout.
+	return cmd.Output()
 }
 func (f *independentFixture) requireCommand(name string, timeout time.Duration, binary string, args ...string) {
 	f.t.Helper()
@@ -820,6 +832,27 @@ func (f *independentFixture) provision(provider, endpoint string) {
 			f.t.Fatalf("UNVERIFIED %s provisioning: %v", provider, ctx.Err())
 		case <-time.After(250 * time.Millisecond):
 		}
+	}
+}
+
+func TestIndependentDockerStdout(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\"\nprintf '%s\\n' 'WARNING: test diagnostic' >&2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	f := &independentFixture{t: t, ctx: context.Background(), logs: dir, env: []string{"PATH=" + dir}}
+	cid := strings.Repeat("a", 64)
+	for _, value := range []string{cid, "127.0.0.1:12345"} {
+		out, err := f.docker(value)
+		if err != nil || string(out) != value+"\n" {
+			t.Fatalf("stdout contaminated: %q, %v", out, err)
+		}
+	}
+	stderr, err := os.ReadFile(filepath.Join(dir, "docker.stderr.log"))
+	if err != nil || string(stderr) != strings.Repeat("WARNING: test diagnostic\n", 2) {
+		t.Fatalf("stderr not preserved: %q, %v", stderr, err)
 	}
 }
 
