@@ -49,6 +49,10 @@ func (s *Service) authJSON(ctx context.Context, request *http.Request, out any, 
 	return nil
 }
 func (s *Service) rauthyIdentity(ctx context.Context, authorization string) (ExternalIdentity, error) {
+	return s.rauthyIdentityWithCache(ctx, authorization, true)
+}
+
+func (s *Service) rauthyIdentityWithCache(ctx context.Context, authorization string, cache bool) (ExternalIdentity, error) {
 	token, err := rauthyBearer(authorization)
 	if err != nil {
 		return ExternalIdentity{}, err
@@ -57,8 +61,10 @@ func (s *Service) rauthyIdentity(ctx context.Context, authorization string) (Ext
 		return ExternalIdentity{}, serviceError(401, "unauthorized: missing bearer token")
 	}
 	key := tokenCacheKey(token)
-	if cached, ok := s.cachedIdentity(key); ok {
-		return cached.Identity, nil
+	if cache {
+		if cached, ok := s.cachedIdentity(key); ok {
+			return cached.Identity, nil
+		}
 	}
 	cfg := s.cfg.Auth.Rauthy
 	req, err := http.NewRequest("POST", strings.TrimRight(cfg.BaseURL, "/")+cfg.IntrospectPath, strings.NewReader(url.Values{"token": {token}}.Encode()))
@@ -122,6 +128,9 @@ func (s *Service) rauthyIdentity(ctx context.Context, authorization string) (Ext
 		}
 	}
 	identity := ExternalIdentity{Provider: "rauthy", ExternalUserID: strings.TrimSpace(info.Sub), ClientID: strings.TrimSpace(info.ClientID), Email: email, DisplayName: name, Active: true}
+	if !cache {
+		return identity, nil
+	}
 	if s.cfg.Auth.Rauthy.CacheTTLSeconds > uint64((1<<63-1)/int64(time.Second)) {
 		return ExternalIdentity{}, serviceError(401, "unauthorized: invalid auth cache duration")
 	}

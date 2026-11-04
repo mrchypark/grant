@@ -19,6 +19,9 @@ type Store struct {
 	db      *rhiza.DB
 	replica *rhiza.ReadReplica
 	cfg     Config
+	// Optional observer used by package tests to coordinate real replica queries
+	// with concurrent authority mutations. It cannot replace query results.
+	afterReplicaQuery func(context.Context, string)
 }
 
 func requestID() string {
@@ -286,6 +289,9 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 		}
 		scope.slot = result.AppliedSlot
 		scope.pinned = true
+		if s.afterReplicaQuery != nil {
+			s.afterReplicaQuery(ctx, sql)
+		}
 		return result, nil
 	}
 	if consistency == "" {
