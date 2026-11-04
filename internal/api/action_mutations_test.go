@@ -88,7 +88,8 @@ func TestOwnerScopedOperableActionHTTPContract(t *testing.T) {
 	item := path + "/" + action.ID
 	call("PATCH", item, `{"name":"Renamed"}`, 200)
 	call("DELETE", item, "", 204)
-	call("POST", "/api/v1/orgs/"+org+"/providers/grant/actions", `{"code":"`+code+`","name":"Invalid provider","riskLevel":"low"}`, 404)
+	call("POST", "/api/v1/orgs/"+org+"/providers/grant/actions", `{"code":"organization.profile.read","name":"Built-in","riskLevel":"low"}`, 400)
+	call("POST", "/api/v1/orgs/"+org+"/providers/missing-provider/actions", `{"code":"`+code+`","name":"Missing provider","riskLevel":"low"}`, 404)
 }
 
 func TestProviderActionHTTPPreconditionsAndPatch(t *testing.T) {

@@ -93,7 +93,7 @@ func (s *Store) replaceApplicationActions(ctx context.Context, target applicatio
 	ss := []Statement{
 		assertion("SELECT 1 FROM applications WHERE id=? AND organization_id=? AND created_at=? AND NOT(first_party=1 AND consent_policy='auto_approve') AND (security_mutation_token IS NULL OR security_mutation_expires_at<=?)", id, target.OrganizationID, target.CreatedAt, nowString()),
 		{SQL: "DELETE FROM application_actions WHERE application_id=?", Args: []any{id}},
-		{SQL: "INSERT INTO application_actions(application_id,action_id) SELECT ?,j.value FROM json_each(?) j JOIN actions a ON a.id=j.value JOIN service_providers p ON p.id=a.provider_id AND p.active=1 WHERE a.grantable_to_applications=1", Args: []any{id, j}, ExpectedRowsAffected: &n},
+		{SQL: "INSERT INTO application_actions(application_id,action_id) SELECT ?,j.value FROM json_each(?) j JOIN actions a ON a.id=j.value JOIN service_providers p ON p.id=a.provider_id AND p.active=1 WHERE a.grantable_to_applications=1 AND " + applicationActionNamespaceSQL, Args: []any{id, j, organizationCustomNamespace(target.OrganizationID) + "*"}, ExpectedRowsAffected: &n},
 		{SQL: "DELETE FROM application_grant_actions WHERE application_grant_id IN(SELECT id FROM application_grants WHERE application_id=?) AND action_id NOT IN(SELECT action_id FROM application_actions WHERE application_id=?)", Args: []any{id, id}},
 	}
 	if user != "" {
