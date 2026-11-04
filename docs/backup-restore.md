@@ -34,7 +34,13 @@ termination. Remote maintenance tokens cannot be cleared based on age or process
 
 Rhiza v0.21.2 supports automatic archive restore for one Grant instance configured
 with `Local: true`, a stable `NodeID` and `ClusterID`, and an archive outside its
-local data directory. Use `ObjStoreDurability: "before-ack"` explicitly. Keep one
+local data directory. Explicit `ObjStoreDurability: "before-ack"` waits for remote
+archival; explicit `"async"` permits acknowledged writes ahead of the archive.
+Async data loss can therefore lose acknowledged but unarchived writes; no fixed
+loss-window bound is guaranteed here. The v0.4.1 `restore-local-storage` CLI only
+accepts before-ack. The v0.7.0 source candidate additionally accepts explicit async,
+using the same Local Open/Close recovery path and unchanged ownership/preflight
+checks. A successful restore is not proof that every acknowledged write survived. Keep one
 writer for that archive, including during recovery. On startup, `OpenStore` restores
 missing local data before returning; no canonical snapshot import is required.
 This path does not use the Rhiza recovery Operator, which requires at least three

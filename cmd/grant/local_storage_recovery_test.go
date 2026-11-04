@@ -25,13 +25,19 @@ func TestRestoreLocalStorageEntrypoint(t *testing.T) {
 		main()
 		return
 	}
-	for _, mode := range []string{"success", "invalid", "extra", "open-error"} {
+	for _, mode := range []string{"success-before-ack", "success-async", "missing-durability", "invalid-durability", "extra", "open-error"} {
 		t.Run(mode, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "data")
 			archive := t.TempDir()
 			r := rhiza.Config{Local: true, ClusterID: "cli", NodeID: "cli-1", ObjStoreProvider: rhiza.ObjectStoreProviderFilesystem, ObjStoreDir: archive, ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck, ObjStoreSecretKey: "test-secret-must-not-appear"}
-			if mode == "invalid" {
+			if mode == "success-async" {
+				r.ObjStoreDurability = rhiza.ObjectStoreDurabilityAsync
+			}
+			if mode == "missing-durability" {
 				r.ObjStoreDurability = ""
+			}
+			if mode == "invalid-durability" {
+				r.ObjStoreDurability = "sync"
 			}
 			if mode == "open-error" {
 				if err := os.WriteFile(root, []byte("blocked"), 0600); err != nil {
@@ -60,7 +66,7 @@ func TestRestoreLocalStorageEntrypoint(t *testing.T) {
 			if strings.Contains(string(out), r.ObjStoreSecretKey) {
 				t.Fatalf("secret leaked: %s", out)
 			}
-			if mode != "success" {
+			if !strings.HasPrefix(mode, "success-") {
 				var exit *exec.ExitError
 				if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 					t.Fatalf("expected exit 1 for %s: %v %s", mode, err, out)
@@ -68,6 +74,10 @@ func TestRestoreLocalStorageEntrypoint(t *testing.T) {
 				if mode != "open-error" {
 					if _, e := os.Stat(root); !os.IsNotExist(e) {
 						t.Fatalf("created database: %v", e)
+					}
+					entries, e := os.ReadDir(archive)
+					if e != nil || len(entries) != 0 {
+						t.Fatalf("touched archive on rejected command: %v %v", entries, e)
 					}
 				}
 				t.Logf("%s exit 1: %s", mode, out)
@@ -119,7 +129,7 @@ func TestRestoreLocalStorageEntrypoint(t *testing.T) {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			t.Logf("success exit 0: %s", out)
+			t.Logf("%s exit 0 after clean-close archive restore: %s", mode, out)
 		})
 	}
 }

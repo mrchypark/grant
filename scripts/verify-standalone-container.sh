@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 image=${IMAGE_NAME:-grant:container-verify}
+durability=${OBJECT_STORE_DURABILITY:-before-ack}
+case "$durability" in
+ async|before-ack) ;; *) echo 'durability must be async or before-ack' >&2; exit 1 ;;
+esac
 log_dir=${LOG_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/grant-standalone-container.XXXXXX")}
 mkdir -p "$log_dir"
 printf 'Standalone container logs: %s\n' "$log_dir"
@@ -76,7 +80,7 @@ run_grant() {
   -e GRANT_NODE_ID=standalone-contract -e GRANT_CLUSTER_ID="$owner" -e GRANT_PEER_ADDR= \
   -e "GRANT_RHIZA_CONFIG_JSON={\"Local\":true,\"NodeID\":\"standalone-contract\",\"ClusterID\":\"$owner\",\"Members\":[],\"PeerAddr\":\"\"}" \
   -e RHIZA_OBJSTORE_PROVIDER=filesystem -e RHIZA_OBJSTORE_DIR=/archive/root \
-  -e RHIZA_OBJSTORE_DURABILITY=before-ack "$image" "$@")
+  -e "RHIZA_OBJSTORE_DURABILITY=$durability" "$image" "$@")
  containers="$containers $cid"
  docker start "$cid" >/dev/null
 }
@@ -134,7 +138,7 @@ init_storage "$owner-init-restore" "$fresh"
 start_main "$owner-main-restored" "$fresh"
 read_marker
 stop_main "$main_cid"
-printf '%s\n' 'Standalone init/main shared DataDir, reuse and clean data-loss archive recovery passed (not crash recovery)'
+printf '%s\n' "Standalone $durability init/main shared DataDir, reuse and clean data-loss archive recovery passed (not crash recovery or an async losslessness guarantee)"
 
 # Run the packaged helper without Go, networking, writable storage, or voter access.
 replica_members() {
