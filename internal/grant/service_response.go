@@ -105,7 +105,7 @@ func (s *Service) responseDecision(ctx context.Context, token, org string, input
 		if pep.PepClientID != input.PEPClientID || catalog.Generation != input.CatalogGeneration || catalog.CatalogDigest != input.CatalogDigest {
 			return false, serviceError(403, "forbidden: stale response catalog or PEP")
 		}
-		current, err := s.resolveApplicationAuthorizationContext(ctx, token, org)
+		current, err := s.httpFollowupPrincipal(ctx, token, org, input, pep, principal)
 		if err != nil {
 			return false, err
 		}
@@ -152,7 +152,7 @@ func (s *Service) responseDecision(ctx context.Context, token, org string, input
 		for i := range checks {
 			checks[i].Subject = AuthorizationSubject{SubjectType: "user", ID: current.UserID, OrganizationID: current.OrganizationID}
 		}
-		decisions, err := s.evaluateAuthorizations(ctx, checks, ReadStrong, &current.ApplicationID)
+		decisions, err := s.evaluateAuthorizations(ctx, checks, ReadStrong, httpAuthorizationApplication(current))
 		if err != nil {
 			return false, err
 		}

@@ -144,19 +144,24 @@ type HttpCapabilityActivation struct {
 	ActivatedBy         string  `json:"activatedBy"`
 }
 type UpsertProviderPepClient struct {
-	Lifecycle  ProviderPepClientLifecycle `json:"lifecycle"`
-	ValidUntil *string                    `json:"validUntil"`
+	Lifecycle         ProviderPepClientLifecycle `json:"lifecycle"`
+	ValidUntil        *string                    `json:"validUntil"`
+	AuthorizationMode *string                    `json:"authorizationMode,omitempty"`
 }
 type ProviderPepClient struct {
-	PepClientID   string  `json:"pepClientId"`
-	ApplicationID string  `json:"applicationId,omitempty"`
-	ProviderID    string  `json:"providerId"`
-	Lifecycle     string  `json:"lifecycle"`
-	ValidUntil    *string `json:"validUntil"`
-	CreatedAt     string  `json:"createdAt"`
-	UpdatedAt     string  `json:"updatedAt"`
+	PepClientID       string  `json:"pepClientId"`
+	ApplicationID     string  `json:"applicationId,omitempty"`
+	ProviderID        string  `json:"providerId"`
+	Lifecycle         string  `json:"lifecycle"`
+	ValidUntil        *string `json:"validUntil"`
+	CreatedAt         string  `json:"createdAt"`
+	UpdatedAt         string  `json:"updatedAt"`
+	AuthorizationMode string  `json:"authorizationMode"`
+	PolicyRevision    int64   `json:"policyRevision"`
 }
 type ActiveHttpCapabilityCatalog struct {
+	AuthorizationMode string                 `json:"authorizationMode,omitempty"`
+	PEPPolicyRevision int64                  `json:"pepPolicyRevision,omitempty"`
 	SchemaVersion     uint64                 `json:"schemaVersion"`
 	ProviderID        string                 `json:"providerId"`
 	PepClientID       string                 `json:"pepClientId"`

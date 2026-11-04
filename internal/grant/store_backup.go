@@ -189,7 +189,7 @@ func ReadStoreSnapshot(path string) (StoreSnapshot, error) {
 	return s, ValidateStoreSnapshot(s)
 }
 func ValidateStoreSnapshot(s StoreSnapshot) error {
-	if s.Version != 1 || (s.SchemaDigest != canonicalSchemaDigest() && s.SchemaDigest != legacySchemaDigestV4() && s.SchemaDigest != legacySchemaDigestV3()) {
+	if s.Version != 1 || (s.SchemaDigest != canonicalSchemaDigest() && s.SchemaDigest != legacySchemaDigestV5() && s.SchemaDigest != legacySchemaDigestV4() && s.SchemaDigest != legacySchemaDigestV3()) {
 		return fmt.Errorf("snapshot schema mismatch")
 	}
 	expected := applicationTables()
@@ -200,8 +200,7 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 		if t.Name != expected[i] || int64(len(t.Rows)) != t.Count {
 			return fmt.Errorf("snapshot count/inventory mismatch")
 		}
-		// V5 changes PEP constraints but preserves the v3/v4 column layout.
-		// Check it before admitting either current or legacy rows for restore.
+		// V6 appends policy columns; legacy snapshots must retain their old shape.
 		var pepColumns []string
 		switch t.Name {
 		case "provider_pep_clients":
@@ -209,12 +208,22 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 		case "provider_pep_client_receipts":
 			pepColumns = []string{"receipt_id", "pep_client_id", "application_id", "provider_id", "lifecycle", "valid_until", "changed_at", "changed_by"}
 		}
+		if pepColumns != nil && s.SchemaDigest == canonicalSchemaDigest() {
+			pepColumns = append(pepColumns, "authorization_mode", "policy_revision")
+		}
 		if pepColumns != nil && !slices.Equal(t.Columns, pepColumns) {
 			return fmt.Errorf("snapshot PEP columns mismatch: %s", t.Name)
 		}
 		for _, r := range t.Rows {
 			if len(r) != len(t.Columns) {
 				return fmt.Errorf("snapshot row shape mismatch")
+			}
+			if pepColumns != nil && s.SchemaDigest == canonicalSchemaDigest() {
+				mode, ok := r[len(r)-2].(string)
+				revision, integer := r[len(r)-1].(int64)
+				if !ok || (mode != "application" && mode != "user") || !integer || revision < 1 {
+					return fmt.Errorf("snapshot PEP policy is invalid: %s", t.Name)
+				}
 			}
 		}
 		d, e := tableDigest(t)
@@ -232,6 +241,21 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 		}
 	}
 	return nil
+}
+
+// Compare restored legacy rows after SQLite has supplied the v6 defaults,
+// without changing the source digest used by admission and restore receipts.
+func restoredTableDigest(source SnapshotTable, schemaDigest string) (string, error) {
+	if schemaDigest == canonicalSchemaDigest() || (source.Name != "provider_pep_clients" && source.Name != "provider_pep_client_receipts") {
+		return source.Digest, nil
+	}
+	source.Columns = append(append([]string(nil), source.Columns...), "authorization_mode", "policy_revision")
+	rows := make([][]any, len(source.Rows))
+	for i, row := range source.Rows {
+		rows[i] = append(append([]any(nil), row...), "application", int64(1))
+	}
+	source.Rows = rows
+	return tableDigest(source)
 }
 
 // A v3 snapshot is admitted only as frozen pre-Goauthy state. Its identity
@@ -305,7 +329,11 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) e
 		return e
 	}
 	for i, t := range restored.Tables {
-		if t.Digest != snap.Tables[i].Digest {
+		expected, err := restoredTableDigest(snap.Tables[i], snap.SchemaDigest)
+		if err != nil {
+			return err
+		}
+		if t.Digest != expected {
 			return fmt.Errorf("restore digest verification failed: %s", t.Name)
 		}
 	}

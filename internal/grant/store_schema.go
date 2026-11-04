@@ -19,6 +19,9 @@ var indexesSQL string
 //go:embed store_schema_goauthy_v4.sql
 var goauthySchemaV4SQL string
 
+//go:embed store_schema_pep_policy_v6.sql
+var pepPolicySchemaV6SQL string
+
 const pepIdentityMigrationSQL = `ALTER TABLE provider_pep_clients RENAME TO provider_pep_clients_application_v1;
 ALTER TABLE provider_pep_client_receipts RENAME TO provider_pep_client_receipts_application_v1;
 CREATE TABLE provider_pep_clients (
@@ -48,6 +51,10 @@ DROP TABLE provider_pep_client_receipts_application_v1;
 CREATE INDEX idx_provider_pep_clients_provider_lifecycle ON provider_pep_clients (provider_id, lifecycle, valid_until);`
 
 func canonicalSchemaDigest() string {
+	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL + pepIdentityMigrationSQL + pepPolicySchemaV6SQL))
+}
+
+func legacySchemaDigestV5() string {
 	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL + pepIdentityMigrationSQL))
 }
 
@@ -64,7 +71,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return e
 	}
 	var migrations []rhiza.Migration
-	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}} {
+	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}, {"grant PEP authorization policy", pepPolicySchemaV6SQL}} {
 		var stmts []Statement
 		for _, q := range strings.Split(group.sql, ";") {
 			if strings.TrimSpace(q) != "" {

@@ -7,6 +7,35 @@ import (
 
 type applicationAuthorizationContext struct{ UserID, OrganizationID, ApplicationID, ExternalSubject, ProviderAudience string }
 
+// The caller must enforce the server PEP policy. User mode additionally requires
+// the issuer owner's supported-user positive and client-credentials negative
+// acceptance artifacts; same-sub UserInfo alone does not establish a human user.
+func (s *Service) resolveLocalUserAuthorizationContext(ctx context.Context, identity ExternalIdentity, org string) (applicationAuthorizationContext, error) {
+	org, err := required("organizationId", org)
+	if err != nil {
+		return applicationAuthorizationContext{}, err
+	}
+	cfg := s.cfg.Auth.Goauthy
+	if s.AuthProviderMode() != "goauthy" || cfg == nil || identity.Provider != "goauthy" || !identity.Active || !identity.UserInfoVerified || identity.Issuer != cfg.Issuer || identity.ExternalUserID == "" || identity.TokenClientID == "" || identity.TokenAudience == "" {
+		return applicationAuthorizationContext{}, serviceError(403, "forbidden: verified Goauthy user identity required")
+	}
+	u, err := s.localIdentity(ctx, identity, ReadStrong)
+	if err != nil {
+		return applicationAuthorizationContext{}, err
+	}
+	if !u.Active {
+		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is inactive")
+	}
+	member, err := s.store.HasActiveOrganizationMembershipWithConsistency(ctx, u.ID, org, ReadStrong)
+	if err != nil {
+		return applicationAuthorizationContext{}, err
+	}
+	if !member {
+		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is not an active member of an active organization")
+	}
+	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: goauthySubject(identity.Issuer, identity.ExternalUserID), ProviderAudience: identity.TokenAudience}, nil
+}
+
 func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, token, org string) (applicationAuthorizationContext, error) {
 	org, err := required("organizationId", org)
 	if err != nil {

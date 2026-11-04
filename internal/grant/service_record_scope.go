@@ -42,12 +42,12 @@ func (s *Service) authorizedRecordScope(ctx context.Context, provider string, ca
 	if !member {
 		return nil, serviceError(403, "forbidden: active organization membership required")
 	}
-	check := UserActionCheck{UserID: principal.UserID, OrganizationID: principal.OrganizationID, ProviderID: provider, ResourceType: cap.Resource.ResourceType, ResourceID: cap.Resource.ID.Value, ActionID: *cap.ActionID, ApplicationID: &principal.ApplicationID, Consistency: ReadStrong}
+	check := UserActionCheck{UserID: principal.UserID, OrganizationID: principal.OrganizationID, ProviderID: provider, ResourceType: cap.Resource.ResourceType, ResourceID: cap.Resource.ID.Value, ActionID: *cap.ActionID, ApplicationID: httpAuthorizationApplication(principal), Consistency: ReadStrong}
 	admission, e := s.store.EvaluateUserActions(ctx, []UserActionCheck{check})
 	if e != nil {
 		return nil, e
 	}
-	if len(admission) != 1 || !admission[0].ApplicationAllowed {
+	if len(admission) != 1 || (principal.ApplicationID != "" && !admission[0].ApplicationAllowed) {
 		return nil, serviceError(403, "forbidden: application action scope or consent is missing")
 	}
 	const maxCandidates = 1000

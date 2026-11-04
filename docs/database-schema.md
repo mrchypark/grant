@@ -86,9 +86,26 @@ Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 
 
 ### `provider_pep_clients`, `provider_pep_client_receipts`
 
-V5 rebuilds both tables while retaining every existing binding and receipt. It removes the application foreign key, uniqueness, and NOT NULL constraints, and recreates `idx_provider_pep_clients_provider_lifecycle`. The provider foreign key and global PEP primary key remain. New bindings and receipts use NULL application metadata. This separates service identity from application lifecycle without rewriting historical evidence. Snapshot exports use the V5 schema digest; restores also accept V3/V4 digests after validating the preserved PEP column layout.
+V5 rebuilds both tables while retaining every existing binding and receipt. It removes the application foreign key, uniqueness, and NOT NULL constraints, and recreates `idx_provider_pep_clients_provider_lifecycle`. The provider foreign key and global PEP primary key remain. New bindings and receipts use NULL application metadata. This separates service identity from application lifecycle without rewriting historical evidence. V6 snapshot compatibility and the appended policy columns are described below.
 
 Exposure 같은 PEP service identity와 provider를 연결한다. `pep_client_id`는 전역 primary key라 다른 provider에 재결합할 수 없다. binding은 active/disabled/deleted lifecycle과 선택적 RFC3339 expiry를 가지며, application row와 독립적으로 fetch·decision에 사용할 수 있다. `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`가 service auth key의 정확한 identity를 고정하며 요청 body나 provider path가 이를 선택하지 못한다. 기존 `application_id` 열은 migration 전 binding/receipt 보존을 위한 nullable 역사 메타데이터이며 runtime 조회나 application lifecycle에 사용하지 않는다. PEP upsert body는 `lifecycle`과 선택적 `validUntil`을 받으며 `applicationId`는 거부한다. 모든 lifecycle 변경은 `provider_pep_client_receipts`에 별도 receipt를 추가하며 capability history를 변경하지 않는다.
+
+V6는 [store_schema_pep_policy_v6.sql](../internal/grant/store_schema_pep_policy_v6.sql)을 여섯 번째 migration으로 추가한다. 기존 migration 1–5의 SQL과 checksum은 변경하지 않는다. 두 PEP 테이블에 다음 컬럼을 끝에 추가하며 테이블·인덱스·기존 canonical key는 유지한다.
+
+| 컬럼 | 저장 제약·기본값 | 의미 |
+|---|---|---|
+| `authorization_mode` | TEXT NOT NULL, `application` 또는 `user`, 기본값 `application` | 서버 PEP의 인가 방식 |
+| `policy_revision` | INTEGER NOT NULL, `typeof(...)='integer'`, 1..9223372036854775807, 기본값 1 | 해당 PEP 정책의 단조 증가 revision |
+
+기존 binding과 receipt에는 application·revision 1을 채운다. 과거 receipt의 다른 값과 lifecycle·expiry는 보존하며, 과거 정책 변경에 없던 revision 이력을 추정해서 만들지 않는다. user 모드는 명시적인 설정만 허용하며 legacy 값·application 부재·토큰 형태에서 자동 전환하지 않는다.
+
+저장소의 조건부 upsert는 같은 트랜잭션에서 provider·PEP 범위와 기대 revision을 확인하고 정책·증가한 revision·receipt를 함께 기록한다. 생성 revision은 1이며, 갱신할 때마다 증가하고 상한에서 갱신을 거부한다. 내부 호환 wrapper에서 모드를 생략하면 기존 값을 보존하고 신규 행만 application으로 생성한다. 관리 조회는 disabled·deleted·expired PEP와 비활성 provider도 조회하지만 runtime의 활성 상태 검사를 대체하지 않는다.
+
+**릴레이션:** `provider_id`의 provider 외래 키와 전역 `pep_client_id` primary key를 유지한다. receipt는 해당 변경의 모드·revision을 보존한다. `application_id`는 계속 nullable 역사 메타데이터다. user 판정은 기존 `(issuer, sub)` identity가 연결한 활성 로컬 사용자·조직 membership·RBAC 관계를 사용하며 application admission은 요구하지 않는다. 모드 변경 자체는 사용자·membership·role·binding·동의를 생성하거나 복구하지 않는다.
+
+**구조의 이유:** PEP의 정책 선택과 사용자 권한을 분리하고, 동시 관리 변경을 revision CAS로 직렬화한다. 기존 권한 테이블을 그대로 사용하므로 별도 사용자 권한 저장소나 자동 grant가 필요하지 않다. 정책과 receipt가 함께 커밋되므로 실패한 CAS가 실행 정책이나 감사 이력을 부분 변경하지 않는다.
+
+**논리 백업·복원:** export는 V6 schema digest와 두 정책 컬럼을 포함한다. V6는 정확한 컬럼 순서, enum과 양의 int64 revision을 검증하고 user 모드·revision을 그대로 복원한다. V3/V4/V5는 기존 PEP 컬럼 순서를 정확히 검증한 뒤 복원 INSERT에서 새 컬럼을 생략하여 DB 기본값 application·1을 적용한다. legacy digest에 V6 컬럼을 넣은 snapshot은 거부한다. offline·cluster 복원 후 테이블 digest 비교는 이 두 기본값만 반영하며 나머지 authority와 receipt를 보존한다. 원본 snapshot digest와 restore admission·activation의 출처 digest는 바꾸지 않는다. 새 모드나 사용자 권한을 추론해서 복원하지 않는다.
 
 ### `actions`, `roles`, `role_actions`, `role_bindings`
 

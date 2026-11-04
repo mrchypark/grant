@@ -217,7 +217,7 @@ func (s *Service) goauthyIdentity(ctx context.Context, authorization string) (Ex
 	if display == "" {
 		display = strings.TrimSpace(sub)
 	}
-	return ExternalIdentity{Provider: "goauthy", Issuer: issuer, ExternalUserID: strings.TrimSpace(sub), ClientID: cfg.ApplicationID, Email: verifiedEmail, DisplayName: display, Active: true}, nil
+	return ExternalIdentity{Provider: "goauthy", Issuer: issuer, ExternalUserID: strings.TrimSpace(sub), ClientID: cfg.ApplicationID, Email: verifiedEmail, DisplayName: display, Active: true, TokenClientID: clientID, TokenAudience: audiences[0], UserInfoVerified: true}, nil
 }
 
 func goauthyAudiences(values []string, resource string) bool {

@@ -246,7 +246,11 @@ func (s *Store) activateClusterRestore(ctx context.Context, snap StoreSnapshot) 
 		return e
 	}
 	for i, t := range restored.Tables {
-		if t.Digest != snap.Tables[i].Digest {
+		expected, err := restoredTableDigest(snap.Tables[i], snap.SchemaDigest)
+		if err != nil {
+			return err
+		}
+		if t.Digest != expected {
 			return fmt.Errorf("cluster restore verification mismatch: %s", t.Name)
 		}
 	}
