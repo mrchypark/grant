@@ -22,8 +22,10 @@ func main() {
 		os.Exit(1)
 	}
 }
-func run() error {
-	if handled, err := commandLine(context.Background()); handled {
+func run() (result error) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if handled, err := commandLine(ctx); handled {
 		return err
 	}
 	cfg, e := grant.ConfigFromEnv()
@@ -53,8 +55,6 @@ func run() error {
 		}
 		defer operator.Close()
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	done := make(chan error, 4)
 	servers := make([]*http.Server, 0, 3)
 	startOperator := func(handler http.Handler) error {
@@ -70,7 +70,11 @@ func run() error {
 	if e != nil {
 		return e
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("close Grant store: %w", err))
+		}
+	}()
 	service := grant.NewService(cfg, store)
 	promotionLearner := cfg.Database.Rhiza.Learner != nil
 	passiveLearner := cfg.Database.LocalNodeRole == "learner"

@@ -1,6 +1,6 @@
 # Grant architecture
 
-Grant is a Go 1.27.3 service with a concrete `Service` and `Store` in `internal/grant`. `internal/api` owns the HTTP boundary. Four `cmd` packages provide the `grant` server and migration commands, the canonical Patch Data manifest digest tool, the management catalog generator, and the Patch Data catalog generator. Storage calls Rhiza v0.21.0's native Go API and does not require cgo.
+Grant is a Go 1.27.3 service with a concrete `Service` and `Store` in `internal/grant`. `internal/api` owns the HTTP boundary. Four `cmd` packages provide the `grant` server and migration commands, the canonical Patch Data manifest digest tool, the management catalog generator, and the Patch Data catalog generator. Storage calls Rhiza v0.21.2's native Go API and does not require cgo.
 
 The application preserves the organization, identity, membership, provider, action, role-binding, application-consent, authority-import and HTTP-capability contracts from baseline `c716877`. The [HTTP inventory](porting-go-http-contract.md) records method/path/authentication boundaries. All public authorization endpoints retain coarse allow/deny semantics and reject the presence of `resource.view`, including null. Historical field-view rows remain guarded by fail-closed startup validation.
 
