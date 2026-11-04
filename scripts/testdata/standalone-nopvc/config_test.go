@@ -50,8 +50,15 @@ func noPVCRemoteConfig() error {
 	if cfg.Database.RuntimeMode != "embedded" || cfg.Database.LocalNodeRole != "voter" || len(cfg.Database.RemoteNodes) != 0 || cfg.Database.OperatorBindAddr != "" || cfg.Database.DataDir != "/var/lib/grant/rhiza" || c.DataDir != cfg.Database.DataDir {
 		return fmt.Errorf("unexpected runtime or shared data path")
 	}
-	if c.ObjStoreProvider != "s3" || c.ObjStoreDir != "" || c.ObjStoreDurability != rhiza.ObjectStoreDurabilityBeforeAck || c.ObjStoreInsecure {
-		return fmt.Errorf("requires remote S3 without filesystem directory, using TLS and before-ack")
+	if c.ObjStoreProvider != "s3" || c.ObjStoreDir != "" || c.ObjStoreInsecure {
+		return fmt.Errorf("requires remote S3 without filesystem directory, using TLS")
+	}
+	durability := rhiza.ObjectStoreDurability(os.Getenv("RHIZA_OBJSTORE_DURABILITY"))
+	if durability != rhiza.ObjectStoreDurabilityAsync && durability != rhiza.ObjectStoreDurabilityBeforeAck {
+		return fmt.Errorf("explicit object store durability must be async or before-ack")
+	}
+	if c.ObjStoreDurability != durability {
+		return fmt.Errorf("configured object store durability was overridden")
 	}
 	for _, value := range []string{c.ObjStoreBucket, c.ObjStorePrefix, c.ObjStoreEndpoint, c.ObjStoreRegion, c.ObjStoreAccessKey, c.ObjStoreSecretKey} {
 		if strings.TrimSpace(value) == "" {
@@ -81,6 +88,7 @@ func noPVCTestSecret() map[string]string {
 		"RHIZA_OBJSTORE_PREFIX": "test-fresh-prefix", "RHIZA_OBJSTORE_ENDPOINT": "https://s3.remote.invalid",
 		"RHIZA_OBJSTORE_REGION": "test-region", "RHIZA_OBJSTORE_ACCESS_KEY": "test-access",
 		"RHIZA_OBJSTORE_SECRET_KEY": "test-secret",
+		"RHIZA_OBJSTORE_DURABILITY": "async",
 	}
 }
 
@@ -89,7 +97,10 @@ func TestNoPVCRemoteRenderedConfig(t *testing.T) {
 		name, key, value string
 		reject           bool
 	}{
-		{name: "valid"},
+		{name: "async-preserved"},
+		{name: "before-ack-preserved", key: "RHIZA_OBJSTORE_DURABILITY", value: "before-ack"},
+		{name: "missing-durability", key: "RHIZA_OBJSTORE_DURABILITY", reject: true},
+		{name: "invalid-durability", key: "RHIZA_OBJSTORE_DURABILITY", value: "sync", reject: true},
 		{name: "missing-bucket", key: "RHIZA_OBJSTORE_BUCKET", reject: true},
 		{name: "missing-prefix", key: "RHIZA_OBJSTORE_PREFIX", reject: true},
 		{name: "missing-endpoint", key: "RHIZA_OBJSTORE_ENDPOINT", reject: true},
@@ -104,7 +115,6 @@ func TestNoPVCRemoteRenderedConfig(t *testing.T) {
 		{name: "ipv6-loopback", key: "RHIZA_OBJSTORE_ENDPOINT", value: "[::1]:9000", reject: true},
 		{name: "filesystem-secret-overridden", key: "RHIZA_OBJSTORE_PROVIDER", value: "filesystem"},
 		{name: "local-dir-secret-cleared", key: "RHIZA_OBJSTORE_DIR", value: "/var/lib/grant/archive"},
-		{name: "async-secret-overridden", key: "RHIZA_OBJSTORE_DURABILITY", value: "async"},
 		{name: "json-secret-overridden", key: "GRANT_RHIZA_CONFIG_JSON", value: `{"Local":true,"ObjStoreProvider":"filesystem","ObjStoreDir":"/var/lib/grant/archive"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

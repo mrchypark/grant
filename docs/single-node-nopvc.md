@@ -3,7 +3,8 @@
 This opt-in profile uses one embedded Local writer with a stable NodeID and
 ClusterID, no peers and no Operator. Local data and local logical backup exports
 live on disk-backed emptyDir. An independent remote S3 archive is required with
-explicit before-ack durability. Filesystem archives, another directory on the same
+explicitly selected durability; async is the requested priority, not zero data loss.
+Filesystem archives, another directory on the same
 emptyDir, and an object store backed only by the same node are not independent DR.
 This is controlled manual recovery with downtime. Production use remains blocked
 until the chosen image, remote archive and operational fencing procedure qualify.
@@ -30,8 +31,13 @@ RHIZA_OBJSTORE_ACCESS_KEY and RHIZA_OBJSTORE_SECRET_KEY (and RHIZA_OBJSTORE_SESS
 required). Use restricted bucket credentials, TLS and appropriate retention policy.
 RHIZA_OBJSTORE_INSECURE must be false. Use an endpoint outside the Pod/node failure
 domain; credentials and endpoint reachability need separate validation. The profile
-forces RHIZA_OBJSTORE_PROVIDER=s3, clears RHIZA_OBJSTORE_DIR, disables insecure mode and forces before-ack
-through the last ConfigMap envFrom entry. Do not add env overrides or mount a local
+forces RHIZA_OBJSTORE_PROVIDER=s3, clears RHIZA_OBJSTORE_DIR and disables insecure mode
+through the last ConfigMap envFrom entry. It removes the inherited durability key.
+Set RHIZA_OBJSTORE_DURABILITY=async in grant-rhiza-storage for asynchronous archival;
+before-ack is a supported optional alternative, not a profile requirement. The verifier
+requires one of these two explicit values and checks that it reaches the effective
+Rhiza configuration unchanged. See the [v0.21.2 constants](https://github.com/mrchypark/rhiza/blob/v0.21.2/internal/types/config.go).
+Do not add env overrides or mount a local
 archive. Init refuses missing object-store configuration, but its success alone is
 not proof that the expected nonempty archive was recovered.
 
@@ -40,6 +46,15 @@ Changing ClusterID can select an empty namespace and succeed. Restore validation
 must check expected business authority, ownership identity/revision and allow/deny
 behavior. Local exports in /var/lib/grant/backups disappear with the Pod; copy any
 required exports off-Pod. The native archive is separate from logical exports.
+
+With async durability, acknowledgment does not wait for remote archival. Loss of
+emptyDir can therefore lose acknowledged writes that have not reached the archive,
+including ownership and authorization changes. This profile establishes no fixed
+time or write-count bound for that loss window and makes no RPO-zero claim.
+Replication intervals are not a guaranteed recovery-point bound. Before-ack is
+available when explicitly selected, but does not establish external writer fencing
+or qualify recovery. Init success does not prove that the latest acknowledged
+authority was recovered; compare it against independently retained evidence.
 
 ## Writer exclusion and node failure
 
@@ -104,7 +119,7 @@ must contain a flat JSON object of string environment values from both secrets
 (auth and S3); rendered ConfigMap values are applied last, as in the Pod. The
 verifier copies this sensitive file only into its temporary directory and removes
 that copy on exit; it does not print values. Keep the original file access-restricted.
-Missing bucket/prefix/endpoint/region/credentials, insecure HTTP, endpoint paths,
+Missing or unsupported durability, missing bucket/prefix/endpoint/region/credentials, insecure HTTP, endpoint paths,
 filesystem endpoints and local/loopback endpoints fail this preflight. Without the
 file, deployment-secret validation is explicitly skipped. This additional policy
 belongs to the verifier: ConfigFromEnv alone does not enforce every remote-S3

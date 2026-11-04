@@ -9,8 +9,13 @@ configMapGenerator:
       - RHIZA_OBJSTORE_PROVIDER=s3
       - RHIZA_OBJSTORE_DIR=
       - RHIZA_OBJSTORE_INSECURE=false
-      - RHIZA_OBJSTORE_DURABILITY=before-ack
 patches:
+  - target:
+      kind: ConfigMap
+      name: grant-standalone-config
+    patch: |-
+      - op: remove
+        path: /data/RHIZA_OBJSTORE_DURABILITY
   - target:
       kind: StatefulSet
       name: grant-standalone

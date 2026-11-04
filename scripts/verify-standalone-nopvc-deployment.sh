@@ -47,7 +47,7 @@ jq -e '
  $p.containers[0].startupProbe.httpGet.path == "/healthz" and
  all($docs[] | select(.kind == "Service"); .spec.selector == $s.spec.selector.matchLabels) and
  $c.RHIZA_OBJSTORE_PROVIDER == "s3" and $c.RHIZA_OBJSTORE_DIR == "" and $c.RHIZA_OBJSTORE_INSECURE == "false" and
- $c.RHIZA_OBJSTORE_DURABILITY == "before-ack" and
+ ($c | has("RHIZA_OBJSTORE_DURABILITY") | not) and
  ($c.GRANT_RHIZA_CONFIG_JSON | fromjson) ==
  {Local:true,NodeID:"grant-standalone",ClusterID:"grant-standalone-v1",Members:[],PeerAddr:""}
 ' "$task_dir/rendered.json" >/dev/null
