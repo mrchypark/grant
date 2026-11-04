@@ -18,6 +18,26 @@ on:
         required: false
         default: ''
         type: string
+      exposure_artifact_asset_id:
+        description: Optional Grant release asset ID for Exposure interop
+        required: false
+        default: ''
+        type: string
+      exposure_artifact_sha256:
+        description: SHA-256 of the Exposure ZIP asset
+        required: false
+        default: ''
+        type: string
+      exposure_binary_sha256:
+        description: SHA-256 of the exposure executable in the ZIP
+        required: false
+        default: ''
+        type: string
+      exposure_source_sha:
+        description: Exact Exposure supplier source commit for evidence
+        required: false
+        default: ''
+        type: string
   pull_request:
     paths:
       - ".github/workflows/e2e-local.yml"
@@ -77,6 +97,90 @@ jobs:
       - name: Verify runtime tool packaging
         run: sh scripts/verify-runtime-tools.sh
 
+      - name: Compile Grant and API tests
+        run: go test -run '^$' ./internal/grant ./internal/api
+
+      - name: Build Go executables
+        run: CGO_ENABLED=0 go build ./cmd/...
+
+      - name: Download and verify optional Exposure artifact
+        if: ${{ inputs.exposure_artifact_asset_id != '' }}
+        id: exposure-artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPOSURE_ASSET_ID: ${{ inputs.exposure_artifact_asset_id }}
+          EXPOSURE_ARTIFACT_SHA256: ${{ inputs.exposure_artifact_sha256 }}
+          EXPOSURE_BINARY_SHA256: ${{ inputs.exposure_binary_sha256 }}
+          EXPOSURE_SOURCE_SHA: ${{ inputs.exposure_source_sha }}
+        run: |
+          set -euo pipefail
+          exposure_dir="$(mktemp -d "$RUNNER_TEMP/grant-exposure-interop.XXXXXX")"
+          echo "directory=$exposure_dir" >> "$GITHUB_OUTPUT"
+          mkdir "$exposure_dir/evidence" "$exposure_dir/evidence/process-logs"
+          printf 'asset_id=%s\nartifact_sha256=%s\nbinary_sha256=%s\nsource_sha=%s\n' \
+            "$EXPOSURE_ASSET_ID" "$EXPOSURE_ARTIFACT_SHA256" \
+            "$EXPOSURE_BINARY_SHA256" "$EXPOSURE_SOURCE_SHA" \
+            > "$exposure_dir/evidence/supplier.txt"
+          case "$EXPOSURE_ASSET_ID" in
+            ''|*[!0-9]*) echo 'Invalid Exposure asset ID' >&2; exit 1 ;;
+          esac
+          test "${#EXPOSURE_ARTIFACT_SHA256}" -eq 64
+          test "${#EXPOSURE_BINARY_SHA256}" -eq 64
+          test "${#EXPOSURE_SOURCE_SHA}" -eq 40
+          case "$EXPOSURE_ARTIFACT_SHA256$EXPOSURE_BINARY_SHA256$EXPOSURE_SOURCE_SHA" in
+            *[!0-9a-f]*) echo 'Invalid Exposure hash or source SHA' >&2; exit 1 ;;
+          esac
+          gh api "repos/mrchypark/grant/releases/assets/$EXPOSURE_ASSET_ID" \
+            -H 'Accept: application/octet-stream' \
+            > "$exposure_dir/exposure.zip" 2> "$exposure_dir/evidence/download.log"
+          printf '%s  %s\n' "$EXPOSURE_ARTIFACT_SHA256" "$exposure_dir/exposure.zip" \
+            | sha256sum --check | tee "$exposure_dir/evidence/archive-check.log"
+          unzip -p "$exposure_dir/exposure.zip" exposure \
+            > "$exposure_dir/exposure" 2> "$exposure_dir/evidence/extract.log"
+          printf '%s  %s\n' "$EXPOSURE_BINARY_SHA256" "$exposure_dir/exposure" \
+            | sha256sum --check | tee "$exposure_dir/evidence/binary-check.log"
+          chmod +x "$exposure_dir/exposure"
+
+      - name: Verify optional Exposure process interop
+        if: ${{ inputs.exposure_artifact_asset_id != '' }}
+        shell: bash
+        env:
+          GRANT_EXPOSURE_BINARY: ${{ steps.exposure-artifact.outputs.directory }}/exposure
+          GRANT_EXPOSURE_BINARY_SHA256: ${{ inputs.exposure_binary_sha256 }}
+          GRANT_EXPOSURE_INTEROP: '1'
+          TMPDIR: ${{ steps.exposure-artifact.outputs.directory }}/evidence/process-logs
+          GRANT_EXPOSURE_EVIDENCE: ${{ steps.exposure-artifact.outputs.directory }}/evidence
+        run: |
+          set -euo pipefail
+          go test -run '^TestPrincipalExposureProcess$' -count=1 -v -timeout 2m ./internal/api \
+            2>&1 | tee "$GRANT_EXPOSURE_EVIDENCE/interop.log"
+
+      - name: Preserve optional Exposure interop evidence
+        if: ${{ always() && inputs.exposure_artifact_asset_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: exposure-interop-evidence
+          path: ${{ runner.temp }}/grant-exposure-interop.*/evidence/
+          if-no-files-found: ignore
+
+      - name: Remove optional Exposure downloaded executables
+        if: ${{ always() && inputs.exposure_artifact_asset_id != '' && steps.exposure-artifact.outputs.directory != '' }}
+        shell: bash
+        env:
+          EXPOSURE_DIRECTORY: ${{ steps.exposure-artifact.outputs.directory }}
+        run: |
+          set -euo pipefail
+          case "$EXPOSURE_DIRECTORY" in
+            "$RUNNER_TEMP"/grant-exposure-interop.*) ;;
+            *) echo 'Refusing cleanup outside owned Exposure directory' >&2; exit 1 ;;
+          esac
+          test "$(dirname -- "$EXPOSURE_DIRECTORY")" = "$RUNNER_TEMP"
+          rm -f -- "$EXPOSURE_DIRECTORY/exposure.zip" "$EXPOSURE_DIRECTORY/exposure"
+          for artifact in "$EXPOSURE_DIRECTORY/exposure.zip" "$EXPOSURE_DIRECTORY/exposure"; do
+            test ! -e "$artifact" && test ! -L "$artifact"
+          done
+
       - name: Verify independent S3 GCS and Azure process recovery
         timeout-minutes: 30
         run: sh scripts/verify-independent-environment.sh dr
@@ -92,9 +196,6 @@ jobs:
             ${{ runner.temp }}/grant-independent-environment.*
             ${{ runner.temp }}/grant-independent-evidence.*
           if-no-files-found: ignore
-
-      - name: Build Go executables
-        run: CGO_ENABLED=0 go build ./cmd/...
 
       - name: Vet Go packages
         run: go vet ./...
