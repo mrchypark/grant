@@ -10,17 +10,17 @@ func (s *Service) ListServiceProviders(ctx context.Context, c ReadConsistency) (
 	return serviceRows[ServiceProvider](ctx, s, c, "SELECT * FROM service_providers ORDER BY name,id")
 }
 func (s *Service) ListProviderActionsAdmin(ctx context.Context, provider string) ([]Action, error) {
-	return s.listProviderActions(ctx, provider, false)
+	return s.listProviderActions(ctx, provider, false, "")
 }
 
 func (s *Service) ListProviderActionsAuthorized(ctx context.Context, user, org, provider string) ([]Action, error) {
 	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.application.manage", "manage organization applications", ReadStrong); err != nil {
 		return nil, err
 	}
-	return s.listProviderActions(ctx, provider, true)
+	return s.listProviderActions(ctx, provider, true, org)
 }
 
-func (s *Service) listProviderActions(ctx context.Context, provider string, candidates bool) ([]Action, error) {
+func (s *Service) listProviderActions(ctx context.Context, provider string, candidates bool, org string) ([]Action, error) {
 	filter := ""
 	if candidates {
 		filter = " AND active=1"
@@ -33,10 +33,12 @@ func (s *Service) listProviderActions(ctx context.Context, provider string, cand
 		return nil, serviceError(404, "service provider not found")
 	}
 	filter = ""
+	args := []any{provider}
 	if candidates {
-		filter = " AND grantable_to_applications=1 AND EXISTS(SELECT 1 FROM service_providers p WHERE p.id=actions.provider_id AND p.active=1)"
+		filter = " AND a.grantable_to_applications=1 AND EXISTS(SELECT 1 FROM service_providers p WHERE p.id=a.provider_id AND p.active=1) AND " + applicationActionNamespaceSQL
+		args = append(args, organizationCustomNamespace(org)+"*")
 	}
-	return serviceRows[Action](ctx, s, ReadStrong, "SELECT * FROM actions WHERE provider_id=?"+filter+" ORDER BY code", provider)
+	return serviceRows[Action](ctx, s, ReadStrong, "SELECT * FROM actions a WHERE a.provider_id=?"+filter+" ORDER BY a.code", args...)
 }
 func (s *Service) UpsertServiceProviderAdmin(ctx context.Context, p ServiceProvider) (ServiceProvider, error) {
 	var err error
