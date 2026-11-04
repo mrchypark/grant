@@ -118,9 +118,15 @@ legacy 이전은 현재 단일 owner에게 관리 권한이 있어야 하고 두
 
 owner 판정은 membership에서 계산하며 owner 전용 system-role binding은 authority source가 아니다. demotion은 membership만 변경하고 무관한 기존 delegated binding은 보존한다. role/binding 편집으로 owner를 만들거나 owner 관리 권한을 제거할 수 없다. owner 권한은 해당 조직의 관리 action에만 적용되며 플랫폼 wildcard 또는 application admission을 부여하지 않는다.
 
-## 조직 범위 Operable 사용자 정의 Action
+## Provider별 조직 범위 사용자 정의 Action
 
-`POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions`는 `operable` provider에 한해 `code`, `name`, `description`, `riskLevel`을 받는다. `PATCH .../actions/{actionId}`는 `name`, `description`, `riskLevel`만 받고 DELETE는 본문이 없다. 세 mutation 모두 active owner와 `organization.permission.manage`가 필요하다. `code`는 `custom.org-<organization-id의 소문자 SHA-256 64자리 hex>.<feature>.<definition-id>.<operation>` 형식이고, DB ID는 `operable.` + code로 생성한다. 이 namespace 검증은 create/edit/delete transaction에서 조직 owner 재검사와 함께 수행된다. built-in 및 role/application/active HTTP catalog가 참조하는 action은 409로 보호한다. 이 경로는 provider 관리 UI/API나 platform action, application admission을 제공하지 않는다.
+`POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions`는 기존 활성 provider에 대해 `code`, `name`, `description`, `riskLevel`을 받는다. `code`는 `custom.org-<organization-id의 소문자 SHA-256 64자리 hex>.<feature>.<definition-id>.<operation>` 형식이어야 하며, ID는 `<providerId>.` + code로 생성한다. 각 provider 안에서 이 namespace는 해당 조직의 사용자 정의 action에만 사용한다. Operable의 기존 경로와 ID 및 서비스 호환 함수는 유지한다. 새 provider를 생성하거나 built-in action을 등록하는 권한은 부여하지 않는다.
+
+`PATCH .../actions/{actionId}`는 `name`, `description`, `riskLevel`, `grantableToApplications`를 받으며 DELETE는 본문이 없다. 세 mutation 모두 실제 active owner와 `organization.permission.manage`가 필요하다. provider 활성 상태, owner와 관리 권한, provider와 조직 namespace를 쓰기 transaction 안에서 다시 검사한다. 수정과 삭제는 canonical ID도 검사하며, 다른 조직이나 provider의 action 및 built-in action은 변경하거나 삭제할 수 없다.
+
+생성 시 eligibility는 false다. `GET .../providers/{providerId}/actions`는 관리 권한이 있는 owner에게 기존 eligible 후보와 해당 조직의 ineligible 사용자 정의 action을 JSON 배열로 반환하고 ETag를 제공한다. 다른 조직의 `custom.org-*` action은 eligible이어도 숨긴다. 일반 application 관리자는 eligible 후보만 조회한다. 다른 provider의 기존 공유 code는 유지하며, Operable의 기존 `custom.*` 격리 규칙도 유지한다.
+
+`grantableToApplications`에 true 또는 false를 명시하면 같은 provider GET의 `If-Match`가 필요하다. 누락 시 428, 오래된 ETag이면 412이며 null 또는 boolean 이외 값은 422다. 필드를 생략한 metadata PATCH는 eligibility를 보존하고 기존처럼 ETag 없이 처리한다. false는 application admission이나 consent-action 참조가 남아 있으면 409로 거절한다. 삭제는 role/application/HTTP catalog 참조가 있으면 409로 거절한다. eligibility 변경은 application admission, 동의, role 또는 binding을 생성하지 않는다. application 등록은 별도 기존 경로에서 처리하며, 단건 추가와 전체 교체 모두 같은 조직 namespace를 transaction 안에서 검사한다. 자세한 절차는 [custom-action-application-admission.md](custom-action-application-admission.md)를 따른다.
 
 ## 조직 없는 온보딩과 조직 생성
 

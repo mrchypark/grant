@@ -54,22 +54,17 @@ func (s *Server) actionMutationRoutes() {
 		return nil, s.service.DeleteProviderAction(r.Context(), r.PathValue("providerId"), r.PathValue("actionId"))
 	})
 	s.route("POST", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", "user", true, 201, lifecycleBody([]string{"code", "name", "riskLevel"}, func(r *request, v grant.CustomActionInput) (any, error) {
-		if r.PathValue("providerId") != "operable" {
-			return nil, failure(404, "service provider not found")
-		}
-		return s.service.CreateOperableCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, v)
+		return s.service.CreateCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("providerId"), v)
 	}))
-	s.route("PATCH", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", "user", true, 200, lifecycleBody(nil, func(r *request, v grant.CustomActionPatch) (any, error) {
-		if r.PathValue("providerId") != "operable" {
-			return nil, failure(404, "service provider not found")
+	s.route("PATCH", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", "user", true, 200, lifecycleBody([]string{"grantableToApplications"}, func(r *request, v grant.CustomActionPatch) (any, error) {
+		match, err := conditionalHeader(r.Request, "If-Match")
+		if err != nil {
+			return nil, err
 		}
-		return s.service.PatchOperableCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("actionId"), v)
+		return s.service.PatchCustomActionConditional(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("providerId"), r.PathValue("actionId"), v, match)
 	}))
 	s.route("DELETE", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions/{actionId}", "user", true, 204, func(r *request) (any, error) {
-		if r.PathValue("providerId") != "operable" {
-			return nil, failure(404, "service provider not found")
-		}
-		return nil, s.service.DeleteOperableCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("actionId"))
+		return nil, s.service.DeleteCustomActionAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("providerId"), r.PathValue("actionId"))
 	})
 }
 
