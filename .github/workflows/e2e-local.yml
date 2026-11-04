@@ -67,6 +67,13 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l internal cmd)"
 
+      - name: Verify replica-members Go module
+        working-directory: scripts/replica-members-src
+        run: |
+          go mod verify
+          go test -race ./...
+          go vet ./...
+
       - name: Verify runtime tool packaging
         run: sh scripts/verify-runtime-tools.sh
 
