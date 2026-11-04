@@ -8,7 +8,8 @@ deploy
 docs
 sandbox
 secrets
-scripts
+scripts/*
+!scripts/replica-members-src
 /var
 tmp
 *.log

@@ -9,6 +9,11 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant ./cmd/grant \
     && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-admin ./cmd/grant-admin \
     && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-patch-data-manifest-digest ./cmd/grant-patch-data-manifest-digest
+COPY --link scripts/replica-members-src /workspace/replica-members-src
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    cd /workspace/replica-members-src \
+    && go test ./... \
+    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/replica-members .
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
@@ -20,6 +25,7 @@ WORKDIR /app
 COPY --link --from=builder --chown=10001:10001 /workspace/grant /usr/local/bin/grant
 COPY --link --from=builder --chown=10001:10001 /workspace/grant-admin /usr/local/bin/grant-admin
 COPY --link --from=builder --chown=10001:10001 /workspace/grant-patch-data-manifest-digest /usr/local/bin/grant-patch-data-manifest-digest
+COPY --link --from=builder --chown=10001:10001 /workspace/replica-members /usr/local/bin/replica-members
 USER 10001:10001
 ENV GRANT_BIND_ADDR=0.0.0.0:8080 GRANT_DATA_DIR=/data/rhiza GRANT_BACKUP_DIR=/data/backups
 EXPOSE 8080 8100/udp

@@ -112,6 +112,23 @@ Configure voters with a private `GRANT_RUNTIME_BIND_ADDR`, a distinct write-capa
 
 Use `scripts/replica-members` with private stdin JSON containing `ClusterID` and native `Members` to derive the public member array. Its output omits voter tokens. Set that array and the sync credential in `GRANT_RHIZA_REPLICA_CONFIG_JSON`; use `GRANT_LOCAL_NODE_ROLE=learner`, unique local data directories/replica IDs, and the same fixed cluster and object-store configuration. Keep `GRANT_CLUSTER_MEMBERS` containing voter tokens only on voters. The helper is a local setup tool, not a network provisioning service.
 
+The image packaging candidate also installs the same helper as `/usr/local/bin/replica-members`. Published v0.5.0 does not contain it. The binary is built from the helper's separate `scripts/replica-members-src` module with its existing dependency pins; neither the cached host launcher nor a Go toolchain is needed in the runtime image. The server entrypoint and existing tools are unchanged. Invoke the helper explicitly with an image containing this packaging change:
+
+```sh
+docker run --rm -i --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --user 10001:10001 \
+  --entrypoint /usr/local/bin/replica-members "$GRANT_IMAGE" \
+  < private-members.json > public-replica-members.json
+```
+
+Stdin is one JSON object using `ClusterID` and `Members`. Each member uses native Rhiza member keys; `token` is an optional private input for deriving the public key. For example, with synthetic values:
+
+```json
+{"ClusterID":"example-cluster","Members":[{"node_id":"n1","peer_url":"quic://n1:8100","log_url":"http://n1:8081/log","wal_identity":"wal-1","token":"example-private-token"}]}
+```
+
+Instead of `token`, a member can supply native `public_key` as a base64-encoded 32-byte public key; if both are supplied they must match. Stdout is the JSON array of `rhiza.ReplicaMember` values returned by `NewReplicaMember`, in input order, followed by a newline. Each output member has `ID`, `PeerURL`, and `PublicKey`; `PublicKey` is a JSON array of 32 byte values, not the base64 string used by native member input. Private tokens are excluded. Use that entire array as the replica configuration's `Members` value; it is not a complete replica configuration. Do not pass the private input to learners. Invalid input or conversion failure exits 1 with `invalid replica member input` on stderr. The helper does not contact voters, issue credentials, create identities, or generate other bootstrap settings.
+
 The voter uses the management application's fixed PocketBase application context; bootstrap creates that application. Create the separate data application through the organization application API, then explicitly configure its action scope, trust or consent, and PEP binding. The data learner uses that data application's context. This uses one fixed application context per service, without a provider-to-application routing map.
 
 Management Exposure sends decisions and authorized requests directly to the private voter, never through itself. Private bootstrap and inactive-organization recovery remain direct administrative operations. Patch Auth remains the separate account service. Exposure's capability contract is generic so the same sidecar pattern can protect another PocketBase instance or another backend without adding authorization code to that backend.

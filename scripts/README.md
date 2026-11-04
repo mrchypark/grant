@@ -22,6 +22,8 @@
 
 | 명령 | 검증 대상과 사용법 | 격리/의존성 |
 | --- | --- | --- |
+| `verify-independent-environment.sh` | Disposable independent unit + S3/GCS/Azure process DR entry point: `sh scripts/verify-independent-environment.sh [all\|unit\|dr]`, default `all`. | POSIX sh, Git, Go; DR also needs local Docker. See [verification environment](../docs/verification-environment.md). No cluster access. |
+| `verify-independent-object-dr.sh` | All-three-provider clean-close process recovery and authority continuity. | Owned local Docker emulators, fake credentials, disposable data; retained evidence and verified cleanup. Called by the independent entry point. |
 | `verify-runtime-tools.sh` | Dockerfile의 런타임 도구와 서버 entrypoint 계약을 확인한다. `sh scripts/verify-runtime-tools.sh [DOCKERFILE]` | 임시 디렉터리, POSIX sh |
 | `verify-rhiza-deployment.sh` | 세 overlay의 Rhiza 배포 형태를 렌더링해 확인한다. `sh scripts/verify-rhiza-deployment.sh` | POSIX sh, kubectl |
 | `verify-go-cli-contract.sh` | cgo 없이 두 Go 실행 파일을 빌드하고 stdout 계약을 확인한다. `sh scripts/verify-go-cli-contract.sh` | POSIX sh, Go |

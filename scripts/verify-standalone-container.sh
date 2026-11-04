@@ -139,3 +139,30 @@ start_main "$owner-main-restored" "$fresh"
 read_marker
 stop_main "$main_cid"
 printf '%s\n' "Standalone $durability init/main shared DataDir, reuse and clean data-loss archive recovery passed (not crash recovery or an async losslessness guarantee)"
+
+# Run the packaged helper without Go, networking, writable storage, or voter access.
+replica_members() {
+ name=$1
+ cid=$(docker create --name "$name" --label "grant.verify.owner=$owner" \
+  --platform linux/amd64 --network none --user 10001:10001 --read-only \
+  --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --pids-limit 256 \
+  -i --entrypoint /usr/local/bin/replica-members "$image")
+ containers="$containers $cid"
+ docker start -ai "$cid" > "$log_dir/$name.json"
+ [ "$(docker inspect -f '{{.State.ExitCode}}' "$cid")" = 0 ]
+ jq -e 'type == "array" and length == 1 and
+  (.[0].PublicKey | type == "array" and length == 32) and
+  ([.. | objects | keys[] | ascii_downcase | select(. == "token" or . == "peertoken")] | length == 0)' \
+  "$log_dir/$name.json" >/dev/null
+ ! grep -F 'fixture-private-token' "$log_dir/$name.json"
+}
+replica_members "$owner-members-token" <<'JSON'
+{"ClusterID":"image-contract","Members":[{"node_id":"n1","peer_url":"quic://n1:8100","log_url":"http://n1:8081/log","wal_identity":"wal-1","token":"fixture-private-token"}]}
+JSON
+key_hex=$(jq -r '.[0].PublicKey[]' "$log_dir/$owner-members-token.json" | awk '{printf "%02x", $1}')
+key_base64=$(printf '%s' "$key_hex" | xxd -r -p | base64 | tr -d '\n')
+jq --arg key "$key_base64" '{ClusterID:"image-contract",Members:[{node_id:"n1",peer_url:"quic://n1:8100",log_url:"http://n1:8081/log",wal_identity:"wal-1",public_key:$key}]}' \
+ "$log_dir/$owner-members-token.json" > "$log_dir/members-public-input.json"
+replica_members "$owner-members-public" < "$log_dir/members-public-input.json"
+cmp "$log_dir/$owner-members-token.json" "$log_dir/$owner-members-public.json"
+printf '%s\n' 'Packaged replica-members stdin/stdout and public-only output contract passed'
