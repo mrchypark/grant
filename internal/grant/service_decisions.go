@@ -16,12 +16,25 @@ func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, to
 	if err != nil {
 		return applicationAuthorizationContext{}, err
 	}
+	return s.resolveLocalApplicationAuthorizationContext(ctx, identity, org)
+}
+
+func (s *Service) resolveLocalApplicationAuthorizationContext(ctx context.Context, identity ExternalIdentity, org string) (applicationAuthorizationContext, error) {
 	u, err := s.localIdentity(ctx, identity, ReadStrong)
 	if err != nil {
 		return applicationAuthorizationContext{}, err
 	}
 	if !u.Active {
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is inactive")
+	}
+	if s.cfg.Database.LocalNodeRole == "learner" {
+		member, err := s.store.HasActiveOrganizationMembershipWithConsistency(ctx, u.ID, org, ReadStrong)
+		if err != nil {
+			return applicationAuthorizationContext{}, err
+		}
+		if !member {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is not an active member of an active organization")
+		}
 	}
 	var a Application
 	if s.AuthProviderMode() == "pocketbase" {
@@ -66,13 +79,34 @@ func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, to
 	return applicationAuthorizationContext{u.ID, org, a.ID, subject, audience}, nil
 }
 func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org string, checks []ApplicationAuthorizationCheck) ([]AuthorizationDecision, error) {
-	c, err := s.resolveApplicationAuthorizationContext(ctx, token, org)
+	org, err := required("organizationId", org)
 	if err != nil {
 		return nil, err
 	}
-	exact := make([]AuthorizationCheck, len(checks))
-	for i, v := range checks {
-		exact[i] = AuthorizationCheck{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: v.Action, Resource: v.Resource}
+	var identity ExternalIdentity
+	if s.cfg.Database.LocalNodeRole == "learner" {
+		// No replicated cache lookup/write or inner Rauthy memory-cache hit:
+		// this request needs fresh external evidence before its local fence.
+		if s.AuthProviderMode() == "rauthy" {
+			identity, err = s.rauthyIdentityWithCache(ctx, token, false)
+		} else {
+			identity, err = s.externalIdentity(ctx, token)
+		}
+	} else {
+		identity, err = s.resolveExternalIdentity(ctx, token, ReadStrong)
 	}
-	return s.evaluateAuthorizations(ctx, exact, ReadStrong, &c.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	return localReplicaRead(ctx, s, func(readCtx context.Context) ([]AuthorizationDecision, error) {
+		c, err := s.resolveLocalApplicationAuthorizationContext(readCtx, identity, org)
+		if err != nil {
+			return nil, err
+		}
+		exact := make([]AuthorizationCheck, len(checks))
+		for i, v := range checks {
+			exact[i] = AuthorizationCheck{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: v.Action, Resource: v.Resource}
+		}
+		return s.evaluateAuthorizations(readCtx, exact, ReadStrong, &c.ApplicationID)
+	})
 }
