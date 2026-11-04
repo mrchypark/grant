@@ -155,7 +155,9 @@ replica_members() {
 replica_members "$owner-members-token" <<'JSON'
 {"ClusterID":"image-contract","Members":[{"node_id":"n1","peer_url":"quic://n1:8100","log_url":"http://n1:8081/log","wal_identity":"wal-1","token":"fixture-private-token"}]}
 JSON
-jq '{ClusterID:"image-contract",Members:[{node_id:"n1",peer_url:"quic://n1:8100",log_url:"http://n1:8081/log",wal_identity:"wal-1",public_key:.[0].PublicKey}]}' \
+key_hex=$(jq -r '.[0].PublicKey[]' "$log_dir/$owner-members-token.json" | awk '{printf "%02x", $1}')
+key_base64=$(printf '%s' "$key_hex" | xxd -r -p | base64 | tr -d '\n')
+jq --arg key "$key_base64" '{ClusterID:"image-contract",Members:[{node_id:"n1",peer_url:"quic://n1:8100",log_url:"http://n1:8081/log",wal_identity:"wal-1",public_key:$key}]}' \
  "$log_dir/$owner-members-token.json" > "$log_dir/members-public-input.json"
 replica_members "$owner-members-public" < "$log_dir/members-public-input.json"
 cmp "$log_dir/$owner-members-token.json" "$log_dir/$owner-members-public.json"
