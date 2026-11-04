@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
+
 	"github.com/mrchypark/grant/internal/grant"
 )
 
@@ -137,14 +139,14 @@ func (s *Server) authorizationRoutes() {
 		}
 		return map[string]any{"resource_ids": ids}, nil
 	}))
-	s.route("POST", "/api/v1/application-authz/check", "application", false, 200, body(false, func(r *request, v applicationCheck) (any, error) {
+	s.route("POST", "/api/v1/application-authz/check", "application", false, 200, applicationAuthorizationBody(s, func(r *request, v applicationCheck) (any, error) {
 		return first(s.applicationChecks(r, []applicationCheck{v}))
 	}))
-	s.route("POST", "/api/v1/application-authz/batch-check", "application", false, 200, body(false, func(r *request, v applicationBatch) (any, error) {
+	s.route("POST", "/api/v1/application-authz/batch-check", "application", false, 200, applicationAuthorizationBody(s, func(r *request, v applicationBatch) (any, error) {
 		out, e := s.applicationChecks(r, v.Checks)
 		return map[string]any{"results": out}, e
 	}))
-	s.route("POST", "/api/v1/application-authz/filter", "application", false, 200, body(false, func(r *request, v applicationFilter) (any, error) {
+	s.route("POST", "/api/v1/application-authz/filter", "application", false, 200, applicationAuthorizationBody(s, func(r *request, v applicationFilter) (any, error) {
 		if len(v.Resources) > 1000 {
 			return nil, failure(400, "resources must contain at most 1000 items")
 		}
@@ -164,4 +166,59 @@ func (s *Server) authorizationRoutes() {
 		}
 		return map[string]any{"resource_ids": ids}, nil
 	}))
+}
+
+// Voters retain legacy extension-field decoding. Learners expose only closed,
+// bounded read requests before obtaining identity evidence or a quorum fence.
+func applicationAuthorizationBody[T any](s *Server, fn func(*request, T) (any, error)) preparedEndpoint {
+	return preparedEndpoint{prepare: func(r *request) (endpoint, error) {
+		if s.learner {
+			for _, name := range []string{"Authorization", "X-Grant-App-Auth-Key", "X-Organization-ID"} {
+				if len(r.Header.Values(name)) > 1 {
+					return nil, failure(400, "multiple "+name+" headers")
+				}
+			}
+		}
+		v, err := decode[T](r.Request, s.learner)
+		if err != nil {
+			return nil, err
+		}
+		if s.learner {
+			var checks []applicationCheck
+			switch value := any(v).(type) {
+			case applicationCheck:
+				checks = []applicationCheck{value}
+			case applicationBatch:
+				if value.Checks == nil {
+					return nil, failure(422, "checks is required")
+				}
+				checks = value.Checks
+			case applicationFilter:
+				if value.Resources == nil {
+					return nil, failure(422, "resources is required")
+				}
+				if strings.TrimSpace(value.Action) == "" {
+					return nil, failure(422, "action is required")
+				}
+				checks = make([]applicationCheck, len(value.Resources))
+				for i, res := range value.Resources {
+					checks[i] = applicationCheck{Action: value.Action, Resource: res}
+				}
+			}
+			if len(checks) > 1000 {
+				return nil, failure(400, "checks must contain at most 1000 items")
+			}
+			for _, check := range checks {
+				if _, err := check.Resource.input(); err != nil {
+					return nil, err
+				}
+				for _, value := range []string{check.Action, check.Resource.Provider, check.Resource.Type, check.Resource.ID} {
+					if strings.TrimSpace(value) == "" {
+						return nil, failure(422, "action and resource provider, type, id are required")
+					}
+				}
+			}
+		}
+		return func(r *request) (any, error) { return fn(r, v) }, nil
+	}}
 }

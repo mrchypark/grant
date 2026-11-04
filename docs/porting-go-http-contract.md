@@ -73,11 +73,50 @@ The inventory includes lifecycle routes listed below and granular action routes 
 
 Current learner routing rejects both `POST /api/v1/me/ensure` and `GET /api/v1/me` with HTTP 503 and `read replica only serves capability decisions and catalogs`. The legacy `false` registration flag for `GET /api/v1/me` does not override this server-level restriction.
 
+The unreleased candidate additionally admits exactly the three application-authorization POST routes described below. Published v0.4.1 rejects those routes on learners. The registration flags in the table do not independently establish learner availability; master `/api/v1/authz/*` and administration remain blocked.
+
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 
 Legacy JSON DTOs retain permissive unknown-field behavior where the Rust DTO did not declare `deny_unknown_fields`. Capability and authority import contracts are closed. Required fields cannot be omitted or null; duplicate object fields are rejected. Rust enum inputs are checked before service execution. Body limit is 2 MiB for JSON. Canonical signatures/hashes are computed by shared storage/domain functions rather than the HTTP layer.
 
 All six authorization routes reject any present `resource.view` value, including null. Batch/filter requests permit at most 1,000 items. `filter` returns `resource_ids`; batch returns `results`. Generic HTTP capability requests validate the active catalog and exact contract before evaluation. An absent consent returns 404; successful deletion returns an empty 204 body. Domain errors retain the JSON `{ "error": "..." }` envelope.
+
+### Unreleased learner application authorization
+
+This candidate is not a released version or deployment qualification. It changes learner availability for exactly `POST /api/v1/application-authz/check`, `POST /api/v1/application-authz/batch-check` and `POST /api/v1/application-authz/filter`; voter wire schemas and decoding compatibility remain unchanged.
+
+All three require these headers. The application key is server-held, deployment-global `GRANT_APP_AUTH_KEY`, not a per-application credential or an application selector. No key issuance/rotation API is added.
+
+```http
+Authorization: Bearer <user-access-token>
+X-Grant-App-Auth-Key: <deployment-application-key>
+X-Organization-ID: <grant-organization-id>
+Content-Type: application/json
+```
+
+The following values are placeholders, not existing registrations. `workspace` is a flat resource convention; resource IDs are nonempty trimmed strings, not necessarily UUIDs. There is no implicit parent-resource inheritance.
+
+Check request:
+
+```json
+{"action":"<registered-action-id>","resource":{"provider":"<provider-id>","type":"workspace","id":"<stable-workspace-id>"}}
+```
+
+Batch request wraps check objects in `{"checks":[...]}`. Filter request:
+
+```json
+{"action":"<registered-action-id>","resources":[{"provider":"<provider-id>","type":"workspace","id":"<stable-workspace-id>"}]}
+```
+
+Successful evaluations return HTTP 200. Check returns `{"allowed":true,"reason":"<decision-reason>"}` or a false decision; batch returns `{"results":[...]}` in input order. Filter returns `{"resource_ids":["<allowed-workspace-id>"]}` or `{"resource_ids":[]}`. It preserves allowed input order and can preserve duplicates. IDs are bare strings: use one provider/type namespace to avoid ambiguity. No subject or application override is accepted on learners; both are derived from authentication and configuration.
+
+Limits remain 1,000 checks/candidates and a 2 MiB JSON body. Learner-only pre-evaluation validation rejects unknown nested/top-level fields, duplicate JSON keys, explicit null required values, malformed/trailing JSON, missing collections, blank action/resource tuple fields, any `resource.view`, and multiple Authorization, X-Grant-App-Auth-Key or X-Organization-ID headers. Explicit empty arrays remain valid but still require authentication and local application context. Voters retain legacy unknown-extension-field handling. Oversized bodies return 413, excess items 400, and closed-shape/required-field errors generally 422; malformed JSON, duplicate headers and unsupported view return 400. Authentication and context checks can return 401/403. Unavailable fences or unstable snapshots fail closed with 503; no partial successful result is returned. Treat all other non-200 or malformed responses as failures as well. Domain errors use `{"error":"..."}` with an optional `code`.
+
+External identity verification occurs once before the learner fence budget. The complete Grant-local identity/user/application active-ready/org context and the whole batch's membership, RBAC, action admission and consent evaluation must share one accepted applied slot at or beyond the request's quorum fence. Snapshot movement retries the whole local operation, at most three attempts within the existing three-second learner budget. External verification is not repeated by those retries and is not pinned to Grant's slot. This is not an IdP/Grant distributed snapshot or a lock. Voters retain individual strong reads; no whole-batch slot guarantee is added there.
+
+Filter is candidate-in/candidate-out, not allowed-resource enumeration: no continuation token, authorized total or full-scope snapshot is returned. The caller owns candidate inventory and pagination. Neither these responses nor the accepted slot provide an expiry lease or effect fence; recheck authorization for protected operations. Configured issuer/client/audience/scope validation and application readiness remain mandatory. No new issuer registry, automatic identity alias/email merge, OAuth client, or missing-account allow fallback is introduced.
+
+For these learner reads, external verification is uncached and performs no cache writes. Rauthy bypasses both memory and replicated caches regardless of positive TTL; an inactive token returns 401 and an unavailable IdP fails closed without cached identity fallback. Voter Rauthy cache semantics are unchanged; Goauthy/PocketBase online validation is preserved.
 
 Grant does not proxy IdP requests. `/auth`, `/auth/v1`, and `/auth/v1/*` return 404; route IdP traffic directly through the Gateway. External token validation remains enabled for the configured provider. Bodyless Bearer `POST /api/v1/me/ensure` creates a missing internal user and external-identity mapping or reuses the existing user without profile writes, and returns only `{ "userId": "..." }`; it grants no membership, role, Binding, or consent. `GET /api/v1/me` and general authentication lookup never create domain users or update profiles at any consistency level. A missing local mapping from `GET /api/v1/me` returns 404 with `LOCAL_USER_NOT_PROVISIONED`.
 
@@ -155,8 +194,9 @@ admin import and pep-clients paths return 404 without aliases.
 
 In the table, `master` also supports an explicitly authorized platform bearer
 for cataloged admin routes. Private operations and bootstrap do not. The
-learner's global gate admits only health/readiness, runtime catalog reads and
-HTTP decide; `Voter only=false` on a registration does not override that gate.
+learner's global gate admits health/readiness, runtime catalog reads and
+HTTP decide, plus the unreleased candidate's exact three application-authz POST
+routes above; `Voter only=false` on a registration does not override that gate.
 
 Provider POST is create-only and returns 409 on duplicate ID. Metadata PATCH
 preserves omitted fields, clears nullable text with null, and rejects empty
