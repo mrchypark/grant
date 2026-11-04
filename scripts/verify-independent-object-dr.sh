@@ -2,7 +2,8 @@
 # Disposable, local-only process verification; evidence survives cleanup.
 set -eu
 umask 077
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=/dev/null
 . "$root/scripts/testdata/independent-object-dr/guards.sh"
 if [ -n "${DOCKER_HOST:-}" ] && ! independent_unix_endpoint "$DOCKER_HOST"; then
  echo 'UNVERIFIED: ambient DOCKER_HOST must be a local Unix socket' >&2; exit 1
@@ -21,7 +22,7 @@ evidence=$(mktemp -d "${TMPDIR:-/tmp}/grant-independent-evidence.XXXXXX")
 work=$(mktemp -d "${TMPDIR:-/tmp}/grant-independent-runtime.XXXXXX")
 mkdir "$work/docker-config" "$work/tmp"
 echo "Evidence: $evidence"
-child= watch=
+child='' watch=''
 stop_tree() {
  for p in $(ps -axo pid=,ppid= | awk -v parent="$1" '$2==parent {print $1}'); do stop_tree "$p"; done
  kill -TERM "$1" 2>/dev/null || :
