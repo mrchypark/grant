@@ -102,7 +102,7 @@ tolerations and real ConfigFromEnv/effective Rhiza configuration using synthetic
 remote S3 settings, without opening storage or contacting a cloud endpoint. It does
 not validate deployment secrets, remote durability, fencing or Kubernetes execution.
 
-Before approval, run the exact image on native AMD64 in an isolated Kubernetes
+Before production rollout, run the exact image on native AMD64 in an isolated Kubernetes
 cluster with disposable remote-S3 test storage. Write authority data, cleanly stop
 and exclude the old writer, replace the Pod, confirm the new Pod UID/fresh local
 volume and verify recovered ownership/authorization plus new writes. Separately
@@ -112,6 +112,11 @@ Native Kubernetes runtime coverage is not established by these validators. Rende
 source-test success is not native image/Kubernetes qualification. S3 testing alone
 also does not establish GCS/Azure adapter coverage or production-cloud parity.
 No deployment, publication, commit or release is authorized by this document.
+
+Merging or releasing this experimental profile requires passing its native CI
+render/configuration checks, not production recovery qualification. A source merge
+or release does not establish Kubernetes, GCS/Azure or production-cloud recovery;
+the deployment restrictions and explicit qualification gaps above still apply.
 
 To validate reviewed deployment environment values without opening storage, provide
 `STORAGE_ENV_FILE=/absolute/path/combined-env.json` to the NoPVC verifier. The file

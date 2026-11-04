@@ -100,6 +100,7 @@ jobs:
         run: |
           sh scripts/verify-standalone-container-ownership.sh
           sh scripts/verify-standalone-deployment.sh
+          sh scripts/verify-standalone-nopvc-deployment.sh
 
       - name: Verify native AMD64 container under production security limits
         run: |
