@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// Reserve organization custom codes across providers; preserve legacy shared codes.
+const applicationActionNamespaceSQL = `((a.provider_id<>'operable' AND a.code NOT GLOB 'custom.org-*') OR a.code NOT GLOB 'custom.*' OR a.code GLOB ?)`
+
 func (s *Service) ListApplicationsAuthorized(ctx context.Context, user, org string, c ReadConsistency) ([]Application, error) {
 	if err := s.requireOrganizationAction(ctx, user, org, org, "organization.application.manage", "manage organization applications", c); err != nil {
 		return nil, err
@@ -147,7 +150,7 @@ func (s *Service) ReplaceApplicationActionsAuthorized(ctx context.Context, user,
 		ids = append(ids, x)
 	}
 	j, _ := jsonString(ids)
-	invalid, err := s.store.Query(ctx, ReadStrong, "SELECT j.value AS id FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM actions a JOIN service_providers p ON p.id=a.provider_id AND p.active=1 WHERE a.id=j.value AND a.grantable_to_applications=1) LIMIT 1", j)
+	invalid, err := s.store.Query(ctx, ReadStrong, "SELECT j.value AS id FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM actions a JOIN service_providers p ON p.id=a.provider_id AND p.active=1 WHERE a.id=j.value AND a.grantable_to_applications=1 AND "+applicationActionNamespaceSQL+") LIMIT 1", j, organizationCustomNamespace(org)+"*")
 	if err != nil {
 		return nil, err
 	}

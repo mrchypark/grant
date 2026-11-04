@@ -467,3 +467,38 @@ configured active first-party auto-approved management app and an admitted
 self-service action. The PDP remains read-only. This exception never changes
 transport policy or supplies an application organization to an absent request.
 Platform and tenant management protections remain separate Grant domain checks.
+
+### Explicit owner custom-action eligibility and admission
+
+**Relations:** `actions.grantable_to_applications` remains eligibility only.
+An active owner with `organization.permission.manage` may explicitly change it
+for their own organization-hashed custom namespace within each active provider.
+The reserved code is `custom.org-<sha256-of-org-id>.<feature>.<definition-id>.<operation>`;
+the owner API ID is `<providerId>.<code>`, preserving existing Operable IDs.
+Provider identity and canonical ID are checked alongside the organization prefix;
+ordinary shared/built-in actions remain outside owner mutation authority. Creation defaults
+to false. No role, binding, `application_actions`, `application_grants`, or
+`application_grant_actions` row is created by the flag change. Both public
+application action admission write paths enforce that an organization custom action's
+namespace matches `applications.organization_id`, inside the write transaction.
+No table, column, index, or physical migration is added.
+
+**Reason for the structure:** A globally stored eligibility flag must not permit
+another organization to admit an organization's custom action. Existing action
+snapshot CAS and transaction authority guards serialize explicit owner changes;
+owner disable rejects while admission/consent-action references remain and
+requires explicit scope removal first. The separate master catalog mutation
+contract retains its existing cascade behavior. See
+[custom-action-application-admission.md](custom-action-application-admission.md)
+for the public workflow and compatibility details.
+
+Public provider-action candidates also enforce this organization namespace for
+`custom.org-*` actions across providers even when globally eligible, keeping candidate reads
+consistent with application admission. Authorized owners may additionally see
+their own ineligible custom actions; owners with only application-management
+permission retain the eligible-only view. Global admin catalog reads are
+unchanged. Legacy role-action selection and existing foreign references retain
+their separate behavior described in the admission document.
+The broader legacy Operable `custom.*` isolation remains in effect; other
+providers' ordinary shared codes (including `custom.shared`) retain their prior
+eligibility behavior. No physical schema migration or rewrite of existing IDs is made.

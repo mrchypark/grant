@@ -51,7 +51,7 @@ func (s *Server) routes() {
 		return snapshotResult(s.service.ProviderActionsSnapshot(r.Context(), r.PathValue("providerId")))
 	})
 	s.route("GET", "/api/v1/orgs/{organizationId}/providers/{providerId}/actions", "user", true, 200, func(r *request) (any, error) {
-		return s.service.ListProviderActionsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("providerId"))
+		return snapshotResult(s.service.ProviderActionsSnapshotAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.PathValue("providerId")))
 	})
 	s.route("GET", "/api/v1/orgs/{organizationId}/apps", "user", false, 200, func(r *request) (any, error) {
 		return s.service.ListApplicationsAuthorized(r.Context(), r.principal.UserID, r.principal.OrganizationID, r.consistency)
