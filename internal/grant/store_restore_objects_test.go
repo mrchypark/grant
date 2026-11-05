@@ -295,7 +295,9 @@ func restoreObjectFixture(t *testing.T, ctx context.Context, c *rhiza.Config, en
 	t.Helper()
 	fixture := &independentFixture{t: t, ctx: ctx, dir: t.TempDir(), logs: t.TempDir(), id: c.ObjStoreBucket}
 	fixture.provision(c.ObjStoreProvider, endpoint)
-	cleanupContext := func() (context.Context, context.CancelFunc) { return context.WithTimeout(context.Background(), 20*time.Second) }
+	cleanupContext := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 20*time.Second)
+	}
 	switch c.ObjStoreProvider {
 	case "s3":
 		c.ObjStoreEndpoint = strings.TrimPrefix(endpoint, "http://")
@@ -321,20 +323,19 @@ func restoreObjectFixture(t *testing.T, ctx context.Context, c *rhiza.Config, en
 			}
 		})
 		return func(key string) {
-			if _, err := client.PutObject(ctx, c.ObjStoreBucket, key, strings.NewReader("owned"), 5, minio.PutObjectOptions{}); err != nil {
-				t.Fatal("S3 fixture write failed")
+				if _, err := client.PutObject(ctx, c.ObjStoreBucket, key, strings.NewReader("owned"), 5, minio.PutObjectOptions{}); err != nil {
+					t.Fatal("S3 fixture write failed")
+				}
+			}, func(key string) {
+				if client.RemoveObject(ctx, c.ObjStoreBucket, key, minio.RemoveObjectOptions{}) != nil {
+					t.Fatal("S3 fixture delete failed")
+				}
 			}
-		}, func(key string) {
-			if client.RemoveObject(ctx, c.ObjStoreBucket, key, minio.RemoveObjectOptions{}) != nil {
-				t.Fatal("S3 fixture delete failed")
-			}
-		}
 	case "gcs":
-		raw, err := os.ReadFile(filepath.Join(fixture.dir, "fake-adc.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		c.ObjStoreServiceAccount = string(raw)
+		// Exercise the production omission path: both the vacancy SDK and
+		// native voter/learner obtain ADC without an inline service-account key.
+		c.ObjStoreServiceAccount = ""
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(fixture.dir, "fake-adc.json"))
 		client, err := storage.NewClient(ctx, option.WithoutAuthentication())
 		if err != nil {
 			t.Fatal("GCS fixture client failed")
@@ -365,17 +366,17 @@ func restoreObjectFixture(t *testing.T, ctx context.Context, c *rhiza.Config, en
 			}
 		})
 		return func(key string) {
-			writer := bucket.Object(key).NewWriter(ctx)
-			_, err := writer.Write([]byte("owned"))
-			closeErr := writer.Close()
-			if err != nil || closeErr != nil {
-				t.Fatal("GCS fixture write failed")
+				writer := bucket.Object(key).NewWriter(ctx)
+				_, err := writer.Write([]byte("owned"))
+				closeErr := writer.Close()
+				if err != nil || closeErr != nil {
+					t.Fatal("GCS fixture write failed")
+				}
+			}, func(key string) {
+				if bucket.Object(key).Delete(ctx) != nil {
+					t.Fatal("GCS fixture delete failed")
+				}
 			}
-		}, func(key string) {
-			if bucket.Object(key).Delete(ctx) != nil {
-				t.Fatal("GCS fixture delete failed")
-			}
-		}
 	case "azure":
 		c.ObjStoreAzureStorageAccount = "devstoreaccount1"
 		c.ObjStoreAzureConnectionString = independentAzureConnection(endpoint)
@@ -397,14 +398,14 @@ func restoreObjectFixture(t *testing.T, ctx context.Context, c *rhiza.Config, en
 			}
 		})
 		return func(key string) {
-			if _, err := client.UploadBuffer(ctx, c.ObjStoreBucket, key, []byte("owned"), nil); err != nil {
-				t.Fatal("Azure fixture write failed")
+				if _, err := client.UploadBuffer(ctx, c.ObjStoreBucket, key, []byte("owned"), nil); err != nil {
+					t.Fatal("Azure fixture write failed")
+				}
+			}, func(key string) {
+				if _, err := client.DeleteBlob(ctx, c.ObjStoreBucket, key, nil); err != nil {
+					t.Fatal("Azure fixture delete failed")
+				}
 			}
-		}, func(key string) {
-			if _, err := client.DeleteBlob(ctx, c.ObjStoreBucket, key, nil); err != nil {
-				t.Fatal("Azure fixture delete failed")
-			}
-		}
 	}
 	t.Fatal("unsupported emulator provider")
 	return nil, nil

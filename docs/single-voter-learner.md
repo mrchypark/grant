@@ -48,7 +48,7 @@ Grant's actual configuration names, not a new provisioning API.
 | `GRANT_DATA_DIR` | New absent child directory, e.g. `/data/rhiza/imported`. |
 | `GRANT_PEER_ADDR` | Fixed UDP bind address, e.g. `0.0.0.0:8100`. |
 | `GRANT_CLUSTER_MEMBERS` | The one-member native array described below. |
-| `GRANT_RHIZA_CONFIG_JSON` | Non-Local config with a separate `AdminToken` and GCS credentials. |
+| `GRANT_RHIZA_CONFIG_JSON` | Non-Local config with a separate `AdminToken`; omit service-account JSON when using ADC. |
 | `RHIZA_OBJSTORE_PROVIDER` | `gcs` |
 | `RHIZA_OBJSTORE_BUCKET` | Existing operator-provisioned target bucket. |
 | `RHIZA_OBJSTORE_PREFIX` | Fresh canonical prefix, e.g. `candidate-import/target-01`. |
@@ -86,12 +86,20 @@ The accompanying `GRANT_RHIZA_CONFIG_JSON` object uses these actual fields:
 ```json
 {
   "Local": false,
-  "AdminToken": "<separate-replica-sync-secret>",
-  "ObjStoreServiceAccount": "<complete-service-account-JSON-encoded-as-one-string>"
+  "AdminToken": "<separate-replica-sync-secret>"
 }
 ```
 
-`ObjStoreServiceAccount` is JSON content, not a credential-file path. Keep the
+Use the existing KSA Workload Identity/ADC configuration for GCS on the seed,
+main voter and learner. No static GCP key or `ObjStoreServiceAccount` value is
+required for this profile. With that field empty or omitted, the namespace-list
+helper uses `storage.NewClient` without explicit credentials, allowing ADC; the
+owner-confirmed native GCS factory also supports default ADC. Ensure the workload
+identity has the target bucket permissions required by each component.
+
+An operator-supplied explicit credential is optional: `ObjStoreServiceAccount`,
+if used, contains complete service-account JSON encoded as one JSON string, not
+a credential-file path. Do not create static keys to follow this runbook. Keep the
 peer secret, sync secret, public API keys, fence key and runtime writer secret
 distinct. The sync credential is distributed to the passive learner only for
 certified replica synchronization; do not expose Rhiza's native admin handler.
@@ -141,6 +149,43 @@ On failure, keep the target isolated and preserve its directory, namespace,
 markers and logs. Normal startup rejects a pending restore. The CLI requires an
 absent directory, so do not delete a marker or reset/reuse a failed target merely
 to retry. Preserve the frozen source for a reviewed retry or rollback decision.
+
+## Deployment-owned one-time seed guard
+
+Seed and main containers in the same Pod must mount the **same `emptyDir`** and
+use the **same `GRANT_DATA_DIR` child path**. The seed runs before-ack; main opens
+that verified directory with the steady-state configuration below. Do not copy
+or recreate authority in a second permanent directory.
+
+The deployment owner supplies an optional, one-time Snapshot Secret and startup
+guards using the image's existing `/bin/sh`. These are deployment checks, not new
+Grant CLI flags or automatic recovery behavior. Apply this order:
+
+| Observed local state | Init/seed behavior |
+|----------------------|--------------------|
+| Pending marker exists, or verification/identity is inconsistent | Fail closed and retain evidence. |
+| Valid verified marker exists and pending marker is absent | Skip seeding; require the expected target cluster/source provenance. |
+| No verified marker, target directory absent, approved one-time payload present | Run the offline import above, then require its verified marker and successful exit. |
+| No verified marker and payload absent, or target directory already exists without verified completion | Fail before main; do not open a blank database or reset the directory. |
+
+Main's own deployment guard must also require the matching verified marker and
+absence of a pending marker before executing `/usr/local/bin/grant` in async
+mode. Do not rely on init completion alone or call normal Grant/SDK Open as a
+test for an empty target.
+
+After the first verified seed, the operator deletes the one-time Snapshot Secret
+without changing the Pod template. Its mount must be optional so a replacement
+Pod can reach the guard and fail explicitly when the payload is absent. Do not
+keep the old snapshot permanently available to a recurring init container.
+Ordinary main-container restarts retain the same Pod's `emptyDir` and verified
+marker. A new Pod has a new empty directory; without the one-time payload its
+guard must fail closed until an explicitly approved recovery is supplied.
+
+Never automatically replay the original V5 snapshot after target writes have
+begun. Recovery requires a reviewed newer logical import into a fresh target or
+another explicitly planned procedure. This guard prevents stale initialization;
+it does not qualify full voter WAL-loss recovery, add HA/PVCs, or replace the
+source/target exclusivity requirement.
 
 ## Start the sole voter and private fence transport
 
@@ -220,7 +265,7 @@ Set learner configuration as follows, then start `/usr/local/bin/grant`:
 | `GRANT_REMOTE_NODES` | The HTTPS terminator origin, without `/read-fence`. |
 | `GRANT_READ_FENCE_KEY` | Matching private voter fence credential. |
 | `GRANT_RHIZA_REPLICA_CONFIG_JSON` | Object with `ClusterID`, a unique `ReplicaID`, matching sync `AdminToken`, and `Members` set to the complete public helper output array. |
-| `GRANT_RHIZA_CONFIG_JSON` | Credential config with `Local: false` and the GCS service-account JSON string, without voter membership or peer secret. |
+| `GRANT_RHIZA_CONFIG_JSON` | `Local: false`, without voter membership or peer secret. Omit `ObjStoreServiceAccount` for existing KSA Workload Identity/ADC; explicit JSON credentials are optional only. |
 | `RHIZA_OBJSTORE_*` | Same provider, bucket and namespace. This passive reader does not select the voter's write durability policy. |
 
 Leave `GRANT_CLUSTER_MEMBERS`, `RHIZA_PEER_TOKEN`, `GRANT_RUNTIME_BIND_ADDR`,

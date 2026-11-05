@@ -17,11 +17,7 @@ func singleVoterRestoreFixture() Config {
 	const cluster = "fresh-import"
 	const node = "import-voter"
 	const token = "import-peer-credential"
-	return Config{Database: DatabaseConfig{RuntimeMode: "embedded", LocalNodeRole: "voter", Rhiza: rhiza.Config{
-		ClusterID:        cluster, NodeID: node, PeerAddr: "127.0.0.1:8100", PeerToken: token, AdminToken: "import-sync-credential",
-		Members:          []rhiza.Member{{ID: node, PeerURL: "quic://127.0.0.1:8100", PublicKey: rhiza.PeerPublicKey(cluster, node, token)}},
-		ObjStoreProvider: "gcs", ObjStoreBucket: "owned-import", ObjStorePrefix: "fresh/import", ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck,
-	}}}
+	return Config{Database: DatabaseConfig{RuntimeMode: "embedded", LocalNodeRole: "voter", Rhiza: rhiza.Config{ClusterID: cluster, NodeID: node, PeerAddr: "127.0.0.1:8100", PeerToken: token, AdminToken: "import-sync-credential", Members: []rhiza.Member{{ID: node, PeerURL: "quic://127.0.0.1:8100", PublicKey: rhiza.PeerPublicKey(cluster, node, token)}}, ObjStoreProvider: "gcs", ObjStoreBucket: "owned-import", ObjStorePrefix: "fresh/import", ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck}}}
 }
 
 func TestRestoreGCSEmulatorRequiresLocalADC(t *testing.T) {
@@ -38,6 +34,15 @@ func TestRestoreGCSEmulatorRequiresLocalADC(t *testing.T) {
 	c.ObjStoreServiceAccount = `{"type":"service_account","token_uri":"http://127.0.0.1:4588/token"}`
 	if err := restoreGCSEmulatorPreflight(c); err != nil {
 		t.Fatal(err)
+	}
+	adc := filepath.Join(t.TempDir(), "fake-adc.json")
+	if err := os.WriteFile(adc, []byte(c.ObjStoreServiceAccount), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c.ObjStoreServiceAccount = ""
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
+	if err := restoreGCSEmulatorPreflight(c); err != nil {
+		t.Fatal("omitted inline service account did not use fixture ADC")
 	}
 	t.Setenv("STORAGE_EMULATOR_HOST", "https://storage.googleapis.com")
 	if err := restoreGCSEmulatorPreflight(c); err == nil {
@@ -108,7 +113,9 @@ func TestSingleVoterRestoreAdmission(t *testing.T) {
 		{"reconfiguration", func(c *Config) { c.Database.Rhiza.EnableReconfiguration = true }},
 		{"cluster restore", func(c *Config) { c.Database.ClusterRestoreSnapshot = "snapshot.json" }},
 		{"no explicit member", func(c *Config) { c.Database.Rhiza.Members = nil }},
-		{"two voters", func(c *Config) { c.Database.Rhiza.Members = append(c.Database.Rhiza.Members, rhiza.Member{ID: "other"}) }},
+		{"two voters", func(c *Config) {
+			c.Database.Rhiza.Members = append(c.Database.Rhiza.Members, rhiza.Member{ID: "other"})
+		}},
 		{"conflicting members", func(c *Config) { c.Database.Members = []rhiza.Member{{ID: "other"}} }},
 		{"source cluster", func(c *Config) { c.Database.Rhiza.ClusterID = snap.ClusterID }},
 		{"implicit cluster", func(c *Config) { c.Database.Rhiza.ClusterID = "" }},
