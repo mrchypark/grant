@@ -36,7 +36,7 @@ that do not participate in the management grant model:
 - `POST /api/v1/admin/bootstrap/owner` (unified provider-neutral bootstrap)
 - `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` (master-only operational first-party admission; never exposed through the admin UI registry)
 - `POST /ops/backups`, `GET /ops/backups` (private backup ops)
-- `PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (private enforcer registration)
+- `GET/PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (candidate private, master-only PEP policy read/registration; excluded from the management catalog)
 - `POST /ops/migrations/patch-data-authority` (private import)
 - `POST /api/v1/authz/check`, `batch-check`, `filter`
 - `POST /api/v1/application-authz/check`, `batch-check`, `filter`
@@ -111,7 +111,21 @@ policy. Health probes do not require a management permission.
 - Backups (`/ops/backups`): private operational endpoint.
 - Import (`/ops/migrations/patch-data-authority`): private migration endpoint.
 - Enforcer registration (`/ops/providers/{providerId}/enforcers/{pepClientId}`):
-  private PEP binding endpoint.
+  candidate private, master-only GET/PUT. GET returns stored policy and `ETag`
+  even for inactive/expired PEPs or absent active catalogs. PUT accepts
+  `authorizationMode`, `lifecycle` and optional `validUntil`; creation requires
+  `If-None-Match: *`, updates require `If-Match` (missing 428, stale 412).
+
+The candidate server policy defaults to `application`; explicit `user` needs
+no application record but retains user, membership and RBAC checks. Legacy
+stored null defaults during migration; modern PUT null is rejected. No OAuth
+client/application provisioning or per-PEP key issuance is added: runtime
+authentication keeps global `GRANT_APP_AUTH_KEY` and configured PEP identity.
+User catalog mode/revision and decision `wireVersion: 2`/`pepPolicyRevision`
+require a matching Exposure v2 candidate; legacy responses omit new fields.
+Published v0.7.0 does not support this mode. See the [principal specification](principal-user-authz-spec.md)
+and [candidate capability contract](http-capabilities.md#candidate-principal-authorization-mode)
+for the full contract; this is not a deployment or runtime PASS claim.
 
 ## Registry structure
 

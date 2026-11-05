@@ -74,7 +74,11 @@ Grant 변경을 검증한 후 관리 카탈로그를 새 세대로 생성하고,
 
 검증 결과는 검증한 로컬 manifest·소속·상태가 여전히 같을 때만 원자적으로 저장한다. 다른 앱에 연결된 client ID, 준비된 앱의 다른 ID로 재연결, 비활성 조직·앱은 거절한다. 실패 시 ready로 바꾸지 않는다. 기존 검증 완료 데이터와 `rauthy_client_id` 컬럼은 보존하며 이름만 일반화하는 DB 변경은 수행하지 않는다.
 
-내부 PEP 서비스는 application이 아니다. 배포는 `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`로 정확한 PEP identity를 고정하고, master 전용 `/ops/providers/{providerId}/enforcers/{pepClientId}`로 provider binding을 등록한다. 요청 body에는 `lifecycle`과 선택적 `validUntil`만 있으며 `applicationId`는 허용하지 않는다. 기존 user/application management checks는 `GRANT_MANAGEMENT_APPLICATION_ID`를 사용한다. `GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID`는 이 application ID의 deprecated alias일 뿐 PEP identity fallback이 아니며, 새 설정과 값이 다르면 시작을 거부한다. 일반 사용자 앱은 기존 읽기 전용 verifier, trust, consent 절차를 그대로 따른다.
+내부 PEP 서비스는 application이 아니다. 배포는 기존 전역 `GRANT_APP_AUTH_KEY`와 `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`로 PEP identity를 고정하며 새 PEP별 키를 발급하지 않는다. 후보 계약의 master 전용 private `/ops/providers/{providerId}/enforcers/{pepClientId}`는 GET으로 비활성·만료 상태나 활성 catalog 부재에도 저장값과 `ETag`를 제공한다. PUT은 `lifecycle`, 선택적 `validUntil`, `authorizationMode`를 받으며 `applicationId`는 거부한다. 생성은 `If-None-Match: *`, 갱신은 GET의 `ETag`를 담은 `If-Match`가 필요하다. 선행 조건 누락은 428, stale은 412다.
+
+서버 모드는 기본 `application` 또는 명시적 `user`다. 생성 시 모드 생략은 application, 갱신 시 생략은 기존 값 유지다. 과거 저장 null의 migration 기본값과 달리 현대 PUT의 명시적 null은 거부한다. user는 application 레코드 없이 검증된 Goauthy 사용자·조직 membership·RBAC로 판단하며 OAuth client나 앱을 자동 생성하지 않는다. user catalog만 mode·revision을 추가하고 user decide는 `wireVersion: 2`와 `pepPolicyRevision`을 요구한다. legacy application 응답은 새 필드를 모두 생략한다. 실제 Goauthy audience와 legacy app-ID audience의 구분, 일치하는 Exposure v2 후보 조건은 [principal 명세](principal-user-authz-spec.md)와 [HTTP capability 계약](http-capabilities.md#candidate-principal-authorization-mode)을 따른다. 발행 v0.7.0은 새 모드를 지원하지 않으며 후보의 CI·런타임 PASS를 뜻하지 않는다.
+
+기존 user/application management checks는 `GRANT_MANAGEMENT_APPLICATION_ID`를 사용한다. `GRANT_HTTP_CAPABILITY_PEP_APPLICATION_ID`는 이 application ID의 deprecated alias일 뿐 PEP identity fallback이 아니며, 새 설정과 값이 다르면 시작을 거부한다. 일반 사용자 앱은 기존 읽기 전용 verifier, trust, consent 절차를 그대로 따른다.
 
 이 문서는 코드 계약이다. IED 반영 여부는 별도의 배포·실기능 검증 기록으로 확인해야 한다.
 
