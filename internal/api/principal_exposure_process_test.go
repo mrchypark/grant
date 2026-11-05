@@ -69,6 +69,10 @@ func TestPrincipalExposureProcess(t *testing.T) {
 	if actual := fmt.Sprintf("%x", hash.Sum(nil)); actual != expectedSHA256 {
 		t.Fatalf("Exposure artifact SHA-256=%s want=%s", actual, expectedSHA256)
 	}
+	// Exercise credential isolation on every real-artifact process launch.
+	for _, key := range []string{"GRANT_MASTER_KEY", "GH_TOKEN", "GITHUB_TOKEN"} {
+		t.Setenv(key, "fixture-ambient-credential")
+	}
 	t.Run("user", func(t *testing.T) {
 		f := newPrincipalExposureSystem(t, ctx)
 		digest := f.publish(t, "user")
@@ -460,16 +464,14 @@ func (f *principalExposureSystem) startExposure(t *testing.T, binary, grantURL, 
 	} else if err := os.MkdirAll(evidence, 0700); err != nil {
 		t.Fatal(err)
 	}
-	log, err := os.CreateTemp(evidence, "grant-principal-exposure-*.log")
-	if err != nil {
-		t.Fatal(err)
-	}
 	command := exec.CommandContext(f.ctx, binary)
 	command.WaitDelay = 2 * time.Second
-	// Isolate from existing Exposure settings; never pass sibling source paths.
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "EXPOSURE_") {
-			command.Env = append(command.Env, entry)
+	command.Dir = t.TempDir()
+	// Inherit only executable lookup and temporary-directory settings.
+	command.Env = []string{}
+	for _, key := range []string{"PATH", "TMPDIR", "TMP", "TEMP"} {
+		if value, ok := os.LookupEnv(key); ok {
+			command.Env = append(command.Env, key+"="+value)
 		}
 	}
 	settings := map[string]string{
@@ -484,6 +486,17 @@ func (f *principalExposureSystem) startExposure(t *testing.T, binary, grantURL, 
 	}
 	for key, value := range settings {
 		command.Env = append(command.Env, "EXPOSURE_"+key+"="+value)
+	}
+	for _, entry := range command.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GRANT_MASTER_KEY", "GH_TOKEN", "GITHUB_TOKEN":
+			t.Fatalf("Exposure child inherited forbidden credential variable %s", key)
+		}
+	}
+	log, err := os.CreateTemp(evidence, "grant-principal-exposure-*.log")
+	if err != nil {
+		t.Fatal(err)
 	}
 	command.Stdout, command.Stderr = log, log
 	if err := command.Start(); err != nil {
