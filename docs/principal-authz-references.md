@@ -19,6 +19,24 @@
 - **Grant application admission**은 Grant가 관리하는 특정 application 범위에서 호출 클라이언트가 사용자 대신 요청한 위임 행위를 수행할 자격과 필요한 사용자 동의를 갖추었는지에 대한 추가 인가 판단이다. 토큰 수신 대상(resource server/API)의 audience 검증과 별개이며, 올바른 audience나 토큰 활성 여부, 사용자 식별 성공만으로 충족되지 않는다. 이 판단만으로 개별 리소스 권한까지 보장하지 않는다.
 - **단순한 접점**은 기존 PEP와 기존 HTTP API다. 서버가 명시적으로 선택한 모드에 따라 사용자 principal이 필요한지, Grant application admission을 어떻게 평가하는지 정한다. 토큰 모양이나 claim 누락을 보고 더 약한 모드로 자동 전환하지 않는다. 구체적인 모드 이름과 HTTP 필드는 이 참조 조사에서 정의하지 않는다.
 
+## Goauthy v0.3.9 사용자 발급 계약: OWNER-VERIFIED
+
+2026-11-05에 전달된 Goauthy 소유자 세션 `01a0e3c9`의 확인을 기록한다. 근거는 공식 저장소의 발행 태그 [Goauthy v0.3.9](https://github.com/mrchypark/goauthy/tree/v0.3.9)에 대한 소유자의 소스 확인과 기존 historical CI 결과다. 이 문서 담당자는 Goauthy 파일을 직접 조사하거나 시험을 재실행하지 않았다. 아래 파일·행과 시험 결과는 모두 **OWNER-VERIFIED**로 인용하며, 새로운 cloud 실행 결과가 아니다.
+
+| OWNER-VERIFIED 근거 | 소유자가 확인한 동작 | 사용자 증명의 의미 |
+|---|---|---|
+| v0.3.9 `server.go:644–646` | `client_credentials`에서 `openid`를 요청하면 400으로 거부한다. | machine 토큰에 사용자용 `openid`를 부여하지 않는다. |
+| v0.3.9 `userinfo.go:33–95` | UserInfo는 유효한 access token, `openid`, 저장된 session의 비어 있지 않은 `Subject`, 활성 user를 요구한다. | JWT claim만이 아니라 저장된 사용자 session과 활성 사용자 계정을 확인한다. |
+| v0.3.9 `machine.go:19–67` | machine JWT의 `sub=clientID`는 저장된 session의 `Subject`를 채우지 않는다. `clientID=userID` 문자열 충돌도 이 조건을 충족시키지 않는다. | machine subject를 사용자 계정 증명으로 오인하지 않는다. |
+
+기존 시험에 대한 소유자 확인도 같은 태그의 근거에 포함된다.
+
+- `UserInfoValidGETAndPOST`: 사용자 토큰의 GET·POST가 200이다.
+- `UserInfoRejectsInvalidTokenAndTransport`: machine·expired·revoked·non-openid 토큰을 401로 거부한다.
+- `OIDCDoesNotIssueWithoutOpenIDOrForClientCredentials`: `openid` 누락 또는 `client_credentials`의 OIDC 발급을 400으로 거부한다.
+
+여기서 ‘human proof’는 **사용자 계정인 resource owner의 토큰임을 확인하는 증거**다. 사람이 현재 키보드 앞에 있다는 증명이나 실시간 사용자 참여·현존 증명을 뜻하지 않는다. v0.3.9의 사용자 발급 계약 선행 조건은 소유자 확인으로 충족되었다. 실제 신뢰 issuer 배포가 어느 버전인지와 해당 배포의 cloud PASS는 여전히 미검증이다. 이 근거로 새 trust 플래그·client·application을 추가하지 않는다.
+
 ## 출처와 확인의 한계
 
-이 문서는 위 6개 1차 출처의 지정 절을 요약하고, 그 규범과 프로젝트의 설계 선택을 구분한다. RFC 7662의 선택 메타데이터가 실제 Goauthy 응답에 존재하는지, Goauthy가 사용자를 어떤 의미로 식별하는지, 기존 PEP/API가 어떤 필드를 지원하는지는 확인하지 않았다. 다른 저장소 파일은 조사하지 않았으며 구현, 런타임 실행, 상호운용 시험도 수행하지 않았다. Envoy의 `latest` URL은 변경될 수 있으므로 내용 확인 시점은 위 날짜로 한정한다.
+이 문서는 위 6개 1차 출처의 지정 절과 별도로 전달된 OWNER-VERIFIED v0.3.9 계약 근거를 구분한다. RFC 7662의 선택 메타데이터가 실제 배포 응답에 존재하는지와 기존 PEP/API의 지원 필드는 이번 작업에서 확인하지 않았다. 다른 저장소 파일은 조사하지 않았으며 구현, 런타임 실행, 상호운용 시험도 수행하지 않았다. Envoy의 `latest` URL은 변경될 수 있으므로 내용 확인 시점은 위 날짜로 한정한다. Grant PR #14의 핵심 구현은 CI bugfix가 남아 있으며, 이 문서 갱신은 구현·런타임 PASS 판정이 아니다.

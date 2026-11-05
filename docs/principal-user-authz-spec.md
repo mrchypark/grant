@@ -36,7 +36,7 @@
 - application 모드의 admission·동의·기존 계약은 유지해야 한다.
 - user 모드는 활성 로컬 사용자, 조직 membership, RBAC를 MUST 요구한다.
 - 자동 사용자 생성, 자동 membership·역할·grant 부여는 MUST 금지한다.
-- 첫 범위는 Goauthy의 검증된 사람 사용자 경로뿐이다.
+- 첫 범위는 Goauthy의 검증된 사용자 계정 resource owner 토큰 경로뿐이다. ‘human proof’는 이 계정 의미이며 사람이 현재 키보드 앞에 있다는 증명은 아니다.
 - 첫 Exposure 연동은 기존 compact JWT 형태의 Goauthy 사용자 토큰을 사용한다. Exposure의 opaque 토큰 지원 확장은 범위 밖이다.
 - 서비스 principal, 다른 IdP, JWT 자체 검증, 새 UI·decision 경로는 비목표다.
 - 이전의 ‘새 엔드포인트 없음’은 수정한다. 기존 관리 경로에 GET 메서드 하나만 추가한다.
@@ -158,13 +158,15 @@ CAS·revision·PEP 변경은 한 트랜잭션이어야 하며 실패 시 부분 
 - audience가 없거나 둘 이상이면 MUST 거부한다. 다중 audience 지원은 추가하지 않는다.
 - application 모드의 기존 appId 기반 audience 의미는 그대로 유지한다.
 - 현재 필수인 application ID 설정 문자열은 legacy projection을 위해 남을 수 있다. user 모드에서 이 문자열을 근거로 application 레코드·client binding·trust를 생성하거나 조회하지 않는다. IdP client 자동 등록도 하지 않는다.
-- introspection의 sub 존재만으로 사람이라고 판단하는 것은 MUST 금지한다.
-- introspection·UserInfo 성공과 동일 sub는 필수지만, 그것만으로 사람임을 보장하지 않는다.
+- introspection의 sub 존재만으로 사용자 계정 resource owner라고 판단하는 것은 MUST 금지한다.
+- introspection·UserInfo 성공과 동일 sub는 필수이며, 그 사용자 계정 의미는 아래 issuer 계약 근거에 의존한다. 실시간 사람의 현존은 보장하지 않는다.
 - issuer 운영자가 제공한 계약이 지원 사용자 flow의 resource owner만 이 경로를 통과함을 보장해야 한다.
 - user 활성화 전에 운영자 제공 사용자 positive·client-credentials negative 벡터를 MUST 검증한다.
 - 계약 또는 벡터가 없으면 해당 배포는 user 모드 미지원이며 MUST fail closed한다.
 - 이는 배포 수용 조건이며 새 승인 API·플래그·principal binding client ID를 추가하지 않는다.
 - service token이 UserInfo 사용자 증명을 충족한다고 추정하지 않는다. 서비스 principal은 후속 설계다.
+- **OWNER-VERIFIED v0.3.9 계약 선행 조건 확인:** Goauthy 소유자 세션 `01a0e3c9`는 [공식 발행 태그 v0.3.9](https://github.com/mrchypark/goauthy/tree/v0.3.9)의 소스와 기존 historical CI를 확인했다. `server.go:644–646`은 `client_credentials`의 `openid` 요청을 400으로 거부한다. `userinfo.go:33–95`는 유효한 access token·`openid`·저장된 session의 비어 있지 않은 `Subject`·활성 user를 요구한다. `machine.go:19–67`의 JWT `sub=clientID`는 저장된 `Subject`를 채우지 않으므로 `clientID=userID` 충돌도 사용자 증명을 만들지 않는다.
+- 기존 사용자 GET·POST 200, machine·expired·revoked·non-openid 401, OIDC의 `openid` 누락·`client_credentials` 400 벡터는 소유자 확인 근거다. 정확한 시험명과 출처 한계는 [OWNER-VERIFIED 참조](principal-authz-references.md#goauthy-v039-사용자-발급-계약-owner-verified)에 기록한다. 이번 작업에서 Goauthy 소스나 시험을 직접 확인하지 않았고 새 cloud 실행도 없다. 실제 issuer 배포 버전과 해당 배포의 cloud PASS는 여전히 미검증이므로 배포 수용 조건은 유지한다.
 - 활성 로컬 사용자와 조직 membership을 확인하고 기존 RBAC로 action·resource를 MUST 판단한다.
 - user 모드만 application 조회·admission·동의를 생략한다. 토큰 client 검증은 생략하지 않는다.
 - 조직 누락·불일치·비활성 상태를 자동 보정하거나 다른 조직으로 대체해서는 안 된다.
@@ -275,8 +277,8 @@ store 담당자는 typed mode·revision·append-only migration의 store 파일�
 
 사용자는 단계별 구현을 승인했다. Exposure 합의는 기존 compact JWT 입력, 검증되지 않은 힌트와 Grant introspection 권위, legacy 필드 생략, user v2·revision 결속, 기존 digest 공식 및 기존 전역 PEP 키 유지다.
 새 mode/version 설계나 추가 플랫폼 필드는 만들지 않는다. 상위 세션의 구현 후 문서 검토와 양쪽 계약 시험은 남아 있다.
-Goauthy 사용자 발급 정책의 실제 증거, 양쪽 릴리스 벡터 적격성, 구현·런타임 PASS는 이 문서에서 확인하지 않았다.
-참조는 이미 확인된 [공식 출처 6개와 적용 한계](principal-authz-references.md)를 재사용한다.
+Goauthy v0.3.9 사용자 발급 계약 선행 조건은 OWNER-VERIFIED 근거로 확인되었다. 실제 issuer 배포 버전·cloud PASS와 Grant·Exposure 양쪽 릴리스 벡터 적격성은 여전히 미검증이다. Grant PR #14의 핵심 구현은 CI bugfix가 남아 있으며 구현·런타임 PASS를 주장하지 않는다. 전달된 Exposure 후보 `b535…`의 상태를 이 증거로 승격하지 않으며 현재 최소 프로토콜을 유지한다.
+참조는 [공식 출처 6개, OWNER-VERIFIED 발행 태그와 적용 한계](principal-authz-references.md)를 사용한다.
 RFC 7662·8707·9068·8725의 구분 원칙을 참고하며 opaque 토큰에 JWT 프로파일을 강제하지 않는다.
 Envoy 문서는 PEP/PDP 역할 분리의 참고이며 ext_authz wire 호환을 주장하지 않는다.
 EGM `design_doc.md`의 문제·목표·여정·구조·대안·파일·검증 구성을 따랐다.

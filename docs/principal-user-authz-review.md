@@ -27,7 +27,7 @@
 
 F2에는 별도로 전달된 복수 audience 지원 금지와 digest 공식을 통합했다.
 모드 null은 legacy 저장값만 application으로 backfill하고 현대 PUT에서는 거부한다.
-사람 증명은 새 승인 서비스·플래그가 아니며 issuer 소유자가 확인해야 할 배포 조건이다.
+사용자 증명은 사용자 계정 resource owner의 토큰이라는 의미이며 사람이 현재 키보드 앞에 있다는 증명이 아니다. 새 승인 서비스·플래그가 아니며 issuer 소유자가 확인해야 할 배포 조건이다.
 
 ## 소스로 확인한 근거
 
@@ -47,7 +47,7 @@ F2에는 별도로 전달된 복수 audience 지원 금지와 digest 공식을 �
 voter의 직접 fence와 기존 함수 재사용을 명시했으며 Local loopback 네트워크는 요구하지 않는다.
 이 항목은 Exposure 합의 반영 전의 문서 재점검 기록이다. 현재 승인·합의 상태는 아래 최신 메모를 따른다.
 당시 두 fresh persona의 최종 독립 재리뷰는 아직 확인되지 않았으며, 후속 전달 기록은 다음 절에 구분한다.
-issuer 계약·운영자 벡터·양쪽 릴리스 capability 2 적격성도 아직 확인되지 않았다.
+당시 issuer 계약·운영자 벡터·양쪽 릴리스 capability 2 적격성도 확인되지 않았다. Goauthy 발행 태그의 계약 근거에 대한 후속 확인은 아래 OWNER-VERIFIED 메모를 따른다.
 구현·빌드·런타임·상호운용 시험은 실행하지 않았으며 테스트 통과를 주장하지 않는다.
 
 ## 최종 독립 재검토
@@ -57,7 +57,7 @@ issuer 계약·운영자 벡터·양쪽 릴리스 capability 2 적격성도 아�
 - 이해도 리뷰: CLEAR. CAS 조회, 정확한 principal digest, snapshot 절차, 후속 revision 변경 처리의 기존 Major 4건 해소.
 - 설계·구현 준비 리뷰: CLEAR. 관리 GET, 사용자 발급 정책의 증거 조건, voter snapshot 경계, append-only migration의 기존 Major 4건 해소.
 - 서로 겹친 지적은 본 보고서의 통합 항목에 매핑한다. 전체 구현·프로토콜 호환·운영 시험 통과를 뜻하지 않는다.
-- 당시 남아 있던 작성자 승인 상태는 아래 최신 메모로 갱신한다. Goauthy 사용자 발급 계약 증거와 Grant·Exposure 양쪽 구현/계약 벡터 실행은 별도로 필요하다.
+- 당시 남아 있던 작성자 승인 상태는 아래 최신 메모로 갱신한다. Goauthy 사용자 발급 계약 증거는 아래 OWNER-VERIFIED 메모로 보완하며, Grant·Exposure 양쪽 구현/계약 벡터 실행은 별도로 필요하다.
 - 독립 리뷰는 fork_context:false로 시작했다. 호스트 AGENTS.md의 배제까지 입증한 것은 아니다.
 
 ## 최신 Exposure 합의 반영 메모
@@ -73,3 +73,16 @@ issuer 계약·운영자 벡터·양쪽 릴리스 capability 2 적격성도 아�
 - store 담당자의 typed mode·revision·append-only migration 작업은 수정하지 않았다. record scope도 앱 admission만 분리하고 사용자·조직·각 record RBAC를 유지하는 서비스 범위로 명세에 추가했다.
 
 legacy strict-parser 호환, application v2 revision 검증, token hint 불일치 거부, initial/follow-up 결속은 앞으로 입증할 수용 조건이다. 구현 완료·시험 통과·배포 적격성은 아직 판정하지 않는다.
+
+## Goauthy 소유자 확인 반영: OWNER-VERIFIED
+
+2026-11-05에 전달된 소유자 세션 `01a0e3c9`의 확인으로 F6의 발급 계약 근거를 보완했다. 대상은 [공식 Goauthy v0.3.9 발행 태그](https://github.com/mrchypark/goauthy/tree/v0.3.9)이며 소유자가 확인한 소스와 기존 historical CI에 한정한다. 이번 담당자는 Goauthy 파일을 직접 조사하거나 새 cloud 시험을 실행하지 않았다.
+
+- `server.go:644–646`: `client_credentials`의 `openid` 요청은 400이다.
+- `userinfo.go:33–95`: UserInfo는 유효한 access token·`openid`·저장된 session의 비어 있지 않은 `Subject`·활성 user를 요구한다.
+- `machine.go:19–67`: machine JWT의 `sub=clientID`는 저장된 `Subject`를 채우지 않는다. `clientID=userID` 충돌도 사용자 session을 만들지 않는다.
+- 기존 `UserInfoValidGETAndPOST`의 사용자 200, `UserInfoRejectsInvalidTokenAndTransport`의 machine·expired·revoked·non-openid 401, `OIDCDoesNotIssueWithoutOpenIDOrForClientCredentials`의 400을 소유자가 확인했다.
+
+따라서 v0.3.9 계약 선행 조건은 확인되었다. ‘human proof’는 사용자 계정 resource owner 토큰의 증거이며 실시간 사람의 현존 증거가 아니다. 실제 issuer 배포 버전·해당 배포의 cloud PASS는 여전히 미검증이다. 새 trust 플래그·client·application은 추가하지 않는다.
+
+Grant PR #14의 핵심 구현에는 CI bugfix가 남아 있다. Exposure 후보 `b535…`와 현재 최소 프로토콜 합의는 유지하며, 이 문서 갱신으로 후보 적격성이나 Grant·Exposure 구현·런타임 PASS를 주장하지 않는다. [참조의 근거와 한계](principal-authz-references.md#goauthy-v039-사용자-발급-계약-owner-verified)를 함께 적용한다.
