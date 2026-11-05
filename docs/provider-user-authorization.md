@@ -1,12 +1,11 @@
 # Provider-bound user authorization
 
-This is an **unreleased candidate** API. Candidate CI and actual GCS-backed
-passive-learner acceptance are pending; this document makes no live PASS claim.
+This document specifies the **Grant v0.9.0** API.
 Published Grant v0.8.0 cannot perform application-free generic batch checks.
 Its existing `/api/v1/application-authz/*` APIs retain their application
 admission and consent contract unchanged.
 
-The candidate exposes exactly two private read operations on voters and passive
+The API exposes exactly two private read operations on voters and passive
 learners:
 
 | Method | Path | Result |
@@ -18,6 +17,21 @@ There is no single-check route, resource inventory, or mutation endpoint. Networ
 placement is private even though these routes share the Grant API listener.
 Deployment, one-time restore and topology instructions are separate from this
 consumer contract.
+
+## Verification scope
+
+[CI run 41985200593](https://github.com/mrchypark/grant/actions/runs/41985200593)
+completed with overall **SUCCESS** for runtime source
+`6c5aef3f756f9c1538be7af305edb7879aaa3d6c`. Its checks include Go contracts/race
+tests, isolated S3/GCS/Azure restore adapter contracts, native quorum/fresh-cluster
+restore, and native AMD64 container execution under production security limits.
+This tested runtime SHA is distinct from any subsequent documentation-only
+finalization SHA; record both in the release provenance and pin the published image.
+
+These CI results use isolated fixtures/emulators, not live cloud acceptance.
+Actual owner qualification still includes KSA Workload Identity/ADC-backed GCS
+import, cross-Pod passive-learner operation, HTTPS fence trust, QUIC synchronization
+and the consumer's real-user schema/row checks. No live deployment PASS is claimed.
 
 ## Caller and authority
 

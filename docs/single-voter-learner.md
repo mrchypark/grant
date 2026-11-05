@@ -1,10 +1,18 @@
 # One voter and a passive learner
 
-This runbook describes an **unreleased candidate**, pinned to Rhiza v0.21.2.
-Candidate CI and actual GCS-backed learner acceptance are pending. It is not a
-claim of published v0.8.0 support or live deployment success. The parent release
-record must identify the final image digest and verification evidence before use.
-The [candidate admission checks](../internal/grant/store_single_voter_restore.go)
+This runbook specifies **Grant v0.9.0**, pinned to Rhiza v0.21.2.
+[CI run 41985200593](https://github.com/mrchypark/grant/actions/runs/41985200593)
+completed with overall **SUCCESS** for runtime source
+`6c5aef3f756f9c1538be7af305edb7879aaa3d6c`, including Go contracts/race tests,
+isolated S3/GCS/Azure restore adapter contracts, native quorum/fresh-cluster
+restore, and native AMD64 container execution under production security limits.
+Record this tested runtime SHA separately from any later documentation-only
+finalization SHA and pin the final published image digest before use.
+
+Actual owner qualification still includes KSA Workload Identity/ADC-backed GCS
+import and cross-Pod learner operation, including HTTPS fence trust, QUIC sync
+and real-user consumer checks. Isolated CI/emulator success is not a live-cloud PASS.
+The [single-voter admission checks](../internal/grant/store_single_voter_restore.go)
 and [logical importer](../internal/grant/store_backup.go) define the behavior below.
 
 The target has one authoritative non-Local Grant voter and a read-only passive
@@ -15,7 +23,7 @@ second writer or a promotion learner.
 
 ## Artifacts and source freeze
 
-Use a producer-published image containing this candidate restore implementation,
+Use a producer-published v0.9.0 image containing this restore implementation,
 `/usr/local/bin/grant`, and `/usr/local/bin/replica-members`. Pin its image digest
 and source provenance. The v0.8.0 image has the member helper but not this new
 single-voter cloud-import admission. Do not build supplier source on the consumer
@@ -51,7 +59,7 @@ Grant's actual configuration names, not a new provisioning API.
 | `GRANT_RHIZA_CONFIG_JSON` | Non-Local config with a separate `AdminToken`; omit service-account JSON when using ADC. |
 | `RHIZA_OBJSTORE_PROVIDER` | `gcs` |
 | `RHIZA_OBJSTORE_BUCKET` | Existing operator-provisioned target bucket. |
-| `RHIZA_OBJSTORE_PREFIX` | Fresh canonical prefix, e.g. `candidate-import/target-01`. |
+| `RHIZA_OBJSTORE_PREFIX` | Fresh canonical prefix, e.g. `grant-import/target-01`. |
 | `RHIZA_OBJSTORE_DURABILITY` | `before-ack` explicitly for the offline seed only. |
 
 Keep normal Grant security/Goauthy configuration valid; see
