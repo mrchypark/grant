@@ -111,11 +111,44 @@ func largeRestoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Keep every official capability and reference in both generations. This
-	// deliberately exceeds the second catalog's reported scale rather than
-	// constructing a subset with potentially incomplete cross-references.
+	// Keep every official capability and reference. The official catalog is
+	// 58,949 bytes at this release, so add synthetic routes only to generation 2
+	// to exercise the reported >=66,099-byte cell without changing generation 1.
+	var template HttpCapability
+	for _, capability := range second.Capabilities {
+		if capability.Method == "GET" && capability.PathTemplate == "/api/v1/orgs/{organizationId}/apps" {
+			template = capability
+			break
+		}
+	}
+	if template.CapabilityID == "" {
+		t.Fatal("missing synthetic route template")
+	}
+	const maxSyntheticCapabilities = 24
+	for i := 0; i < maxSyntheticCapabilities; i++ {
+		canonical, err := generationJSON(provider, second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(canonical) >= 66099 {
+			break
+		}
+		capability := template
+		capability.CapabilityID = fmt.Sprintf("synthetic.restore.%d", i)
+		// Replace only the first literal segment, preserving variable positions.
+		capability.PathTemplate = fmt.Sprintf("/synthetic-restore-%d%s", i, strings.TrimPrefix(template.PathTemplate, "/api"))
+		capability.ContractDigest, err = HttpCapabilityContractDigest(capability)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second.Capabilities = append(second.Capabilities, capability)
+	}
+	second.CatalogDigest, err = HttpCapabilityCatalogDigest(provider, second)
+	if err != nil {
+		t.Fatal(err)
+	}
 	secondJSON := addCatalog(second)
-	if len(second.Capabilities) != 77 || len(catalogTable.Rows) != 2 ||
+	if len(second.Capabilities) < 77 || len(catalogTable.Rows) != 2 ||
 		len(secondJSON) < 50000 || max(len(first), len(secondJSON)) < 66099 ||
 		len(jsonBytes(catalogTable.Rows)) < 116201 || len(jsonBytes(actionTable.Rows)) < 31651 {
 		t.Fatalf("synthetic size/count requirements unmet: secondCapabilities=%d catalogs=%d firstBytes=%d secondBytes=%d catalogsRowsBytes=%d actionsRowsBytes=%d",
