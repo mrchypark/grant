@@ -1,6 +1,6 @@
 # Provider HTTP capabilities
 
-Current support is limited to internal service Providers deployed directly in Kubernetes (K8s). External Application integration is deferred to the [external application roadmap](external-application-roadmap.md). The candidate additions below do not constitute an external onboarding or credential-distribution procedure. Published v0.7.0 does not support the new principal authorization mode; this candidate contract is not a release or runtime PASS claim.
+Providers are authorization domains for service integrations using declared catalogs and authenticated PEPs. Kubernetes is one deployment option, not a prerequisite for this HTTP contract. External delegated-application onboarding is deferred to the [external application roadmap](external-application-roadmap.md). The candidate additions below do not constitute an external onboarding or credential-distribution procedure. Published v0.7.0 does not support the new principal authorization mode; this candidate contract is not a release or runtime PASS claim.
 
 Grant stores authorization-significant HTTP contracts; it does not proxy provider traffic and never stores an upstream origin.
 
