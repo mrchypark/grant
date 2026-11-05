@@ -90,10 +90,10 @@ func (s *Server) setPEPPolicy(r *request, v grant.UpsertProviderPepClient) (any,
 	provider, pep := r.PathValue("providerId"), r.PathValue("pepClientId")
 	if match != "" {
 		current, err := s.service.GetProviderPepClientAdmin(r.Context(), provider, pep)
-		if grant.ErrorStatus(err) == 404 {
-			return nil, failure(412, "PEP policy precondition failed")
-		}
 		if err != nil {
+			if grant.ErrorStatus(err) == 404 {
+				return nil, failure(412, "PEP policy precondition failed")
+			}
 			return nil, err
 		}
 		if match != pepPolicyETag(current) {

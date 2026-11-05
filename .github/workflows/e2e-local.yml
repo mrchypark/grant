@@ -59,14 +59,101 @@ concurrency:
   cancel-in-progress: ${{ !inputs.publish_rauthy_launcher_gar }}
 
 jobs:
+  exposure-artifact:
+    if: ${{ inputs.exposure_artifact_asset_id != '' && !inputs.publish_rauthy_launcher_gar }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Validate Exposure supplier inputs
+        id: supplier
+        shell: bash
+        env:
+          EXPOSURE_ASSET_ID: ${{ inputs.exposure_artifact_asset_id }}
+          EXPOSURE_ARTIFACT_SHA256: ${{ inputs.exposure_artifact_sha256 }}
+          EXPOSURE_BINARY_SHA256: ${{ inputs.exposure_binary_sha256 }}
+          EXPOSURE_SOURCE_SHA: ${{ inputs.exposure_source_sha }}
+        run: |
+          set -euo pipefail
+          exposure_dir="$(mktemp -d "$RUNNER_TEMP/grant-exposure-download.XXXXXX")"
+          echo "directory=$exposure_dir" >> "$GITHUB_OUTPUT"
+          mkdir "$exposure_dir/evidence"
+          case "$EXPOSURE_ASSET_ID" in
+            ''|*[!0-9]*) echo 'Invalid Exposure asset ID' >&2; exit 1 ;;
+          esac
+          test "${#EXPOSURE_ARTIFACT_SHA256}" -eq 64
+          test "${#EXPOSURE_BINARY_SHA256}" -eq 64
+          test "${#EXPOSURE_SOURCE_SHA}" -eq 40
+          case "$EXPOSURE_ARTIFACT_SHA256$EXPOSURE_BINARY_SHA256$EXPOSURE_SOURCE_SHA" in
+            *[!0-9a-f]*) echo 'Invalid Exposure hash or source SHA' >&2; exit 1 ;;
+          esac
+          printf 'asset_id=%s\nartifact_sha256=%s\nbinary_sha256=%s\nsource_sha=%s\n' \
+            "$EXPOSURE_ASSET_ID" "$EXPOSURE_ARTIFACT_SHA256" \
+            "$EXPOSURE_BINARY_SHA256" "$EXPOSURE_SOURCE_SHA" \
+            > "$exposure_dir/evidence/supplier.txt"
+
+      - name: Download and verify Grant draft release ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPOSURE_ASSET_ID: ${{ inputs.exposure_artifact_asset_id }}
+          EXPOSURE_ARTIFACT_SHA256: ${{ inputs.exposure_artifact_sha256 }}
+          EXPOSURE_DIRECTORY: ${{ steps.supplier.outputs.directory }}
+        run: |
+          set -euo pipefail
+          gh api "repos/mrchypark/grant/releases/assets/$EXPOSURE_ASSET_ID" \
+            --method GET -H 'Accept: application/octet-stream' \
+            > "$EXPOSURE_DIRECTORY/exposure.zip" 2> "$EXPOSURE_DIRECTORY/evidence/download.log"
+          printf '%s  %s\n' "$EXPOSURE_ARTIFACT_SHA256" "$EXPOSURE_DIRECTORY/exposure.zip" \
+            | sha256sum --check | tee "$EXPOSURE_DIRECTORY/evidence/archive-check.log"
+
+      - name: Hand off verified Exposure ZIP and receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: exposure-verified-supplier
+          path: |
+            ${{ steps.supplier.outputs.directory }}/exposure.zip
+            ${{ steps.supplier.outputs.directory }}/evidence/supplier.txt
+          if-no-files-found: error
+
+      - name: Preserve Exposure download evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: exposure-artifact-download-evidence
+          path: ${{ runner.temp }}/grant-exposure-download.*/evidence/
+          if-no-files-found: ignore
+
+      - name: Remove owned Exposure download ZIP
+        if: ${{ always() && steps.supplier.outputs.directory != '' }}
+        shell: bash
+        env:
+          EXPOSURE_DIRECTORY: ${{ steps.supplier.outputs.directory }}
+        run: |
+          set -euo pipefail
+          case "$EXPOSURE_DIRECTORY" in
+            "$RUNNER_TEMP"/grant-exposure-download.*) ;;
+            *) echo 'Refusing cleanup outside owned Exposure directory' >&2; exit 1 ;;
+          esac
+          test "$(dirname -- "$EXPOSURE_DIRECTORY")" = "$RUNNER_TEMP"
+          rm -f -- "$EXPOSURE_DIRECTORY/exposure.zip"
+          test ! -e "$EXPOSURE_DIRECTORY/exposure.zip"
+          test ! -L "$EXPOSURE_DIRECTORY/exposure.zip"
+
   go-verification:
-    if: ${{ !inputs.publish_rauthy_launcher_gar }}
+    needs: exposure-artifact
+    if: >-
+      ${{ !cancelled() && !inputs.publish_rauthy_launcher_gar &&
+        (needs.exposure-artifact.result == 'success' || needs.exposure-artifact.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Reclaim runner disk
         run: |
@@ -103,40 +190,43 @@ jobs:
       - name: Build Go executables
         run: CGO_ENABLED=0 go build ./cmd/...
 
-      - name: Download and verify optional Exposure artifact
+      - name: Prepare optional Exposure artifact directory
         if: ${{ inputs.exposure_artifact_asset_id != '' }}
         id: exposure-artifact
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPOSURE_ASSET_ID: ${{ inputs.exposure_artifact_asset_id }}
-          EXPOSURE_ARTIFACT_SHA256: ${{ inputs.exposure_artifact_sha256 }}
-          EXPOSURE_BINARY_SHA256: ${{ inputs.exposure_binary_sha256 }}
-          EXPOSURE_SOURCE_SHA: ${{ inputs.exposure_source_sha }}
         run: |
           set -euo pipefail
           exposure_dir="$(mktemp -d "$RUNNER_TEMP/grant-exposure-interop.XXXXXX")"
           echo "directory=$exposure_dir" >> "$GITHUB_OUTPUT"
-          mkdir "$exposure_dir/evidence" "$exposure_dir/evidence/process-logs"
+          mkdir "$exposure_dir/received" "$exposure_dir/evidence" "$exposure_dir/evidence/process-logs"
+
+      - name: Download verified Exposure artifact from this run
+        if: ${{ inputs.exposure_artifact_asset_id != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: exposure-verified-supplier
+          path: ${{ steps.exposure-artifact.outputs.directory }}/received
+
+      - name: Reverify optional Exposure artifact and executable
+        if: ${{ inputs.exposure_artifact_asset_id != '' }}
+        shell: bash
+        env:
+          EXPOSURE_ASSET_ID: ${{ inputs.exposure_artifact_asset_id }}
+          EXPOSURE_ARTIFACT_SHA256: ${{ inputs.exposure_artifact_sha256 }}
+          EXPOSURE_BINARY_SHA256: ${{ inputs.exposure_binary_sha256 }}
+          EXPOSURE_SOURCE_SHA: ${{ inputs.exposure_source_sha }}
+          EXPOSURE_DIRECTORY: ${{ steps.exposure-artifact.outputs.directory }}
+        run: |
+          set -euo pipefail
+          exposure_dir="$EXPOSURE_DIRECTORY"
+          cp "$exposure_dir/received/evidence/supplier.txt" "$exposure_dir/evidence/supplier.txt"
           printf 'asset_id=%s\nartifact_sha256=%s\nbinary_sha256=%s\nsource_sha=%s\n' \
             "$EXPOSURE_ASSET_ID" "$EXPOSURE_ARTIFACT_SHA256" \
             "$EXPOSURE_BINARY_SHA256" "$EXPOSURE_SOURCE_SHA" \
-            > "$exposure_dir/evidence/supplier.txt"
-          case "$EXPOSURE_ASSET_ID" in
-            ''|*[!0-9]*) echo 'Invalid Exposure asset ID' >&2; exit 1 ;;
-          esac
-          test "${#EXPOSURE_ARTIFACT_SHA256}" -eq 64
-          test "${#EXPOSURE_BINARY_SHA256}" -eq 64
-          test "${#EXPOSURE_SOURCE_SHA}" -eq 40
-          case "$EXPOSURE_ARTIFACT_SHA256$EXPOSURE_BINARY_SHA256$EXPOSURE_SOURCE_SHA" in
-            *[!0-9a-f]*) echo 'Invalid Exposure hash or source SHA' >&2; exit 1 ;;
-          esac
-          gh api "repos/mrchypark/grant/releases/assets/$EXPOSURE_ASSET_ID" \
-            -H 'Accept: application/octet-stream' \
-            > "$exposure_dir/exposure.zip" 2> "$exposure_dir/evidence/download.log"
-          printf '%s  %s\n' "$EXPOSURE_ARTIFACT_SHA256" "$exposure_dir/exposure.zip" \
+            | cmp - "$exposure_dir/evidence/supplier.txt"
+          printf '%s  %s\n' "$EXPOSURE_ARTIFACT_SHA256" "$exposure_dir/received/exposure.zip" \
             | sha256sum --check | tee "$exposure_dir/evidence/archive-check.log"
-          unzip -p "$exposure_dir/exposure.zip" exposure \
+          unzip -p "$exposure_dir/received/exposure.zip" exposure \
             > "$exposure_dir/exposure" 2> "$exposure_dir/evidence/extract.log"
           printf '%s  %s\n' "$EXPOSURE_BINARY_SHA256" "$exposure_dir/exposure" \
             | sha256sum --check | tee "$exposure_dir/evidence/binary-check.log"
@@ -155,6 +245,7 @@ jobs:
           set -euo pipefail
           go test -run '^TestPrincipalExposureProcess$' -count=1 -v -timeout 2m ./internal/api \
             2>&1 | tee "$GRANT_EXPOSURE_EVIDENCE/interop.log"
+          grep -Eq '^--- PASS: TestPrincipalExposureProcess \(' "$GRANT_EXPOSURE_EVIDENCE/interop.log"
 
       - name: Preserve optional Exposure interop evidence
         if: ${{ always() && inputs.exposure_artifact_asset_id != '' }}
@@ -176,8 +267,8 @@ jobs:
             *) echo 'Refusing cleanup outside owned Exposure directory' >&2; exit 1 ;;
           esac
           test "$(dirname -- "$EXPOSURE_DIRECTORY")" = "$RUNNER_TEMP"
-          rm -f -- "$EXPOSURE_DIRECTORY/exposure.zip" "$EXPOSURE_DIRECTORY/exposure"
-          for artifact in "$EXPOSURE_DIRECTORY/exposure.zip" "$EXPOSURE_DIRECTORY/exposure"; do
+          rm -f -- "$EXPOSURE_DIRECTORY/received/exposure.zip" "$EXPOSURE_DIRECTORY/exposure"
+          for artifact in "$EXPOSURE_DIRECTORY/received/exposure.zip" "$EXPOSURE_DIRECTORY/exposure"; do
             test ! -e "$artifact" && test ! -L "$artifact"
           done
 
@@ -244,7 +335,7 @@ jobs:
           if-no-files-found: ignore
 
   local-bootstrap:
-    if: ${{ !inputs.publish_rauthy_launcher_gar }}
+    if: ${{ !cancelled() && !inputs.publish_rauthy_launcher_gar && needs.go-verification.result == 'success' }}
     runs-on: ubuntu-latest
     needs: go-verification
     timeout-minutes: 60

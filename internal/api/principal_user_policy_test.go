@@ -91,6 +91,39 @@ func TestPEPPolicyHTTPConditionalWrites(t *testing.T) {
 	}
 }
 
+func TestPEPPolicyHTTPExistingPolicyPreconditions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		match  func(string) string
+		status int
+	}{
+		{"matching", func(tag string) string { return tag }, 200},
+		{"stale", func(string) string { return `"stale"` }, 412},
+		{"weak", func(tag string) string { return "W/" + tag }, 412},
+		{"wildcard", func(string) string { return "*" }, 412},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := managementTestServer(t)
+			path := "/ops/providers/grant-management/enforcers/policy-pep"
+			created := pepPolicyCall(t, s, "PUT", path, `{"lifecycle":"active"}`, "", "*", 200)
+			tag := created.Header().Get("ETag")
+			pepPolicyCall(t, s, "PUT", path, `{"lifecycle":"disabled"}`, tc.match(tag), "", tc.status)
+			read := pepPolicyCall(t, s, "GET", path, "", "", "", 200)
+			var policy grant.ProviderPepClient
+			if err := json.Unmarshal(read.Body.Bytes(), &policy); err != nil {
+				t.Fatal(err)
+			}
+			if tc.status == 200 {
+				if policy.Lifecycle != "disabled" || policy.PolicyRevision != 2 || read.Header().Get("ETag") == tag {
+					t.Fatalf("matching write did not update policy: %+v", policy)
+				}
+			} else if policy.Lifecycle != "active" || policy.PolicyRevision != 1 || read.Header().Get("ETag") != tag {
+				t.Fatalf("failed precondition changed policy: %+v", policy)
+			}
+		})
+	}
+}
+
 func TestPEPPolicyHTTPManagementBoundary(t *testing.T) {
 	s := managementTestServer(t)
 	path := "/ops/providers/grant-management/enforcers/policy-pep"
