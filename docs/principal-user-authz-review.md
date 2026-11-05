@@ -1,8 +1,14 @@
 # 사용자 독립 인가 설계 리뷰 보고서
 
-- 상태: **단계별 구현 사용자 승인 · Exposure 합의 문서 반영 · 구현 검증 대기**
+- 상태: **Grant v0.8.0 · Exposure v0.3.0 발행 · 단계 1 fixture 및 최종 CI 통과**
 - 대상: [principal-user-authz-spec.md](principal-user-authz-spec.md)
-- 범위: 문서 계약과 로컬 소스의 정합성이다. 구현·빌드·런타임은 평가하지 않았다.
+- 초기 리뷰 범위: 문서 계약과 로컬 소스의 정합성이었다. 당시 구현·빌드·런타임은 평가하지 않았다. 후속 CI·발행 결과는 아래에 별도로 기록한다.
+
+## 발행 후 상태 갱신 — 2026-11-05
+
+[Grant v0.8.0](https://github.com/mrchypark/grant/releases/tag/v0.8.0)과 Exposure v0.3.0이 발행되었다. Grant PR #14 merge는 `1e0eea5eb435b0798441dce9a9b1b0a668f4ea3b`이며 시험한 `8b3cc0fc959f4d6ed6c4e6e2b396107218751c09`와 파일 차이가 없다. [최종 PR CI](https://github.com/mrchypark/grant/actions/runs/41950428624), [단계 1 Exposure interop을 포함한 전체 수동 CI](https://github.com/mrchypark/grant/actions/runs/41950457179), [Grant 이미지 발행](https://github.com/mrchypark/grant/actions/runs/41958102856)이 통과했다. native upstream/PDP를 같은 Grant 서버로 구성한 apps=0 성공, wrong-org binding·역할 회수 거부 및 upstream 호출 수 불변을 fixture에서 확인했다. generic business-mock 근거와 구분하며, 통제된 issuer fixture의 성공을 live IED·실제 Goauthy 배포·remote learner PASS로 확대하지 않는다.
+
+아래는 설계·검토·수정 진행 순서에 따른 역사적 기록이다. ‘대기’, ‘앞으로 입증’, ‘검토 중’은 각 기록 당시 상태이며 위 발행 후 상태로 갱신되었다. 당시 reviewer CLEAR를 소급하여 구현 PASS로 바꾸지 않는다. 이번 문서 갱신에서도 시험을 재실행하지 않았다.
 
 ## 초기 리뷰의 출처와 한계
 
@@ -60,7 +66,7 @@ voter의 직접 fence와 기존 함수 재사용을 명시했으며 Local loopba
 - 당시 남아 있던 작성자 승인 상태는 아래 최신 메모로 갱신한다. Goauthy 사용자 발급 계약 증거는 아래 OWNER-VERIFIED 메모로 보완하며, Grant·Exposure 양쪽 구현/계약 벡터 실행은 별도로 필요하다.
 - 독립 리뷰는 fork_context:false로 시작했다. 호스트 AGENTS.md의 배제까지 입증한 것은 아니다.
 
-## 최신 Exposure 합의 반영 메모
+## 당시 Exposure 합의 반영 메모
 
 사용자는 단계별 구현을 승인했다. 이번 작업은 명세와 이 보고서만 수정했으며 코드·빌드·런타임·상호운용 시험을 수행하지 않았다. 상위 세션이 구현 후 문서를 검토한다. 앞선 CLEAR는 당시 설계에 대한 전달 기록이며 이번 변경이나 구현의 PASS로 확대하지 않는다.
 
@@ -72,7 +78,7 @@ voter의 직접 fence와 기존 함수 재사용을 명시했으며 Local loopba
 - 현재 GRANT_GOAUTHY_APPLICATION_ID 필수 문자열은 application 레코드 생성이나 IdP client 등록을 뜻하지 않는다. user 모드는 앱 레코드·앱 binding·trust를 추가하지 않는다.
 - store 담당자의 typed mode·revision·append-only migration 작업은 수정하지 않았다. record scope도 앱 admission만 분리하고 사용자·조직·각 record RBAC를 유지하는 서비스 범위로 명세에 추가했다.
 
-legacy strict-parser 호환, application v2 revision 검증, token hint 불일치 거부, initial/follow-up 결속은 앞으로 입증할 수용 조건이다. 구현 완료·시험 통과·배포 적격성은 아직 판정하지 않는다.
+당시 legacy strict-parser 호환, application v2 revision 검증, token hint 불일치 거부, initial/follow-up 결속은 앞으로 입증할 수용 조건이었다. 이 메모 시점에서는 구현 완료·시험 통과·배포 적격성을 판정하지 않았다.
 
 ## Goauthy 소유자 확인 반영: OWNER-VERIFIED
 
@@ -85,6 +91,6 @@ legacy strict-parser 호환, application v2 revision 검증, token hint 불일�
 
 따라서 v0.3.9 계약 선행 조건은 확인되었다. ‘human proof’는 사용자 계정 resource owner 토큰의 증거이며 실시간 사람의 현존 증거가 아니다. 실제 issuer 배포 버전·해당 배포의 cloud PASS는 여전히 미검증이다. 새 trust 플래그·client·application은 추가하지 않는다.
 
-Grant PR #14의 핵심 구현에는 CI bugfix가 남아 있다. Exposure 후보 `b535…`와 현재 최소 프로토콜 합의는 유지하며, 이 문서 갱신으로 후보 적격성이나 Grant·Exposure 구현·런타임 PASS를 주장하지 않는다. [참조의 근거와 한계](principal-authz-references.md#goauthy-v039-사용자-발급-계약-owner-verified)를 함께 적용한다.
+당시 Grant PR #14의 핵심 구현에는 CI bugfix가 남아 있었고 Exposure 후보는 `b535…`였다. 이 시점의 메모는 구현·런타임 PASS를 주장하지 않았다. 후속 완료 상태는 위 발행 후 갱신을 따른다. [참조의 근거와 한계](principal-authz-references.md#goauthy-v039-사용자-발급-계약-owner-verified)를 함께 적용한다.
 
-추가로 전달된 Grant native gap은 `NativeAuthorizePlatformManagement`의 무조건 application 검사 때문에 실제 자체 upstream의 apps=0 요청이 실패한 문제다. generic real-PDP/business-mock 근거와 구분한다. 검토 중인 수정은 canonical `grant-management`·configured PEP ID·활성 explicit-user 서버 정책으로만 fenced Goauthy 사용자·membership·정확한 platform RBAC 경로를 선택하며 native와 user PDP 모두 ManagementOrg를 강제한다. PEP 부재·noncanonical·application은 legacy admission을 유지하고 disabled canonical user는 거부한다. 기존 canonical provider 상수를 쓰는 Grant 자체 control plane 수정이며 새 요청 헤더·플래그·승인·자동 앱 생성은 없다. Exposure의 upstream 자격은 원래 Bearer/org뿐이고 AppAuthKey는 private PDP에만 사용한다. 동일 Grant 서버의 upstream/PDP를 통한 native active-catalog GET에서 apps=0 200/body, wrong-org binding 및 역할 회수의 403·upstream 호출 수 불변을 확인하는 [추가 실제 interop 시험](http-capabilities.md#candidate-grant-native-upstream-verification)이 필요하다. 소스 의존성인 native selector와 user-PDP 조직 검사 및 시험은 검토·CI 대기 중이며 PASS로 기록하지 않는다.
+당시 추가로 전달된 Grant native gap은 `NativeAuthorizePlatformManagement`의 무조건 application 검사 때문에 실제 자체 upstream의 apps=0 요청이 실패한 문제였다. generic real-PDP/business-mock 근거와 구분했다. 당시 검토 중인 수정은 canonical `grant-management`·configured PEP ID·활성 explicit-user 서버 정책으로만 fenced Goauthy 사용자·membership·정확한 platform RBAC 경로를 선택하며 native와 user PDP 모두 ManagementOrg를 강제하는 내용이었다. PEP 부재·noncanonical·application은 legacy admission을 유지하고 disabled canonical user는 거부한다. 기존 canonical provider 상수를 쓰는 Grant 자체 control plane 수정이며 새 요청 헤더·플래그·승인·자동 앱 생성은 없다. Exposure의 upstream 자격은 원래 Bearer/org뿐이고 AppAuthKey는 private PDP에만 사용한다. 동일 Grant 서버의 upstream/PDP를 통한 native active-catalog GET에서 apps=0 200/body, wrong-org binding 및 역할 회수의 403·upstream 호출 수 불변을 확인하는 추가 interop 시험이 당시 필요했다. native selector와 user-PDP 조직 검사 및 시험은 이 메모 시점에 검토·CI 대기 중이었다. 이후 통과한 [실제 interop 결과](http-capabilities.md#released-grant-native-upstream-verification)는 위 발행 후 상태에 반영했다.

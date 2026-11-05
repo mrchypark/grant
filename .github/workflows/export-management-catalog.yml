@@ -1,0 +1,79 @@
+name: Export management catalog
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
+      generation:
+        description: Catalog generation (1–1000000); regenerate for every generation
+        required: true
+        default: '1'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: sh -eu {0}
+    steps:
+      - name: Validate inputs before checkout
+        id: input
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GENERATION: ${{ inputs.generation }}
+        run: |
+          test "${#SOURCE_SHA}" -eq 40
+          printf '%s\n' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          test "${#GENERATION}" -le 7
+          printf '%s\n' "$GENERATION" | grep -Eq '^[1-9][0-9]*$'
+          test "$GENERATION" -le 1000000
+          printf 'sha=%s\ngeneration=%s\n' "$SOURCE_SHA" "$GENERATION" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.input.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify checked-out source
+        env:
+          SOURCE_SHA: ${{ steps.input.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Generate and validate canonical artifacts
+        env:
+          SOURCE_SHA: ${{ steps.input.outputs.sha }}
+          GENERATION: ${{ steps.input.outputs.generation }}
+        run: |
+          mkdir catalog-export
+          actions="catalog-export/management-actions-g${GENERATION}.json"
+          catalog="catalog-export/management-catalog-g${GENERATION}.json"
+          previous=$((GENERATION - 1))
+          go run ./cmd/grant-management-catalog -generation "$GENERATION" -previous-generation "$previous" -actions > "$actions"
+          go run ./cmd/grant-management-catalog -generation "$GENERATION" -previous-generation "$previous" > "$catalog"
+          jq -e 'type == "array" and length > 0 and all(.[]; .providerId == "grant-management" and (.id == ("grant-management." + .code)))' "$actions"
+          jq -e --argjson generation "$GENERATION" --slurpfile actions "$actions" '
+            .schemaVersion == 1 and .generation == $generation and
+            .expectedLatestGeneration == (if $generation == 1 then null else $generation - 1 end) and
+            (.catalogDigest | test("^sha256:[0-9a-f]{64}$")) and (.capabilities | length > 0) and
+            all(.capabilities[]; .actionId as $id | any($actions[0][]; .id == $id))' "$catalog"
+          git tag --points-at HEAD | jq -Rsc --arg sha "$SOURCE_SHA" --argjson generation "$GENERATION" \
+            '{source_sha:$sha, source_tags:(split("\n") | map(select(length > 0))), generation:$generation}' > catalog-export/SOURCE.json
+          cd catalog-export
+          sha256sum management-actions-*.json management-catalog-*.json SOURCE.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          printf '%s\n' 'Catalog digests bind the generation. Never reuse g1 stage JSON as gN.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: management-catalog-${{ steps.input.outputs.sha }}-g${{ steps.input.outputs.generation }}
+          path: catalog-export/
+          if-no-files-found: error
