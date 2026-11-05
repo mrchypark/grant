@@ -39,4 +39,6 @@
 
 ## 출처와 확인의 한계
 
-이 문서는 위 6개 1차 출처의 지정 절과 별도로 전달된 OWNER-VERIFIED v0.3.9 계약 근거를 구분한다. RFC 7662의 선택 메타데이터가 실제 배포 응답에 존재하는지와 기존 PEP/API의 지원 필드는 이번 작업에서 확인하지 않았다. 다른 저장소 파일은 조사하지 않았으며 구현, 런타임 실행, 상호운용 시험도 수행하지 않았다. Envoy의 `latest` URL은 변경될 수 있으므로 내용 확인 시점은 위 날짜로 한정한다. Grant PR #14의 핵심 구현은 CI bugfix가 남아 있으며, 이 문서 갱신은 구현·런타임 PASS 판정이 아니다.
+이 문서는 위 6개 1차 출처의 지정 절과 별도로 전달된 OWNER-VERIFIED v0.3.9 계약 근거를 구분한다. RFC 7662의 선택 메타데이터가 실제 운영 배포 응답에 존재하는지는 확인하지 않았다. 원래의 출처 조사에서는 다른 저장소 파일을 조사하거나 구현·런타임·상호운용 시험을 수행하지 않았다. Envoy의 `latest` URL은 변경될 수 있으므로 내용 확인 시점은 위 날짜로 한정한다.
+
+후속 상태로 Grant PR #14가 merge되어 [v0.8.0](https://github.com/mrchypark/grant/releases/tag/v0.8.0)과 Exposure v0.3.0이 발행되었으며 [최종 PR CI](https://github.com/mrchypark/grant/actions/runs/41950428624) 및 [단계 1 process interop을 포함한 전체 수동 CI](https://github.com/mrchypark/grant/actions/runs/41950457179)가 통과했다. 이는 출처 조사 당시의 pending CI 상태를 갱신하는 근거다. fixture는 통제된 issuer 응답을 사용하며, Goauthy 소유자가 확인한 v0.3.9 계약과 별개로 실제 issuer 배포 버전·cloud 동작, live IED 및 단계 2 remote learner는 여전히 미검증이다. 이번 문서 갱신에서 시험을 재실행하지 않았다.

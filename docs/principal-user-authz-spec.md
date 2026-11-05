@@ -1,19 +1,23 @@
 # Goauthy 사용자 독립 인가 설계
 
-- 상태: **단계별 구현은 사용자 승인됨 · Exposure 연동 계약 합의 반영 · 구현·검증 완료 아님**
-- 이번 문서 작업은 코드·빌드·런타임·배포 작업을 포함하지 않는다. 상위 세션이 구현 후 문서를 검토한다.
-- 아래 MUST는 합의한 목표 계약이다. 출시 v0.7.0의 현재 동작이나 구현 PASS를 뜻하지 않는다.
+- 상태: **Grant v0.8.0 · Exposure v0.3.0 발행 완료 · 단계 1 fixture와 최종 CI 통과**
+- 이번 갱신은 확인된 발행·CI 결과를 문서에 반영한다. 코드·빌드·런타임·배포 작업은 수행하지 않는다.
+- 아래 MUST는 발행된 사용자 인가 계약이다. live IED, 실제 Goauthy 배포 버전·cloud 동작과 단계 2 remote learner는 여전히 미검증이다.
+
+## 발행과 검증 근거
+
+[Grant v0.8.0](https://github.com/mrchypark/grant/releases/tag/v0.8.0)은 PR #14의 merge `1e0eea5eb435b0798441dce9a9b1b0a668f4ea3b`다. 시험한 `8b3cc0fc959f4d6ed6c4e6e2b396107218751c09`와 파일 차이가 없으며 [최종 PR CI](https://github.com/mrchypark/grant/actions/runs/41950428624), [Exposure process interop을 포함한 전체 수동 CI](https://github.com/mrchypark/grant/actions/runs/41950457179), [이미지 발행](https://github.com/mrchypark/grant/actions/runs/41958102856)이 통과했다. 대응 릴리스는 Exposure v0.3.0이다. 단계 1은 실제 Grant PDP·native upstream과 Exposure 프로세스 및 통제된 issuer 응답을 사용한 fixture 근거이며 실제 운영 issuer나 IED 배포 시험은 아니다. 과거 v0.7.0 기준선과 설계 당시 구현 계획은 아래에 구분해 보존한다.
 
 ## 개요와 문제
 
-현재 `POST /api/v2/http-capabilities/decide`는 관리 application 문맥을 요구한다.
-사용자 토큰과 로컬 RBAC가 유효해도 application admission 없이 독립적으로 판단할 수 없다.
-첫 단계는 기존 Goauthy 사용자 검증을 재사용하여 이 의존성만 분리한다.
+v0.7.0의 `POST /api/v2/http-capabilities/decide`는 관리 application 문맥을 요구했다.
+사용자 토큰과 로컬 RBAC가 유효해도 application admission 없이 독립적으로 판단할 수 없었다.
+v0.8.0의 첫 단계는 기존 Goauthy 사용자 검증을 재사용하여 이 의존성만 분리한다.
 서버 PEP 설정에서 `application` 또는 `user`를 선택하며 요청자는 모드를 선택하지 못한다.
 
-## 현재 상태와 근거
+## 설계 당시 v0.7.0 기준선과 근거
 
-아래는 출시 v0.7.0의 `bdc186f` 기준이다. 병행 작업의 구현 상태는 별도 검증하며 이 목록으로 추정하지 않는다.
+아래 목록의 ‘현재’는 설계 당시 출시 v0.7.0의 `bdc186f`를 가리키는 역사적 기준선이다. wireVersion·인가 모드·revision·private GET·CAS가 추가된 v0.8.0 상태를 설명하지 않는다.
 
 - `internal/grant/service_models.go`의 입력·응답에는 `wireVersion`이 없다.
 - `internal/grant/store_capability_types.go`의 PEP에는 인가 모드·정책 revision이 없다.
@@ -78,9 +82,9 @@ PEP는 기존 전역 AppAuthKey 인증과 configured PEP ID/provider registry �
 관리 PUT의 master 권한과 런타임 catalog·decide 자격은 분리한다.
 통신은 TLS 또는 접근이 제한된 private transport를 MUST 사용한다.
 
-## 최소 필드와 마이그레이션 제안
+## 최소 필드와 마이그레이션
 
-| 위치 | 제안 필드 | 의미 |
+| 위치 | 계약 필드 | 의미 |
 |---|---|---|
 | PEP 저장·upsert | `authorizationMode` | `application` 또는 명시적인 `user` |
 | PEP 저장·조회 | `policyRevision` | 서버가 관리하는 양의 int64 범위 revision |
@@ -97,23 +101,21 @@ application 모드의 v2 요청은 새 decoder가 명시적으로 지원하는 �
 - 신규 생성 시 모드 생략도 application이다. 기존 user 레코드의 PUT 생략은 현재 모드를 보존한다.
 - 현대 PUT의 모드 null은 현재 모드와 관계없이 MUST 거부한다. user는 문자열로 명시한다.
 - 알 수 없는 모드·버전·잘못된 타입은 MUST 거부한다.
-- `policyRevision` 초기값은 1을 제안하며, 기존 레코드에도 같은 논리 기본값을 적용한다.
+- `policyRevision` 초기값은 1이며, 기존 레코드에도 같은 논리 기본값을 적용한다.
 - 모드 변경은 revision 증가와 함께 같은 원자적 쓰기로 MUST 커밋한다.
 - lifecycle·만료 등 집행에 영향을 주는 PEP 변경도 revision을 MUST 증가시킨다.
 - 클라이언트가 revision을 임의 지정하거나 감소시키는 것은 MUST 금지한다.
 - revision 범위는 `1..9223372036854775807`이며 상한에서 변경은 거부하고 overflow를 MUST 금지한다.
 - 기존 migration SQL·checksum은 MUST 보존하고 다음 번호 migration만 추가한다.
-- 현재 `store_schema.go`의 migration은 1..5다. 충돌이 없으면 신규 번호는 6으로 제안한다.
-- 적용 직전 다음 번호를 재확인하며 다른 작업의 migration을 덮어쓰지 않는다.
-- 모드는 NOT NULL과 `CHECK (authorization_mode IN ('application','user'))`를 제안한다.
-- revision은 NOT NULL과 `CHECK (typeof(policy_revision)='integer' AND policy_revision BETWEEN 1 AND 9223372036854775807)`를 제안한다.
+- 설계 당시 migration 1..5 다음 번호 6과 NOT NULL·SQL CHECK 제약을 제안했다. 이는 당시 물리 저장 설계 기록이며 발행된 저장 구현을 이 제안만으로 추정하지 않는다. 실제 저장 형태와 호환성은 [스키마 문서](database-schema.md)를 따른다.
+- 후속 migration은 적용 직전 다음 번호를 재확인하며 다른 작업의 migration을 덮어쓰지 않는다.
 - legacy 행은 application·revision 1로 backfill하며 기존 관계·영수증은 보존한다.
 - 변경 시 `docs/database-schema.md` 반영은 필수이며, 이 문서 작업에서는 수정하지 않는다.
 
 ## 기존 경로 재사용과 CAS
 
-기존 PUT에 동일한 관리 권한 검사를 유지하면서 CAS를 추가하는 방안을 제안한다.
-같은 `/ops/providers/{providerId}/enforcers/{pepClientId}`에 GET 하나를 추가한다.
+v0.8.0은 기존 PUT에 동일한 관리 권한 검사를 유지하면서 CAS를 추가했다.
+같은 `/ops/providers/{providerId}/enforcers/{pepClientId}`에 GET 하나를 추가했다.
 GET은 PUT과 같은 master 인증·private 노출 경계를 MUST 유지한다.
 disabled·expired 상태와 활성 catalog 부재에도 저장된 PEP 상태와 `ETag` 헤더를 반환한다.
 없는 PEP는 GET 404이며 생성 PUT은 `If-None-Match: *`를 MUST 요구한다.
@@ -127,19 +129,19 @@ catalog GET은 런타임 계약의 모드·revision만 제공하며 관리 CAS �
 관리 GET은 상태를 읽기만 한다. 새 승인 서비스·경로·사용자 플래그는 만들지 않는다.
 CAS·revision·PEP 변경은 한 트랜잭션이어야 하며 실패 시 부분 갱신은 MUST 없어야 한다.
 
-**제안 JSON 조각: 기존 PEP PUT 본문의 일부이며 전체 요청이 아니다.**
+**JSON 조각: 기존 PEP PUT 본문의 일부이며 전체 요청이 아니다.**
 
 ```json
 {"authorizationMode":"user","lifecycle":"active","validUntil":null}
 ```
 
-**제안 JSON 조각: decide 입력의 추가 부분이며 전체 요청이 아니다.**
+**JSON 조각: decide 입력의 추가 부분이며 전체 요청이 아니다.**
 
 ```json
 {"wireVersion":2,"pepPolicyRevision":7}
 ```
 
-**제안 JSON 조각: decide 응답의 추가 부분이며 전체 응답이 아니다.**
+**JSON 조각: decide 응답의 추가 부분이며 전체 응답이 아니다.**
 
 ```json
 {"wireVersion":2,"pepPolicyRevision":7}
@@ -246,7 +248,7 @@ user에서 application으로의 롤백은 관리자의 명시적 CAS 변경으�
 
 ## 승인된 단계별 구현 범위와 수용 기준
 
-다음은 로컬에서 존재를 확인한 파일이다. 이번 작업은 설계와 별도 리뷰 보고서만 수정·작성한다.
+다음은 설계 당시 정리한 파일별 구현 책임과 수용 기준이다. 파일 목록은 당시 계획이며 최종 변경 파일 전체 목록을 대신하지 않는다. 현재 단계 1 결과는 위 발행·검증 근거를 따른다.
 
 - `internal/grant/store_capability_types.go`, `store_capabilities.go`: 모드·revision·원자적 PEP 갱신.
 - `internal/grant/store_schema.go`: 다음 migration 추가·schema digest 호환 처리. 과거 SQL은 수정하지 않는다.
@@ -269,17 +271,19 @@ legacy null backfill·현대 PUT null 거부, 복수 audience 거부·정확한 
 사용자 positive·client-credentials negative와 계약 부재 시 user 활성화 금지를 검증한다.
 단계 1에서 provider 업무 코드 변경 없이 동작하고 runtime master 자격이 없음을 검증한다.
 Exposure 측 변경·시험은 해당 프로젝트 담당 세션이 수행하고 결과를 별도로 전달해야 한다.
-이 문서에서는 구현 시험·런타임·빌드를 수행하지 않았으며 통과를 주장하지 않는다.
+이번 문서 갱신에서 시험·런타임·빌드를 재실행하지 않았다. 단계 1 fixture와 최종 CI 통과는 위 실행 기록에 근거하며 live 배포 검증으로 확대하지 않는다.
 store 담당자는 typed mode·revision·append-only migration의 store 파일을 소유한다. 이번 문서 작업은 해당 파일이나 다른 담당자의 작업을 수정하지 않는다.
 수용 시험에는 legacy application catalog·decision의 새 필드 완전 생략, application v2의 stale revision 거부, compact JWT 힌트와 introspection 불일치 거부, initial/follow-up digest 일치 검사를 포함한다.
 
 ## 합의와 미검증 상태 및 참조
 
-Grant 자체 관리 upstream에는 별도 최소 수정이 필요하다. 전달된 근거에 따르면 `NativeAuthorizePlatformManagement`의 무조건 application 검사가 apps=0 요청을 막았으며 generic real-PDP/business-mock 시험은 이 경로를 입증하지 못했다. 검토 중인 소스 의존성은 기존 canonical `grant-management` provider와 configured PEP ID가 일치하는 활성 explicit-user 정책만 선택하는 native selector 및 user PDP의 동일한 ManagementOrg 검사다. 두 경로 모두 설정된 관리 조직·fenced Goauthy 사용자·활성 membership·정확한 platform RBAC를 요구하며 application만 생략한다. PEP 부재·noncanonical·application 모드는 legacy admission을 유지하고 disabled canonical user는 거부한다. 이는 Grant 자체 control plane의 정책이며 업무 앱 이름을 하드코딩하거나 새 헤더·플래그·승인·앱 자동 생성을 추가하지 않는다. Exposure는 원래 Bearer/org만 upstream에 전달하고 master/AppAuthKey는 전달하지 않는다. AppAuthKey는 private PDP에만 사용한다. 동일 Grant 서버를 upstream/PDP로 사용하는 apps=0 native GET 200/body, wrong-org binding 및 역할 회수의 403·upstream 호출 수 불변은 [추가 interop 수용 조건](http-capabilities.md#candidate-grant-native-upstream-verification)이며 소스 검토와 CI는 대기 중이다.
+Grant 자체 관리 upstream의 `NativeAuthorizePlatformManagement`가 무조건 application 검사를 하던 gap은 v0.8.0에서 수정되었다. generic real-PDP/business-mock 시험과 native upstream 근거는 구분한다. 기존 canonical `grant-management` provider와 configured PEP ID가 일치하는 활성 explicit-user 정책만 native user 경로를 선택하며 user PDP도 동일한 ManagementOrg 검사를 유지한다. 두 경로 모두 설정된 관리 조직·fenced Goauthy 사용자·활성 membership·정확한 platform RBAC를 요구하고 application만 생략한다. PEP 부재·noncanonical·application 모드는 legacy admission을 유지하고 disabled canonical user는 거부한다. 이는 Grant 자체 control plane의 정책이며 업무 앱 이름 하드코딩·provider 자동 rename·새 헤더·플래그·승인·앱 자동 생성은 없다. Exposure는 원래 Bearer/org만 upstream에 전달하며 AppAuthKey는 private PDP에만 사용한다. 동일 Grant 서버의 upstream/PDP를 통한 apps=0 native GET 200/body, wrong-org binding 및 역할 회수의 403·upstream 호출 수 불변은 [단계 1 interop fixture에서 확인되었다](http-capabilities.md#released-grant-native-upstream-verification).
+
+기존 `grant` 권한 데이터와 canonical 관리 provider의 추가 구성, PEP ID의 전역 소유권 및 단일 configured PEP ID에 따른 조정된 전환은 [발행 후 migration·공존 경계](management-api.md#released-upgrade-and-coexistence-boundaries)를 따른다. 저장 공존이 두 PEP의 동시 runtime routing을 뜻하지 않는다.
 
 사용자는 단계별 구현을 승인했다. Exposure 합의는 기존 compact JWT 입력, 검증되지 않은 힌트와 Grant introspection 권위, legacy 필드 생략, user v2·revision 결속, 기존 digest 공식 및 기존 전역 PEP 키 유지다.
-새 mode/version 설계나 추가 플랫폼 필드는 만들지 않는다. 상위 세션의 구현 후 문서 검토와 양쪽 계약 시험은 남아 있다.
-Goauthy v0.3.9 사용자 발급 계약 선행 조건은 OWNER-VERIFIED 근거로 확인되었다. 실제 issuer 배포 버전·cloud PASS와 Grant·Exposure 양쪽 릴리스 벡터 적격성은 여전히 미검증이다. Grant PR #14의 핵심 구현은 CI bugfix가 남아 있으며 구현·런타임 PASS를 주장하지 않는다. 전달된 Exposure 후보 `b535…`의 상태를 이 증거로 승격하지 않으며 현재 최소 프로토콜을 유지한다.
+새 mode/version 설계나 추가 플랫폼 필드는 만들지 않는다. Grant v0.8.0과 Exposure v0.3.0의 단계 1 fixture·최종 CI·발행이 완료되었다.
+Goauthy v0.3.9 사용자 발급 계약 선행 조건은 OWNER-VERIFIED 근거로 확인되었다. 실제 issuer 배포 버전·cloud PASS, live IED와 단계 2 remote learner는 여전히 미검증이다. 발행 및 fixture 성공을 이 운영 검증의 대체 근거로 사용하지 않는다.
 참조는 [공식 출처 6개, OWNER-VERIFIED 발행 태그와 적용 한계](principal-authz-references.md)를 사용한다.
 RFC 7662·8707·9068·8725의 구분 원칙을 참고하며 opaque 토큰에 JWT 프로파일을 강제하지 않는다.
 Envoy 문서는 PEP/PDP 역할 분리의 참고이며 ext_authz wire 호환을 주장하지 않는다.

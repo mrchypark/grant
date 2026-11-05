@@ -36,7 +36,7 @@ that do not participate in the management grant model:
 - `POST /api/v1/admin/bootstrap/owner` (unified provider-neutral bootstrap)
 - `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` (master-only operational first-party admission; never exposed through the admin UI registry)
 - `POST /ops/backups`, `GET /ops/backups` (private backup ops)
-- `GET/PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (candidate private, master-only PEP policy read/registration; excluded from the management catalog)
+- `GET/PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (private, master-only PEP policy read/registration; excluded from the management catalog)
 - `POST /ops/migrations/patch-data-authority` (private import)
 - `POST /api/v1/authz/check`, `batch-check`, `filter`
 - `POST /api/v1/application-authz/check`, `batch-check`, `filter`
@@ -61,7 +61,7 @@ platform Bearer access. Other organizations cannot grant themselves access.
 
 Grant authenticates the user and checks the exact action against resource
 `grant-management/platform/grant`. Legacy application mode additionally checks
-application admission and trust or consent; the candidate native user selector
+application admission and trust or consent; the released native user selector
 below omits only those application checks.
 Admin routes containing an organization path still require this platform
 privilege; the path identifies the organization being administered.
@@ -70,12 +70,14 @@ Internal callers can continue using `X-Grant-Master-Key`. An explicitly supplied
 invalid master key cannot fall back to Bearer authentication. Exposure strips
 this header and never receives the master key in its configuration.
 
-### Candidate native platform user authorization (under review)
+<a id="candidate-native-platform-user-authorization-under-review"></a>
 
-The reported native gap is that `NativeAuthorizePlatformManagement` always
+### Released native platform user authorization
+
+The former native gap was that `NativeAuthorizePlatformManagement` always
 performed an application check: a generic real-PDP/business-mock test could
 succeed with zero applications while Grant's own upstream handler still failed.
-The source fix under review selects user authorization only from the active,
+The Grant v0.8.0 fix selects user authorization only from the active,
 explicit `user` policy for the canonical `grant-management` PEP matching
 `GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`. It uses fenced Goauthy user, active
 membership and exact platform RBAC checks without an application record.
@@ -86,20 +88,23 @@ retains legacy native application admission; none implicitly selects user.
 A disabled canonical user PEP denies access rather than falling back.
 
 This is Grant's own control-plane policy using its existing canonical management
-provider constant, not a selector based on business application names. It adds
+provider constant, not a selector based on business application names, and does
+not automatically rename providers. It adds
 no request headers, flags, approval step or automatic application provisioning.
 For this management path, Exposure forwards the original Bearer and organization
 to Grant upstream, never a master key or AppAuthKey; AppAuthKey is used only for
-the private PDP call. The source dependencies are the native management selector
-and the user PDP's matching ManagementOrg guard; review and CI remain pending.
+the private PDP call. The native management selector and the user PDP's matching
+ManagementOrg guard passed final CI and the phase 1 process fixture with
+Exposure v0.3.0; see the [full CI run](https://github.com/mrchypark/grant/actions/runs/41950457179).
+This does not establish live IED, deployed Goauthy or remote learner verification.
 See the [principal specification](principal-user-authz-spec.md) and
-[actual upstream interop criterion](http-capabilities.md#candidate-grant-native-upstream-verification).
+[actual upstream interop evidence](http-capabilities.md#released-grant-native-upstream-verification).
 
 ### forward-user authorization
 
 All management routes use `forward-user` request authorization. Grant
 resolves the Bearer token to an authenticated principal. The authorization
-decision checks the following; the candidate native platform user path above
+decision checks the following; the released native platform user path above
 omits only application admission and trust/consent, never membership or RBAC:
 
 1. **Active membership**: the principal must have an active membership
@@ -139,21 +144,58 @@ policy. Health probes do not require a management permission.
 - Backups (`/ops/backups`): private operational endpoint.
 - Import (`/ops/migrations/patch-data-authority`): private migration endpoint.
 - Enforcer registration (`/ops/providers/{providerId}/enforcers/{pepClientId}`):
-  candidate private, master-only GET/PUT. GET returns stored policy and `ETag`
+  private, master-only GET/PUT. GET returns stored policy and `ETag`
   even for inactive/expired PEPs or absent active catalogs. PUT accepts
   `authorizationMode`, `lifecycle` and optional `validUntil`; creation requires
   `If-None-Match: *`, updates require `If-Match` (missing 428, stale 412).
 
-The candidate server policy defaults to `application`; explicit `user` needs
+The released server policy defaults to `application`; explicit `user` needs
 no application record but retains user, membership and RBAC checks. Legacy
 stored null defaults during migration; modern PUT null is rejected. No OAuth
 client/application provisioning or per-PEP key issuance is added: runtime
 authentication keeps global `GRANT_APP_AUTH_KEY` and configured PEP identity.
 User catalog mode/revision and decision `wireVersion: 2`/`pepPolicyRevision`
-require a matching Exposure v2 candidate; legacy responses omit new fields.
-Published v0.7.0 does not support this mode. See the [principal specification](principal-user-authz-spec.md)
-and [candidate capability contract](http-capabilities.md#candidate-principal-authorization-mode)
-for the full contract; this is not a deployment or runtime PASS claim.
+are supported by the released Grant v0.8.0/Exposure v0.3.0 pair; legacy responses
+omit new fields. Published v0.7.0 does not support this mode. See the
+[principal specification](principal-user-authz-spec.md) and
+[released capability contract](http-capabilities.md#released-principal-authorization-mode)
+for the contract and phase 1 evidence; live deployment qualification is separate.
+
+## Released upgrade and coexistence boundaries
+
+Restore does **not** rename providers or map action prefixes. Legacy PEPs receive
+only the compatibility defaults `authorizationMode: application` and revision 1.
+The existing `grant` provider's six bootstrap coarse actions and any existing
+custom actions are preserved; bootstrap does not create `grant-management`. Do not delete or rewrite
+those records as a prerequisite for user mode.
+
+Create the canonical `grant-management` provider, its exact actions/role grants,
+catalog and a new globally unique PEP ID additively alongside existing records.
+An old PEP ID remains globally owned and cannot be reused for another provider,
+even after disabling or deleting it. A runtime has only one configured
+`GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`: storage coexistence does not provide
+simultaneous runtime routing for both identities. Coordinate the Grant/Exposure
+configuration and catalog cutover, retaining the ManagementOrg and exact role
+checks described above. No prefix mapping or automatic application provisioning
+is part of this migration.
+
+Use the existing [private bootstrap and registration APIs](registration-api-management.md#초기-등록과-운영-전용-api)
+and the [catalog registration sequence](#staging-before-activation) with their
+documented master/private boundaries. `grant-management-catalog` exists as CLI
+source, but the released runtime image does **not** ship that executable.
+Use source-pinned [release assets](https://github.com/mrchypark/grant/releases/tag/v0.8.0)
+when published: `management-actions-g1.json`, `management-catalog-g1.json`,
+`SOURCE.json` and `SHA256SUMS`. Before use, verify the payload checksums against
+`SHA256SUMS` and the source revision in `SOURCE.json` against the intended
+release/source; otherwise hold the rollout. These names do not establish
+successful publication or distribution PASS. Availability of a checked-in
+manifest is not established here. Do not assume a command shown below is
+available inside the runtime image.
+
+Apply the [archive/schema compatibility constraints](backup-restore.md) to the
+actual source and destination. The defaults above do not promise arbitrary
+v0.4.1 archive restore compatibility or authorize an in-place archive conversion,
+namespace deletion or replacement of existing data.
 
 ## Registry structure
 
@@ -294,8 +336,10 @@ even when multiple routes use them.
    `POST /api/v1/admin/providers/grant-management/http-capability-generations`.
 4. GET `/api/v1/admin/providers/grant-management/http-capability-generations/N`
    and verify the stored generation content and digest match the expected values.
-5. Complete the role, application and consent migration below, and verify the
-   intended principals can authorize the new exact actions.
+5. Complete the exact-action role migration below and verify identity, active
+   membership and RBAC for the intended principals. In application mode also
+   complete application admission and trust/consent migration; user mode does
+   not require an application record, admission or consent.
 6. Activate with
    `POST /api/v1/admin/providers/grant-management/http-capability-active`,
    providing `targetGeneration` and `targetCatalogDigest`.
@@ -335,10 +379,13 @@ Before activating the new catalog, migrate those existing grants to exactly:
 - `grant-management.groups.create`
 - `grant-management.groups.delete`
 
-Use `PUT /orgs/{organizationId}/roles/{roleId}/actions/{actionId}` and
-`PUT /orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` (both under `/api/v1`)
-to add each action while preserving the other actions, including `manage` for rollback. Existing
-organization resource bindings can be reused. Trusted apps must temporarily
+Use `PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}`
+to add each exact role action while preserving other actions, including `manage`
+for rollback. Existing organization resource bindings can be reused. User mode
+requires verified identity, active membership and the exact RBAC grant, without
+application admission or consent. In application mode, also use
+`PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}`
+to add each application action without removing unrelated actions. Trusted apps must temporarily
 leave trusted mode to change their action set, then have trust explicitly
 restored by the operator. For non-trusted apps, each affected user must update
 their consent through `PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/consent`,
@@ -349,8 +396,10 @@ merely to bypass this step.
 Register definitions and stage the catalog while the old generation remains
 active. Check the new exact action decisions for previously allowed and denied
 principals, then activate using the expected old generation/digest. If any
-required role, app admission, or consent is missing, keep the old generation
-active. Retaining only `manage` will deny the new routes. This is an explicit
+required identity, membership or role grant is missing, keep the old generation
+active. In application mode, missing required app admission or trust/consent
+also blocks activation; those application conditions do not apply to user mode.
+Retaining only `manage` will deny the new routes. This is an explicit
 operator data migration, not a startup migration or an authorization fallback.
 Never expand a legacy group grant into all management actions; additional
 administration rights require a separate reviewed grant.
@@ -385,7 +434,9 @@ runtime:
 1. Actions must be registered via
    `PUT /api/v1/admin/providers/grant-management/actions`.
 2. A capability generation must be staged and activated.
-3. Applications must be admitted, and ordinarily either trusted or explicitly consented.
+3. Organization-scoped requests in both modes require verified identity and active membership.
+   Application mode additionally requires application admission and trust or
+   explicit consent. User mode requires no application record, admission or consent.
 4. Role bindings must grant the required action on the target resource, except for the exact organizationless onboarding paths below.
 
 No step is implicit. The catalog is a generator; the API is the
