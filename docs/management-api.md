@@ -189,13 +189,81 @@ when published: `management-actions-g1.json`, `management-catalog-g1.json`,
 `SHA256SUMS` and the source revision in `SOURCE.json` against the intended
 release/source; otherwise hold the rollout. These names do not establish
 successful publication or distribution PASS. Availability of a checked-in
-manifest is not established here. Do not assume a command shown below is
-available inside the runtime image.
+manifest is not established here. The producer workflow
+[`export-management-catalog.yml`](../.github/workflows/export-management-catalog.yml)
+can export these files for an exact source revision and generation; the runtime
+image is not their producer.
 
 Apply the [archive/schema compatibility constraints](backup-restore.md) to the
 actual source and destination. The defaults above do not promise arbitrary
 v0.4.1 archive restore compatibility or authorize an in-place archive conversion,
 namespace deletion or replacement of existing data.
+
+### Apply producer artifacts through HTTP
+
+Verify `SOURCE.json` identifies the intended release source and generation, and
+verify the downloaded payloads against `SHA256SUMS` before applying anything.
+Use the operator/master boundary for provider action, staging and activation
+requests below; PEP policy remains private master-only.
+
+| Artifact | HTTP use |
+|----------|----------|
+| `management-actions-g1.json` | Action definition array, not a raw bulk PUT body. |
+| `management-catalog-g1.json` | Complete generation-1 stage request; send unchanged. |
+| `SOURCE.json`, `SHA256SUMS` | Source/generation provenance and payload verification. |
+
+1. GET `/api/v1/admin/providers/grant-management/actions` and retain its exact
+   `ETag`. Review and merge the existing array with the generated action array,
+   preserving unrelated actions and resolving ID/code/metadata conflicts rather
+   than overwriting them. Existing `grant` actions are not moved into this set.
+2. For individual POST `/api/v1/admin/providers/grant-management/actions`, send
+   one generated action object with `providerId` removed. POST uses a closed DTO:
+   that extra field is rejected with 422. For whole-set PUT to the same path,
+   remove `providerId` from each reviewed action and wrap the array as
+   `{"actions":[...]}`. PUT currently ignores that extra field, but it is not part
+   of the request DTO. Project the reviewed array onto the accepted fields:
+
+   ```sh
+   jq '{actions: map({id, code, name, description, riskLevel,
+     visibilityGranting, grantableToApplications, consentLabel,
+     consentDescription})}' reviewed-merged-actions.json > actions-request.json
+   ```
+
+   Send the PUT with `Content-Type: application/json` and `If-Match` containing
+   the GET ETag. Missing preconditions return 428; stale values return 412.
+   After 412, GET and review the merge again instead of retrying unconditionally.
+3. POST the unchanged stage JSON to
+   `/api/v1/admin/providers/grant-management/http-capability-generations`.
+   Generation 1 is only for a provider with no stored generations. Otherwise
+   obtain a new producer artifact for the next generation after the latest
+   stored generation, including staged generations. The catalog digest binds
+   the generation; the producer also supplies its expected previous generation.
+   Regenerate, never edit g1 into gN.
+4. GET `/api/v1/admin/providers/grant-management/http-capability-generations/N`
+   and verify the stored content and digest. Complete exact role/resource grants,
+   applicable native coarse permissions and application requirements, and active
+   unexpired PEP setup before activation. Staging does not change the active pointer.
+5. GET `/api/v1/admin/providers/grant-management/http-capability-active`, then POST
+   to that path with `expectedGeneration` and `expectedCatalogDigest` from the
+   observed active state, plus `targetGeneration` and the verified
+   `targetCatalogDigest`. Use null expectations only when no active catalog exists.
+   Resolve a concurrent-state conflict by rereading; do not drop the CAS expectations.
+
+### Authorization layers and evidence limits
+
+User-mode PDP omits caller-application admission/consent; it does not remove a
+native endpoint's coarse RBAC checks. Ordinary tenant routes may require both
+an existing `grant` action such as `organization.group.manage` on the tenant
+organization and the corresponding canonical `grant-management` route action.
+Existing `grant` bindings are not canonical aliases. A canonical binding is
+reusable only for the same provider, resource type and exact resource ID, with
+the required role actions and subject scope.
+
+The actual zero-application native-upstream interop covers the platform catalog
+read route, not the entire canonical catalog. Ordinary tenant authentication
+does not inherently resolve a caller application, but application-management
+operations and onboarding are not uniform zero-application flows. Full-catalog
+apps=0 behavior is not proven by the platform-read test.
 
 ## Registry structure
 
@@ -329,8 +397,9 @@ even when multiple routes use them.
 
 ### Staging before activation
 
-1. Generate the stage payload with `grant-management-catalog -generation N -previous-generation P`
-   for `N=P+1`; omit the previous generation for the initial generation 1.
+1. Obtain the source-pinned producer stage artifact for `N=P+1`, where P is
+   the latest stored generation; use generation 1 only when none exists. Follow
+   [artifact verification and HTTP application](#apply-producer-artifacts-through-http).
 2. Review the output for correctness.
 3. POST the stage payload to
    `POST /api/v1/admin/providers/grant-management/http-capability-generations`.
@@ -342,7 +411,9 @@ even when multiple routes use them.
    not require an application record, admission or consent.
 6. Activate with
    `POST /api/v1/admin/providers/grant-management/http-capability-active`,
-   providing `targetGeneration` and `targetCatalogDigest`.
+   providing the observed active `expectedGeneration`/`expectedCatalogDigest`
+   and verified `targetGeneration`/`targetCatalogDigest`. Both expectations are
+   null only when there is no active catalog.
 
 Never activate a catalog without staging and digest pinning first. The
 activation endpoint requires the exact `targetCatalogDigest` to prevent
@@ -355,12 +426,8 @@ action definitions output (`-actions` flag). When replacing provider
 actions, include the legacy action to preserve existing role/app/consent rows
 while the old catalog is active. This does not translate their permissions:
 
-```sh
-grant-management-catalog -generation 1 -actions > actions.json
-# Merge with existing provider actions, preserving the legacy manage
-# Wrap the merged array for the registration API (provider is in the URL).
-jq '{actions: map(del(.providerId))}' actions.json > actions-request.json
-```
+Use the producer action array and the reviewed merge, DTO projection and ETag
+procedure in [Apply producer artifacts through HTTP](#apply-producer-artifacts-through-http).
 
 The action set is a union: new fine-grained actions are added alongside
 existing coarse actions. Existing coarse actions (e.g.
@@ -381,7 +448,10 @@ Before activating the new catalog, migrate those existing grants to exactly:
 
 Use `PUT /api/v1/orgs/{organizationId}/roles/{roleId}/actions/{actionId}`
 to add each exact role action while preserving other actions, including `manage`
-for rollback. Existing organization resource bindings can be reused. User mode
+for rollback. Existing canonical organization bindings can be reused only when
+their provider is `grant-management`, resource type is `organization`, exact
+resource ID and subject scope still match, and their role has the required actions.
+Provider-`grant` bindings are not aliases. User mode
 requires verified identity, active membership and the exact RBAC grant, without
 application admission or consent. In application mode, also use
 `PUT /api/v1/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}`
@@ -415,16 +485,10 @@ For additional explicitly granted management capabilities:
 
 ## Usage
 
-```sh
-# Stage generation 1
-grant-management-catalog -generation 1
-
-# Emit actions for review
-grant-management-catalog -generation 1 -actions
-
-# Advance to generation 2
-grant-management-catalog -generation 2 -previous-generation 1
-```
+Use the verified producer artifacts through the
+[HTTP application sequence](#apply-producer-artifacts-through-http). The released
+runtime image does not ship the generator. For a later generation, obtain newly
+generated artifacts for that generation instead of modifying a previous stage.
 
 ## Runtime access model
 
