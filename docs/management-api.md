@@ -97,6 +97,19 @@ the private PDP call. The native management selector and the user PDP's matching
 ManagementOrg guard passed final CI and the phase 1 process fixture with
 Exposure v0.3.0; see the [full CI run](https://github.com/mrchypark/grant/actions/runs/41950457179).
 This does not establish live IED, deployed Goauthy or remote learner verification.
+Exposure v0.3.0 historically required a single JWT audience, rejecting the
+Goauthy client-plus-resource profile before the PDP even when native Grant and
+UserInfo succeeded. [Exposure v0.3.1](https://github.com/mrchypark/exposure/releases/tag/v0.3.1)
+supports the trusted opt-in described in the [audience profile guidance](http-capabilities.md#goauthy-jwt-profile-exposure-v031-opt-in),
+with owner-confirmed PR #4 merge and full push/PR/main CI evidence linked there.
+Both settings absent still preserves strict-single behavior. [Official image
+publication](https://github.com/mrchypark/exposure/actions/runs/41968036239) and
+owner-independent private linux/amd64 registry/source verification are complete;
+the exact digest is recorded in the audience profile guidance. Operational
+acceptance is deployment-specific: verify real-user positive and negative cases
+before rollout, and hold until that deployment's acceptance evidence is recorded.
+Supplier CI/image proof implies no live PASS or new Grant API, key,
+application or OAuth client.
 See the [principal specification](principal-user-authz-spec.md) and
 [actual upstream interop evidence](http-capabilities.md#released-grant-native-upstream-verification).
 
@@ -155,7 +168,7 @@ stored null defaults during migration; modern PUT null is rejected. No OAuth
 client/application provisioning or per-PEP key issuance is added: runtime
 authentication keeps global `GRANT_APP_AUTH_KEY` and configured PEP identity.
 User catalog mode/revision and decision `wireVersion: 2`/`pepPolicyRevision`
-are supported by the released Grant v0.8.0/Exposure v0.3.0 pair; legacy responses
+were verified with the Grant v0.8.0/Exposure v0.3.0 phase 1 baseline; legacy responses
 omit new fields. Published v0.7.0 does not support this mode. See the
 [principal specification](principal-user-authz-spec.md) and
 [released capability contract](http-capabilities.md#released-principal-authorization-mode)

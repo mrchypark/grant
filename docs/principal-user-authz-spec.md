@@ -1,12 +1,12 @@
 # Goauthy 사용자 독립 인가 설계
 
-- 상태: **Grant v0.8.0 · Exposure v0.3.0 발행 완료 · 단계 1 fixture와 최종 CI 통과**
+- 상태: **Grant v0.8.0 · Exposure v0.3.0 단계 1 기준선 검증 완료 · v0.3.1 audience opt-in 발행·CI·이미지 검증 완료 · 실환경 수용은 배포별 별도 검증**
 - 이번 갱신은 확인된 발행·CI 결과를 문서에 반영한다. 코드·빌드·런타임·배포 작업은 수행하지 않는다.
-- 아래 MUST는 발행된 사용자 인가 계약이다. live IED, 실제 Goauthy 배포 버전·cloud 동작과 단계 2 remote learner는 여전히 미검증이다.
+- 아래 MUST는 발행된 사용자 인가 계약이다. 공급자 CI·이미지 근거는 배포별 실제 사용자 수용, cloud 복구와 단계 2 remote learner 검증을 대체하지 않는다.
 
 ## 발행과 검증 근거
 
-[Grant v0.8.0](https://github.com/mrchypark/grant/releases/tag/v0.8.0)은 PR #14의 merge `1e0eea5eb435b0798441dce9a9b1b0a668f4ea3b`다. 시험한 `8b3cc0fc959f4d6ed6c4e6e2b396107218751c09`와 파일 차이가 없으며 [최종 PR CI](https://github.com/mrchypark/grant/actions/runs/41950428624), [Exposure process interop을 포함한 전체 수동 CI](https://github.com/mrchypark/grant/actions/runs/41950457179), [이미지 발행](https://github.com/mrchypark/grant/actions/runs/41958102856)이 통과했다. 대응 릴리스는 Exposure v0.3.0이다. 단계 1은 실제 Grant PDP·native upstream과 Exposure 프로세스 및 통제된 issuer 응답을 사용한 fixture 근거이며 실제 운영 issuer나 IED 배포 시험은 아니다. 과거 v0.7.0 기준선과 설계 당시 구현 계획은 아래에 구분해 보존한다.
+[Grant v0.8.0](https://github.com/mrchypark/grant/releases/tag/v0.8.0)은 PR #14의 merge `1e0eea5eb435b0798441dce9a9b1b0a668f4ea3b`다. 시험한 `8b3cc0fc959f4d6ed6c4e6e2b396107218751c09`와 파일 차이가 없으며 [최종 PR CI](https://github.com/mrchypark/grant/actions/runs/41950428624), [Exposure process interop을 포함한 전체 수동 CI](https://github.com/mrchypark/grant/actions/runs/41950457179), [이미지 발행](https://github.com/mrchypark/grant/actions/runs/41958102856)이 통과했다. 이 단계 1 시험의 기준선은 Exposure v0.3.0이며 Goauthy의 두 audience opt-in은 아래 Exposure v0.3.1 계약을 따른다. 단계 1은 실제 Grant PDP·native upstream과 Exposure 프로세스 및 통제된 issuer 응답을 사용한 fixture 근거이며 실제 운영 issuer나 IED 배포 시험은 아니다. 과거 v0.7.0 기준선과 설계 당시 구현 계획은 아래에 구분해 보존한다.
 
 ## 개요와 문제
 
@@ -155,9 +155,9 @@ CAS·revision·PEP 변경은 한 트랜잭션이어야 하며 실패 시 부분 
 - introspection은 active, 실제 `client_id`, `aud`, scope, 만료를 기존 설정과 MUST 대조한다.
 - 요청에 새 client hint를 추가하지 않는다. 권위 있는 실제 client ID는 introspection에서만 얻는다.
 - issuer는 신뢰하는 설정·검증 경로에 결속하며 응답에 있으면 정확히 일치해야 한다.
-- user 모드의 audience 증거는 실제 검증된 토큰 audience와 MUST 일치해야 한다.
+- user 모드의 audience 증거는 Grant가 온라인 introspection으로 검증한 resource audience와 MUST 일치해야 한다. JWT의 전체 `aud` 배열과 introspection의 `aud`가 같은 표현이라고 가정하지 않는다.
 - 기존 `goauthyAudiences`의 `len(values) == 1 && values[0] == resource`를 MUST 유지한다.
-- audience가 없거나 둘 이상이면 MUST 거부한다. 다중 audience 지원은 추가하지 않는다.
+- introspection audience가 없거나 둘 이상이면 MUST 거부한다. Grant의 다중 introspection audience 지원은 추가하지 않는다.
 - application 모드의 기존 appId 기반 audience 의미는 그대로 유지한다.
 - 현재 필수인 application ID 설정 문자열은 legacy projection을 위해 남을 수 있다. user 모드에서 이 문자열을 근거로 application 레코드·client binding·trust를 생성하거나 조회하지 않는다. IdP client 자동 등록도 하지 않는다.
 - introspection의 sub 존재만으로 사용자 계정 resource owner라고 판단하는 것은 MUST 금지한다.
@@ -172,6 +172,16 @@ CAS·revision·PEP 변경은 한 트랜잭션이어야 하며 실패 시 부분 
 - 활성 로컬 사용자와 조직 membership을 확인하고 기존 RBAC로 action·resource를 MUST 판단한다.
 - user 모드만 application 조회·admission·동의를 생략한다. 토큰 client 검증은 생략하지 않는다.
 - 조직 누락·불일치·비활성 상태를 자동 보정하거나 다른 조직으로 대체해서는 안 된다.
+
+<a id="goauthy-jwt-audience-프로파일과-exposure-후보-경계"></a>
+
+### Goauthy JWT audience 프로파일과 Exposure v0.3.1 경계
+
+Goauthy 소유자 전달에 따르면 v0.3.8/v0.3.9는 JWT `aud`를 OAuth client ID와 resource audiences의 중복 제거 합집합으로 만들고 `azp`를 client ID로 설정한다. introspection은 resource audience만 반환한다. 소유자가 제시한 [공식 v0.3.8 소스 기준](https://github.com/mrchypark/goauthy/tree/v0.3.8)은 `access_jwt.go:230–239`, `introspection.go:60–82`, `device_resource_test.go:148–152`다. 이번 문서 작업에서 Goauthy 소스를 직접 조사하지 않았다. 전달된 실제 관측에서는 JWT에 서로 다른 audience 두 개가 있었고 native Grant와 UserInfo는 200이었지만 Exposure v0.3.0은 strict-single JWT 검사에서 PDP 호출 전에 401을 반환했다. 이는 해당 JWT 프로파일과 Exposure 입력 계약의 불일치이며 Grant의 단일 introspection resource 검증 실패로 해석하지 않는다. 기존 단계 1 fixture 통과가 이 프로파일의 운영 연동 성공까지 입증한 것은 아니다.
+
+이 opt-in은 [Exposure v0.3.1](https://github.com/mrchypark/exposure/releases/tag/v0.3.1)에서 지원한다. 소유자 확인에 따르면 [PR #4](https://github.com/mrchypark/exposure/pull/4)는 `25b0a0eb3b610f21ca103a07e48d55e5069c43f8`로 merge되었고 검토한 `61a62aa`와 tree가 같다. 전체 [push CI](https://github.com/mrchypark/exposure/actions/runs/41967549454)·[PR CI](https://github.com/mrchypark/exposure/actions/runs/41967555996)·[main CI](https://github.com/mrchypark/exposure/actions/runs/41967811570)가 통과했다. 신뢰하는 운영 설정 `EXPOSURE_GOAUTHY_USER_CLIENT_ID`와 `EXPOSURE_GOAUTHY_USER_RESOURCE_AUDIENCE`를 함께 명시할 때만 적용한다. 두 설정이 모두 없으면 strict-single 기본값을 유지한다. 일부만 설정하거나 값이 유효하지 않거나 non-Goauthy 환경에 설정하거나 client와 resource가 같으면 시작을 거부한다. 적용 범위는 user catalog뿐이다. JWT `aud`는 순서와 무관하게 정확히 `{configured client, configured resource}`의 서로 다른 두 원소여야 하며 `azp`는 configured client, `iss`는 configured issuer와 정확히 일치해야 한다. 추가 원소·중복·첫 audience 선택·fallback은 허용하지 않는다. 요청 audience 힌트는 configured resource로 만든다.
+
+이 프로파일의 JWT 해석은 인증 근거가 아니다. 원본 토큰과 credential digest를 바꾸지 않고 Grant 온라인 introspection의 정확한 단일 resource·실제 client·scope, UserInfo, fence, membership·RBAC 검사를 그대로 유지한다. legacy application 경로도 바꾸지 않으며 새 Grant API·키·application·OAuth client를 추가하지 않는다. [공식 이미지 발행 41968036239](https://github.com/mrchypark/exposure/actions/runs/41968036239)가 성공했고 소유자가 private linux/amd64 이미지의 registry와 OCI source revision `25b0a0eb3b610f21ca103a07e48d55e5069c43f8`을 독립 확인했다. 이미지 digest는 `sha256:342c611d1d75d23b1258bbfd09f09f0bec8cc8270662628b20b80f71ac903118`이다. **실환경 수용은 배포별 별도 검증이며 공급자 CI·이미지 근거로 대체할 수 없다.** 배포 전 실제 사용자 positive와 negative를 확인하고 해당 수용 근거가 기록될 때까지 rollout을 보류한다. 여기 기록한 공급자 근거만으로 live PASS를 주장하지 않는다. v0.3.0의 두 audience 거부는 당시 strict-single 계약의 관측이며 v0.3.1의 운영 수용 결과로 바꾸지 않는다.
 
 ## 계약 결속·일관성·회수
 
