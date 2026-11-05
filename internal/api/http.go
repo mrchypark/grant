@@ -66,7 +66,7 @@ func applicationAuthorizationRead(r *http.Request) bool {
 	return false
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.learner && !applicationAuthorizationRead(r) && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
+	if s.learner && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
 		if _, pattern := s.mux.Handler(r); pattern == "" {
 			http.NotFound(w, r)
 			return

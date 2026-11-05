@@ -45,3 +45,5 @@ KEEP_GRANT_FIXTURE=1 sh scripts/verify-go-three-voter.sh
 Kubernetes 기본 배포는 3 voter를 유지하며, 같은 Rhiza object-store bucket과 prefix를 공유한다. 운영 환경은 `deploy/overlays/production`과 별도로 공급하는 `grant-rhiza-storage` Secret을 사용한다. `deploy/overlays/ephemeral`에는 폐기 가능한 로컬 S3 fixture가 포함된다. Compose는 명시적인 단일 voter 구성이고 새 `grant_rhiza_data` volume을 사용한다. 기존 `grant_data` volume은 삭제하거나 재사용하지 않는다.
 
 [API 계약](docs/porting-go-http-contract.md), [권한 모델](docs/authorization-model.md), [스키마](docs/database-schema.md)를 함께 관리한다. 스키마나 릴레이션 의미가 바뀌면 스키마 문서도 갱신한다. 이전 Rust/Hiqlite 운영 문서는 [history/hiqlite](docs/history/hiqlite)에 보존한다.
+
+The unreleased [provider-bound user authorization API](docs/provider-user-authorization.md) documents application-free private batch checks and candidate filtering.

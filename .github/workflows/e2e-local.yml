@@ -172,7 +172,13 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - name: Check formatting
-        run: test -z "$(gofmt -l internal cmd)"
+        run: |
+          files=$(gofmt -l internal cmd)
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            gofmt -d internal cmd
+            exit 1
+          fi
 
       - name: Verify replica-members Go module
         working-directory: scripts/replica-members-src
@@ -292,7 +298,82 @@ jobs:
         run: go vet ./...
 
       - name: Test Go contracts and race safety
-        run: go test -race ./...
+        env:
+          GRANT_SINGLE_VOTER_RESTORE_CONTRACT: "1"
+          GRANT_SINGLE_VOTER_RESTORE_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          GRANT_SINGLE_VOTER_RESTORE_EVIDENCE: ${{ runner.temp }}/grant-single-voter-restore-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          set -eu
+          work="$RUNNER_TEMP/grant-single-voter-restore-$GRANT_SINGLE_VOTER_RESTORE_SCOPE"
+          evidence="$RUNNER_TEMP/grant-single-voter-restore-evidence-$GRANT_SINGLE_VOTER_RESTORE_SCOPE"
+          test ! -e "$work"
+          mkdir -m 700 "$work"
+          mkdir -p "$evidence"
+          result=0
+          TMPDIR="$work" go test -race ./... || result=$?
+          printf 'test_exit=%s\n' "$result" > "$evidence/test-result.txt"
+          exit "$result"
+
+      - name: Remove owned single-voter restore emulators
+        if: always()
+        env:
+          GRANT_SINGLE_VOTER_RESTORE_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          set -eu
+          unset DOCKER_CONTEXT
+          scope="$GRANT_SINGLE_VOTER_RESTORE_SCOPE"
+          work="$RUNNER_TEMP/grant-single-voter-restore-$scope"
+          evidence="$RUNNER_TEMP/grant-single-voter-restore-evidence-$scope"
+          mkdir -p "$evidence"
+          result=0
+          ids=$(docker ps -aq --no-trunc --filter "label=io.grant.single-voter-restore=$scope") || {
+            printf '%s\n' 'UNVERIFIED: cannot list scoped containers' >> "$evidence/cleanup.txt"
+            result=1
+            ids=''
+          }
+          printf '%s\n' "$ids" > "$evidence/container-ids.txt"
+          for cid in $ids; do
+            actual=$(docker inspect --format '{{index .Config.Labels "io.grant.single-voter-restore"}}' "$cid") || { result=1; continue; }
+            owner=$(docker inspect --format '{{index .Config.Labels "grant.independent.owner"}}' "$cid") || { result=1; continue; }
+            name=$(docker inspect --format '{{.Name}}' "$cid") || { result=1; continue; }
+            case "$owner" in grant-restore-*) ;; *) result=1; continue ;; esac
+            if [ "$actual" != "$scope" ] || [ "$name" != "/$owner" ]; then
+              printf 'UNVERIFIED: ownership mismatch for %s\n' "$cid" >> "$evidence/cleanup.txt"
+              result=1
+              continue
+            fi
+            docker inspect --format '{{.Id}} {{.State.Status}} {{.Config.Image}}' "$cid" >> "$evidence/container-state.txt" || result=1
+            docker rm -f -v "$cid" >> "$evidence/cleanup.txt" 2>&1 || result=1
+          done
+          remaining=$(docker ps -aq --no-trunc --filter "label=io.grant.single-voter-restore=$scope") || {
+            printf '%s\n' 'UNVERIFIED: container absence check failed' >> "$evidence/cleanup.txt"
+            result=1
+            remaining='unknown'
+          }
+          if [ -n "$remaining" ]; then
+            printf 'UNVERIFIED: remaining scoped containers %s\n' "$remaining" >> "$evidence/cleanup.txt"
+            result=1
+          fi
+          rm -rf -- "$work"
+          if [ -e "$work" ]; then
+            printf '%s\n' 'UNVERIFIED: owned temporary data remains' >> "$evidence/cleanup.txt"
+            result=1
+          fi
+          if [ "$result" -eq 0 ]; then
+            printf '%s\n' 'Scoped container absence and owned temporary-data removal verified' >> "$evidence/cleanup.txt"
+          fi
+          cat "$evidence/cleanup.txt"
+          exit "$result"
+
+      - name: Preserve single-voter restore cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: single-voter-restore-cleanup-evidence
+          path: ${{ runner.temp }}/grant-single-voter-restore-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          if-no-files-found: error
 
       - name: Verify executable stdout and SQLite export contracts
         run: |

@@ -73,6 +73,8 @@ POST /api/v1/orgs/{organizationId}/reactivate
 POST /api/v1/orgs/{organizationId}/roles
 POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions
 POST /api/v2/http-capabilities/decide
+POST /api/v2/providers/{providerId}/authz/batch-check
+POST /api/v2/providers/{providerId}/authz/filter
 POST /ops/backups
 POST /ops/migrations/patch-data-authority
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}
