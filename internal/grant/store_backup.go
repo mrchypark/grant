@@ -299,29 +299,62 @@ func snapshotIdentityTuple(row []any, columns map[string]int) (provider, issuer,
 	}
 	return provider, issuer, collection, true
 }
-func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) error {
+func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (result error) {
 	if e := ValidateStoreSnapshot(snap); e != nil {
 		return e
 	}
-	if len(cfg.Database.Members) > 0 || len(cfg.Database.Rhiza.Members) > 0 || len(cfg.Database.RemoteNodes) > 0 || cfg.Database.RuntimeMode == "remote" || cfg.Database.RuntimeMode == "split" || cfg.Database.LocalNodeRole == "learner" || cfg.Database.Rhiza.ObjStoreProvider != "" || cfg.Database.Rhiza.ObjStoreEndpoint != "" || cfg.Database.Rhiza.ObjStoreDir != "" || cfg.Database.Rhiza.ObjStoreBucket != "" {
-		return fmt.Errorf("logical restore requires isolated single-voter local configuration without remote members or shared object storage")
-	}
-	if _, e := os.Stat(cfg.Database.DataDir); !os.IsNotExist(e) {
+	if _, e := os.Lstat(cfg.Database.DataDir); !os.IsNotExist(e) {
 		return fmt.Errorf("restore requires a new, absent data directory")
+	}
+	clusterID := "offline"
+	pendingBody := []byte(snap.Digest)
+	if len(cfg.Database.Members) > 0 || len(cfg.Database.Rhiza.Members) > 0 || len(cfg.Database.RemoteNodes) > 0 || (cfg.Database.RuntimeMode != "" && cfg.Database.RuntimeMode != "embedded") || cfg.Database.LocalNodeRole == "learner" || cfg.Database.Rhiza.ObjStoreProvider != "" || cfg.Database.Rhiza.ObjStoreEndpoint != "" || cfg.Database.Rhiza.ObjStoreDir != "" || cfg.Database.Rhiza.ObjStoreBucket != "" {
+		c, err := singleVoterRestoreConfig(cfg, snap)
+		if err != nil {
+			return err
+		}
+		// Listing proves observed vacancy, not a lock. The operator must freeze
+		// writers and reserve this dedicated namespace for this sole importer.
+		if err = restoreNamespaceEmpty(ctx, c); err != nil {
+			return err
+		}
+		defer func() {
+			if result != nil {
+				// Rhiza may wrap cloud SDK errors containing signed URLs.
+				result = fmt.Errorf("single-voter restore failed; target evidence retained, do not reset or reuse its namespace")
+			}
+		}()
+		cfg.Database.Rhiza = c
+		clusterID = c.ClusterID
+		// This fingerprints the seed attempt only; normal OpenStore does not
+		// enforce seed durability/listener settings after verified completion.
+		target, err := canonicalJSON(c, "")
+		if err != nil {
+			return fmt.Errorf("encode restore target binding")
+		}
+		pendingBody, err = json.Marshal(map[string]string{"sourceDigest": snap.Digest, "targetDigest": digestBytes([]byte(target)), "clusterId": clusterID})
+		if err != nil {
+			return err
+		}
 	}
 	if e := os.Mkdir(cfg.Database.DataDir, 0700); e != nil {
 		return e
 	}
 	pending := filepath.Join(cfg.Database.DataDir, "grant-restore-pending.json")
-	if e := writeDurableExclusive(pending, []byte(snap.Digest)); e != nil {
+	if e := writeDurableExclusive(pending, pendingBody); e != nil {
 		return e
 	}
 	s, e := openStore(ctx, cfg, true, nil)
 	if e != nil {
 		return e
 	}
-	defer s.Close()
-	if e = s.restoreCanonicalAtomic(ctx, snap, "offline"); e != nil {
+	closed := false
+	defer func() {
+		if !closed {
+			_ = s.Close()
+		}
+	}()
+	if e = s.restoreCanonicalAtomic(ctx, snap, clusterID); e != nil {
 		return e
 	}
 	restored, e := s.ExportSnapshot(ctx)
@@ -340,7 +373,19 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) e
 	if e = s.VerifySchema(ctx); e != nil {
 		return e
 	}
-	marker := map[string]string{"sourceDigest": snap.Digest, "verifiedAt": nowString(), "backend": "rhiza"}
+	receipt, e := s.Query(ctx, ReadStrong, "SELECT snapshot_digest,cluster_id FROM grant_restore_activation WHERE id='active'")
+	if e != nil || len(receipt) != 1 || rowString(receipt[0], "snapshot_digest") != snap.Digest || rowString(receipt[0], "cluster_id") != clusterID {
+		return fmt.Errorf("restore activation receipt verification failed")
+	}
+	closeErr := s.Close()
+	closed = true
+	if closeErr != nil {
+		return fmt.Errorf("restore close failed; pending evidence retained")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	marker := map[string]string{"sourceDigest": snap.Digest, "verifiedAt": nowString(), "backend": "rhiza", "clusterId": clusterID}
 	b, _ := json.Marshal(marker)
 	if e = writeDurableExclusive(filepath.Join(cfg.Database.DataDir, "grant-cutover-verified.json"), b); e != nil {
 		return e
