@@ -27,6 +27,8 @@ func TestManagementCatalogCoversRegisteredRoutes(t *testing.T) {
 		"POST /api/v1/application-authz/filter":                   true,
 		"GET /api/v2/http-capabilities/catalog/{providerId}":      true,
 		"POST /api/v2/http-capabilities/decide":                   true,
+		"POST " + providerUserBatchPath:                           true,
+		"POST " + providerUserFilterPath:                          true,
 	}
 	catalog := make(map[string]bool)
 	for _, route := range grant.ManagementRoutes() {

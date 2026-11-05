@@ -194,6 +194,7 @@ func (s *Server) routes() {
 	})
 	s.authorizationRoutes()
 	s.capabilityRoutes()
+	s.providerUserAuthorizationRoutes()
 	s.route("GET", "/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}", "master", true, 200, bodyless(s.httpCapabilityGeneration))
 	s.actionMutationRoutes()
 	s.lifecycleRoutes()
