@@ -74,23 +74,16 @@ func TestPEPIdentitySnapshotCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.SchemaDigest != canonicalSchemaDigest() || snapshot.SchemaDigest == legacySchemaDigestV4() {
-		t.Fatal("export does not identify the v5 schema")
+		t.Fatal("export does not identify the v6 schema")
 	}
 	for _, table := range snapshot.Tables {
 		if table.Name == "applications" && table.Count != 0 {
 			t.Fatal("PEP snapshot unexpectedly requires an application")
 		}
 	}
-	// The previous digest also labeled early v5 exports. Both those exports
-	// and actual v4 rows retain the same column layout and fit v5 constraints.
-	for _, version := range []struct{ name, digest string }{{"v5", canonicalSchemaDigest()}, {"v4", legacySchemaDigestV4()}} {
+	for _, version := range []struct{ name, digest string }{{"v6", canonicalSchemaDigest()}, {"v5", legacySchemaDigestV5()}, {"v4", legacySchemaDigestV4()}} {
 		t.Run(version.name, func(t *testing.T) {
-			compatible := snapshot
-			compatible.SchemaDigest = version.digest
-			compatible.Digest, err = snapshotDigest(compatible)
-			if err != nil {
-				t.Fatal(err)
-			}
+			compatible := pepSnapshotFixtureVersion(t, snapshot, version.digest)
 			cfg := Config{Database: DatabaseConfig{DataDir: filepath.Join(root, version.name)}}
 			if err = RestoreStoreSnapshot(ctx, cfg, compatible); err != nil {
 				t.Fatal(err)
@@ -101,16 +94,28 @@ func TestPEPIdentitySnapshotCompatibility(t *testing.T) {
 			}
 			defer restored.Close()
 			pep, err := restored.ProviderPepClient(ctx, "snapshot-provider", "snapshot-pep")
-			if err != nil || pep.Lifecycle != "disabled" || pep.ApplicationID != "" {
+			if err != nil || pep.Lifecycle != "disabled" || pep.ApplicationID != "" || pep.AuthorizationMode != "application" || pep.PolicyRevision != 1 {
 				t.Fatalf("independent PEP changed on restore: %#v %v", pep, err)
+			}
+			again, err := restored.ExportSnapshot(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, table := range again.Tables {
+				expected, err := restoredTableDigest(compatible.Tables[i], compatible.SchemaDigest)
+				if err != nil || table.Digest != expected {
+					t.Fatalf("legacy authority changed: %s %v", table.Name, err)
+				}
+			}
+			rows, err := restored.Query(ctx, ReadStrong, "SELECT snapshot_digest FROM grant_restore_activation WHERE id='active'")
+			if err != nil || len(rows) != 1 || rowString(rows[0], "snapshot_digest") != compatible.Digest {
+				t.Fatalf("legacy source provenance changed: %v %v", rows, err)
 			}
 		})
 	}
-	for _, digest := range []string{canonicalSchemaDigest(), legacySchemaDigestV4(), legacySchemaDigestV3()} {
+	for _, digest := range []string{canonicalSchemaDigest(), legacySchemaDigestV5(), legacySchemaDigestV4(), legacySchemaDigestV3()} {
 		for _, name := range []string{"provider_pep_clients", "provider_pep_client_receipts"} {
-			malformed := snapshot
-			malformed.SchemaDigest = digest
-			malformed.Tables = append([]SnapshotTable(nil), snapshot.Tables...)
+			malformed := pepSnapshotFixtureVersion(t, snapshot, digest)
 			for i := range malformed.Tables {
 				table := &malformed.Tables[i]
 				if table.Name != name {

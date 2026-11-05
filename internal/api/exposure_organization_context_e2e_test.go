@@ -80,6 +80,9 @@ func TestExposureOrganizationContextE2E(t *testing.T) {
 		}
 		req.Header.Set("X-Grant-Master-Key", "fixture-master")
 		req.Header.Set("Content-Type", "application/json")
+		if method == "PUT" && strings.Contains(path, "/enforcers/") {
+			req.Header.Set("If-None-Match", "*")
+		}
 		resp, e := http.DefaultClient.Do(req)
 		if e != nil {
 			t.Fatal(e)

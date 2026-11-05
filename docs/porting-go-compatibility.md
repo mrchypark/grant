@@ -143,6 +143,23 @@ This inventory is a porting checklist, not a claim that all reference behavior h
 
 ## Deliberate current lifecycle changes
 
+The current principal-mode candidate extends the private master-only PEP path
+with GET (stored policy and `ETag`, including inactive/expired PEPs) and
+conditional PUT: `If-None-Match: *` for creation, `If-Match` for updates,
+missing conditions 428 and stale conditions 412. PUT accepts `authorizationMode`
+alongside lifecycle/expiry. Server-default `application` preserves admission;
+explicit `user` needs no application record but retains verified identity,
+membership and RBAC. Legacy stored null migrates to application; modern PUT
+null is rejected. User catalogs alone add mode/revision; user decide requires
+`wireVersion: 2` and `pepPolicyRevision`, and legacy responses omit all new
+fields for strict compatibility. Actual verified Goauthy audience replaces
+the app-ID projection only in user mode. Global AppAuthKey/configured PEP ID
+remain; no new per-PEP key or OAuth client/application provisioning is added.
+Only a matching Exposure v2 candidate supports this contract; published
+v0.7.0 does not. See the [principal specification](principal-user-authz-spec.md)
+and [candidate HTTP contract](http-capabilities.md#candidate-principal-authorization-mode).
+This does not rewrite the frozen Rust inventory or establish runtime PASS.
+
 The frozen Rust reference above retains historical `/auth/v1` and provisioning
 reservations. Current Grant intentionally removes `/auth`, `/auth/v1` and its
 wildcard proxy, and replaces the manual POST provisioning route with platform

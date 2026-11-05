@@ -39,6 +39,7 @@ GET /api/v1/providers
 GET /api/v2/http-capabilities/catalog/{providerId}
 GET /healthz
 GET /ops/backups
+GET /ops/providers/{providerId}/enforcers/{pepClientId}
 GET /readyz
 PATCH /api/v1/admin/providers/{providerId}
 PATCH /api/v1/admin/providers/{providerId}/actions/{actionId}

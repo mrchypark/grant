@@ -23,6 +23,56 @@ func readScope(ctx context.Context) *replicaRead {
 	return v
 }
 
+// Only unversioned application policy retains the legacy remote read contract.
+func capabilityPolicyRead[T any](ctx context.Context, s *Service, provider string, wireVersion uint64, read func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if s.store.db == nil && s.cfg.Database.LocalNodeRole != "learner" {
+		// Preserve legacy remote application reads without claiming a fenced snapshot.
+		pep, err := s.configuredPEP(ctx, provider)
+		if err != nil {
+			return zero, err
+		}
+		if wireVersion != 0 {
+			return zero, serviceError(503, "unavailable: versioned decisions require local fenced authority")
+		}
+		result, err := read(ctx)
+		if err != nil {
+			return zero, err
+		}
+		current, err := s.configuredPEP(ctx, provider)
+		if err != nil {
+			return zero, err
+		}
+		if current.PolicyRevision != pep.PolicyRevision {
+			return zero, serviceError(403, "forbidden: PEP policy changed")
+		}
+		return result, nil
+	}
+	return capabilityAuthorizationRead(ctx, s, read)
+}
+
+// The caller validates external identity once before entering this local budget
+// and retains it in replicaIdentityKey for all local retries.
+func capabilityAuthorizationRead[T any](ctx context.Context, s *Service, read func(context.Context) (T, error)) (T, error) {
+	var zero T
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var fence uint64
+	var err error
+	if s.cfg.Database.LocalNodeRole == "learner" {
+		fence, err = s.store.readFence(ctx)
+	} else if s.store.db == nil {
+		err = fmt.Errorf("voter required")
+	} else {
+		result, e := s.store.db.Query(ctx, rhiza.QueryRequest{SQL: "SELECT 1", Consistency: rhiza.ConsistencyLinearizable})
+		fence, err = result.AppliedSlot, e
+	}
+	if err != nil {
+		return zero, serviceError(503, "unavailable: HTTP capability quorum fence failed")
+	}
+	return readAtFence(ctx, s, fence, read)
+}
+
 // Every successful response is read from one applied snapshot at or beyond a
 // quorum fence obtained after this request started. A local-ready bit is not a fence.
 func localReplicaRead[T any](ctx context.Context, s *Service, read func(context.Context) (T, error)) (T, error) {

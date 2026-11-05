@@ -148,7 +148,7 @@ func TestLegacyV3SnapshotRejectsGoauthyIdentityRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot.SchemaDigest = legacySchemaDigestV3()
+	snapshot = pepSnapshotFixtureVersion(t, snapshot, legacySchemaDigestV3())
 	if snapshot.Digest, err = snapshotDigest(snapshot); err != nil {
 		t.Fatal(err)
 	}

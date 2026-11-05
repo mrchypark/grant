@@ -52,10 +52,45 @@ func (s *Service) configuredPEP(ctx context.Context, provider string) (ProviderP
 	if err = requireActivePEP(pep, time.Now()); err != nil {
 		return ProviderPepClient{}, err
 	}
+	if s.store.db == nil && s.cfg.Database.LocalNodeRole != "learner" && pep.AuthorizationMode != "application" {
+		return ProviderPepClient{}, serviceError(503, "unavailable: PEP policy requires local fenced authority")
+	}
 	return pep, nil
 }
+func (s *Service) GetProviderPepClientAdmin(ctx context.Context, provider, pep string) (ProviderPepClient, error) {
+	return s.store.ProviderPepClientAdmin(ctx, provider, pep)
+}
+func (s *Service) SetProviderPepClientAdminConditional(ctx context.Context, provider, pep string, v UpsertProviderPepClient, expectedRevision *int64) (ProviderPepClient, error) {
+	return s.store.UpsertProviderPepClientConditional(ctx, provider, pep, ManagementActorFromContext(ctx), v, expectedRevision)
+}
+
+func validateHTTPPolicy(pep ProviderPepClient, r HttpCapabilityDecisionInput) error {
+	if pep.AuthorizationMode != "" && pep.AuthorizationMode != "application" && pep.AuthorizationMode != "user" {
+		return serviceError(503, "unavailable: unsupported PEP policy")
+	}
+	if r.WireVersion != 0 && r.WireVersion != 2 {
+		return serviceError(400, "unsupported HTTP capability wire version")
+	}
+	if pep.AuthorizationMode == "user" && r.WireVersion != 2 {
+		return serviceError(400, "user authorization requires wire version 2")
+	}
+	if r.WireVersion == 2 {
+		if r.PEPPolicyRevision <= 0 {
+			return serviceError(400, "PEP policy revision is required")
+		}
+		if pep.PolicyRevision <= 0 || r.PEPPolicyRevision != pep.PolicyRevision {
+			return serviceError(403, "forbidden: stale PEP policy")
+		}
+	} else if r.PEPPolicyRevision != 0 {
+		return serviceError(400, "PEP policy revision requires wire version 2")
+	}
+	return nil
+}
 func (s *Service) ActiveHttpCapabilityCatalog(ctx context.Context, provider string) (ActiveHttpCapabilityCatalog, error) {
-	return localReplicaRead(ctx, s, func(ctx context.Context) (ActiveHttpCapabilityCatalog, error) {
+	if readScope(ctx) != nil {
+		return s.activeHttpCapabilityCatalog(ctx, provider)
+	}
+	return capabilityPolicyRead(ctx, s, provider, 0, func(ctx context.Context) (ActiveHttpCapabilityCatalog, error) {
 		return s.activeHttpCapabilityCatalog(ctx, provider)
 	})
 }
@@ -64,20 +99,34 @@ func (s *Service) activeHttpCapabilityCatalog(ctx context.Context, provider stri
 	if err != nil {
 		return ActiveHttpCapabilityCatalog{}, err
 	}
-	return s.store.ActiveHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
+	catalog, err := s.store.ActiveHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
+	if err != nil {
+		return ActiveHttpCapabilityCatalog{}, err
+	}
+	if pep.AuthorizationMode == "user" {
+		if pep.PolicyRevision <= 0 {
+			return ActiveHttpCapabilityCatalog{}, serviceError(503, "unavailable: invalid PEP policy")
+		}
+		catalog.AuthorizationMode, catalog.PEPPolicyRevision = "user", pep.PolicyRevision
+	} else {
+		catalog.AuthorizationMode, catalog.PEPPolicyRevision = "", 0
+	}
+	return catalog, nil
 }
 func (s *Service) DecideHttpCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput) (HttpCapabilityDecision, error) {
-	if s.cfg.Database.LocalNodeRole == "learner" {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
-		defer cancel()
-		identity, e := s.externalIdentity(ctx, token)
-		if e != nil {
-			return HttpCapabilityDecision{}, e
-		}
-		ctx = context.WithValue(ctx, replicaIdentityKey{}, identity)
+	if strings.TrimSpace(token) == "" {
+		return HttpCapabilityDecision{}, serviceError(401, "unauthorized: missing bearer token")
 	}
-	return localReplicaRead(ctx, s, func(ctx context.Context) (HttpCapabilityDecision, error) {
+	identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity)
+	if !ok {
+		var err error
+		identity, err = s.externalIdentity(ctx, token)
+		if err != nil {
+			return HttpCapabilityDecision{}, err
+		}
+	}
+	ctx = context.WithValue(ctx, replicaIdentityKey{}, identity)
+	return capabilityPolicyRead(ctx, s, r.ProviderID, r.WireVersion, func(ctx context.Context) (HttpCapabilityDecision, error) {
 		return s.decideHttpCapability(ctx, token, org, r)
 	})
 }
@@ -92,6 +141,9 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	if pep.PepClientID != r.PEPClientID {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: PEP client binding mismatch")
+	}
+	if err = validateHTTPPolicy(pep, r); err != nil {
+		return HttpCapabilityDecision{}, err
 	}
 	catalog, err := s.ActiveHttpCapabilityCatalog(ctx, r.ProviderID)
 	if err != nil {
@@ -132,6 +184,23 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if org == "" && cap.OrganizationContext != "optional" {
 		return HttpCapabilityDecision{}, serviceError(400, "organization context is required")
 	}
+	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
+	platformManagementOrgRequired := r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
+		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID)
+	if pep.AuthorizationMode == "user" {
+		identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity)
+		if !ok {
+			return HttpCapabilityDecision{}, serviceError(401, "unauthorized: verified identity required")
+		}
+		c, e := s.resolveLocalUserAuthorizationContext(ctx, identity, org)
+		if e != nil {
+			return HttpCapabilityDecision{}, e
+		}
+		if platformManagementOrgRequired {
+			return httpCapabilityDecisionResult(r, c, *cap, pep, false, "platform_management_organization_required", nil), nil
+		}
+		return s.decideUserHTTPCapability(ctx, token, org, r, pep, *cap, c)
+	}
 	orglessOnboarding := org == "" && managementOnboardingCapability(r.ProviderID, *cap)
 	trustedTenantManagement := false
 	tenantReactivation := managementReactivationCapability(r.ProviderID, *cap, org, r.ResourceID, r.CanonicalPath)
@@ -169,7 +238,6 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
-	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
 	if orglessOnboarding {
 		allowed, reason = true, "management_onboarding"
 	} else if trustedTenantManagement {
@@ -178,8 +246,7 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			return HttpCapabilityDecision{}, e
 		}
 		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "trusted_tenant_management"
-	} else if r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
-		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID) {
+	} else if platformManagementOrgRequired {
 		allowed, reason = false, "platform_management_organization_required"
 	} else if r.ResponseDigest != "" {
 		allowed, reason, err = s.responseDecision(ctx, token, org, r, c)
@@ -239,6 +306,94 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 		}
 		allowed, reason = decisions[0].Allowed, decisions[0].Reason
 	}
+	return httpCapabilityDecisionResult(r, c, *cap, pep, allowed, reason, scope), nil
+}
+
+func httpCapabilityDecisionResult(r HttpCapabilityDecisionInput, c applicationAuthorizationContext, cap HttpCapability, pep ProviderPepClient, allowed bool, reason string, scope *HttpRecordScope) HttpCapabilityDecision {
 	now := time.Now().UTC()
-	return HttpCapabilityDecision{Allowed: allowed, Reason: reason, ProviderID: r.ProviderID, PEPClientID: r.PEPClientID, CatalogGeneration: r.CatalogGeneration, CatalogDigest: r.CatalogDigest, CapabilityID: r.CapabilityID, CapabilityVersion: r.CapabilityVersion, ContractDigest: r.ContractDigest, ActionID: *cap.ActionID, ResourceType: r.ResourceType, ResourceID: r.ResourceID, Method: r.Method, CanonicalPath: r.CanonicalPath, CanonicalQueryDigest: r.CanonicalQueryDigest, ForwardedHeaderDigest: r.ForwardedHeaderDigest, BodyDigest: r.BodyDigest, BodyLength: r.BodyLength, ProviderCredentialDigest: r.ProviderCredentialDigest, ProviderSubject: c.ExternalSubject, ProviderAudience: c.ProviderAudience, RequestBinding: r.RequestBinding, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(5 * time.Second).Format(time.RFC3339Nano), RecordScope: scope, BatchDigest: r.BatchDigest, ResponseDigest: r.ResponseDigest, ResponseLength: r.ResponseLength, ResponseReferencesDigest: r.ResponseReferencesDigest}, nil
+	var revision int64
+	if r.WireVersion == 2 {
+		revision = pep.PolicyRevision
+	}
+	return HttpCapabilityDecision{WireVersion: r.WireVersion, PEPPolicyRevision: revision, Allowed: allowed, Reason: reason, ProviderID: r.ProviderID, PEPClientID: r.PEPClientID, CatalogGeneration: r.CatalogGeneration, CatalogDigest: r.CatalogDigest, CapabilityID: r.CapabilityID, CapabilityVersion: r.CapabilityVersion, ContractDigest: r.ContractDigest, ActionID: *cap.ActionID, ResourceType: r.ResourceType, ResourceID: r.ResourceID, Method: r.Method, CanonicalPath: r.CanonicalPath, CanonicalQueryDigest: r.CanonicalQueryDigest, ForwardedHeaderDigest: r.ForwardedHeaderDigest, BodyDigest: r.BodyDigest, BodyLength: r.BodyLength, ProviderCredentialDigest: r.ProviderCredentialDigest, ProviderSubject: c.ExternalSubject, ProviderAudience: c.ProviderAudience, RequestBinding: r.RequestBinding, PrincipalDigest: ExposurePrincipalDigest(c.UserID, c.OrganizationID, c.ApplicationID), IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(5 * time.Second).Format(time.RFC3339Nano), RecordScope: scope, BatchDigest: r.BatchDigest, ResponseDigest: r.ResponseDigest, ResponseLength: r.ResponseLength, ResponseReferencesDigest: r.ResponseReferencesDigest}
+}
+
+func (s *Service) decideUserHTTPCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput, pep ProviderPepClient, cap HttpCapability, c applicationAuthorizationContext) (HttpCapabilityDecision, error) {
+	if c.ExternalSubject != r.ProviderCredential.Subject || c.ProviderAudience != r.ProviderCredential.Audience {
+		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential principal mismatch")
+	}
+	if cap.ActionID == nil || cap.Resource == nil {
+		return HttpCapabilityDecision{}, serviceError(503, "authorized capability action or resource missing")
+	}
+	var scope *HttpRecordScope
+	var allowed bool
+	var reason string
+	var err error
+	switch {
+	case r.ResponseDigest != "":
+		allowed, reason, err = s.responseDecision(ctx, token, org, r, c)
+	case r.ResponseLength != 0 || r.ResponseReferencesDigest != "" || len(r.ResponseReferences) != 0:
+		err = serviceError(403, "forbidden: incomplete response evidence")
+	case cap.Batch != nil:
+		allowed, reason, err = s.batchDecision(ctx, token, org, r, c)
+	case cap.RecordScope != nil:
+		scope, err = s.recordScopeDecision(ctx, r.ProviderID, cap, c, r.CatalogGeneration, r.CatalogDigest, r.PEPClientID)
+		allowed, reason = err == nil, "record_scope"
+	default:
+		var decisions []AuthorizationDecision
+		decisions, err = s.evaluateAuthorizations(ctx, []AuthorizationCheck{{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: *cap.ActionID, Resource: AuthorizationResource{ProviderID: r.ProviderID, ResourceType: cap.Resource.ResourceType, ID: r.ResourceID}}}, ReadStrong, nil)
+		if err == nil {
+			if len(decisions) != 1 {
+				err = serviceError(503, "incomplete authorization decision")
+			} else {
+				allowed, reason = decisions[0].Allowed, decisions[0].Reason
+			}
+		}
+	}
+	if err != nil {
+		return HttpCapabilityDecision{}, err
+	}
+	return httpCapabilityDecisionResult(r, c, cap, pep, allowed, reason, scope), nil
+}
+
+// Follow-up evidence retains the original principal and server-selected mode.
+func (s *Service) httpFollowupPrincipal(ctx context.Context, token, org string, input HttpCapabilityDecisionInput, pep ProviderPepClient, principal applicationAuthorizationContext) (applicationAuthorizationContext, error) {
+	if err := validateHTTPPolicy(pep, input); err != nil {
+		return applicationAuthorizationContext{}, err
+	}
+	var current applicationAuthorizationContext
+	var err error
+	if pep.AuthorizationMode == "user" {
+		if principal.ApplicationID != "" {
+			return current, serviceError(403, "forbidden: authorization mode changed")
+		}
+		identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity)
+		if !ok {
+			return current, serviceError(401, "unauthorized: verified identity required")
+		}
+		current, err = s.resolveLocalUserAuthorizationContext(ctx, identity, org)
+	} else {
+		if principal.ApplicationID == "" {
+			return current, serviceError(403, "forbidden: authorization mode changed")
+		}
+		if org == "" {
+			current, err = s.resolveOrglessApplicationContext(ctx, token)
+		} else {
+			current, err = s.resolveApplicationAuthorizationContext(ctx, token, org)
+		}
+	}
+	if err != nil {
+		return current, err
+	}
+	if current != principal {
+		return current, serviceError(403, "forbidden: authorization principal changed")
+	}
+	return current, nil
+}
+
+func httpAuthorizationApplication(c applicationAuthorizationContext) *string {
+	if c.ApplicationID == "" {
+		return nil
+	}
+	return &c.ApplicationID
 }

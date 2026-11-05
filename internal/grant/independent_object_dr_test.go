@@ -221,6 +221,9 @@ func (f *independentFixture) request(method, path string, body any, status int) 
 		f.t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if method == "PUT" && strings.HasPrefix(path, "/ops/providers/") && strings.Contains(path, "/enforcers/") {
+		req.Header.Set("If-None-Match", "*")
+	}
 	req.Header.Set("X-Grant-Master-Key", f.id+"-master")
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()

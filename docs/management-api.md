@@ -36,7 +36,7 @@ that do not participate in the management grant model:
 - `POST /api/v1/admin/bootstrap/owner` (unified provider-neutral bootstrap)
 - `PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}` (master-only operational first-party admission; never exposed through the admin UI registry)
 - `POST /ops/backups`, `GET /ops/backups` (private backup ops)
-- `PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (private enforcer registration)
+- `GET/PUT /ops/providers/{providerId}/enforcers/{pepClientId}` (candidate private, master-only PEP policy read/registration; excluded from the management catalog)
 - `POST /ops/migrations/patch-data-authority` (private import)
 - `POST /api/v1/authz/check`, `batch-check`, `filter`
 - `POST /api/v1/application-authz/check`, `batch-check`, `filter`
@@ -59,8 +59,10 @@ and `X-Organization-ID` matches it. Reserve this organization for operators:
 its role administrators can grant platform privileges. An unset value disables
 platform Bearer access. Other organizations cannot grant themselves access.
 
-Grant authenticates the user and checks application admission, trust or consent,
-and the exact action against resource `grant-management/platform/grant`.
+Grant authenticates the user and checks the exact action against resource
+`grant-management/platform/grant`. Legacy application mode additionally checks
+application admission and trust or consent; the candidate native user selector
+below omits only those application checks.
 Admin routes containing an organization path still require this platform
 privilege; the path identifies the organization being administered.
 
@@ -68,11 +70,37 @@ Internal callers can continue using `X-Grant-Master-Key`. An explicitly supplied
 invalid master key cannot fall back to Bearer authentication. Exposure strips
 this header and never receives the master key in its configuration.
 
+### Candidate native platform user authorization (under review)
+
+The reported native gap is that `NativeAuthorizePlatformManagement` always
+performed an application check: a generic real-PDP/business-mock test could
+succeed with zero applications while Grant's own upstream handler still failed.
+The source fix under review selects user authorization only from the active,
+explicit `user` policy for the canonical `grant-management` PEP matching
+`GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID`. It uses fenced Goauthy user, active
+membership and exact platform RBAC checks without an application record.
+The configured ManagementOrg guard above remains mandatory in both native
+authorization and the user PDP, even when another organization has a matching
+role binding. Missing PEP, noncanonical provider or explicit application mode
+retains legacy native application admission; none implicitly selects user.
+A disabled canonical user PEP denies access rather than falling back.
+
+This is Grant's own control-plane policy using its existing canonical management
+provider constant, not a selector based on business application names. It adds
+no request headers, flags, approval step or automatic application provisioning.
+For this management path, Exposure forwards the original Bearer and organization
+to Grant upstream, never a master key or AppAuthKey; AppAuthKey is used only for
+the private PDP call. The source dependencies are the native management selector
+and the user PDP's matching ManagementOrg guard; review and CI remain pending.
+See the [principal specification](principal-user-authz-spec.md) and
+[actual upstream interop criterion](http-capabilities.md#candidate-grant-native-upstream-verification).
+
 ### forward-user authorization
 
 All management routes use `forward-user` request authorization. Grant
 resolves the Bearer token to an authenticated principal. The authorization
-decision checks:
+decision checks the following; the candidate native platform user path above
+omits only application admission and trust/consent, never membership or RBAC:
 
 1. **Active membership**: the principal must have an active membership
    in the organization identified by `{organizationId}`.
@@ -111,7 +139,21 @@ policy. Health probes do not require a management permission.
 - Backups (`/ops/backups`): private operational endpoint.
 - Import (`/ops/migrations/patch-data-authority`): private migration endpoint.
 - Enforcer registration (`/ops/providers/{providerId}/enforcers/{pepClientId}`):
-  private PEP binding endpoint.
+  candidate private, master-only GET/PUT. GET returns stored policy and `ETag`
+  even for inactive/expired PEPs or absent active catalogs. PUT accepts
+  `authorizationMode`, `lifecycle` and optional `validUntil`; creation requires
+  `If-None-Match: *`, updates require `If-Match` (missing 428, stale 412).
+
+The candidate server policy defaults to `application`; explicit `user` needs
+no application record but retains user, membership and RBAC checks. Legacy
+stored null defaults during migration; modern PUT null is rejected. No OAuth
+client/application provisioning or per-PEP key issuance is added: runtime
+authentication keeps global `GRANT_APP_AUTH_KEY` and configured PEP identity.
+User catalog mode/revision and decision `wireVersion: 2`/`pepPolicyRevision`
+require a matching Exposure v2 candidate; legacy responses omit new fields.
+Published v0.7.0 does not support this mode. See the [principal specification](principal-user-authz-spec.md)
+and [candidate capability contract](http-capabilities.md#candidate-principal-authorization-mode)
+for the full contract; this is not a deployment or runtime PASS claim.
 
 ## Registry structure
 

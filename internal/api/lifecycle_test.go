@@ -15,6 +15,9 @@ func lifecycleCall(t *testing.T, s *Server, method, path, body, org string, mast
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
+	if method == "PUT" && strings.Contains(path, "/enforcers/") {
+		r.Header.Set("If-None-Match", "*")
+	}
 	r.Header.Set("Authorization", "Bearer tok")
 	r.Header.Set("X-Organization-ID", org)
 	if master {

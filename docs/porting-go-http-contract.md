@@ -4,6 +4,8 @@ Baseline: `c716877` (same application tree as `ee5852b`).
 
 The executable route inventory is `internal/api/testdata/routes-voter.txt` (88 routes; 71 management capabilities). GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
 
+The inventory counts above are an existing baseline, not a refreshed candidate inventory. The principal-mode additions below describe the current candidate; published v0.7.0 does not support the new mode, and this document does not establish CI or runtime PASS.
+
 ## Method, path, authorization and node role
 
 | Method | Path | Authentication | Voter only | Success |
@@ -12,6 +14,7 @@ The executable route inventory is `internal/api/testdata/routes-voter.txt` (88 r
 | GET | `/api/v1/admin/providers/{providerId}/http-capability-generations/{generation}` | master or authorized platform bearer (`admin.catalog.read`) | true | 200 |
 | POST | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
 | GET | `/api/v1/admin/providers/{providerId}/http-capability-active` | master | true | 200 |
+| GET | `/ops/providers/{providerId}/enforcers/{pepClientId}` | master | true | 200 |
 | PUT | `/ops/providers/{providerId}/enforcers/{pepClientId}` | master | true | 200 |
 | GET | `/api/v2/http-capabilities/catalog/{providerId}` | app | false | 200 |
 | POST | `/api/v2/http-capabilities/decide` | application | false | 200 |
@@ -70,6 +73,10 @@ The executable route inventory is `internal/api/testdata/routes-voter.txt` (88 r
 | GET/HEAD | `/readyz` | public | false | 200/503 |
 
 The inventory includes lifecycle routes listed below and granular action routes in the next section. Removed Exposure APIs, the V2 authority receiver, Grant IdP proxy paths, and the old provisioning verification route return 404 without aliases. Generic HTTP catalog/decide and private V1 authority migration remain supported.
+
+Candidate private PEP GET is master-only and returns stored policy plus `ETag` even when inactive/expired or without an active catalog (missing PEP: 404). PUT adds `authorizationMode` to `lifecycle`/optional `validUntil`, rejects `applicationId`, and requires `If-None-Match: *` for creation or `If-Match` for updates; missing conditions return 428, stale conditions 412. Server mode defaults to `application`; explicit `user` removes only application admission/consent, requiring no application record. Legacy stored null migrates to application; modern request null is rejected, while update omission preserves mode.
+
+Only user catalogs add `authorizationMode`/`pepPolicyRevision`; user decisions require matching `wireVersion: 2`/`pepPolicyRevision`. Legacy application responses omit new fields for strict parsers. User evidence uses the actual verified single Goauthy audience, not the legacy app-ID projection. Runtime authentication retains global `GRANT_APP_AUTH_KEY` plus configured PEP ID/provider binding; no per-PEP key or automatic OAuth client/application provisioning is introduced. Only a matching Exposure v2 candidate can consume this contract. The table's legacy `application` authentication label for decide does not require an application record in explicit user mode. See the [principal specification](principal-user-authz-spec.md) rather than treating the candidate as released support.
 
 Current learner routing rejects both `POST /api/v1/me/ensure` and `GET /api/v1/me` with HTTP 503 and `read replica only serves capability decisions and catalogs`. The legacy `false` registration flag for `GET /api/v1/me` does not override this server-level restriction.
 

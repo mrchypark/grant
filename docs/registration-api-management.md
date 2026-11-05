@@ -77,6 +77,10 @@ Provider·역할·앱의 `GET .../actions` 응답에서 `ETag`를 얻는다. 전
 
 PEP는 판정을 요청하는 배포 인스턴스의 신뢰 경계를 식별한다. 개발자의 Application 등록과 구분하여 배포 저장소의 선언 파일로 관리하고, 운영자가 private `PUT /ops/providers/{providerId}/enforcers/{pepClientId}`에 적용한다. Pod 시작 때 자동 재등록하지 않아 운영자가 비활성화한 바인딩을 되살리지 않는다. `/ops`와 bootstrap은 관리 Exposure 카탈로그에서 제외하고 master key로만 호출한다.
 
+후보 계약은 같은 private 경로의 master 전용 GET으로 비활성·만료 PEP나 활성 catalog 부재에도 저장 정책과 `ETag`를 조회한다. PUT은 `authorizationMode`, `lifecycle`, 선택적 `validUntil`을 받는다. 생성에는 `If-None-Match: *`, 갱신에는 GET의 `ETag`를 담은 `If-Match`가 필요하며 누락은 428, stale은 412다. 서버 기본 모드는 `application`이며 명시적 `user`는 앱 레코드 없이 사용자·membership·RBAC를 검사한다. 과거 저장 null은 migration에서 기본값을 적용하지만 현대 PUT null은 거부한다.
+
+user catalog만 mode·revision을 추가하고 user decide는 `wireVersion: 2`와 `pepPolicyRevision`을 요구한다. legacy 응답은 새 필드를 모두 생략하며 일치하는 Exposure v2 후보만 사용한다. 사용자 audience는 실제 검증된 Goauthy audience이며 legacy app-ID 의미와 구분한다. 기존 전역 `GRANT_APP_AUTH_KEY`와 configured PEP ID를 유지하고 PEP별 키·OAuth client·application을 자동 생성하지 않는다. 발행 v0.7.0은 새 모드를 지원하지 않는다. 전체 계약은 [principal 명세](principal-user-authz-spec.md)를 따르며, 이 후보 문서는 CI·런타임 PASS를 주장하지 않는다.
+
 ## 등록 이후의 관리
 
 [수명주기 전체 계약](api-lifecycle.md)의 조직 생성·목록·프로필, 구성원 제거, 앱 상태·삭제, 역할 수정·삭제 및 관리자 동의 철회 경로를 사용한다. `POST /api/v1/admin/orgs`는 기존 활성 `ownerUserId`에 owner membership과 조직 범위 owner Binding을 원자 생성한다. 호출자를 암묵적으로 owner로 만들지 않는다.

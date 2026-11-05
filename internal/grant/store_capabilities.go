@@ -65,8 +65,27 @@ func capabilityCatalogAssertion(provider string, generation uint64, count int64)
 }
 
 func (s *Store) UpsertProviderPepClient(ctx context.Context, p, id, actor string, in UpsertProviderPepClient) (ProviderPepClient, error) {
+	return s.upsertProviderPepClient(ctx, p, id, actor, in, nil)
+}
+
+// A zero revision creates only; a positive revision replaces that exact policy.
+// The legacy wrapper is reserved for existing internal/bootstrap callers.
+func (s *Store) UpsertProviderPepClientConditional(ctx context.Context, p, id, actor string, in UpsertProviderPepClient, expectedRevision *int64) (ProviderPepClient, error) {
+	if expectedRevision == nil {
+		return ProviderPepClient{}, serviceError(428, "PEP policy precondition required")
+	}
+	if *expectedRevision < 0 {
+		return ProviderPepClient{}, serviceError(400, "invalid PEP policy precondition")
+	}
+	return s.upsertProviderPepClient(ctx, p, id, actor, in, expectedRevision)
+}
+
+func (s *Store) upsertProviderPepClient(ctx context.Context, p, id, actor string, in UpsertProviderPepClient, expectedRevision *int64) (ProviderPepClient, error) {
 	if !capabilityToken(p) || !capabilityToken(id) || (in.Lifecycle != "active" && in.Lifecycle != "disabled" && in.Lifecycle != "deleted") {
 		return ProviderPepClient{}, serviceError(422, "invalid PEP client")
+	}
+	if in.AuthorizationMode != nil && *in.AuthorizationMode != "application" && *in.AuthorizationMode != "user" {
+		return ProviderPepClient{}, serviceError(422, "invalid PEP authorization mode")
 	}
 	if in.ValidUntil != nil {
 		t, e := time.Parse(time.RFC3339Nano, *in.ValidUntil)
@@ -76,14 +95,53 @@ func (s *Store) UpsertProviderPepClient(ctx context.Context, p, id, actor string
 		v := t.UTC().Format("2006-01-02T15:04:05.000000000Z")
 		in.ValidUntil = &v
 	}
-	now := nowString()
+	now, receipt := nowString(), requestID()
 	ss := []Statement{assertion("SELECT 1 WHERE EXISTS(SELECT 1 FROM service_providers WHERE id=? AND active=1) AND NOT EXISTS(SELECT 1 FROM provider_pep_clients WHERE pep_client_id=? AND provider_id<>?)", p, id, p),
-		{SQL: "INSERT INTO provider_pep_clients(pep_client_id,application_id,provider_id,lifecycle,valid_until,created_at,updated_at) VALUES(?,NULL,?,?,?,?,?) ON CONFLICT(pep_client_id) DO UPDATE SET lifecycle=excluded.lifecycle,valid_until=excluded.valid_until,updated_at=excluded.updated_at", Args: []any{id, p, in.Lifecycle, in.ValidUntil, now, now}},
-		{SQL: "INSERT INTO provider_pep_client_receipts(receipt_id,pep_client_id,application_id,provider_id,lifecycle,valid_until,changed_at,changed_by) VALUES(?,?,NULL,?,?,?,?,?)", Args: []any{requestID(), id, p, in.Lifecycle, in.ValidUntil, now, actor}}}
+		{SQL: `INSERT INTO provider_pep_clients(pep_client_id,application_id,provider_id,lifecycle,valid_until,created_at,updated_at,authorization_mode,policy_revision)
+ VALUES(?,NULL,?,?,?,?,?,COALESCE(?,'application'),1)
+ ON CONFLICT(pep_client_id) DO UPDATE SET lifecycle=excluded.lifecycle,valid_until=excluded.valid_until,updated_at=excluded.updated_at,
+ authorization_mode=COALESCE(?,provider_pep_clients.authorization_mode),policy_revision=provider_pep_clients.policy_revision+1
+ WHERE provider_pep_clients.provider_id=excluded.provider_id AND provider_pep_clients.policy_revision<9223372036854775807`, Args: []any{id, p, in.Lifecycle, in.ValidUntil, now, now, in.AuthorizationMode, in.AuthorizationMode}, ExpectedRowsAffected: requireOne()},
+		{SQL: `INSERT INTO provider_pep_client_receipts(receipt_id,pep_client_id,application_id,provider_id,lifecycle,valid_until,changed_at,changed_by,authorization_mode,policy_revision)
+ SELECT ?,pep_client_id,application_id,provider_id,lifecycle,valid_until,updated_at,?,authorization_mode,policy_revision
+ FROM provider_pep_clients WHERE provider_id=? AND pep_client_id=?`, Args: []any{receipt, actor, p, id}, ExpectedRowsAffected: requireOne()}}
+	if expectedRevision != nil {
+		ss = append([]Statement{assertion(`SELECT 1 WHERE
+ (?=0 AND NOT EXISTS(SELECT 1 FROM provider_pep_clients WHERE pep_client_id=?)) OR
+ (? > 0 AND EXISTS(SELECT 1 FROM provider_pep_clients WHERE provider_id=? AND pep_client_id=? AND policy_revision=?))`,
+			*expectedRevision, id, *expectedRevision, p, id, *expectedRevision)}, ss...)
+	}
 	if e := s.Transaction(ctx, ss); e != nil {
+		if expectedRevision != nil && strings.Contains(e.Error(), "transaction rejected") {
+			return ProviderPepClient{}, serviceError(412, "PEP policy precondition failed")
+		}
 		return ProviderPepClient{}, capabilityWriteError(e)
 	}
-	return s.ProviderPepClient(ctx, p, id)
+	// Read this write's receipt, rather than a possibly newer concurrent policy.
+	rows, e := s.Query(ctx, ReadStrong, `SELECT r.pep_client_id,r.application_id,r.provider_id,r.lifecycle,r.valid_until,
+ r.authorization_mode,r.policy_revision,p.created_at,r.changed_at AS updated_at
+ FROM provider_pep_client_receipts r JOIN provider_pep_clients p ON p.pep_client_id=r.pep_client_id AND p.provider_id=r.provider_id
+ WHERE r.receipt_id=?`, receipt)
+	if e != nil {
+		return ProviderPepClient{}, e
+	}
+	if len(rows) != 1 {
+		return ProviderPepClient{}, serviceError(503, "PEP policy result unavailable")
+	}
+	return decodeRow[ProviderPepClient](rows[0])
+}
+
+// ProviderPepClientAdmin reads durable policy even when its provider or PEP is
+// disabled, expired or deleted, and does not require an active capability catalog.
+func (s *Store) ProviderPepClientAdmin(ctx context.Context, p, id string) (ProviderPepClient, error) {
+	rows, err := s.Query(ctx, ReadStrong, "SELECT * FROM provider_pep_clients WHERE provider_id=? AND pep_client_id=?", p, id)
+	if err != nil {
+		return ProviderPepClient{}, err
+	}
+	if len(rows) != 1 {
+		return ProviderPepClient{}, serviceError(404, "PEP policy not found")
+	}
+	return decodeRow[ProviderPepClient](rows[0])
 }
 func (s *Store) ProviderPepClient(ctx context.Context, p, id string) (ProviderPepClient, error) {
 	r, e := s.Query(ctx, ReadStrong, "SELECT pc.* FROM provider_pep_clients pc JOIN service_providers sp ON sp.id=pc.provider_id AND sp.active=1 WHERE pc.provider_id=? AND pc.pep_client_id=?", p, id)

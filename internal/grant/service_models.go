@@ -101,6 +101,8 @@ type HttpCapabilityResourceEvidence struct {
 }
 
 type HttpCapabilityDecisionInput struct {
+	WireVersion              uint64                           `json:"wireVersion,omitempty"`
+	PEPPolicyRevision        int64                            `json:"pepPolicyRevision,omitempty"`
 	ProviderID               string                           `json:"providerId"`
 	PEPClientID              string                           `json:"pepClientId"`
 	CatalogGeneration        uint64                           `json:"catalogGeneration"`
@@ -159,6 +161,8 @@ type HttpBatchChild struct {
 }
 
 type HttpCapabilityDecision struct {
+	WireVersion              uint64           `json:"wireVersion,omitempty"`
+	PEPPolicyRevision        int64            `json:"pepPolicyRevision,omitempty"`
 	Allowed                  bool             `json:"allowed"`
 	Reason                   string           `json:"reason"`
 	ProviderID               string           `json:"providerId"`
@@ -231,4 +235,8 @@ type ExternalIdentity struct {
 	Email                              *string
 	DisplayName                        string
 	Active                             bool
+	// ClientID retains its legacy application meaning. These are verified token claims.
+	TokenClientID, TokenAudience string
+	// UserInfoVerified records same-sub UserInfo success, not a human-user classification.
+	UserInfoVerified bool
 }
