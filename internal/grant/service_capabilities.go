@@ -184,6 +184,9 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if org == "" && cap.OrganizationContext != "optional" {
 		return HttpCapabilityDecision{}, serviceError(400, "organization context is required")
 	}
+	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
+	platformManagementOrgRequired := r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
+		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID)
 	if pep.AuthorizationMode == "user" {
 		identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity)
 		if !ok {
@@ -192,6 +195,9 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 		c, e := s.resolveLocalUserAuthorizationContext(ctx, identity, org)
 		if e != nil {
 			return HttpCapabilityDecision{}, e
+		}
+		if platformManagementOrgRequired {
+			return httpCapabilityDecisionResult(r, c, *cap, pep, false, "platform_management_organization_required", nil), nil
 		}
 		return s.decideUserHTTPCapability(ctx, token, org, r, pep, *cap, c)
 	}
@@ -232,7 +238,6 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	}
 	var scope *HttpRecordScope
 	allowed, reason := false, "denied"
-	managementRoute, managementKnown := LookupManagementRoute(cap.Method, cap.PathTemplate)
 	if orglessOnboarding {
 		allowed, reason = true, "management_onboarding"
 	} else if trustedTenantManagement {
@@ -241,8 +246,7 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 			return HttpCapabilityDecision{}, e
 		}
 		allowed, reason = len(decisions) == 1 && decisions[0].Allowed, "trusted_tenant_management"
-	} else if r.ProviderID == "grant-management" && managementKnown && managementRoute.Platform &&
-		(s.cfg.Security.ManagementOrganizationID == "" || org != s.cfg.Security.ManagementOrganizationID) {
+	} else if platformManagementOrgRequired {
 		allowed, reason = false, "platform_management_organization_required"
 	} else if r.ResponseDigest != "" {
 		allowed, reason, err = s.responseDecision(ctx, token, org, r, c)

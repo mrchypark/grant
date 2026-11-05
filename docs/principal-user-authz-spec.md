@@ -275,6 +275,8 @@ store 담당자는 typed mode·revision·append-only migration의 store 파일�
 
 ## 합의와 미검증 상태 및 참조
 
+Grant 자체 관리 upstream에는 별도 최소 수정이 필요하다. 전달된 근거에 따르면 `NativeAuthorizePlatformManagement`의 무조건 application 검사가 apps=0 요청을 막았으며 generic real-PDP/business-mock 시험은 이 경로를 입증하지 못했다. 검토 중인 소스 의존성은 기존 canonical `grant-management` provider와 configured PEP ID가 일치하는 활성 explicit-user 정책만 선택하는 native selector 및 user PDP의 동일한 ManagementOrg 검사다. 두 경로 모두 설정된 관리 조직·fenced Goauthy 사용자·활성 membership·정확한 platform RBAC를 요구하며 application만 생략한다. PEP 부재·noncanonical·application 모드는 legacy admission을 유지하고 disabled canonical user는 거부한다. 이는 Grant 자체 control plane의 정책이며 업무 앱 이름을 하드코딩하거나 새 헤더·플래그·승인·앱 자동 생성을 추가하지 않는다. Exposure는 원래 Bearer/org만 upstream에 전달하고 master/AppAuthKey는 전달하지 않는다. AppAuthKey는 private PDP에만 사용한다. 동일 Grant 서버를 upstream/PDP로 사용하는 apps=0 native GET 200/body, wrong-org binding 및 역할 회수의 403·upstream 호출 수 불변은 [추가 interop 수용 조건](http-capabilities.md#candidate-grant-native-upstream-verification)이며 소스 검토와 CI는 대기 중이다.
+
 사용자는 단계별 구현을 승인했다. Exposure 합의는 기존 compact JWT 입력, 검증되지 않은 힌트와 Grant introspection 권위, legacy 필드 생략, user v2·revision 결속, 기존 digest 공식 및 기존 전역 PEP 키 유지다.
 새 mode/version 설계나 추가 플랫폼 필드는 만들지 않는다. 상위 세션의 구현 후 문서 검토와 양쪽 계약 시험은 남아 있다.
 Goauthy v0.3.9 사용자 발급 계약 선행 조건은 OWNER-VERIFIED 근거로 확인되었다. 실제 issuer 배포 버전·cloud PASS와 Grant·Exposure 양쪽 릴리스 벡터 적격성은 여전히 미검증이다. Grant PR #14의 핵심 구현은 CI bugfix가 남아 있으며 구현·런타임 PASS를 주장하지 않는다. 전달된 Exposure 후보 `b535…`의 상태를 이 증거로 승격하지 않으며 현재 최소 프로토콜을 유지한다.

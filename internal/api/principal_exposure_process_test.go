@@ -140,6 +140,49 @@ func TestPrincipalExposureProcess(t *testing.T) {
 		}
 		f.assertNoApplications(t)
 	})
+	t.Run("actual Grant management upstream", func(t *testing.T) {
+		f := newPrincipalExposureSystem(t, ctx)
+		digest := f.publishManagement(t)
+		var fault atomic.Int32
+		relay := f.decisionRelay(t, &fault)
+		origin := f.startExposure(t, binary, relay.URL, digest, false)
+		path := "/api/v1/admin/providers/grant-management/http-capability-active"
+		request := func(org string, want int) {
+			t.Helper()
+			before, decisions := f.upstreamHits.Load(), f.decisions.Load()
+			status, body := principalExposureResponse(t, ctx, origin+path, f.tokens["user"], org)
+			if status != want {
+				t.Fatalf("native management status=%d want=%d body=%s", status, want, body)
+			}
+			var delta int64
+			if want == http.StatusOK {
+				delta = 1
+				var catalog grant.AdminHttpCapabilityCatalog
+				if err := json.Unmarshal(body, &catalog); err != nil {
+					t.Fatal(err)
+				}
+				if catalog.CatalogDigest != digest || len(catalog.Capabilities) != 1 || catalog.Capabilities[0].ActionID == nil || *catalog.Capabilities[0].ActionID != "grant-management.admin.catalog.read" {
+					t.Fatalf("unexpected native management catalog: %s", body)
+				}
+			}
+			if got := f.upstreamHits.Load() - before; got != delta {
+				t.Fatalf("native management upstream delta=%d want=%d", got, delta)
+			}
+			if got := f.decisions.Load() - decisions; got != 1 {
+				t.Fatalf("real Grant decision requests=%d want=1", got)
+			}
+			f.assertNoApplications(t)
+		}
+		request("fixture-owner", http.StatusOK)
+		// The other organization has active membership and the same platform role.
+		// Configuration must still prevent tenant bindings from granting access.
+		request("other-org", http.StatusForbidden)
+		result, err := f.store.Exec(ctx, "UPDATE role_bindings SET state='revoked' WHERE id='fixture-management-reader' AND state='active'")
+		if err != nil || result != 1 {
+			t.Fatalf("revoke platform role: affected=%d err=%v", result, err)
+		}
+		request("fixture-owner", http.StatusForbidden)
+	})
 	t.Run("legacy application", func(t *testing.T) {
 		f := newPrincipalExposureSystem(t, ctx)
 		app := grant.Application{ID: "unused-legacy-application", OrganizationID: "fixture-owner", Slug: "legacy", Name: "Legacy", ApplicationType: "confidential", AppType: "server", FirstParty: true, ConsentPolicy: "auto_approve", Active: true, ProvisioningStatus: "ready", CreatedByUserID: "fixture-owner"}
@@ -168,6 +211,7 @@ type principalExposureSystem struct {
 	ctx                                     context.Context
 	config                                  grant.Config
 	mode                                    string
+	providerID, providerOrigin              string
 	store                                   *grant.Store
 	grantServer, issuer, upstream           *httptest.Server
 	tokens                                  map[string]string
@@ -177,7 +221,7 @@ type principalExposureSystem struct {
 
 func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExposureSystem {
 	t.Helper()
-	f := &principalExposureSystem{ctx: ctx, tokens: make(map[string]string)}
+	f := &principalExposureSystem{ctx: ctx, providerID: "fixture-provider", tokens: make(map[string]string)}
 	// A compact JWT is an untrusted Exposure parsing hint. Grant authenticates
 	// against this server's token lookup, not against those payload claims.
 	variants := map[string]principalExposureClaims{
@@ -239,7 +283,7 @@ func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExp
 	}
 	trustLocalIssuerForGrantAPI(t, f.issuer.Certificate())
 	cfg := grant.Config{
-		Security: grant.SecurityConfig{BootstrapUserID: "fixture-owner", MasterKey: "fixture-master", AppAuthKey: "fixture-app-key", HTTPCapabilityPEPClientID: "fixture-pep"},
+		Security: grant.SecurityConfig{BootstrapUserID: "fixture-owner", MasterKey: "fixture-master", AppAuthKey: "fixture-app-key", HTTPCapabilityPEPClientID: "fixture-pep", ManagementOrganizationID: "fixture-owner"},
 		Auth:     grant.AuthConfig{ProviderMode: "goauthy", Goauthy: &grant.GoauthyConfig{Issuer: f.issuer.URL, IntrospectionClientID: "fixture-introspector", IntrospectionClientSecret: "fixture-secret", ExpectedClientID: "fixture-login", Resource: "https://grant.example.test/", ApplicationID: "unused-legacy-application", RequiredScopes: []string{"openid", "grant"}}},
 		Database: grant.DatabaseConfig{DataDir: t.TempDir(), DefaultReadConsistency: grant.ReadStrong},
 	}
@@ -275,13 +319,90 @@ func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExp
 		}
 	}
 	f.assertNoApplications(t)
-	f.grantServer = principalExposureServer(t, ctx, New(grant.NewService(cfg, store), false), false)
+	api := New(grant.NewService(cfg, store), false)
+	f.grantServer = principalExposureServer(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/providers/grant-management/http-capability-active" {
+			f.upstreamHits.Add(1)
+			if r.Header.Get("X-Grant-Master-Key") != "" || r.Header.Get("Authorization") != "Bearer "+f.tokens["user"] {
+				t.Error("native management upstream must receive only the forwarded user credential")
+			}
+		}
+		api.ServeHTTP(w, r)
+	}), false)
 	f.upstream = principalExposureServer(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.upstreamHits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"path": r.URL.Path})
 	}), false)
+	f.providerOrigin = f.upstream.URL
 	return f
+}
+
+func (f *principalExposureSystem) publishManagement(t *testing.T) string {
+	t.Helper()
+	f.providerID, f.providerOrigin, f.mode = "grant-management", f.grantServer.URL, "user"
+	stage, actions, err := grant.ManagementCatalog(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the published generator's exact contract; only narrow the catalog.
+	var selected []grant.HttpCapability
+	for _, cap := range stage.Capabilities {
+		if cap.Method == http.MethodGet && cap.PathTemplate == "/api/v1/admin/providers/{providerId}/http-capability-active" {
+			selected = append(selected, cap)
+		}
+	}
+	if len(selected) != 1 || selected[0].ActionID == nil || *selected[0].ActionID != "grant-management.admin.catalog.read" || selected[0].Resource == nil || selected[0].Resource.ResourceType != "platform" || selected[0].Resource.ID.Kind != "constant" || selected[0].Resource.ID.Value != "grant" {
+		t.Fatal("management generator must supply the exact platform catalog-read contract")
+	}
+	stage.Capabilities = selected
+	stage.CatalogDigest, err = grant.HttpCapabilityCatalogDigest(f.providerID, stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		"INSERT INTO service_providers(id,name,active,created_at,updated_at) VALUES('grant-management','Grant Management',1,'now','now')",
+		"INSERT INTO organizations(id,name,created_at,updated_at) VALUES('other-org','Other','now','now')",
+		"INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES('fixture-other-member','other-org','fixture-user','member','active','now','now')",
+		"INSERT INTO roles(id,organization_id,code,name,created_at,updated_at) VALUES('fixture-platform-reader',NULL,'fixture-platform-reader','Platform Reader','now','now')",
+	} {
+		if _, err := f.store.Exec(f.ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	found := false
+	for _, action := range actions {
+		if action.ID != *selected[0].ActionID {
+			continue
+		}
+		found = true
+		if _, err := f.store.Exec(f.ctx, "INSERT INTO actions(id,provider_id,code,name,risk_level,visibility_granting,grantable_to_applications,created_at,updated_at) VALUES(?,?,?,?,?,0,?,'now','now')", action.ID, action.ProviderID, action.Code, action.Name, action.RiskLevel, action.GrantableToApplications); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !found {
+		t.Fatal("management generator did not supply catalog-read action metadata")
+	}
+	if _, err := f.store.Exec(f.ctx, "INSERT INTO role_actions(role_id,action_id) VALUES('fixture-platform-reader','grant-management.admin.catalog.read')"); err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range []struct{ id, org string }{{"fixture-management-reader", "fixture-owner"}, {"fixture-other-management-reader", "other-org"}} {
+		if _, err := f.store.Exec(f.ctx, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES(?,'user','fixture-user',?,'grant-management','platform','grant','fixture-platform-reader','active','fixture-owner','now','now')", binding.id, binding.org); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := grant.NewService(f.config, f.store)
+	if _, err := svc.SetProviderPepClientAdmin(f.ctx, f.providerID, "fixture-pep", grant.UpsertProviderPepClient{Lifecycle: "active", AuthorizationMode: &f.mode}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.StageHttpCapabilityGenerationAdmin(f.ctx, f.providerID, stage); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ActivateHttpCapabilityGenerationAdmin(f.ctx, f.providerID, grant.ActivateHttpCapabilityGeneration{TargetGeneration: 1, TargetCatalogDigest: stage.CatalogDigest}); err != nil {
+		t.Fatal(err)
+	}
+	f.assertNoApplications(t)
+	return stage.CatalogDigest
 }
 
 func bearerPrincipalExposureToken(value string) string {
@@ -476,8 +597,8 @@ func (f *principalExposureSystem) startExposure(t *testing.T, binary, grantURL, 
 	}
 	settings := map[string]string{
 		"PROXY_ENABLED": "true", "DATA_ADDR": data, "ADMIN_ADDR": admin,
-		"GRANT_LEARNER_URL": grantURL, "PROVIDER_ORIGIN": f.upstream.URL,
-		"PROVIDER_ID": "fixture-provider", "PEP_CLIENT_ID": "fixture-pep", "EXPECTED_CATALOG_DIGEST": digest,
+		"GRANT_LEARNER_URL": grantURL, "PROVIDER_ORIGIN": f.providerOrigin,
+		"PROVIDER_ID": f.providerID, "PEP_CLIENT_ID": "fixture-pep", "EXPECTED_CATALOG_DIGEST": digest,
 		"GRANT_APP_AUTH_KEY": "fixture-app-key", "AUTHN_LIMITER_KEY": strings.Repeat("f", 40),
 		"PROVIDER_AUTHORIZATION_MODE": "forward-user", "CREDENTIAL_MODE": "goauthy", "GOAUTHY_ISSUER": f.issuer.URL,
 	}
@@ -583,6 +704,12 @@ func principalExposureServer(t *testing.T, ctx context.Context, handler http.Han
 
 func principalExposureRequest(t *testing.T, ctx context.Context, target, token, org string) int {
 	t.Helper()
+	status, _ := principalExposureResponse(t, ctx, target, token, org)
+	return status
+}
+
+func principalExposureResponse(t *testing.T, ctx context.Context, target, token, org string) (int, []byte) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -596,10 +723,10 @@ func principalExposureRequest(t *testing.T, ctx context.Context, target, token, 
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	_, err = io.Copy(io.Discard, io.LimitReader(res.Body, 8192))
+	body, err := io.ReadAll(io.LimitReader(res.Body, 8192))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("GET %s status=%d", target, res.StatusCode)
-	return res.StatusCode
+	return res.StatusCode, body
 }
