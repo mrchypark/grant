@@ -5,9 +5,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/mrchypark/rhiza"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	"io"
 	"net/url"
@@ -307,6 +309,8 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 		return fmt.Errorf("restore requires a new, absent data directory")
 	}
 	clusterID := "offline"
+	phase := "target_binding"
+	var diagnosticCause error
 	pendingBody := []byte(snap.Digest)
 	if len(cfg.Database.Members) > 0 || len(cfg.Database.Rhiza.Members) > 0 || len(cfg.Database.RemoteNodes) > 0 || (cfg.Database.RuntimeMode != "" && cfg.Database.RuntimeMode != "embedded") || cfg.Database.LocalNodeRole == "learner" || cfg.Database.Rhiza.ObjStoreProvider != "" || cfg.Database.Rhiza.ObjStoreEndpoint != "" || cfg.Database.Rhiza.ObjStoreDir != "" || cfg.Database.Rhiza.ObjStoreBucket != "" {
 		c, err := singleVoterRestoreConfig(cfg, snap)
@@ -321,7 +325,11 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 		defer func() {
 			if result != nil {
 				// Rhiza may wrap cloud SDK errors containing signed URLs.
-				result = fmt.Errorf("single-voter restore failed; target evidence retained, do not reset or reuse its namespace")
+				cause := result
+				if diagnosticCause != nil {
+					cause = diagnosticCause
+				}
+				result = safeRestoreError(phase, cause)
 			}
 		}()
 		cfg.Database.Rhiza = c
@@ -337,13 +345,16 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 			return err
 		}
 	}
+	phase = "create_directory"
 	if e := os.Mkdir(cfg.Database.DataDir, 0700); e != nil {
 		return e
 	}
 	pending := filepath.Join(cfg.Database.DataDir, "grant-restore-pending.json")
+	phase = "pending_marker"
 	if e := writeDurableExclusive(pending, pendingBody); e != nil {
 		return e
 	}
+	phase = "open_store"
 	s, e := openStore(ctx, cfg, true, nil)
 	if e != nil {
 		return e
@@ -354,13 +365,16 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 			_ = s.Close()
 		}
 	}()
+	phase = "import"
 	if e = s.restoreCanonicalAtomic(ctx, snap, clusterID); e != nil {
 		return e
 	}
+	phase = "verify_export"
 	restored, e := s.ExportSnapshot(ctx)
 	if e != nil {
 		return e
 	}
+	phase = "verify_tables"
 	for i, t := range restored.Tables {
 		expected, err := restoredTableDigest(snap.Tables[i], snap.SchemaDigest)
 		if err != nil {
@@ -370,21 +384,27 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 			return fmt.Errorf("restore digest verification failed: %s", t.Name)
 		}
 	}
+	phase = "verify_schema"
 	if e = s.VerifySchema(ctx); e != nil {
 		return e
 	}
+	phase = "verify_receipt"
 	receipt, e := s.Query(ctx, ReadStrong, "SELECT snapshot_digest,cluster_id FROM grant_restore_activation WHERE id='active'")
 	if e != nil || len(receipt) != 1 || rowString(receipt[0], "snapshot_digest") != snap.Digest || rowString(receipt[0], "cluster_id") != clusterID {
+		diagnosticCause = e
 		return fmt.Errorf("restore activation receipt verification failed")
 	}
+	phase = "close"
 	closeErr := s.Close()
 	closed = true
 	if closeErr != nil {
+		diagnosticCause = closeErr
 		return fmt.Errorf("restore close failed; pending evidence retained")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	phase = "finalize_marker"
 	marker := map[string]string{"sourceDigest": snap.Digest, "verifiedAt": nowString(), "backend": "rhiza", "clusterId": clusterID}
 	b, _ := json.Marshal(marker)
 	if e = writeDurableExclusive(filepath.Join(cfg.Database.DataDir, "grant-cutover-verified.json"), b); e != nil {
@@ -394,6 +414,34 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 		return e
 	}
 	return syncDirectory(cfg.Database.DataDir)
+}
+
+// Only fixed phase names and recognized public sentinels may reach this message.
+// Never wrap the cause: native errors can contain credentials or signed URLs.
+func safeRestoreError(phase string, cause error) error {
+	switch phase {
+	case "target_binding", "create_directory", "pending_marker", "open_store", "import", "verify_export", "verify_tables", "verify_schema", "verify_receipt", "close", "finalize_marker":
+	default:
+		phase = "unknown"
+	}
+	class := "unknown"
+	for _, candidate := range []struct {
+		err  error
+		name string
+	}{
+		{context.DeadlineExceeded, "deadline"},
+		{context.Canceled, "canceled"},
+		{rhiza.ErrNotReady, "not_ready"},
+		{rhiza.ErrQuorumUnavailable, "quorum_unavailable"},
+		{rhiza.ErrDurabilityUnavailable, "durability_unavailable"},
+		{rhiza.ErrCommitUnknown, "commit_unknown"},
+	} {
+		if errors.Is(cause, candidate.err) {
+			class = candidate.name
+			break
+		}
+	}
+	return fmt.Errorf("single-voter restore failed; target evidence retained, do not reset or reuse its namespace; phase=%s error_class=%s", phase, class)
 }
 
 func syncDirectory(path string) error {

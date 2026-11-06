@@ -54,7 +54,7 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 			}
 			marker := c.ObjStorePrefix + "/occupied"
 			put(marker)
-			snap := restoreFrozenSource(t, ctx)
+			snap := largeRestoreFrozenSource(t, ctx)
 			if err := RestoreStoreSnapshot(ctx, cfg, snap); err == nil {
 				t.Fatal("occupied object namespace admitted")
 			}
