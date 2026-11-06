@@ -1,13 +1,52 @@
 # One voter and a passive learner
 
-This runbook specifies **Grant v0.9.0**, pinned to Rhiza v0.21.2.
-[CI run 41985200593](https://github.com/mrchypark/grant/actions/runs/41985200593)
-completed with overall **SUCCESS** for runtime source
-`6c5aef3f756f9c1538be7af305edb7879aaa3d6c`, including Go contracts/race tests,
-isolated S3/GCS/Azure restore adapter contracts, native quorum/fresh-cluster
-restore, and native AMD64 container execution under production security limits.
-Record this tested runtime SHA separately from any later documentation-only
-finalization SHA and pin the final published image digest before use.
+## Grant v0.9.1 and verification provenance
+
+The v0.9.1 release target uses Rhiza v0.23.0 in both runtime and member helper.
+[CI 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
+completed with overall **SUCCESS** for exact runtime source
+`8c3dd5d9ff252b033452ea107ec91c0e872ae929`: Go contracts/race, native quorum and
+restore, AMD64 production-security container checks, and local bootstrap passed.
+This documentation-only finalization follows that tested code; record its separate
+commit SHA and the final release/image revision at publication, rather than
+claiming that later documentation commit was separately runtime-tested.
+
+[Baseline artifact 13468575056](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13468575056)
+records the exact v0.9.0 image/OCI source, CGO-disabled linux/amd64 binary and
+cleanup. The required-gate Local probe passed: old CLI synthetic snapshot import,
+new-version same-directory Open, schema/all-31-table digests, new write and reopen.
+The race log shows the required baseline environment and package success; it was
+not a verbose named-test PASS log. This narrow synthetic result does not qualify
+arbitrary old stores, non-Local upgrades, downgrade, rollback or mixed-version peers.
+
+The Rhiza owner confirms that raw `Local: true` recovery can open a new empty
+directory from a complete compatible object archive without an Operator or PVC.
+Grant's existing Local process DR tests cover clean shutdown followed by directory
+loss; they do not establish crash durability or preservation of unarchived async
+acknowledgements. This is distinct from the non-Local import procedure below.
+
+Registered/enrolled/anchored voter recovery retains its identity and admission
+safeguards. For v0.23.0 the owner confirms ordinary Open into a new empty directory
+for an unregistered, unenrolled, unanchored raw single voter with one fixed member,
+using a complete certified object-store checkpoint and tail, without an Operator
+or PVC. Grant's S3/GCS/Azure SDK/emulator tests passed clean close followed by
+same-identity ordinary Open with a new empty directory, schema and all 31 table
+counts/columns/digests preserved, and successful close; see
+[artifact 13467909402](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13467909402).
+The same suite separately passed async writes and learner fence/revocation before
+the cold-open phase. This is clean-close cold DR, not a crash or live-cloud qualification.
+Fence the old writer and keep the exact cluster/member identity and
+archive namespace; do not rewrite identity or allow overlapping writers. Async
+acknowledgements not yet archived are not promised recoverable. GCS unresolved maintenance remains
+fail-closed: do not force-unlock, garbage-collect or rewrite identity to proceed.
+
+## Historical v0.9.0 evidence
+
+Grant v0.9.0 used Rhiza v0.21.2. Its
+[CI 41985200593](https://github.com/mrchypark/grant/actions/runs/41985200593) passed
+for runtime `6c5aef3f756f9c1538be7af305edb7879aaa3d6c`; published source was
+`f0ab0e7684f279dc84f82f22c7537d3679780eb9`. That history is separate from the
+v0.9.1 runtime evidence above.
 
 Actual owner qualification still includes KSA Workload Identity/ADC-backed GCS
 import and cross-Pod learner operation, including HTTPS fence trust, QUIC sync
@@ -23,9 +62,10 @@ second writer or a promotion learner.
 
 ## Artifacts and source freeze
 
-Use a producer-published v0.9.0 image containing this restore implementation,
+Use the producer-published v0.9.1 image containing this restore implementation,
 `/usr/local/bin/grant`, and `/usr/local/bin/replica-members`. Pin its image digest
-and source provenance. The v0.8.0 image has the member helper but not this new
+and source provenance. Until v0.9.1 publication and digest verification complete,
+do not treat the planned image tag as available. The v0.8.0 image has the member helper but not this
 single-voter cloud-import admission. Do not build supplier source on the consumer
 host or use `go run` as a setup step.
 
@@ -205,8 +245,13 @@ from configuration overrides. The equivalent environment value is
 example, one minute is JSON integer `60000000000`, or environment value
 `RHIZA_OBJSTORE_SYNC_INTERVAL=1m`. Choose the batching interval for the deployment;
 it is not an RPO bound or proof that no other path flushes storage. This restart
-contract is limited to the fresh, unregistered/unanchored single-voter target;
-it does not authorize changing a registered generation's durability. Preserve
+contract is limited to the fresh, unregistered/unanchored single-voter target.
+For v0.23.0 the owner confirms the early raw exception only when `Members <= 1`,
+`clusterData == nil`, `localidentity == nil`, and neither enrollment nor prepared
+learner admission applies, before registration is created. That exception retains
+the before-ack seed to async reopen path; it does not authorize a durability change
+for registered, enrolled, managed, prepared or anchored state. This supplier source
+contract is distinct from, and covered by, the bounded three-provider CI execution above. Preserve
 the snapshot's bootstrap identity configuration so startup does not seed a
 different owner. Keep the source installation stopped.
 
@@ -299,9 +344,10 @@ Cut over to one authoritative target only after those checks. Keep the old sourc
 and immutable snapshot stopped for rollback; never maintain two writable copies.
 Post-cutover writes need a separate reverse-migration decision before reverting.
 
-This procedure is a one-time logical import, not automatic recovery after voter
-WAL or whole-directory loss. `emptyDir` and accepted async loss elsewhere do not
-override non-Local identity safeguards. Preserve original voter state across an
-ordinary restart; do not promise cold replacement under the same identity. GCS
+This procedure is a one-time logical import, not an automatic recurring
+snapshot restore after voter directory loss. The v0.23.0 raw-single ordinary-Open
+archive recovery contract is qualified above and must not be confused with stale
+snapshot reseeding or with registered/enrolled/anchored recovery. The one-time
+deployment guard is not silently changed into an automatic recovery controller. GCS
 SDK/emulator contract results also do not establish production-cloud parity,
 cross-Pod TLS/QUIC reachability, or actual learner acceptance.

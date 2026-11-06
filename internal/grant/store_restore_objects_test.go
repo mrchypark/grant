@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,9 +89,12 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			voterClosed := false
 			t.Cleanup(func() {
-				if err := voter.Close(); err != nil {
-					t.Error("voter cleanup failed")
+				if !voterClosed {
+					if err := voter.Close(); err != nil {
+						t.Error("voter cleanup failed")
+					}
 				}
 			})
 			verifyRestoredTables(t, ctx, voter, snap)
@@ -112,9 +116,12 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			learnerClosed := false
 			t.Cleanup(func() {
-				if err := learner.Close(); err != nil {
-					t.Error("learner cleanup failed")
+				if !learnerClosed {
+					if err := learner.Close(); err != nil {
+						t.Error("learner cleanup failed")
+					}
 				}
 			})
 			svc := NewService(learnerCfg, learner)
@@ -174,6 +181,64 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 			}
 			if err := RestoreStoreSnapshot(ctx, cfg, snap); err == nil {
 				t.Fatal("occupied directory/namespace was silently reset")
+			}
+			closeErr := learner.Close()
+			learnerClosed = true
+			if closeErr != nil {
+				t.Fatalf("close learner before archive cold recovery: %v", safeRestoreError("close", closeErr))
+			}
+			beforeClose, err := voter.ExportSnapshot(ctx)
+			if err != nil || len(beforeClose.Tables) != 31 {
+				t.Fatal("archive cold recovery source snapshot unavailable")
+			}
+			// Clean Close publishes the archive. This does not qualify crash
+			// recovery or preservation of unflushed async acknowledgements.
+			closeErr = voter.Close()
+			voterClosed = true
+			if closeErr != nil {
+				t.Fatalf("close voter before archive cold recovery: %v", safeRestoreError("close", closeErr))
+			}
+			coldCfg := cfg
+			coldCfg.Database.DataDir = filepath.Join(t.TempDir(), "cold-target")
+			if _, err := os.Lstat(coldCfg.Database.DataDir); !os.IsNotExist(err) {
+				t.Fatal("archive cold recovery requires an absent target directory")
+			}
+			// Keep the cluster, peer identity, members, async durability and
+			// archive unchanged; use ordinary OpenStore, not logical restore.
+			cold, err := OpenStore(ctx, coldCfg)
+			if err != nil {
+				t.Fatalf("ordinary archive cold recovery open: %v", safeRestoreError("open_store", err))
+			}
+			coldClosed := false
+			t.Cleanup(func() {
+				if !coldClosed {
+					if err := cold.Close(); err != nil {
+						t.Error("cold recovery cleanup failed")
+					}
+				}
+			})
+			if err := cold.VerifySchema(ctx); err != nil {
+				t.Fatal("archive cold recovery schema verification failed")
+			}
+			afterOpen, err := cold.ExportSnapshot(ctx)
+			if err != nil || len(afterOpen.Tables) != 31 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
+				t.Fatal("archive cold recovery canonical inventory changed")
+			}
+			for i, want := range beforeClose.Tables {
+				got := afterOpen.Tables[i]
+				if got.Name != want.Name || got.Count != want.Count || !slices.Equal(got.Columns, want.Columns) || got.Digest != want.Digest {
+					t.Fatalf("archive cold recovery changed canonical table %s", want.Name)
+				}
+			}
+			closeErr = cold.Close()
+			coldClosed = true
+			if closeErr != nil {
+				t.Fatalf("close recovered archive voter: %v", safeRestoreError("close", closeErr))
+			}
+			if evidence := os.Getenv("GRANT_SINGLE_VOTER_RESTORE_EVIDENCE"); evidence != "" {
+				if err := os.WriteFile(filepath.Join(evidence, image.name+"-archive-cold-dr.txt"), []byte("PASS: clean-close archive cold recovery through ordinary OpenStore; 31 canonical tables/counts/columns/digests preserved; async unchanged; no crash/unflushed-ACK guarantee\n"), 0600); err != nil {
+					t.Fatal("cannot preserve archive cold recovery evidence")
+				}
 			}
 			remove(sibling)
 		})

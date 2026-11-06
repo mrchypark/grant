@@ -1,5 +1,21 @@
 # Native Rhiza runtime modes
 
+Grant v0.9.1 targets Rhiza v0.23.0 in both runtime and member helper. Full
+[CI 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
+passed for exact runtime source `8c3dd5d9ff252b033452ea107ec91c0e872ae929`,
+including Go/race, native quorum/restore, production-security AMD64 containers
+and local bootstrap. This documentation-only finalization is a separate revision:
+record its commit SHA and the final release/image revision at publication.
+Use the verified v0.9.1 image digest after publication, not an assumed available tag.
+
+[Artifact 13468575056](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13468575056)
+records the successful required synthetic v0.9.0 CLI-to-v0.23.0 Local retained-store
+probe and cleanup. [Artifact 13467909402](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13467909402)
+records successful S3/GCS/Azure clean-close ordinary cold Open with schema and
+all 31 table counts/columns/digests preserved. Neither qualifies arbitrary old
+non-Local data, mixed-version peers, downgrade, rollback, crash recovery,
+unarchived async acknowledgements, partition fencing or live GCS deployment.
+
 ## Health probes
 
 `GET /healthz` checks only whether the HTTP process is alive and returns HTTP 200
@@ -17,7 +33,15 @@ and consistent local schema reads; it reports `writeReady: false` because replic
 
 ## Configuration
 
-Grant selects Rhiza v0.21.2 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+Grant v0.9.1 source selects Rhiza v0.23.0 and requires Go 1.27.3 or later.
+The supplier confirms a self-contained CGO-disabled Go SDK. Dependency verification
+does not establish old-state or archive compatibility: upgrade and rollback remain
+unqualified beyond the narrow synthetic Local result above. Full CI and that
+retained-directory probe passed; neither proves production non-Local migration.
+The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; the public
+HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or
+split behavior; unsupported combinations fail startup rather than silently changing
+consistency or topology. The following v0.21 sections describe historical contracts.
 
 ### Rhiza v0.21 compatibility
 
@@ -61,7 +85,7 @@ process state. Grant's default configuration does not enable `Local` or supervis
 fencing. Existing lost-WAL voter safeguards still
 apply; upgrading the module does not authorize deleting or reusing a voter directory.
 
-The ordinary embedded configuration accepts Grant aliases for the current candidate. The optional Operator deployment instead uses only native `RHIZA_*` values for generation-owned topology: `RHIZA_NODE_ID`, `RHIZA_DATA_DIR`, `RHIZA_CLUSTER_ID`, `RHIZA_CLUSTER_MEMBERS`, `RHIZA_PEER_TOKENS`, `RHIZA_ADMIN_TOKEN`, `RHIZA_PEER_ADDR`, `RHIZA_BIND_ADDR`, and `RHIZA_ENABLE_RECONFIGURATION`. In that mode, Grant rejects nonempty `GRANT_DATA_DIR`, `GRANT_NODE_ID`, `GRANT_CLUSTER_ID`, `GRANT_PEER_ADDR`, `GRANT_CLUSTER_MEMBERS`, `GRANT_RHIZA_CONFIG_JSON`, `GRANT_RHIZA_REPLICA_CONFIG_JSON`, `GRANT_REMOTE_NODES`, and `GRANT_CLUSTER_RESTORE_SNAPSHOT`. `GRANT_RUNTIME_MODE=embedded`, `GRANT_LOCAL_NODE_ROLE=voter`, `GRANT_RUNTIME_BIND_ADDR`, `GRANT_REMOTE_API_SECRET`, and `GRANT_READ_FENCE_KEY` remain allowed with their existing validation; the runtime secret and fence key must remain distinct from native Rhiza admin and peer credentials. Native `RHIZA_LEARNER` controls learner admission. Three native members start concurrently; the old Grant Hiqlite ordinal-zero lifecycle gate is not used. Rauthy's separate lifecycle remains unchanged.
+The ordinary embedded configuration accepts Grant aliases for v0.9.1. The optional Operator deployment instead uses only native `RHIZA_*` values for generation-owned topology: `RHIZA_NODE_ID`, `RHIZA_DATA_DIR`, `RHIZA_CLUSTER_ID`, `RHIZA_CLUSTER_MEMBERS`, `RHIZA_PEER_TOKENS`, `RHIZA_ADMIN_TOKEN`, `RHIZA_PEER_ADDR`, `RHIZA_BIND_ADDR`, and `RHIZA_ENABLE_RECONFIGURATION`. In that mode, Grant rejects nonempty `GRANT_DATA_DIR`, `GRANT_NODE_ID`, `GRANT_CLUSTER_ID`, `GRANT_PEER_ADDR`, `GRANT_CLUSTER_MEMBERS`, `GRANT_RHIZA_CONFIG_JSON`, `GRANT_RHIZA_REPLICA_CONFIG_JSON`, `GRANT_REMOTE_NODES`, and `GRANT_CLUSTER_RESTORE_SNAPSHOT`. `GRANT_RUNTIME_MODE=embedded`, `GRANT_LOCAL_NODE_ROLE=voter`, `GRANT_RUNTIME_BIND_ADDR`, `GRANT_REMOTE_API_SECRET`, and `GRANT_READ_FENCE_KEY` remain allowed with their existing validation; the runtime secret and fence key must remain distinct from native Rhiza admin and peer credentials. Native `RHIZA_LEARNER` controls learner admission. Three native members start concurrently; the old Grant Hiqlite ordinal-zero lifecycle gate is not used. Rauthy's separate lifecycle remains unchanged.
 
 Single-voter local development can use a filesystem object store. Multiple voters require the shared object-store configuration: `RHIZA_OBJSTORE_PROVIDER`, `ENDPOINT`, `BUCKET`, `PREFIX`, `REGION`, `ACCESS_KEY`, `SECRET_KEY`, and optionally `SESSION_TOKEN` (all prefixed `RHIZA_OBJSTORE_`). The full native configuration can be supplied through `GRANT_RHIZA_CONFIG_JSON`. Use `RHIZA_OBJSTORE_DURABILITY=before-ack` for the provided three-voter deployment. A fresh Rhiza prefix must not overlap a legacy Hiqlite backup prefix.
 
@@ -73,20 +97,35 @@ An embedded native voter may still enable this private runtime transport on TCP 
 
 See [the compatibility inventory](porting-go-compatibility.md) for the exact supported environment mapping and [the migration guide](backup-restore.md) for existing stores. The [old Hiqlite runtime guide](history/hiqlite/runtime-modes.md) is historical documentation, not a native Rhiza configuration recipe.
 
-The corrected native three-voter fixture passes writes, follower strong reads and
-same-directory recovery with the original WAL intact. Cold startup into an empty
+The historical native three-voter fixture passes writes, follower strong reads and
+same-directory recovery with the original WAL intact. For that registered topology, cold startup into an empty
 directory under the same voter identity intentionally fails with `ErrVoterStateLost`.
 The base `emptyDir` deployment cannot recover a replacement under that identity.
 The optional Operator integration instead starts a fresh learner; the local fixture
 verifies promotion, preserved data and new writes. This does not qualify production
 fencing or Kubernetes whole-generation recovery.
 
-Production migration requires either a Rhiza Operator integration with trusted
+For registered/enrolled non-Local recovery, the existing guide requires either a Rhiza Operator integration with trusted
 external fencing or an approved persistent-storage strategy that retains each
 voter's original disk and WAL. Lost-WAL replacement requires a fresh learner,
 fencing and membership reconfiguration when quorum survives, or Operator-managed
 whole-generation recovery. See the upstream [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/recovery.md)
 and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/embedded-operator.md).
+These historical HA paths do not establish requirements for every raw single voter.
+For v0.23.0, the owner confirms raw Local empty-directory recovery from a complete
+compatible archive without an Operator or PVC. The owner also confirms ordinary
+Open into a new empty directory for a raw non-Local single voter with one fixed
+member, no registration/enrollment/anchor, and a complete certified checkpoint
+and tail. This exact raw topology needs neither an Operator nor PVC. Stop the old
+writer and retain the exact identity and archive namespace; overlapping writers,
+unarchived async acknowledgements, uncertain maintenance and anchored recovery
+are outside that qualification. Grant's three-provider clean-close cold-DR tests
+passed in the CI/artifact above; crash and live-cloud behavior remain separate.
+The initial raw before-ack-to-async exception remains available before registration
+or anchoring, excluding enrollment and prepared learners; see the
+[exact runbook conditions](single-voter-learner.md#start-the-sole-voter-and-private-fence-transport).
+GCS unresolved maintenance remains fail-closed; do not force-unlock, GC or rewrite
+identity. Managed generation rules must not be generalized to the raw topology.
 The isolated fixture uses disposable local Versity Gateway; production recovery
 must be rehearsed before traffic cutover.
 
@@ -96,15 +135,15 @@ must be rehearsed before traffic cutover.
 
 ### Local authority PDP
 
-A learner can serve the HTTP capability catalog and decision APIs as a colocated PDP. The data unit consists of an unchanged PocketBase backend, an Exposure sidecar, and one Grant learner holding a Rhiza authority replica. Exposure calls that local PDP; the backend does not call authorization APIs or evaluate policy. The Grant unit consists of the original voter and its Exposure sidecar, which calls the private voter directly for decisions and management requests; it needs no management learner. Published v0.4.1 learners publish only `/healthz`, `/readyz`, `/api/v2/http-capabilities/catalog/{providerId}` and `/api/v2/http-capabilities/decide`. The unreleased candidate additionally admits exactly `POST /api/v1/application-authz/check`, `POST /api/v1/application-authz/batch-check` and `POST /api/v1/application-authz/filter`. Master `/api/v1/authz/*` and administration remain blocked on learners; there is no central runtime control-plane exception. Management writes, bootstrap, identity creation, auth cache persistence, and the Rauthy proxy remain voter-only.
+A learner can serve the HTTP capability catalog and decision APIs as a colocated PDP. In the Exposure/PocketBase arrangement, Exposure calls that local PDP and protects an unchanged backend. Grant v0.9.1 also serves the existing learner application-authorization check/batch/filter routes and the two provider-bound USER batch/filter routes introduced in v0.9.0; see [provider-user authorization](provider-user-authorization.md). `/healthz` and `/readyz` remain available. Master `/api/v1/authz/*` and administration remain blocked on learners; there is no central runtime control-plane exception. Management writes, bootstrap, identity creation, auth cache persistence, and the Rauthy proxy remain voter-only.
 
 Each catalog or decision request first obtains a quorum-backed applied slot from the voter's private `POST /read-fence`, synchronizes its replica, then reads locally. Every SQL result must report the same applied slot at or above that fence; a changed snapshot triggers at most three attempts within a three-second deadline. PocketBase/Rauthy verification occurs once, outside retries, and only existing scoped identities are accepted. A disconnected voter fence, failed synchronization, or unstable snapshot returns unavailable; local readiness or a recent sync timestamp alone never authorizes access. Decisions already issued retain their existing short expiration.
 
-For the unreleased generic application-authorization reads, external identity verification occurs once before the learner's three-second fence/catch-up/retry budget. The complete local identity mapping, active user, configured active/ready application and organization context, and every membership, RBAC, application-admission and consent evaluation use one accepted Grant applied slot across the entire request. A slot change retries the whole local operation, without repeating external verification or returning partial decisions. This detects snapshot movement; it does not lock the database. IdP verification is not part of a distributed snapshot. Voters retain their legacy individual strong reads, without the learner's whole-request slot guarantee.
+For generic application-authorization reads, external identity verification occurs once before the learner's three-second fence/catch-up/retry budget. The complete local identity mapping, active user, configured active/ready application and organization context, and every membership, RBAC, application-admission and consent evaluation use one accepted Grant applied slot across the entire request. A slot change retries the whole local operation, without repeating external verification or returning partial decisions. This detects snapshot movement; it does not lock the database. IdP verification is not part of a distributed snapshot. Voters retain their legacy individual strong reads for application-authorization routes; provider-bound USER reads instead require the fenced snapshot on both voters and learners.
 
-The generic wire format and 1,000-item/2 MiB limits are unchanged. Learners alone apply closed nested input validation and reject ambiguous duplicate authentication/context headers. Filter accepts caller-supplied candidates and returns allowed IDs in input order; it provides no inventory, continuation token, authorized total, expiry lease or effect fence. Recheck protected operations after listing. See [the HTTP contract](porting-go-http-contract.md#unreleased-learner-application-authorization) for headers, JSON and validation details. The engine remains pinned to Rhiza v0.21.2.
+The generic wire format and 1,000-item/2 MiB limits are unchanged. Application-authorization learners apply closed nested validation; provider-bound USER routes apply closed DTOs and duplicate-header rejection on both voters and learners. Filter accepts caller-supplied candidates and returns allowed IDs in input order; it provides no inventory, continuation token, authorized total, expiry lease or effect fence. Recheck protected operations after listing. See [the application HTTP contract](porting-go-http-contract.md#unreleased-learner-application-authorization) and [USER contract](provider-user-authorization.md) for headers, JSON and validation details. The current engine is Rhiza v0.23.0.
 
-Configured issuer, client, audience and scope checks remain trust boundaries. A different deployment issuer denotes a different qualified identity; Grant does not automatically alias subjects or merge accounts by email. This candidate adds no issuer-registration feature, OAuth-client provisioning or missing-account allow fallback. Existing local identity mapping and compatible configured application readiness remain prerequisites.
+Configured issuer, client, audience and scope checks remain trust boundaries. A different deployment issuer denotes a different qualified identity; Grant does not automatically alias subjects or merge accounts by email. This release adds no issuer-registration feature, OAuth-client provisioning or missing-account allow fallback. Existing local identity mapping is required; application readiness applies to application mode, not explicit provider-bound USER mode.
 
 Generic learner application reads use uncached, nonwriting external verification. In particular, Rauthy bypasses both its memory cache and replicated identity cache, even with a positive cache TTL; revoked tokens and an unavailable IdP cannot fall back to a cached allow. Voter Rauthy caching remains unchanged. Goauthy and PocketBase retain online validation.
 
@@ -112,7 +151,16 @@ Configure voters with a private `GRANT_RUNTIME_BIND_ADDR`, a distinct write-capa
 
 Use `scripts/replica-members` with private stdin JSON containing `ClusterID` and native `Members` to derive the public member array. Its output omits voter tokens. Set that array and the sync credential in `GRANT_RHIZA_REPLICA_CONFIG_JSON`; use `GRANT_LOCAL_NODE_ROLE=learner`, unique local data directories/replica IDs, and the same fixed cluster and object-store configuration. Keep `GRANT_CLUSTER_MEMBERS` containing voter tokens only on voters. The helper is a local setup tool, not a network provisioning service.
 
-The image packaging candidate also installs the same helper as `/usr/local/bin/replica-members`. Published v0.5.0 does not contain it. The binary is built from the helper's separate `scripts/replica-members-src` module with its existing dependency pins; neither the cached host launcher nor a Go toolchain is needed in the runtime image. The server entrypoint and existing tools are unchanged. Invoke the helper explicitly with an image containing this packaging change:
+The v0.9.1 image includes `/usr/local/bin/replica-members`, built from its separate
+`scripts/replica-members-src` module pinned to Rhiza v0.23.0 like the runtime.
+The supplier's [v0.19.0](https://github.com/mrchypark/rhiza/tree/v0.19.0) to
+[v0.23.0](https://github.com/mrchypark/rhiza/tree/v0.23.0) source comparison confirms
+unchanged key derivation without trimming, member conversion/URL fallback and
+`ID`/`PeerURL`/32-number `PublicKey` JSON. This is source-confirmed compatibility,
+not a cross-version golden-key runtime test. Transport/profile/ALPN changes remain
+outside that claim: use v0.23.0 for voter, learner and helper together, without
+claiming rolling or mixed-version qualification. No Go toolchain is needed in the
+runtime image. Invoke the helper explicitly with the verified published image:
 
 ```sh
 docker run --rm -i --network none --read-only --cap-drop ALL \
@@ -129,6 +177,10 @@ Stdin is one JSON object using `ClusterID` and `Members`. Each member uses nativ
 
 Instead of `token`, a member can supply native `public_key` as a base64-encoded 32-byte public key; if both are supplied they must match. Stdout is the JSON array of `rhiza.ReplicaMember` values returned by `NewReplicaMember`, in input order, followed by a newline. Each output member has `ID`, `PeerURL`, and `PublicKey`; `PublicKey` is a JSON array of 32 byte values, not the base64 string used by native member input. Private tokens are excluded. Use that entire array as the replica configuration's `Members` value; it is not a complete replica configuration. Do not pass the private input to learners. Invalid input or conversion failure exits 1 with `invalid replica member input` on stderr. The helper does not contact voters, issue credentials, create identities, or generate other bootstrap settings.
 
-The voter uses the management application's fixed PocketBase application context; bootstrap creates that application. Create the separate data application through the organization application API, then explicitly configure its action scope, trust or consent, and PEP binding. The data learner uses that data application's context. This uses one fixed application context per service, without a provider-to-application routing map.
+In legacy application mode, provision the data application and its action scope,
+trust/consent separately, then configure its fixed application context and PEP.
+Owner bootstrap does not create an application. Explicit Goauthy USER mode instead
+requires its configured provider-bound user PEP and exact RBAC, without application
+admission or consent; it does not silently switch provider or mode.
 
 Management Exposure sends decisions and authorized requests directly to the private voter, never through itself. Private bootstrap and inactive-organization recovery remain direct administrative operations. Patch Auth remains the separate account service. Exposure's capability contract is generic so the same sidecar pattern can protect another PocketBase instance or another backend without adding authorization code to that backend.

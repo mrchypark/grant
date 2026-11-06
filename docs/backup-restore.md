@@ -2,13 +2,60 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
+## Grant v0.9.1 / Rhiza v0.23.0 qualification
+
+The v0.9.1 target selects v0.23.0 in runtime and helper. Full
+[CI 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
+passed for runtime `8c3dd5d9ff252b033452ea107ec91c0e872ae929`, including Go/race,
+native quorum/restore, AMD64 container and bootstrap checks. This documentation-only
+finalization has a separate commit SHA; record that SHA and the final release/image
+revision without attributing a new runtime test to a later documentation commit.
+The older version-specific evidence below is historical. The supplier has not
+qualified arbitrary old-state upgrade or rollback. `TestUpgradeLocalRetainedV090`
+passed using only a synthetic large snapshot: an exact published v0.9.0 executable
+imports into a fresh Local directory, then the v0.23.0 runtime
+opens that same directory, compares schema and all 31 canonical table digests,
+writes a marker row and reopens again. Baseline image digest, OCI revision,
+linux/amd64 platform, CGO-disabled build metadata and binary checksum are checked
+in CI. [Artifact 13468575056](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13468575056)
+preserves provenance and cleanup. Required baseline env plus the successful race
+package result establishes execution, not a verbose named-test log. This pass does
+not qualify arbitrary old stores, non-Local state, crash recovery, downgrade,
+rollback or mixed-version peers. Use a verified producer v0.9.1 image digest for
+new operations only after publication; do not substitute the v0.9.0 probe baseline.
+
+For raw `Local: true`, the supplier confirms ordinary Open of an empty directory
+from a complete compatible object archive without an Operator or PVC. Existing
+Grant three-provider Local DR covers clean shutdown, full directory removal,
+`restore-local-storage` and authority continuity; it passed again in this CI run,
+separately from the retained-format probe. Async acknowledgement is not
+proof of archive completion and carries no fixed recovery-point bound here.
+
+Registered/enrolled/anchored non-Local recovery must preserve native admission
+safeguards. The owner confirms v0.23.0 ordinary Open into a new empty directory
+for a raw unregistered, unenrolled, unanchored single voter with one fixed member
+and a complete certified object-store checkpoint and tail. No Operator or PVC is
+required for that exact contract. Keep the old writer stopped and preserve the
+exact identity/namespace; no overlapping writer or identity rewrite is allowed.
+The Grant S3/GCS/Azure SDK/emulator clean-close-to-new-directory ordinary-Open
+tests passed with schema and 31 canonical tables/counts/columns/digests preserved,
+async unchanged and successful close; see
+[artifact 13467909402](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13467909402).
+Async writes and learner fence/revocation were tested separately before cold open;
+the cold phase does not claim a post-recovery write or learner test. Unarchived async
+acknowledgements, uncertain maintenance and anchored recovery are not covered.
+Managed generation rules do not establish the raw topology's contract. Unresolved GCS
+maintenance fails closed; no automatic unlock, GC or identity rewrite is authorized.
+The owner separately confirms the initial unregistered/unanchored single-voter
+before-ack-to-async exception described in [the runbook](single-voter-learner.md#start-the-sole-voter-and-private-fence-transport).
+
 ## Rhiza v0.21.2 upgrade compatibility guide
 
-Grant selects Rhiza v0.21.2 and latticedb-go v0.11.3. Production deployment and migration have not been completed. Grant's canonical snapshot format and SQL schema are unchanged, but pre-v0.21 archives are incompatible and have no automatic migration. For pre-v0.21 sources use a new, empty `DataDir` and a new independent archive only; preserve existing data and archives. See [runtime-modes.md](runtime-modes.md#rhiza-v021-compatibility).
+The historical v0.21.2 integration selected latticedb-go v0.11.3. This paragraph is not a v0.23.0 compatibility claim. Grant's canonical snapshot format and SQL schema were unchanged, but pre-v0.21 archives were incompatible and had no automatic migration. For those sources the guide required a new, empty `DataDir` and a new independent archive; preserve existing data and archives. See [runtime-modes.md](runtime-modes.md#rhiza-v021-compatibility).
 
 Rhiza v0.19.0 advances SQL execution policy to 7 and changes protected QLog/WAL compatibility. It refuses old SQL history, materializations and checkpoints; mixed-version peers and downgrade after activation are unsupported. This requires logical migration to a fresh cluster, not a rolling binary upgrade. Keep the old binary, data directories, object namespace and recovery evidence available until cutover is verified. See the [upstream SQL execution policy compatibility boundary](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/sql-execution-policy.md) for the exact documented constraints.
 
-Before these logical cutover steps, require either a Rhiza Operator integration with trusted external fencing or an approved persistent-storage strategy retaining each voter's original disk and WAL. The current `emptyDir` deployment cannot replace a pod under the same identity after WAL loss: cold startup intentionally returns `ErrVoterStateLost`. With surviving quorum, replacement uses a fresh learner, fencing and reconfiguration; otherwise use Operator-managed whole-generation recovery. The [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/recovery.md) and [embedded Operator guide](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/embedded-operator.md) define the prerequisites. Validate the chosen recovery strategy before production migration; copying an old voter identity or replaying old history cannot bypass this requirement.
+For the historical registered three-voter cutover below, require either a Rhiza Operator integration with trusted external fencing or an approved persistent-storage strategy retaining each voter's original disk and WAL. That registered `emptyDir` topology cannot replace a pod under the same identity after WAL loss: cold startup intentionally returns `ErrVoterStateLost`. With surviving quorum, replacement uses a fresh learner, fencing and reconfiguration; otherwise use Operator-managed whole-generation recovery. The [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/recovery.md) and [embedded Operator guide](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/embedded-operator.md) define those historical prerequisites, not a blanket restriction on the raw single-voter contract above. Validate the chosen recovery strategy before production migration; copying an old voter identity or replaying old history cannot bypass registered admission.
 
 1. Quiesce writes and create a consistent logical Grant snapshot with the old compatible binary through `POST /ops/backups` or the snapshot export path supported by that source binary. If voters disagree, reconcile the application state before selecting the snapshot.
 2. Create a fresh target with a distinct cluster ID, peer identities, empty dedicated S3 prefix and new local data directories. Follow **Coordinated fresh three-voter restore** below, which uses `migrate-prepare-cluster` and requires every new voter to acknowledge the same immutable snapshot before activation.
@@ -18,27 +65,28 @@ This migration uses the existing logical snapshot and coordinated restore comman
 
 ## Single-instance Local archive recovery
 
-v0.21.2 retains the v0.21.0 archive format; this patch upgrade requires no format
-migration. The fresh-directory requirement below applies to older incompatible
-archives, not to an existing compatible v0.21.0 Local installation.
+For current v0.9.1 operations, use Rhiza v0.23.0 with a complete compatible archive,
+stable identity and exclusive writer ownership as qualified above. Old-state
+compatibility must not be inferred from the following v0.21 format history.
 
-The v0.21 archive format is incompatible with pre-v0.21 archives, with no automatic
-migration. Start only with a new, empty `DataDir` and a new independent archive
-directory or object-store namespace. Preserve existing data and archives unchanged.
-Automatic recovery below applies only to a compatible v0.21 archive created there.
+Historical format note: v0.21.2 retained the v0.21.0 format while rejecting
+pre-v0.21 archives without automatic migration. That historical patch compatibility
+is not evidence that arbitrary v0.21 archives can be opened by v0.23.0. Use a
+complete compatible archive for the exact runtime and preserve old data/archive
+copies; the synthetic retained-directory probe does not qualify archive upgrades.
 Filesystem maintenance and recovery require a dedicated, trusted, stable archive
 root and parent outside `DataDir` on the same Linux or macOS host. Do not rename,
 replace, remount or externally remove them while in use. Stop the old process
 before offline restore or copying files; a Pod deletion response is not proof of
 termination. Remote maintenance tokens cannot be cleared based on age or process state.
 
-Rhiza v0.21.2 supports automatic archive restore for one Grant instance configured
+The current v0.23.0 Local contract supports automatic archive restore for one Grant instance configured
 with `Local: true`, a stable `NodeID` and `ClusterID`, and an archive outside its
 local data directory. Explicit `ObjStoreDurability: "before-ack"` waits for remote
 archival; explicit `"async"` permits acknowledged writes ahead of the archive.
 Async data loss can therefore lose acknowledged but unarchived writes; no fixed
 loss-window bound is guaranteed here. The v0.4.1 `restore-local-storage` CLI only
-accepts before-ack. The v0.7.0 source candidate additionally accepts explicit async,
+accepts before-ack. The v0.9.1 restore command accepts explicit async or before-ack,
 using the same Local Open/Close recovery path and unchanged ownership/preflight
 checks. A successful restore is not proof that every acknowledged write survived. Keep one
 writer for that archive, including during recovery. On startup, `OpenStore` restores

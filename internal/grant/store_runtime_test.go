@@ -3,7 +3,6 @@ package grant
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/mrchypark/rhiza"
 	"testing"
 )
@@ -74,20 +73,38 @@ func TestBootstrapPreservesDisabledAuthority(t *testing.T) {
 }
 
 func TestNativeOutcomeRetryRetainsOperationAndRejectsPermanentFailure(t *testing.T) {
-	attempts := 0
-	e := retryNativeOutcome(context.Background(), func(context.Context) error {
-		attempts++
-		if attempts == 1 {
-			return fmt.Errorf("archive head race: %w", rhiza.ErrCommitUnknown)
+	for _, cause := range []error{
+		rhiza.ErrCommitUnknown,
+		errors.Join(rhiza.ErrCommitUnknown, rhiza.ErrDurabilityUnavailable),
+		errors.Join(rhiza.ErrCommitUnknown, rhiza.ErrQuorumUnavailable),
+		errors.Join(rhiza.ErrCommitUnknown, context.DeadlineExceeded),
+		errors.Join(rhiza.ErrCommitUnknown, context.Canceled),
+	} {
+		attempts := 0
+		err := retryNativeOutcome(context.Background(), func(context.Context) error {
+			attempts++
+			return cause
+		})
+		if err != cause || attempts != 1 {
+			t.Fatalf("unknown outcome must return unchanged without resubmission: attempts=%d", attempts)
 		}
-		return nil
-	})
-	if e != nil || attempts != 2 {
-		t.Fatalf("unknown resolution attempts=%d err=%v", attempts, e)
 	}
-	attempts = 0
+	for _, transient := range []error{rhiza.ErrDurabilityUnavailable, rhiza.ErrNotReady, rhiza.ErrQuorumUnavailable} {
+		attempts := 0
+		err := retryNativeOutcome(context.Background(), func(context.Context) error {
+			attempts++
+			if attempts == 1 {
+				return transient
+			}
+			return nil
+		})
+		if err != nil || attempts != 2 {
+			t.Fatalf("precommit transient retry attempts=%d", attempts)
+		}
+	}
+	attempts := 0
 	sentinel := errors.New("invalid migration")
-	e = retryNativeOutcome(context.Background(), func(context.Context) error { attempts++; return sentinel })
+	e := retryNativeOutcome(context.Background(), func(context.Context) error { attempts++; return sentinel })
 	if !errors.Is(e, sentinel) || attempts != 1 {
 		t.Fatalf("permanent failure retried: %d %v", attempts, e)
 	}

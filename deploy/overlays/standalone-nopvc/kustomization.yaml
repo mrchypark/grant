@@ -4,7 +4,7 @@ resources:
   - ../standalone
 images:
   - name: ghcr.io/mrchypark/grant
-    newTag: v0.7.0
+    newTag: v0.9.1
 configMapGenerator:
   - name: grant-standalone-config
     behavior: merge

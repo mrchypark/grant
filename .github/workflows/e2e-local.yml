@@ -150,6 +150,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -297,12 +298,52 @@ jobs:
       - name: Vet Go packages
         run: go vet ./...
 
+      - name: Extract verified v0.9.0 Local upgrade baseline
+        id: upgrade-baseline
+        shell: sh -eu {0}
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          scope="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          work="$RUNNER_TEMP/grant-upgrade-baseline-$scope"
+          evidence="$RUNNER_TEMP/grant-upgrade-evidence-$scope"
+          test ! -e "$work"
+          mkdir -m 700 "$work"
+          printf '%s\n' "$scope" > "$work/owner"
+          mkdir -m 700 "$work/docker-config"
+          mkdir -p "$evidence"
+          export DOCKER_CONFIG="$work/docker-config"
+          export DOCKER_HOST=unix:///var/run/docker.sock
+          image=ghcr.io/mrchypark/grant@sha256:da3a5c9c0193870b5c892cb5407f657cc19df88b31593dd7bb8e94b48445e70f
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          docker pull --platform linux/amd64 "$image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = f0ab0e7684f279dc84f82f22c7537d3679780eb9
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")" = v0.9.0
+          printf 'image=%s\nsource=%s\nversion=v0.9.0\nplatform=linux/amd64\n' "$image" f0ab0e7684f279dc84f82f22c7537d3679780eb9 > "$evidence/baseline.txt"
+          docker create --name "grant-upgrade-$scope" --label "io.grant.upgrade-baseline=$scope" --network none "$image" > "$work/container-id"
+          cid=$(cat "$work/container-id")
+          docker cp "$cid:/usr/local/bin/grant" "$work/grant"
+          chmod 700 "$work/grant"
+          go version -m "$work/grant" > "$evidence/binary-buildinfo.txt"
+          grep -Eq 'CGO_ENABLED=0$' "$evidence/binary-buildinfo.txt"
+          grep -Eq 'GOOS=linux$' "$evidence/binary-buildinfo.txt"
+          grep -Eq 'GOARCH=amd64$' "$evidence/binary-buildinfo.txt"
+          grep -Eq 'dep[[:space:]]+github.com/mrchypark/rhiza[[:space:]]+v0.21.2([[:space:]]|$)' "$evidence/binary-buildinfo.txt"
+          sha256sum "$work/grant" > "$evidence/binary-sha256.txt"
+          digest=$(cut -d ' ' -f 1 "$evidence/binary-sha256.txt")
+          printf 'binary=%s\nsha256=%s\n' "$work/grant" "$digest" >> "$GITHUB_OUTPUT"
+
       - name: Test Go contracts and race safety
         env:
           GRANT_SINGLE_VOTER_RESTORE_CONTRACT: "1"
           GRANT_SINGLE_VOTER_RESTORE_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           GRANT_SINGLE_VOTER_RESTORE_EVIDENCE: ${{ runner.temp }}/grant-single-voter-restore-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           DOCKER_HOST: unix:///var/run/docker.sock
+          GRANT_UPGRADE_BASELINE_REQUIRED: "1"
+          GRANT_UPGRADE_BASELINE_BINARY: ${{ steps.upgrade-baseline.outputs.binary }}
+          GRANT_UPGRADE_BASELINE_SHA256: ${{ steps.upgrade-baseline.outputs.sha256 }}
         run: |
           set -eu
           work="$RUNNER_TEMP/grant-single-voter-restore-$GRANT_SINGLE_VOTER_RESTORE_SCOPE"
@@ -314,6 +355,38 @@ jobs:
           TMPDIR="$work" go test -race ./... || result=$?
           printf 'test_exit=%s\n' "$result" > "$evidence/test-result.txt"
           exit "$result"
+
+      - name: Remove owned Local upgrade baseline
+        if: always()
+        shell: sh -eu {0}
+        run: |
+          scope="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          work="$RUNNER_TEMP/grant-upgrade-baseline-$scope"
+          evidence="$RUNNER_TEMP/grant-upgrade-evidence-$scope"
+          test -e "$work" || exit 0
+          test "$(cat "$work/owner")" = "$scope"
+          trap 'rm -f "$work/grant"; rm -rf "$work/docker-config"' EXIT
+          mkdir -p "$evidence"
+          export DOCKER_CONFIG="$work/docker-config"
+          export DOCKER_HOST=unix:///var/run/docker.sock
+          ids=$(docker ps -aq --no-trunc --filter "label=io.grant.upgrade-baseline=$scope")
+          for cid in $ids; do
+            test "$(docker inspect --format '{{index .Config.Labels "io.grant.upgrade-baseline"}}' "$cid")" = "$scope"
+            test "$(docker inspect --format '{{.Name}}' "$cid")" = "/grant-upgrade-$scope"
+            docker rm -v "$cid"
+          done
+          test -z "$(docker ps -aq --no-trunc --filter "label=io.grant.upgrade-baseline=$scope")"
+          rm -rf "$work"
+          test ! -e "$work"
+          printf '%s\n' 'Owned non-running container, baseline binary and isolated registry credentials removed.' > "$evidence/cleanup.txt"
+
+      - name: Preserve Local upgrade provenance and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: local-upgrade-baseline-evidence
+          path: ${{ runner.temp }}/grant-upgrade-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
 
       - name: Remove owned single-voter restore emulators
         if: always()

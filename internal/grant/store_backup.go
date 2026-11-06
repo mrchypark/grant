@@ -429,12 +429,12 @@ func safeRestoreError(phase string, cause error) error {
 		err  error
 		name string
 	}{
+		{rhiza.ErrCommitUnknown, "commit_unknown"},
 		{context.DeadlineExceeded, "deadline"},
 		{context.Canceled, "canceled"},
 		{rhiza.ErrNotReady, "not_ready"},
 		{rhiza.ErrQuorumUnavailable, "quorum_unavailable"},
 		{rhiza.ErrDurabilityUnavailable, "durability_unavailable"},
-		{rhiza.ErrCommitUnknown, "commit_unknown"},
 	} {
 		if errors.Is(cause, candidate.err) {
 			class = candidate.name
