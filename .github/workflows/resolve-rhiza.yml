@@ -1,0 +1,80 @@
+name: Resolve Rhiza v0.23.0 candidate locks
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/resolve-rhiza.yml
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOPROXY: https://proxy.golang.org
+      GOSUMDB: sum.golang.org
+      CGO_ENABLED: "0"
+      RHIZA_VERSION: v0.23.0
+      RHIZA_SOURCE: f050d6e30f57718736c8c4fdb5edef777183bc05
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Resolve and verify both module graphs
+        shell: sh
+        run: |
+          set -eu
+          evidence="$RUNNER_TEMP/rhiza-resolution"
+          mkdir -p "$evidence/root" "$evidence/helper"
+          curl -fsS --retry 3 --connect-timeout 20 --max-time 120 \
+            "https://proxy.golang.org/github.com/mrchypark/rhiza/@v/$RHIZA_VERSION.info" \
+            -o "$evidence/rhiza.info.json"
+          jq -e --arg version "$RHIZA_VERSION" --arg source "$RHIZA_SOURCE" \
+            '.Version == $version and .Origin.Hash == $source' "$evidence/rhiza.info.json"
+          git rev-parse HEAD > "$evidence/grant-source.txt"
+          go version > "$evidence/toolchain.txt"
+          for label in root helper; do
+            (
+              if [ "$label" = helper ]; then cd scripts/replica-members-src; fi
+              go get "github.com/mrchypark/rhiza@$RHIZA_VERSION"
+              go mod tidy
+              go mod verify
+              go mod download -json "github.com/mrchypark/rhiza@$RHIZA_VERSION" > "$evidence/$label/rhiza-download.json"
+              jq -e --arg version "$RHIZA_VERSION" \
+                '.Path == "github.com/mrchypark/rhiza" and .Version == $version and .Error == null and (.Sum | startswith("h1:")) and (.GoModSum | startswith("h1:"))' \
+                "$evidence/$label/rhiza-download.json"
+              for kind in Sum GoModSum; do
+                suffix=
+                if [ "$kind" = GoModSum ]; then suffix=/go.mod; fi
+                checksum=$(jq -r --arg kind "$kind" '.[$kind]' "$evidence/$label/rhiza-download.json")
+                awk -v version="$RHIZA_VERSION$suffix" -v checksum="$checksum" \
+                  '$1 == "github.com/mrchypark/rhiza" && $2 == version && $3 == checksum { found=1 } END { exit !found }' go.sum
+              done
+              go list -m -json github.com/mrchypark/rhiza > "$evidence/$label/rhiza-module.json"
+              jq -e --arg version "$RHIZA_VERSION" \
+                '.Version == $version and .Replace == null' "$evidence/$label/rhiza-module.json"
+              go list -m all > "$evidence/$label/module-versions.txt"
+              cp go.mod go.sum "$evidence/$label/"
+            )
+          done
+          (
+            cd "$evidence"
+            sha256sum root/go.mod root/go.sum helper/go.mod helper/go.sum > SHA256SUMS
+          )
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rhiza-v0.23.0-candidate-locks
+          path: ${{ runner.temp }}/rhiza-resolution/
+          if-no-files-found: error
+          retention-days: 7
