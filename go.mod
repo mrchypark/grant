@@ -9,7 +9,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.2
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/mrchypark/ely-htmx v0.1.0
-	github.com/mrchypark/rhiza v0.23.0
+	github.com/mrchypark/rhiza v0.23.1
 	github.com/ncruces/go-sqlite3 v0.35.6
 	github.com/nlnwa/whatwg-url v0.6.2
 	google.golang.org/api v0.301.0
