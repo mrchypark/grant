@@ -1,5 +1,33 @@
 # One voter and a passive learner
 
+## Rhiza v0.23.0 integration candidate
+
+The current source selects Rhiza v0.23.0; this is not a newly qualified release.
+The v0.9.0 CI evidence below belongs to the v0.21.2 runtime, not this candidate.
+Candidate compilation, three-provider restore and retained-directory probe results
+must be recorded separately after remote CI completes. Old-state upgrades and
+rollback are not supplier-qualified. The synthetic Local v0.9.0-to-candidate
+retained-directory probe is experimental evidence only, not a production or
+non-Local migration guarantee.
+
+The Rhiza owner confirms that raw `Local: true` recovery can open a new empty
+directory from a complete compatible object archive without an Operator or PVC.
+Grant's existing Local process DR tests cover clean shutdown followed by directory
+loss; they do not establish crash durability or preservation of unarchived async
+acknowledgements. This is distinct from the non-Local import procedure below.
+
+Registered/enrolled/anchored voter recovery retains its identity and admission
+safeguards. For v0.23.0 the owner confirms ordinary Open into a new empty directory
+for an unregistered, unenrolled, unanchored raw single voter with one fixed member,
+using a complete certified object-store checkpoint and tail, without an Operator
+or PVC. This is a supplier source contract, not yet a Grant three-provider cold-DR
+CI pass. Fence the old writer and keep the exact cluster/member identity and
+archive namespace; do not rewrite identity or allow overlapping writers. Async
+acknowledgements not yet archived are not promised recoverable. GCS unresolved maintenance remains
+fail-closed: do not force-unlock, garbage-collect or rewrite identity to proceed.
+
+## Released v0.9.0 evidence
+
 This runbook specifies **Grant v0.9.0**, pinned to Rhiza v0.21.2.
 [CI run 41985200593](https://github.com/mrchypark/grant/actions/runs/41985200593)
 completed with overall **SUCCESS** for runtime source
@@ -205,8 +233,13 @@ from configuration overrides. The equivalent environment value is
 example, one minute is JSON integer `60000000000`, or environment value
 `RHIZA_OBJSTORE_SYNC_INTERVAL=1m`. Choose the batching interval for the deployment;
 it is not an RPO bound or proof that no other path flushes storage. This restart
-contract is limited to the fresh, unregistered/unanchored single-voter target;
-it does not authorize changing a registered generation's durability. Preserve
+contract is limited to the fresh, unregistered/unanchored single-voter target.
+For v0.23.0 the owner confirms the early raw exception only when `Members <= 1`,
+`clusterData == nil`, `localidentity == nil`, and neither enrollment nor prepared
+learner admission applies, before registration is created. That exception retains
+the before-ack seed to async reopen path; it does not authorize a durability change
+for registered, enrolled, managed, prepared or anchored state. This supplier source
+contract is separate from candidate three-provider CI execution evidence. Preserve
 the snapshot's bootstrap identity configuration so startup does not seed a
 different owner. Keep the source installation stopped.
 
@@ -299,9 +332,10 @@ Cut over to one authoritative target only after those checks. Keep the old sourc
 and immutable snapshot stopped for rollback; never maintain two writable copies.
 Post-cutover writes need a separate reverse-migration decision before reverting.
 
-This procedure is a one-time logical import, not automatic recovery after voter
-WAL or whole-directory loss. `emptyDir` and accepted async loss elsewhere do not
-override non-Local identity safeguards. Preserve original voter state across an
-ordinary restart; do not promise cold replacement under the same identity. GCS
+This v0.9.0 procedure is a one-time logical import, not an automatic recurring
+snapshot restore after voter directory loss. The v0.23.0 raw-single ordinary-Open
+archive recovery contract is qualified above and must not be confused with stale
+snapshot reseeding or with registered/enrolled/anchored recovery. The one-time
+deployment guard is not silently changed into an automatic recovery controller. GCS
 SDK/emulator contract results also do not establish production-cloud parity,
 cross-Pod TLS/QUIC reachability, or actual learner acceptance.

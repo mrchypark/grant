@@ -39,7 +39,7 @@ jq -e '
  $p.containers[0].envFrom[1].secretRef.name == "grant-rhiza-storage" and
  $p.containers[0].envFrom[2].configMapRef.name == $configs[0].metadata.name and
  all(($p.initContainers + $p.containers)[];
-   .image == "ghcr.io/mrchypark/grant:v0.7.0" and .imagePullPolicy == "IfNotPresent" and
+   .image == "ghcr.io/mrchypark/grant:v0.9.1" and .imagePullPolicy == "IfNotPresent" and
    .securityContext.readOnlyRootFilesystem == true and
    .securityContext.allowPrivilegeEscalation == false and .securityContext.capabilities.drop == ["ALL"] and
    any(.volumeMounts[]; .name == "data" and .mountPath == "/var/lib/grant")) and

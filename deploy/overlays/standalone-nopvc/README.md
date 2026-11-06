@@ -2,11 +2,13 @@
 
 See [the NoPVC runbook](../../../docs/single-node-nopvc.md). This opt-in overlay
 inherits standalone init/main and security, and overrides both images to the
-reserved v0.7.0 release from this PR (Rhiza v0.21.2). This tag is not yet published:
-do not apply until this exact reviewed source is released as v0.7.0 and its image
-revision/publication is verified. v0.6.2 is reserved for the separate helper PR.
+planned v0.9.1 release (Rhiza v0.23.0). This tag is not yet published:
+do not apply until this exact reviewed source is released as v0.9.1 and its image
+revision/publication is verified. The final override applies to both init and main;
+the inherited standalone image pin is not used by this overlay.
 The older v0.4.1 restore command rejects async; it cannot run this async profile.
-This profile does not qualify the v0.22.1 source candidate or a production rollout.
+This is a single-node `Local: true`, S3-only example with no Operator or PVC,
+not a generic example for every object-store provider or a qualified production rollout.
 Never apply over an existing retained-PVC StatefulSet; use a separately approved
 namespace and migration plan. Do not combine both overlays in one namespace.
 
@@ -14,7 +16,7 @@ Remote S3 archive configuration is mandatory. The ConfigMap overrides secret
 provider/directory values with s3 and an empty filesystem directory. It removes
 the inherited durability key so grant-rhiza-storage can explicitly select
 RHIZA_OBJSTORE_DURABILITY=async (the requested priority) or before-ack. Both modes
-are supported by Rhiza v0.21.2 and this PR's updated Grant restore command;
+are supported by the candidate Rhiza v0.23.0 integration and Grant restore command;
 before-ack is optional. Supply the other archive fields
 using grant-rhiza-storage; no secret
 or bucket is provisioned here. A filesystem archive is not supported by this

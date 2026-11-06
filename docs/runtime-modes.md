@@ -17,7 +17,15 @@ and consistent local schema reads; it reports `writeReady: false` because replic
 
 ## Configuration
 
-Grant selects Rhiza v0.21.2 with latticedb-go v0.11.3 and requires Go 1.27.3 or later. The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; production migration remains a separate fresh-cluster operational decision. The public HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or split behavior; unsupported combinations fail startup instead of silently selecting a different consistency or topology.
+Current candidate source selects Rhiza v0.23.0 and requires Go 1.27.3 or later.
+The supplier confirms a self-contained CGO-disabled Go SDK. Dependency verification
+does not establish old-state or archive compatibility: upgrade and rollback remain
+unqualified. Remote full CI and the synthetic v0.9.0 Local retained-directory probe
+are separate pending evidence. Neither proves production non-Local migration.
+The embedded Operator listener is integrated behind `RHIZA_BIND_ADDR`; the public
+HTTP API never exposes raw SQL. `GRANT_RUNTIME_MODE` selects embedded, remote, or
+split behavior; unsupported combinations fail startup rather than silently changing
+consistency or topology. The following v0.21 sections describe historical contracts.
 
 ### Rhiza v0.21 compatibility
 
@@ -73,20 +81,35 @@ An embedded native voter may still enable this private runtime transport on TCP 
 
 See [the compatibility inventory](porting-go-compatibility.md) for the exact supported environment mapping and [the migration guide](backup-restore.md) for existing stores. The [old Hiqlite runtime guide](history/hiqlite/runtime-modes.md) is historical documentation, not a native Rhiza configuration recipe.
 
-The corrected native three-voter fixture passes writes, follower strong reads and
-same-directory recovery with the original WAL intact. Cold startup into an empty
+The historical native three-voter fixture passes writes, follower strong reads and
+same-directory recovery with the original WAL intact. For that registered topology, cold startup into an empty
 directory under the same voter identity intentionally fails with `ErrVoterStateLost`.
 The base `emptyDir` deployment cannot recover a replacement under that identity.
 The optional Operator integration instead starts a fresh learner; the local fixture
 verifies promotion, preserved data and new writes. This does not qualify production
 fencing or Kubernetes whole-generation recovery.
 
-Production migration requires either a Rhiza Operator integration with trusted
+For registered/enrolled non-Local recovery, the existing guide requires either a Rhiza Operator integration with trusted
 external fencing or an approved persistent-storage strategy that retains each
 voter's original disk and WAL. Lost-WAL replacement requires a fresh learner,
 fencing and membership reconfiguration when quorum survives, or Operator-managed
 whole-generation recovery. See the upstream [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/recovery.md)
 and [embedded Operator integration](https://github.com/mrchypark/rhiza/blob/v0.21.2/docs/embedded-operator.md).
+These historical HA paths do not establish requirements for every raw single voter.
+For v0.23.0, the owner confirms raw Local empty-directory recovery from a complete
+compatible archive without an Operator or PVC. The owner also confirms ordinary
+Open into a new empty directory for a raw non-Local single voter with one fixed
+member, no registration/enrollment/anchor, and a complete certified checkpoint
+and tail. This exact raw topology needs neither an Operator nor PVC. Stop the old
+writer and retain the exact identity and archive namespace; overlapping writers,
+unarchived async acknowledgements, uncertain maintenance and anchored recovery
+are outside that qualification. Grant's three-provider cold-DR execution remains
+pending CI and is not established by this supplier source statement alone.
+The initial raw before-ack-to-async exception remains available before registration
+or anchoring, excluding enrollment and prepared learners; see the
+[exact runbook conditions](single-voter-learner.md#start-the-sole-voter-and-private-fence-transport).
+GCS unresolved maintenance remains fail-closed; do not force-unlock, GC or rewrite
+identity. Managed generation rules must not be generalized to the raw topology.
 The isolated fixture uses disposable local Versity Gateway; production recovery
 must be rehearsed before traffic cutover.
 

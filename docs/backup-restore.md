@@ -2,13 +2,46 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
+## Rhiza v0.23.0 candidate qualification
+
+Current source selects v0.23.0; the older version-specific evidence below remains
+historical. The supplier has not qualified old-state upgrade or rollback. The
+new `TestUpgradeLocalRetainedV090` uses only a synthetic large snapshot: an exact
+published v0.9.0 executable imports into a fresh Local directory, then the candidate
+opens that same directory, compares schema and all 31 canonical table digests,
+writes a marker row and reopens again. Baseline image digest, OCI revision,
+linux/amd64 platform, CGO-disabled build metadata and binary checksum are checked
+in CI. Execution is pending; even a pass does not qualify arbitrary old stores,
+non-Local state, crash recovery, downgrade or rollback.
+
+For raw `Local: true`, the supplier confirms ordinary Open of an empty directory
+from a complete compatible object archive without an Operator or PVC. Existing
+Grant three-provider Local DR covers clean shutdown, full directory removal,
+`restore-local-storage` and authority continuity. Rerunning it on v0.23.0 is a
+separate validation from the retained-format probe. Async acknowledgement is not
+proof of archive completion and carries no fixed recovery-point bound here.
+
+Registered/enrolled/anchored non-Local recovery must preserve native admission
+safeguards. The owner confirms v0.23.0 ordinary Open into a new empty directory
+for a raw unregistered, unenrolled, unanchored single voter with one fixed member
+and a complete certified object-store checkpoint and tail. No Operator or PVC is
+required for that exact contract. Keep the old writer stopped and preserve the
+exact identity/namespace; no overlapping writer or identity rewrite is allowed.
+The Grant three-provider clean-close-to-empty-directory cold-DR extension is
+pending CI, separate from that supplier source qualification. Unarchived async
+acknowledgements, uncertain maintenance and anchored recovery are not covered.
+Managed generation rules do not establish the raw topology's contract. Unresolved GCS
+maintenance fails closed; no automatic unlock, GC or identity rewrite is authorized.
+The owner separately confirms the initial unregistered/unanchored single-voter
+before-ack-to-async exception described in [the runbook](single-voter-learner.md#start-the-sole-voter-and-private-fence-transport).
+
 ## Rhiza v0.21.2 upgrade compatibility guide
 
-Grant selects Rhiza v0.21.2 and latticedb-go v0.11.3. Production deployment and migration have not been completed. Grant's canonical snapshot format and SQL schema are unchanged, but pre-v0.21 archives are incompatible and have no automatic migration. For pre-v0.21 sources use a new, empty `DataDir` and a new independent archive only; preserve existing data and archives. See [runtime-modes.md](runtime-modes.md#rhiza-v021-compatibility).
+The historical v0.21.2 integration selected latticedb-go v0.11.3. This paragraph is not a v0.23.0 compatibility claim. Grant's canonical snapshot format and SQL schema were unchanged, but pre-v0.21 archives were incompatible and had no automatic migration. For those sources the guide required a new, empty `DataDir` and a new independent archive; preserve existing data and archives. See [runtime-modes.md](runtime-modes.md#rhiza-v021-compatibility).
 
 Rhiza v0.19.0 advances SQL execution policy to 7 and changes protected QLog/WAL compatibility. It refuses old SQL history, materializations and checkpoints; mixed-version peers and downgrade after activation are unsupported. This requires logical migration to a fresh cluster, not a rolling binary upgrade. Keep the old binary, data directories, object namespace and recovery evidence available until cutover is verified. See the [upstream SQL execution policy compatibility boundary](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/sql-execution-policy.md) for the exact documented constraints.
 
-Before these logical cutover steps, require either a Rhiza Operator integration with trusted external fencing or an approved persistent-storage strategy retaining each voter's original disk and WAL. The current `emptyDir` deployment cannot replace a pod under the same identity after WAL loss: cold startup intentionally returns `ErrVoterStateLost`. With surviving quorum, replacement uses a fresh learner, fencing and reconfiguration; otherwise use Operator-managed whole-generation recovery. The [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/recovery.md) and [embedded Operator guide](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/embedded-operator.md) define the prerequisites. Validate the chosen recovery strategy before production migration; copying an old voter identity or replaying old history cannot bypass this requirement.
+For the historical registered three-voter cutover below, require either a Rhiza Operator integration with trusted external fencing or an approved persistent-storage strategy retaining each voter's original disk and WAL. That registered `emptyDir` topology cannot replace a pod under the same identity after WAL loss: cold startup intentionally returns `ErrVoterStateLost`. With surviving quorum, replacement uses a fresh learner, fencing and reconfiguration; otherwise use Operator-managed whole-generation recovery. The [recovery contract](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/recovery.md) and [embedded Operator guide](https://github.com/mrchypark/rhiza/blob/v0.19.0/docs/embedded-operator.md) define those historical prerequisites, not a blanket restriction on the raw single-voter contract above. Validate the chosen recovery strategy before production migration; copying an old voter identity or replaying old history cannot bypass registered admission.
 
 1. Quiesce writes and create a consistent logical Grant snapshot with the old compatible binary through `POST /ops/backups` or the snapshot export path supported by that source binary. If voters disagree, reconcile the application state before selecting the snapshot.
 2. Create a fresh target with a distinct cluster ID, peer identities, empty dedicated S3 prefix and new local data directories. Follow **Coordinated fresh three-voter restore** below, which uses `migrate-prepare-cluster` and requires every new voter to acknowledge the same immutable snapshot before activation.

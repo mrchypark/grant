@@ -14,15 +14,14 @@ until the chosen image, remote archive and operational fencing procedure qualify
 Render deploy/overlays/standalone-nopvc separately in an approved namespace. Do not
 apply it over an existing PVC StatefulSet or combine it with standalone/HA overlays.
 The old PVC overlay is unchanged. This profile overrides both init and main to
-ghcr.io/mrchypark/grant:v0.7.0 (Rhiza v0.21.2), reserved for the feature release
-containing this PR's async restore-command change. v0.6.2 is reserved for the
-separate helper PR. v0.7.0 is not yet published: do not apply this profile until
+ghcr.io/mrchypark/grant:v0.9.1 (Rhiza v0.23.0), the planned release candidate.
+v0.9.1 is not yet published: do not apply this profile until
 the exact reviewed source is released under that tag and image publication/source
 revision is verified. v0.4.1's restore command requires before-ack and cannot run
 this async profile. Both containers retain IfNotPresent, the same envFrom order,
 mounts, UID/GID 10001, read-only root filesystem, dropped capabilities and disabled
-service-account token automount. Source tests against Rhiza v0.22.1 do not qualify
-this release candidate. Override both images only in an independently reviewed
+service-account token automount. New v0.23.0 CI results are pending; the historical
+v0.22.1 results below do not qualify this release candidate. Override both images only in an independently reviewed
 customization with a verified immutable image.
 
 Provision grant-secrets with distinct GRANT_MASTER_KEY and GRANT_APP_AUTH_KEY,
@@ -42,7 +41,8 @@ through the last ConfigMap envFrom entry. It removes the inherited durability ke
 Set RHIZA_OBJSTORE_DURABILITY=async in grant-rhiza-storage for asynchronous archival;
 before-ack is a supported optional alternative, not a profile requirement. The verifier
 requires one of these two explicit values and checks that it reaches the effective
-Rhiza configuration unchanged. See the [v0.21.2 constants](https://github.com/mrchypark/rhiza/blob/v0.21.2/internal/types/config.go).
+Rhiza configuration unchanged. See Grant's [configuration mapping](../internal/grant/config.go)
+and the [S3-only overlay](../deploy/overlays/standalone-nopvc/kustomization.yaml).
 Do not add env overrides or mount a local
 archive. Init refuses missing object-store configuration, but its success alone is
 not proof that the expected nonempty archive was recovered.
@@ -62,7 +62,7 @@ available when explicitly selected, but does not establish external writer fenci
 or qualify recovery. Init success does not prove that the latest acknowledged
 authority was recovered; compare it against independently retained evidence.
 
-This PR's generic restore-local-storage command accepts explicit async or
+The restore-local-storage command accepts explicit async or
 before-ack, matching Rhiza Local Open's archive-restore support. Init and main
 must keep the same selected durability and archive identity. The command retains
 the Local-only topology, legacy/pending-restore evidence, ownership and cancellation
@@ -147,9 +147,10 @@ A remote-looking hostname can still resolve to the same node or local storage;
 DNS, failure-domain independence, credentials and reachability require external
 review and runtime verification. This is not a runtime admission or fencing guard.
 
-## Validation results — 2026-11-02
+## Historical validation results — 2026-11-02
 
-A source candidate using Rhiza v0.22.1 passed host-process recovery on Darwin ARM64
+These results concern a prior source candidate, not the planned v0.9.1 image or
+its pending Rhiza v0.23.0 CI. That candidate using Rhiza v0.22.1 passed host-process recovery on Darwin ARM64
 with CGO_ENABLED=0 through the actual provider adapters/SDKs: S3 with Floci 2.3.0,
 GCS with Floci-GCP 0.11.0 and Azure Blob with Floci-AZ 0.15.0. Each isolated run
 used the real restore-local-storage CLI and main HTTP server, acknowledged a

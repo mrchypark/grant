@@ -80,8 +80,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		migrations = append(migrations, rhiza.Migration{Version: int64(len(migrations) + 1), Name: group.name, Statements: stmts})
 	}
-	// Native Migrate derives each request ID from its immutable migration checksum.
-	// Replaying this exact plan resolves unknown commits without issuing new writes.
+	// Retry precommit transient failures only. An unknown outcome must not be
+	// resubmitted: a time budget does not guarantee retained request receipts.
 	if err := retryNativeOutcome(ctx, func(ctx context.Context) error { return s.db.Migrate(ctx, migrations) }); err != nil {
 		return fmt.Errorf("migrate Grant schema: %w", err)
 	}
@@ -95,7 +95,10 @@ func retryNativeOutcome(ctx context.Context, call func(context.Context) error) e
 		if err == nil {
 			return nil
 		}
-		if !errors.Is(err, rhiza.ErrCommitUnknown) && !errors.Is(err, rhiza.ErrDurabilityUnavailable) && !errors.Is(err, rhiza.ErrNotReady) && !errors.Is(err, rhiza.ErrQuorumUnavailable) {
+		if errors.Is(err, rhiza.ErrCommitUnknown) {
+			return err
+		}
+		if !errors.Is(err, rhiza.ErrDurabilityUnavailable) && !errors.Is(err, rhiza.ErrNotReady) && !errors.Is(err, rhiza.ErrQuorumUnavailable) {
 			return err
 		}
 		select {

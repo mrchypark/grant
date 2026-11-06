@@ -22,6 +22,10 @@ func TestSafeRestoreError(t *testing.T) {
 		{rhiza.ErrQuorumUnavailable, "quorum_unavailable"},
 		{rhiza.ErrDurabilityUnavailable, "durability_unavailable"},
 		{rhiza.ErrCommitUnknown, "commit_unknown"},
+		{errors.Join(rhiza.ErrCommitUnknown, rhiza.ErrDurabilityUnavailable), "commit_unknown"},
+		{errors.Join(rhiza.ErrCommitUnknown, rhiza.ErrQuorumUnavailable), "commit_unknown"},
+		{errors.Join(rhiza.ErrCommitUnknown, context.DeadlineExceeded), "commit_unknown"},
+		{errors.Join(rhiza.ErrCommitUnknown, context.Canceled), "commit_unknown"},
 		{errors.New(secret), "unknown"},
 	} {
 		t.Run(tc.class, func(t *testing.T) {
