@@ -2,23 +2,33 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
-## Rhiza v0.23.0 candidate qualification
+## Grant v0.9.1 / Rhiza v0.23.0 qualification
 
-Current source selects v0.23.0; the older version-specific evidence below remains
-historical. The supplier has not qualified old-state upgrade or rollback. The
-new `TestUpgradeLocalRetainedV090` uses only a synthetic large snapshot: an exact
-published v0.9.0 executable imports into a fresh Local directory, then the candidate
+The v0.9.1 target selects v0.23.0 in runtime and helper. Full
+[CI 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
+passed for runtime `8c3dd5d9ff252b033452ea107ec91c0e872ae929`, including Go/race,
+native quorum/restore, AMD64 container and bootstrap checks. This documentation-only
+finalization has a separate commit SHA; record that SHA and the final release/image
+revision without attributing a new runtime test to a later documentation commit.
+The older version-specific evidence below is historical. The supplier has not
+qualified arbitrary old-state upgrade or rollback. `TestUpgradeLocalRetainedV090`
+passed using only a synthetic large snapshot: an exact published v0.9.0 executable
+imports into a fresh Local directory, then the v0.23.0 runtime
 opens that same directory, compares schema and all 31 canonical table digests,
 writes a marker row and reopens again. Baseline image digest, OCI revision,
 linux/amd64 platform, CGO-disabled build metadata and binary checksum are checked
-in CI. Execution is pending; even a pass does not qualify arbitrary old stores,
-non-Local state, crash recovery, downgrade or rollback.
+in CI. [Artifact 13468575056](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13468575056)
+preserves provenance and cleanup. Required baseline env plus the successful race
+package result establishes execution, not a verbose named-test log. This pass does
+not qualify arbitrary old stores, non-Local state, crash recovery, downgrade,
+rollback or mixed-version peers. Use a verified producer v0.9.1 image digest for
+new operations only after publication; do not substitute the v0.9.0 probe baseline.
 
 For raw `Local: true`, the supplier confirms ordinary Open of an empty directory
 from a complete compatible object archive without an Operator or PVC. Existing
 Grant three-provider Local DR covers clean shutdown, full directory removal,
-`restore-local-storage` and authority continuity. Rerunning it on v0.23.0 is a
-separate validation from the retained-format probe. Async acknowledgement is not
+`restore-local-storage` and authority continuity; it passed again in this CI run,
+separately from the retained-format probe. Async acknowledgement is not
 proof of archive completion and carries no fixed recovery-point bound here.
 
 Registered/enrolled/anchored non-Local recovery must preserve native admission
@@ -27,8 +37,12 @@ for a raw unregistered, unenrolled, unanchored single voter with one fixed membe
 and a complete certified object-store checkpoint and tail. No Operator or PVC is
 required for that exact contract. Keep the old writer stopped and preserve the
 exact identity/namespace; no overlapping writer or identity rewrite is allowed.
-The Grant three-provider clean-close-to-empty-directory cold-DR extension is
-pending CI, separate from that supplier source qualification. Unarchived async
+The Grant S3/GCS/Azure SDK/emulator clean-close-to-new-directory ordinary-Open
+tests passed with schema and 31 canonical tables/counts/columns/digests preserved,
+async unchanged and successful close; see
+[artifact 13467909402](https://github.com/mrchypark/grant/actions/runs/42138972875/artifacts/13467909402).
+Async writes and learner fence/revocation were tested separately before cold open;
+the cold phase does not claim a post-recovery write or learner test. Unarchived async
 acknowledgements, uncertain maintenance and anchored recovery are not covered.
 Managed generation rules do not establish the raw topology's contract. Unresolved GCS
 maintenance fails closed; no automatic unlock, GC or identity rewrite is authorized.
@@ -51,27 +65,28 @@ This migration uses the existing logical snapshot and coordinated restore comman
 
 ## Single-instance Local archive recovery
 
-v0.21.2 retains the v0.21.0 archive format; this patch upgrade requires no format
-migration. The fresh-directory requirement below applies to older incompatible
-archives, not to an existing compatible v0.21.0 Local installation.
+For current v0.9.1 operations, use Rhiza v0.23.0 with a complete compatible archive,
+stable identity and exclusive writer ownership as qualified above. Old-state
+compatibility must not be inferred from the following v0.21 format history.
 
-The v0.21 archive format is incompatible with pre-v0.21 archives, with no automatic
-migration. Start only with a new, empty `DataDir` and a new independent archive
-directory or object-store namespace. Preserve existing data and archives unchanged.
-Automatic recovery below applies only to a compatible v0.21 archive created there.
+Historical format note: v0.21.2 retained the v0.21.0 format while rejecting
+pre-v0.21 archives without automatic migration. That historical patch compatibility
+is not evidence that arbitrary v0.21 archives can be opened by v0.23.0. Use a
+complete compatible archive for the exact runtime and preserve old data/archive
+copies; the synthetic retained-directory probe does not qualify archive upgrades.
 Filesystem maintenance and recovery require a dedicated, trusted, stable archive
 root and parent outside `DataDir` on the same Linux or macOS host. Do not rename,
 replace, remount or externally remove them while in use. Stop the old process
 before offline restore or copying files; a Pod deletion response is not proof of
 termination. Remote maintenance tokens cannot be cleared based on age or process state.
 
-Rhiza v0.21.2 supports automatic archive restore for one Grant instance configured
+The current v0.23.0 Local contract supports automatic archive restore for one Grant instance configured
 with `Local: true`, a stable `NodeID` and `ClusterID`, and an archive outside its
 local data directory. Explicit `ObjStoreDurability: "before-ack"` waits for remote
 archival; explicit `"async"` permits acknowledged writes ahead of the archive.
 Async data loss can therefore lose acknowledged but unarchived writes; no fixed
 loss-window bound is guaranteed here. The v0.4.1 `restore-local-storage` CLI only
-accepts before-ack. The v0.7.0 source candidate additionally accepts explicit async,
+accepts before-ack. The v0.9.1 restore command accepts explicit async or before-ack,
 using the same Local Open/Close recovery path and unchanged ownership/preflight
 checks. A successful restore is not proof that every acknowledged write survived. Keep one
 writer for that archive, including during recovery. On startup, `OpenStore` restores

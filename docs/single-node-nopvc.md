@@ -14,14 +14,12 @@ until the chosen image, remote archive and operational fencing procedure qualify
 Render deploy/overlays/standalone-nopvc separately in an approved namespace. Do not
 apply it over an existing PVC StatefulSet or combine it with standalone/HA overlays.
 The old PVC overlay is unchanged. This profile overrides both init and main to
-ghcr.io/mrchypark/grant:v0.9.1 (Rhiza v0.23.0), the planned release candidate.
-v0.9.1 is not yet published: do not apply this profile until
-the exact reviewed source is released under that tag and image publication/source
-revision is verified. v0.4.1's restore command requires before-ack and cannot run
+ghcr.io/mrchypark/grant:v0.9.1 (Rhiza v0.23.0). Verify image publication and source
+revision before deployment. v0.4.1's restore command requires before-ack and cannot run
 this async profile. Both containers retain IfNotPresent, the same envFrom order,
 mounts, UID/GID 10001, read-only root filesystem, dropped capabilities and disabled
-service-account token automount. New v0.23.0 CI results are pending; the historical
-v0.22.1 results below do not qualify this release candidate. Override both images only in an independently reviewed
+service-account token automount. The v0.9.1 source verification is recorded below;
+the historical v0.22.1 results remain separate evidence. Override both images only in an independently reviewed
 customization with a verified immutable image.
 
 Provision grant-secrets with distinct GRANT_MASTER_KEY and GRANT_APP_AUTH_KEY,
@@ -111,7 +109,7 @@ scripts/verify-standalone-deployment.sh
 scripts/verify-standalone-nopvc-deployment.sh
 ```
 
-The new verifier checks the rendered NoPVC contract, indefinite node-condition
+The verifier checks the rendered NoPVC contract, indefinite node-condition
 tolerations and real ConfigFromEnv/effective Rhiza configuration using synthetic
 remote S3 settings, without opening storage or contacting a cloud endpoint. It does
 not validate deployment secrets, remote durability, fencing or Kubernetes execution.
@@ -147,10 +145,26 @@ A remote-looking hostname can still resolve to the same node or local storage;
 DNS, failure-domain independence, credentials and reachability require external
 review and runtime verification. This is not a runtime admission or fencing guard.
 
+## v0.9.1 source verification
+
+[CI run 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
+completed with overall **SUCCESS** for runtime source
+`8c3dd5d9ff252b033452ea107ec91c0e872ae929`. It includes NoPVC render/configuration
+checks, race tests and Local clean-close recovery source coverage. The synthetic
+v0.9.0 Local retained-directory upgrade probe and three-provider raw single-voter
+ordinary-Open cold recovery tests also passed; the latter compare schema and all
+31 canonical tables' names, counts, columns and digests.
+
+These source/emulator results do not establish live Kubernetes Pod replacement,
+external writer fencing, abrupt-crash recovery, preservation of unarchived async
+acknowledgements or production-cloud parity. This deployment example remains
+Local and S3-only, with no Operator or PVC. Final documentation and merge commits
+are distinct from the tested runtime SHA above.
+
 ## Historical validation results — 2026-11-02
 
-These results concern a prior source candidate, not the planned v0.9.1 image or
-its pending Rhiza v0.23.0 CI. That candidate using Rhiza v0.22.1 passed host-process recovery on Darwin ARM64
+These results concern a prior source candidate and are separate from the v0.9.1
+source verification above. That candidate using Rhiza v0.22.1 passed host-process recovery on Darwin ARM64
 with CGO_ENABLED=0 through the actual provider adapters/SDKs: S3 with Floci 2.3.0,
 GCS with Floci-GCP 0.11.0 and Azure Blob with Floci-AZ 0.15.0. Each isolated run
 used the real restore-local-storage CLI and main HTTP server, acknowledged a
