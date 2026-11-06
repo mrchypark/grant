@@ -298,7 +298,7 @@ jobs:
       - name: Vet Go packages
         run: go vet ./...
 
-      - name: Extract verified v0.9.0 Local upgrade baseline
+      - name: Extract verified v0.9.0 and v0.9.1 Local upgrade baselines
         id: upgrade-baseline
         shell: sh -eu {0}
         env:
@@ -315,25 +315,41 @@ jobs:
           mkdir -p "$evidence"
           export DOCKER_CONFIG="$work/docker-config"
           export DOCKER_HOST=unix:///var/run/docker.sock
-          image=ghcr.io/mrchypark/grant@sha256:da3a5c9c0193870b5c892cb5407f657cc19df88b31593dd7bb8e94b48445e70f
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          for version in v0.9.0 v0.9.1; do
+          case "$version" in
+            v0.9.0)
+              image=ghcr.io/mrchypark/grant@sha256:da3a5c9c0193870b5c892cb5407f657cc19df88b31593dd7bb8e94b48445e70f
+              source=f0ab0e7684f279dc84f82f22c7537d3679780eb9
+              rhiza=v0.21.2
+              output=binary
+              hash_output=sha256 ;;
+            v0.9.1)
+              image=ghcr.io/mrchypark/grant@sha256:4bfe950f9910710e49efe172230e7b9107f65b6e2b417791544b7de6e2b80179
+              source=131748aa1fbc62d38c663899fd1278583e93d892
+              rhiza=v0.23.0
+              output=binary-v091
+              hash_output=sha256-v091 ;;
+          esac
+          mkdir "$work/$version" "$evidence/$version"
           docker pull --platform linux/amd64 "$image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = f0ab0e7684f279dc84f82f22c7537d3679780eb9
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")" = v0.9.0
-          printf 'image=%s\nsource=%s\nversion=v0.9.0\nplatform=linux/amd64\n' "$image" f0ab0e7684f279dc84f82f22c7537d3679780eb9 > "$evidence/baseline.txt"
-          docker create --name "grant-upgrade-$scope" --label "io.grant.upgrade-baseline=$scope" --network none "$image" > "$work/container-id"
-          cid=$(cat "$work/container-id")
-          docker cp "$cid:/usr/local/bin/grant" "$work/grant"
-          chmod 700 "$work/grant"
-          go version -m "$work/grant" > "$evidence/binary-buildinfo.txt"
-          grep -Eq 'CGO_ENABLED=0$' "$evidence/binary-buildinfo.txt"
-          grep -Eq 'GOOS=linux$' "$evidence/binary-buildinfo.txt"
-          grep -Eq 'GOARCH=amd64$' "$evidence/binary-buildinfo.txt"
-          grep -Eq 'dep[[:space:]]+github.com/mrchypark/rhiza[[:space:]]+v0.21.2([[:space:]]|$)' "$evidence/binary-buildinfo.txt"
-          sha256sum "$work/grant" > "$evidence/binary-sha256.txt"
-          digest=$(cut -d ' ' -f 1 "$evidence/binary-sha256.txt")
-          printf 'binary=%s\nsha256=%s\n' "$work/grant" "$digest" >> "$GITHUB_OUTPUT"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$source"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")" = "$version"
+          printf 'image=%s\nsource=%s\nversion=%s\nrhiza=%s\nplatform=linux/amd64\n' "$image" "$source" "$version" "$rhiza" > "$evidence/$version/baseline.txt"
+          docker create --name "grant-upgrade-$scope-$version" --label "io.grant.upgrade-baseline=$scope" --network none "$image" > "$work/$version/container-id"
+          cid=$(cat "$work/$version/container-id")
+          docker cp "$cid:/usr/local/bin/grant" "$work/$version/grant"
+          chmod 700 "$work/$version/grant"
+          go version -m "$work/$version/grant" > "$evidence/$version/binary-buildinfo.txt"
+          grep -Eq 'CGO_ENABLED=0$' "$evidence/$version/binary-buildinfo.txt"
+          grep -Eq 'GOOS=linux$' "$evidence/$version/binary-buildinfo.txt"
+          grep -Eq 'GOARCH=amd64$' "$evidence/$version/binary-buildinfo.txt"
+          awk -v expected="$rhiza" '$1 == "dep" && $2 == "github.com/mrchypark/rhiza" && $3 == expected { found=1 } END { exit !found }' "$evidence/$version/binary-buildinfo.txt"
+          sha256sum "$work/$version/grant" > "$evidence/$version/binary-sha256.txt"
+          digest=$(cut -d ' ' -f 1 "$evidence/$version/binary-sha256.txt")
+          printf '%s=%s\n%s=%s\n' "$output" "$work/$version/grant" "$hash_output" "$digest" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Test Go contracts and race safety
         env:
@@ -344,6 +360,8 @@ jobs:
           GRANT_UPGRADE_BASELINE_REQUIRED: "1"
           GRANT_UPGRADE_BASELINE_BINARY: ${{ steps.upgrade-baseline.outputs.binary }}
           GRANT_UPGRADE_BASELINE_SHA256: ${{ steps.upgrade-baseline.outputs.sha256 }}
+          GRANT_UPGRADE_V091_BASELINE_BINARY: ${{ steps.upgrade-baseline.outputs.binary-v091 }}
+          GRANT_UPGRADE_V091_BASELINE_SHA256: ${{ steps.upgrade-baseline.outputs.sha256-v091 }}
         run: |
           set -eu
           work="$RUNNER_TEMP/grant-single-voter-restore-$GRANT_SINGLE_VOTER_RESTORE_SCOPE"
@@ -365,20 +383,23 @@ jobs:
           evidence="$RUNNER_TEMP/grant-upgrade-evidence-$scope"
           test -e "$work" || exit 0
           test "$(cat "$work/owner")" = "$scope"
-          trap 'rm -f "$work/grant"; rm -rf "$work/docker-config"' EXIT
+          trap 'rm -f "$work/v0.9.0/grant" "$work/v0.9.1/grant"; rm -rf "$work/docker-config"' EXIT
           mkdir -p "$evidence"
           export DOCKER_CONFIG="$work/docker-config"
           export DOCKER_HOST=unix:///var/run/docker.sock
           ids=$(docker ps -aq --no-trunc --filter "label=io.grant.upgrade-baseline=$scope")
           for cid in $ids; do
             test "$(docker inspect --format '{{index .Config.Labels "io.grant.upgrade-baseline"}}' "$cid")" = "$scope"
-            test "$(docker inspect --format '{{.Name}}' "$cid")" = "/grant-upgrade-$scope"
+            case "$(docker inspect --format '{{.Name}}' "$cid")" in
+              "/grant-upgrade-$scope-v0.9.0"|"/grant-upgrade-$scope-v0.9.1") ;;
+              *) echo 'Refusing cleanup of unexpected container name' >&2; exit 1 ;;
+            esac
             docker rm -v "$cid"
           done
           test -z "$(docker ps -aq --no-trunc --filter "label=io.grant.upgrade-baseline=$scope")"
           rm -rf "$work"
           test ! -e "$work"
-          printf '%s\n' 'Owned non-running container, baseline binary and isolated registry credentials removed.' > "$evidence/cleanup.txt"
+          printf '%s\n' 'Owned non-running containers, both baseline binaries and isolated registry credentials removed.' > "$evidence/cleanup.txt"
 
       - name: Preserve Local upgrade provenance and cleanup evidence
         if: always()
