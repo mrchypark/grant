@@ -12,12 +12,17 @@ import (
 // remains the v0.9.0 implementation (f0ab0e7684f279dc84f82f22c7537d3679780eb9).
 // Raw snapshot/cell sizes do not establish the size of a JSON-encoded command.
 func TestLargeRestoreSnapshotFixture(t *testing.T) {
-	largeRestoreFrozenSource(t, context.Background())
+	largeRestoreCurrentSource(t, context.Background())
 }
 
 func largeRestoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 	t.Helper()
-	snap := restoreFrozenSource(t, ctx)
+	return freezeRestoreSourceV6(t, largeRestoreCurrentSource(t, ctx))
+}
+
+func largeRestoreCurrentSource(t *testing.T, ctx context.Context) StoreSnapshot {
+	t.Helper()
+	snap := restoreCurrentSource(t, ctx)
 	table := func(name string) *SnapshotTable {
 		for i := range snap.Tables {
 			if snap.Tables[i].Name == name {
@@ -154,8 +159,8 @@ func largeRestoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 		t.Fatalf("synthetic size/count requirements unmet: secondCapabilities=%d catalogs=%d firstBytes=%d secondBytes=%d catalogsRowsBytes=%d actionsRowsBytes=%d",
 			len(second.Capabilities), len(catalogTable.Rows), len(first), len(secondJSON), len(jsonBytes(catalogTable.Rows)), len(jsonBytes(actionTable.Rows)))
 	}
-	if len(snap.Tables) != 31 {
-		t.Fatalf("expected 31 canonical tables, got %d", len(snap.Tables))
+	if snap.SchemaDigest != canonicalSchemaDigest() || len(snap.Tables) != 33 {
+		t.Fatalf("expected current schema with 33 canonical tables, got %d", len(snap.Tables))
 	}
 	for i := range snap.Tables {
 		snap.Tables[i].Count = int64(len(snap.Tables[i].Rows))

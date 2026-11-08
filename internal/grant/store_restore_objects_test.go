@@ -308,6 +308,11 @@ func restoreContractEmulator(t *testing.T, ctx context.Context, provider, image 
 
 func restoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 	t.Helper()
+	return freezeRestoreSourceV6(t, restoreCurrentSource(t, ctx))
+}
+
+func restoreCurrentSource(t *testing.T, ctx context.Context) StoreSnapshot {
+	t.Helper()
 	root := t.TempDir()
 	source, err := OpenStore(ctx, Config{Database: DatabaseConfig{DataDir: filepath.Join(root, "source"), Rhiza: rhiza.Config{Local: true, ClusterID: "source-local", NodeID: "source-local", ObjStoreProvider: "filesystem", ObjStoreDir: filepath.Join(root, "archive"), ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck}}})
 	if err != nil {
@@ -339,6 +344,11 @@ func restoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 		t.Fatal(err)
 	}
 	closed = true
+	return snap
+}
+
+func freezeRestoreSourceV6(t *testing.T, snap StoreSnapshot) StoreSnapshot {
+	t.Helper()
 	frozen := pepSnapshotFixtureVersion(t, snap, legacySchemaDigestV6())
 	if len(frozen.Tables) != 31 {
 		t.Fatalf("frozen v6 fixture has %d tables, want 31", len(frozen.Tables))

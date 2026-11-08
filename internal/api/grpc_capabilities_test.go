@@ -192,6 +192,50 @@ type grpcReadFunc func([]byte) (int, error)
 func (f grpcReadFunc) Read(b []byte) (int, error) { return f(b) }
 func (grpcReadFunc) Close() error                 { return nil }
 
+func TestGRPCCatalogRejectsUnreadBody(t *testing.T) {
+	s := testServer()
+	for _, tc := range []struct {
+		name, method, key string
+		length            int64
+		encoding          []string
+		supportsDeadline  bool
+		status            int
+	}{
+		{"GET with content length", http.MethodGet, "app-secret", 12, nil, true, 400},
+		{"HEAD with content length", http.MethodHead, "app-secret", 12, nil, true, 400},
+		{"GET chunked", http.MethodGet, "app-secret", -1, []string{"chunked"}, true, 400},
+		{"HEAD chunked even with zero length", http.MethodHead, "app-secret", 0, []string{"chunked"}, true, 400},
+		{"HEAD with unknown length", http.MethodHead, "app-secret", -1, nil, true, 400},
+		{"unauthenticated HEAD", http.MethodHead, "", 12, nil, true, 401},
+		{"deadline unavailable", http.MethodGet, "app-secret", 12, nil, false, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, grpcCatalogPrefix+"inventory", nil)
+			if tc.key != "" {
+				r.Header.Set("X-Grant-App-Auth-Key", tc.key)
+			}
+			r.ContentLength, r.TransferEncoding = tc.length, tc.encoding
+			r.Body = grpcReadFunc(func([]byte) (int, error) {
+				t.Fatal("catalog handler read a disallowed body")
+				return 0, os.ErrDeadlineExceeded
+			})
+			rec := httptest.NewRecorder()
+			deadlineRec := &grpcDeadlineRecorder{ResponseRecorder: rec}
+			var w http.ResponseWriter = rec
+			if tc.supportsDeadline {
+				w = deadlineRec
+			}
+			s.ServeHTTP(w, r)
+			if rec.Code != tc.status || rec.Header().Get("Connection") != "close" {
+				t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body)
+			}
+			if tc.supportsDeadline && (len(deadlineRec.deadlines) != 1 || deadlineRec.deadlines[0].IsZero()) {
+				t.Fatalf("expected one active deadline, got %v", deadlineRec.deadlines)
+			}
+		})
+	}
+}
+
 func TestGRPCDecisionBodyReadDeadline(t *testing.T) {
 	s := testServer()
 	for _, tc := range []struct {

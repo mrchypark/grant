@@ -127,11 +127,15 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 		panic("invalid endpoint registration")
 	}
 	s.patterns = append(s.patterns, method+" "+path)
+	grpcCatalog := method == http.MethodGet && path == grpcCatalogPath
 	s.mux.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
+		// The GET registration also serves HEAD. Reject declared or streamed
+		// bodies without reading them to determine whether they are empty.
+		catalogBody := grpcCatalog && (r.ContentLength != 0 || len(r.TransferEncoding) != 0)
 		var controller *http.ResponseController
 		var deadlineErr error
 		closeUnreadBody := false
-		if grpcBody {
+		if grpcBody || catalogBody {
 			controller = http.NewResponseController(w)
 			// Also bound any body reads net/http performs after an early rejection.
 			deadlineErr = controller.SetReadDeadline(time.Now().Add(grpcBodyTimeout))
@@ -235,9 +239,13 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 			writeError(w, err)
 			return
 		}
-		if grpcBody {
+		if grpcBody || catalogBody {
 			if deadlineErr != nil {
 				writeError(w, failure(503, "gRPC request body read deadline unavailable"))
+				return
+			}
+			if catalogBody {
+				writeError(w, failure(400, "gRPC catalog request body is not allowed"))
 				return
 			}
 			handler, err = prepare(q)
