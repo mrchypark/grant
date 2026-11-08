@@ -11,8 +11,12 @@ import (
 	"testing"
 	"time"
 
+	pdppb "github.com/mrchypark/grant/api/pdp/v1"
 	"github.com/mrchypark/grant/internal/grant"
 	"github.com/mrchypark/rhiza"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func TestProviderUserAuthorizationHTTPBoundary(t *testing.T) {
@@ -186,7 +190,8 @@ func TestProviderUserAuthorizationHTTPRealReplica(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	server := httptest.NewServer(New(grant.NewService(lc, replica), true))
+	learner := grant.NewService(lc, replica)
+	server := httptest.NewServer(New(learner, true))
 	t.Cleanup(server.Close)
 	request := func(path, payload, key, token, org string, want int) map[string]json.RawMessage {
 		t.Helper()
@@ -222,6 +227,26 @@ func TestProviderUserAuthorizationHTTPRealReplica(t *testing.T) {
 	const allowed = `{"action":"operable.row.read","resource":{"provider":"operable","type":"row","id":"allowed"}}`
 	const denied = `{"action":"operable.row.read","resource":{"provider":"operable","type":"row","id":"denied"}}`
 	batch := `{"checks":[` + denied + `,` + allowed + `,` + allowed + `]}`
+	pdp := newPDPTestClient(t, learner)
+	pdpBatch := func(org, provider, body string, want codes.Code) grant.UserBatchCheckResult {
+		t.Helper()
+		call, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		call = metadata.AppendToOutgoingContext(call, "x-grant-app-auth-key", "fixture-app-key", "authorization", "Bearer fixture-token", "x-organization-id", org)
+		reply, err := pdp.BatchCheckProviderUser(call, &pdppb.ProviderUserBatchRequest{ProviderId: provider, ChecksJson: []byte(body)})
+		var result grant.UserBatchCheckResult
+		if status.Code(err) != want {
+			t.Fatalf("native USER batch: status=%v want %s", err, want)
+		}
+		if want != codes.OK {
+			if reply != nil {
+				t.Fatalf("failed native USER batch returned a response: %v", reply)
+			}
+		} else if err := json.Unmarshal(reply.GetDecisionJson(), &result); err != nil {
+			t.Fatalf("decode native USER batch: %v", err)
+		}
+		return result
+	}
 	out := request(root+"batch-check", batch, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 200)
 	var result grant.UserBatchCheckResult
 	raw, _ := json.Marshal(out)
@@ -231,6 +256,12 @@ func TestProviderUserAuthorizationHTTPRealReplica(t *testing.T) {
 	if result.PEPPolicyRevision != 1 || len(result.Results) != 3 || result.Results[0].Allowed || !result.Results[1].Allowed || !result.Results[2].Allowed {
 		t.Fatalf("ordered decisions lost: %+v", result)
 	}
+	if got := pdpBatch("conalog-grant", "operable", batch, codes.OK); got.PEPPolicyRevision != result.PEPPolicyRevision ||
+		len(got.Results) != 3 || got.Results[0] != result.Results[0] || got.Results[1] != result.Results[1] || got.Results[2] != result.Results[2] {
+		t.Fatalf("native batch differs from HTTP: native=%+v HTTP=%+v", got, result)
+	}
+	pdpBatch("wrong-org", "operable", batch, codes.PermissionDenied)
+	pdpBatch("conalog-grant", "grant", `{"checks":[]}`, codes.PermissionDenied)
 	filter := `{"action":"operable.row.read","resources":[{"provider":"operable","type":"row","id":"denied"},{"provider":"operable","type":"row","id":"allowed"},{"provider":"operable","type":"row","id":"allowed"}]}`
 	out = request(root+"filter", filter, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 200)
 	if string(out["resource_ids"]) != `["allowed","allowed"]` || string(out["pepPolicyRevision"]) != "1" {
@@ -239,6 +270,9 @@ func TestProviderUserAuthorizationHTTPRealReplica(t *testing.T) {
 	out = request(root+"batch-check", `{"checks":[]}`, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 200)
 	if string(out["results"]) != "[]" || string(out["pepPolicyRevision"]) != "1" {
 		t.Fatal("empty batch lost fenced policy result")
+	}
+	if got := pdpBatch("conalog-grant", "operable", `{"checks":[]}`, codes.OK); got.Results == nil || len(got.Results) != 0 || got.PEPPolicyRevision <= 0 {
+		t.Fatalf("native empty batch lost fenced policy result: %+v", got)
 	}
 	out = request(root+"filter", `{"action":"operable.row.read","resources":[]}`, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 200)
 	if string(out["resource_ids"]) != "[]" || string(out["pepPolicyRevision"]) != "1" {
@@ -249,6 +283,10 @@ func TestProviderUserAuthorizationHTTPRealReplica(t *testing.T) {
 	request(root+"batch-check", batch, "fixture-app-key", "Bearer fixture-token", "", 400)
 	request("/api/v1/application-authz/batch-check", batch, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 403)
 	exec("UPDATE role_bindings SET state='revoked' WHERE id='provider-binding'")
+	if got := pdpBatch("conalog-grant", "operable", `{"checks":[`+allowed+`]}`, codes.OK); got.PEPPolicyRevision != 1 ||
+		len(got.Results) != 1 || got.Results[0].Allowed {
+		t.Fatalf("native batch retained revoked authority: %+v", got)
+	}
 	out = request(root+"filter", filter, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 200)
 	if string(out["resource_ids"]) != "[]" {
 		t.Fatal("revoked binding retained")
@@ -256,12 +294,14 @@ func TestProviderUserAuthorizationHTTPRealReplica(t *testing.T) {
 	if _, err = svc.SetProviderPepClientAdmin(ctx, "operable", "provider-pep", grant.UpsertProviderPepClient{Lifecycle: "disabled"}); err != nil {
 		t.Fatal(err)
 	}
+	pdpBatch("conalog-grant", "operable", `{"checks":[]}`, codes.PermissionDenied)
 	request(root+"batch-check", `{"checks":[]}`, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 403)
 	rows, err := voter.Query(ctx, grant.ReadStrong, "SELECT id FROM applications")
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("zero-application contract changed: rows=%d err=%v", len(rows), err)
 	}
 	runtime.Close()
+	pdpBatch("conalog-grant", "operable", batch, codes.Unavailable)
 	request(root+"batch-check", batch, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 503)
 	request(root+"filter", `{"action":"operable.row.read","resources":[]}`, "fixture-app-key", "Bearer fixture-token", "conalog-grant", 503)
 }

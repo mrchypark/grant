@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -17,7 +18,7 @@ func (s *Server) providerUserAuthorizationRead(r *http.Request) bool {
 
 func (s *Server) providerUserAuthorizationRoutes() {
 	s.route("POST", providerUserBatchPath, "application", false, 200, providerUserAuthorizationBody(func(r *request, v applicationBatch) (any, error) {
-		return s.providerUserChecks(r, v.Checks)
+		return providerUserChecks(r.Context(), s.service, r.bearer, r.org, r.PathValue("providerId"), v.Checks)
 	}))
 	s.route("POST", providerUserFilterPath, "application", false, 200, providerUserAuthorizationBody(func(r *request, v applicationFilter) (any, error) {
 		resources := make([]grant.AuthorizationResource, len(v.Resources))
@@ -36,7 +37,7 @@ func (s *Server) providerUserAuthorizationRoutes() {
 	}))
 }
 
-func (s *Server) providerUserChecks(r *request, values []applicationCheck) (grant.UserBatchCheckResult, error) {
+func providerUserChecks(ctx context.Context, service *grant.Service, bearer, org, provider string, values []applicationCheck) (grant.UserBatchCheckResult, error) {
 	checks := make([]grant.ApplicationAuthorizationCheck, len(values))
 	for i, value := range values {
 		resource, err := value.Resource.input()
@@ -45,19 +46,46 @@ func (s *Server) providerUserChecks(r *request, values []applicationCheck) (gran
 		}
 		checks[i] = grant.ApplicationAuthorizationCheck{Action: value.Action, Resource: resource}
 	}
-	out, err := s.service.UserBatchCheck(r.Context(), r.bearer, r.org, r.PathValue("providerId"), checks)
+	out, err := service.UserBatchCheck(ctx, bearer, org, provider, checks)
 	if err == nil && (out.Results == nil || len(out.Results) != len(checks) || out.PEPPolicyRevision <= 0) {
 		return grant.UserBatchCheckResult{}, failure(503, "incomplete provider user authorization result")
 	}
 	return out, err
 }
 
+func validProviderUserID(provider string) bool {
+	return provider != "" && len(provider) <= 256 && !strings.ContainsFunc(provider, func(c rune) bool {
+		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:-", c))
+	})
+}
+
+func validateProviderUserChecks(provider string, checks []applicationCheck) error {
+	if checks == nil {
+		return failure(422, "checks is required")
+	}
+	if len(checks) > 1000 {
+		return failure(400, "checks must contain at most 1000 items")
+	}
+	for _, check := range checks {
+		if _, err := check.Resource.input(); err != nil {
+			return err
+		}
+		for _, value := range []string{check.Action, check.Resource.Provider, check.Resource.Type, check.Resource.ID} {
+			if strings.TrimSpace(value) == "" {
+				return failure(422, "action and resource provider, type, id are required")
+			}
+		}
+		if check.Resource.Provider != provider {
+			return failure(400, "resource provider must match path provider")
+		}
+	}
+	return nil
+}
+
 func providerUserAuthorizationBody[T any](fn func(*request, T) (any, error)) preparedEndpoint {
 	return preparedEndpoint{prepare: func(r *request) (endpoint, error) {
 		provider := r.PathValue("providerId")
-		if provider == "" || len(provider) > 256 || strings.ContainsFunc(provider, func(c rune) bool {
-			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:-", c))
-		}) {
+		if !validProviderUserID(provider) {
 			return nil, failure(422, "invalid providerId")
 		}
 		for _, name := range []string{"Authorization", "X-Grant-App-Auth-Key", "X-Organization-ID"} {
@@ -82,24 +110,8 @@ func providerUserAuthorizationBody[T any](fn func(*request, T) (any, error)) pre
 				checks[i] = applicationCheck{Action: value.Action, Resource: resource}
 			}
 		}
-		if checks == nil {
-			return nil, failure(422, "checks is required")
-		}
-		if len(checks) > 1000 {
-			return nil, failure(400, "checks must contain at most 1000 items")
-		}
-		for _, check := range checks {
-			if _, err := check.Resource.input(); err != nil {
-				return nil, err
-			}
-			for _, value := range []string{check.Action, check.Resource.Provider, check.Resource.Type, check.Resource.ID} {
-				if strings.TrimSpace(value) == "" {
-					return nil, failure(422, "action and resource provider, type, id are required")
-				}
-			}
-			if check.Resource.Provider != provider {
-				return nil, failure(400, "resource provider must match path provider")
-			}
+		if err := validateProviderUserChecks(provider, checks); err != nil {
+			return nil, err
 		}
 		return func(r *request) (any, error) { return fn(r, v) }, nil
 	}}
