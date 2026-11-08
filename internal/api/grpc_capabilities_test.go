@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -140,13 +141,17 @@ func TestGRPCCapabilityCatalogHTTPPublication(t *testing.T) {
 	}
 	request := func(method, path string, input any, status int) *httptest.ResponseRecorder {
 		t.Helper()
-		raw, err := json.Marshal(input)
-		if err != nil {
-			t.Fatal(err)
+		var body io.Reader
+		if input != nil {
+			raw, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = strings.NewReader(string(raw))
 		}
-		r := httptest.NewRequest(method, strings.Replace(path, "{providerId}", provider, 1), strings.NewReader(string(raw)))
-		r.Header.Set("Content-Type", "application/json")
+		r := httptest.NewRequest(method, strings.Replace(path, "{providerId}", provider, 1), body)
 		if method == http.MethodPost {
+			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("X-Grant-Master-Key", "master-secret")
 		} else {
 			r.Header.Set("X-Grant-App-Auth-Key", "app-secret")
