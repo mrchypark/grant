@@ -46,8 +46,21 @@ The listener is off by default. Set `GRANT_PDP_GRPC_LISTEN_ADDR` to a TCP `host:
 
 Plaintext is allowed only on a literal loopback bind address, such as `127.0.0.1:8443` or `[::1]:8443`. Hostnames such as `localhost`, wildcard binds and other nonloopback addresses require TLS 1.2 or later. In TLS mode, the client must trust the server certificate chain and verify the expected hostname or IP against the certificate. The Grant listener does not require a TLS client certificate; the app key remains the PEP credential.
 
+Keep this listener on private ingress and restrict reachability to the intended PEPs, including when TLS is enabled. Do not publish it on public ingress. The app key is checked in the handler after grpc-go has received and decoded the protobuf envelope; it does not protect the listener from unauthenticated connections or decoding work.
+
 Configure Exposure explicitly for the intended PDP transport and endpoint. For native gRPC, use the configured trust and server identity; never disable certificate verification or downgrade to plaintext on failure. During migration, switch between HTTP and gRPC by explicit configuration. A failed gRPC request must never trigger HTTP fallback.
 
 Exposure issues one logical PDP RPC per operation. Do not retry in application code, configure gRPC retry or hedging policies, or resend after an ambiguous outcome. Use grpc-go's [`WithDisableRetry`](https://github.com/grpc/grpc-go/blob/v1.84.0/dialoptions.go#L678) to disable configured retries. It leaves transparent retries enabled when nothing was written to the wire or the library knows the server application did not receive the RPC for processing. Only that library behavior is permitted, within the original RPC context and deadline, with the same evidence and request binding. A single logical RPC can therefore have more than one physical transport attempt.
 
 Before rollout, verify the pinned client and a real passive learner together: exercise all four RPCs, compare their typed results with the HTTP equivalents, and verify receipt binding. Confirm that a denied decision, bad certificate, lost read fence, or expired deadline yields no business call and no HTTP fallback. These are acceptance checks for the pair, not results established by reviewing the Grant source.
+
+On Darwin arm64, run the opt-in HTTP business capability smoke against the executable from Exposure CI run `42467000290` (attempt 2), artifact `13611614991`, source `5bf054c32ae55aff0397ee2bb341ba5df4926e98`. Verify the archive SHA-256 `79352e6b0057550fa4834e25c9d3d1b136d3a56d7e353e3f5588447c1fe234dd` before extracting. Set `EXPOSURE_BINARY` to the absolute path of the executable:
+
+```sh
+GRANT_EXPOSURE_NATIVE_PDP_INTEROP=1 \
+GRANT_EXPOSURE_BINARY="$EXPOSURE_BINARY" \
+GRANT_EXPOSURE_BINARY_SHA256=0be83b3fb1407a51657b2dc5f0356ed1471f3fdf642f2068628edc6d7d9b014e \
+  go test -mod=readonly -run '^TestPrincipalExposureNativePDP$' -count=1 -timeout=2m -v ./internal/api
+```
+
+The test skips by default. It uses only loopback fixtures and covers USER and application authorization, role revocation, fence loss, upstream credential isolation, and zero requests to a configured HTTP fallback trap. It does not exercise the unary gRPC business capability RPCs or qualify a deployment.

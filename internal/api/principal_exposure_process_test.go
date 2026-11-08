@@ -37,38 +37,7 @@ func TestPrincipalExposureProcess(t *testing.T) {
 		}
 		t.Skip("set GRANT_EXPOSURE_BINARY to a CI-supplied Exposure artifact; no interop executed")
 	}
-	expectedSHA256 := os.Getenv("GRANT_EXPOSURE_BINARY_SHA256")
-	if len(expectedSHA256) != 64 || strings.IndexFunc(expectedSHA256, func(r rune) bool {
-		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f')
-	}) != -1 {
-		t.Fatal("GRANT_EXPOSURE_BINARY_SHA256 must contain exactly 64 lowercase hexadecimal characters when GRANT_EXPOSURE_BINARY is supplied")
-	}
-	var err error
-	binary, err = filepath.Abs(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-		t.Fatal("GRANT_EXPOSURE_BINARY must be an executable regular file (CI must chmod +x)")
-	}
-	// The CI downloader pins the ZIP separately. Verify its executable here too.
-	artifact, err := os.Open(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hash := sha256.New()
-	_, hashErr := io.Copy(hash, artifact)
-	closeErr := artifact.Close()
-	if hashErr != nil || closeErr != nil {
-		t.Fatalf("read Exposure artifact: hash=%v close=%v", hashErr, closeErr)
-	}
-	if actual := fmt.Sprintf("%x", hash.Sum(nil)); actual != expectedSHA256 {
-		t.Fatalf("Exposure artifact SHA-256=%s want=%s", actual, expectedSHA256)
-	}
+	binary = verifyPrincipalExposureBinary(t, binary)
 	// Exercise credential isolation on every real-artifact process launch.
 	for _, key := range []string{"GRANT_MASTER_KEY", "GH_TOKEN", "GITHUB_TOKEN"} {
 		t.Setenv(key, "fixture-ambient-credential")
@@ -202,6 +171,43 @@ func TestPrincipalExposureProcess(t *testing.T) {
 	})
 }
 
+func verifyPrincipalExposureBinary(t *testing.T, binary string) string {
+	t.Helper()
+	expectedSHA256 := os.Getenv("GRANT_EXPOSURE_BINARY_SHA256")
+	if len(expectedSHA256) != 64 || strings.IndexFunc(expectedSHA256, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f')
+	}) != -1 {
+		t.Fatal("GRANT_EXPOSURE_BINARY_SHA256 must contain exactly 64 lowercase hexadecimal characters when GRANT_EXPOSURE_BINARY is supplied")
+	}
+	var err error
+	binary, err = filepath.Abs(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		t.Fatal("GRANT_EXPOSURE_BINARY must be an executable regular file (CI must chmod +x)")
+	}
+	// The CI downloader pins the ZIP separately. Verify its executable here too.
+	artifact, err := os.Open(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.New()
+	_, hashErr := io.Copy(hash, artifact)
+	closeErr := artifact.Close()
+	if hashErr != nil || closeErr != nil {
+		t.Fatalf("read Exposure artifact: hash=%v close=%v", hashErr, closeErr)
+	}
+	if actual := fmt.Sprintf("%x", hash.Sum(nil)); actual != expectedSHA256 {
+		t.Fatalf("Exposure artifact SHA-256=%s want=%s", actual, expectedSHA256)
+	}
+	return binary
+}
+
 type principalExposureClaims struct {
 	subject, client, audience, profileSubject string
 	wrongIssuer, missingScope                 bool
@@ -220,6 +226,11 @@ type principalExposureSystem struct {
 }
 
 func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExposureSystem {
+	t.Helper()
+	return newPrincipalExposureSystemWithDB(t, ctx, nil, nil)
+}
+
+func newPrincipalExposureSystemWithDB(t *testing.T, ctx context.Context, configureDB func(*grant.DatabaseConfig), checkUpstream func(*http.Request, string)) *principalExposureSystem {
 	t.Helper()
 	f := &principalExposureSystem{ctx: ctx, providerID: "fixture-provider", tokens: make(map[string]string)}
 	// A compact JWT is an untrusted Exposure parsing hint. Grant authenticates
@@ -287,6 +298,9 @@ func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExp
 		Auth:     grant.AuthConfig{ProviderMode: "goauthy", Goauthy: &grant.GoauthyConfig{Issuer: f.issuer.URL, IntrospectionClientID: "fixture-introspector", IntrospectionClientSecret: "fixture-secret", ExpectedClientID: "fixture-login", Resource: "https://grant.example.test/", ApplicationID: "unused-legacy-application", RequiredScopes: []string{"openid", "grant"}}},
 		Database: grant.DatabaseConfig{DataDir: t.TempDir(), DefaultReadConsistency: grant.ReadStrong},
 	}
+	if configureDB != nil {
+		configureDB(&cfg.Database)
+	}
 	store, err := grant.OpenStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -330,6 +344,9 @@ func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExp
 		api.ServeHTTP(w, r)
 	}), false)
 	f.upstream = principalExposureServer(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if checkUpstream != nil {
+			checkUpstream(r, f.tokens["user"])
+		}
 		f.upstreamHits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"path": r.URL.Path})
@@ -563,6 +580,11 @@ func (f *principalExposureSystem) decisionRelay(t *testing.T, fault *atomic.Int3
 
 func (f *principalExposureSystem) startExposure(t *testing.T, binary, grantURL, digest string, legacy bool) string {
 	t.Helper()
+	return f.startExposureWithPDP(t, binary, digest, legacy, map[string]string{"GRANT_LEARNER_URL": grantURL})
+}
+
+func (f *principalExposureSystem) startExposureWithPDP(t *testing.T, binary, digest string, legacy bool, pdp map[string]string) string {
+	t.Helper()
 	address := func() string {
 		t.Helper()
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -597,13 +619,19 @@ func (f *principalExposureSystem) startExposure(t *testing.T, binary, grantURL, 
 	}
 	settings := map[string]string{
 		"PROXY_ENABLED": "true", "DATA_ADDR": data, "ADMIN_ADDR": admin,
-		"GRANT_LEARNER_URL": grantURL, "PROVIDER_ORIGIN": f.providerOrigin,
-		"PROVIDER_ID": f.providerID, "PEP_CLIENT_ID": "fixture-pep", "EXPECTED_CATALOG_DIGEST": digest,
+		"PROVIDER_ORIGIN": f.providerOrigin,
+		"PROVIDER_ID":     f.providerID, "PEP_CLIENT_ID": "fixture-pep", "EXPECTED_CATALOG_DIGEST": digest,
 		"GRANT_APP_AUTH_KEY": "fixture-app-key", "AUTHN_LIMITER_KEY": strings.Repeat("f", 40),
 		"PROVIDER_AUTHORIZATION_MODE": "forward-user", "CREDENTIAL_MODE": "goauthy", "GOAUTHY_ISSUER": f.issuer.URL,
 	}
 	if legacy {
 		settings["GOAUTHY_APPLICATION_ID"] = "unused-legacy-application"
+	}
+	for key, value := range pdp {
+		if _, exists := settings[key]; exists {
+			t.Fatalf("PDP setting would override fixture setting %q", key)
+		}
+		settings[key] = value
 	}
 	for key, value := range settings {
 		command.Env = append(command.Env, "EXPOSURE_"+key+"="+value)
