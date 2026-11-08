@@ -1,0 +1,52 @@
+name: Verify Operable typed HTTP Darwin fixture
+
+on:
+  push:
+    branches:
+      - feature/verify-operable-typed-http-darwin
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FIXTURE_SHA: b16d33c3ffdeea1f2897f53d1cd9c55e17ddccc1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: b16d33c3ffdeea1f2897f53d1cd9c55e17ddccc1
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Cross-compile the pinned Grant fixture
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+          GOARCH: arm64
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FIXTURE_SHA"
+          artifact_dir="$RUNNER_TEMP/grant-operable-typed-http"
+          mkdir -p "$artifact_dir"
+          go test -mod=readonly -c -ldflags="-X github.com/mrchypark/grant/internal/api.envelopeGrantFixtureSHA=$FIXTURE_SHA" -o "$artifact_dir/grant-operable-typed-http" ./internal/api
+          grep -aFq -- "$FIXTURE_SHA" "$artifact_dir/grant-operable-typed-http"
+          printf 'Embedded fixture source: %s\n' "$FIXTURE_SHA"
+          printf '%s\n' "$FIXTURE_SHA" > "$artifact_dir/source-sha.txt"
+          (cd "$artifact_dir" && sha256sum grant-operable-typed-http > binary.sha256)
+          cat "$artifact_dir/binary.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: grant-operable-typed-http-darwin-arm64
+          path: |
+            ${{ runner.temp }}/grant-operable-typed-http/grant-operable-typed-http
+            ${{ runner.temp }}/grant-operable-typed-http/binary.sha256
+            ${{ runner.temp }}/grant-operable-typed-http/source-sha.txt
+          if-no-files-found: error
+          retention-days: 3
