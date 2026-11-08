@@ -54,6 +54,38 @@ func (s *pdpGRPC) DecideGrpc(ctx context.Context, r *pdppb.DecisionRequest) (*pd
 	return pdpDecision(ctx, s, r, true, s.service.DecideGRPCCapability)
 }
 
+func (s *pdpGRPC) BatchCheckProviderUser(ctx context.Context, r *pdppb.ProviderUserBatchRequest) (*pdppb.DecisionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, pdpRPCTimeout)
+	defer cancel()
+	if err := s.authenticatePEP(ctx); err != nil {
+		return nil, err
+	}
+	bearer, org, err := pdpDecisionMetadata(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil || len(r.ProtoReflect().GetUnknown()) != 0 || !validProviderUserID(r.GetProviderId()) {
+		return nil, status.Error(codes.InvalidArgument, "invalid provider USER batch request")
+	}
+	provider := r.GetProviderId()
+	in, err := decodeJSON[applicationBatch](r.GetChecksJson(), true)
+	if err != nil {
+		return nil, pdpStatus(err)
+	}
+	if err := validateProviderUserChecks(provider, in.Checks); err != nil {
+		return nil, pdpStatus(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, pdpStatus(err)
+	}
+	out, err := providerUserChecks(ctx, s.service, bearer, org, provider, in.Checks)
+	raw, err := pdpEncode(ctx, out, err, pdpMaxDecisionJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &pdppb.DecisionResponse{DecisionJson: raw}, nil
+}
+
 func pdpCatalog[T any](ctx context.Context, s *pdpGRPC, r *pdppb.CatalogRequest, lookup func(context.Context, string) (T, error)) (*pdppb.CatalogResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, pdpRPCTimeout)
 	defer cancel()
