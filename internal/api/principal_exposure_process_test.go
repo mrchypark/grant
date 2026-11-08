@@ -232,6 +232,11 @@ func newPrincipalExposureSystem(t *testing.T, ctx context.Context) *principalExp
 
 func newPrincipalExposureSystemWithDB(t *testing.T, ctx context.Context, configureDB func(*grant.DatabaseConfig), checkUpstream func(*http.Request, string)) *principalExposureSystem {
 	t.Helper()
+	return newPrincipalExposureSystemWithAudience(t, ctx, configureDB, checkUpstream, false)
+}
+
+func newPrincipalExposureSystemWithAudience(t *testing.T, ctx context.Context, configureDB func(*grant.DatabaseConfig), checkUpstream func(*http.Request, string), dualAudience bool) *principalExposureSystem {
+	t.Helper()
 	f := &principalExposureSystem{ctx: ctx, providerID: "fixture-provider", tokens: make(map[string]string)}
 	// A compact JWT is an untrusted Exposure parsing hint. Grant authenticates
 	// against this server's token lookup, not against those payload claims.
@@ -285,7 +290,12 @@ func newPrincipalExposureSystemWithDB(t *testing.T, ctx context.Context, configu
 	}), true)
 	// Seed the immutable lookup before any external request can reach the fixture.
 	for name, claims := range variants {
-		payload, err := json.Marshal(map[string]any{"iss": f.issuer.URL, "sub": "resource-owner", "aud": []string{"https://grant.example.test/"}, "exp": time.Now().Add(time.Hour).Unix(), "jti": name})
+		claimsJSON := map[string]any{"iss": f.issuer.URL, "sub": "resource-owner", "aud": []string{"https://grant.example.test/"}, "exp": time.Now().Add(time.Hour).Unix(), "jti": name}
+		if dualAudience && name == "user" {
+			claimsJSON["aud"] = []string{claims.client, claims.audience}
+			claimsJSON["azp"] = claims.client
+		}
+		payload, err := json.Marshal(claimsJSON)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -452,6 +462,11 @@ func (f *principalExposureSystem) revokeResourceRole(t *testing.T) {
 
 func (f *principalExposureSystem) publish(t *testing.T, mode string) string {
 	t.Helper()
+	return f.publishItem(t, mode, http.MethodGet, grant.HttpRequestPolicy{Body: "none", ForwardHeaders: []string{"x-organization-id"}, Authorization: "forward-user"})
+}
+
+func (f *principalExposureSystem) publishItem(t *testing.T, mode, method string, request grant.HttpRequestPolicy) string {
+	t.Helper()
 	f.mode = mode
 	svc := grant.NewService(f.config, f.store)
 	ctx := f.ctx
@@ -459,7 +474,7 @@ func (f *principalExposureSystem) publish(t *testing.T, mode string) string {
 		t.Fatal(err)
 	}
 	action := "fixture-provider.item.read"
-	cap := grant.HttpCapability{CapabilityID: "item-read", Version: 1, Enabled: true, AccessMode: "authorized", Method: "GET", PathTemplate: "/items/{itemId}", ActionID: &action, Resource: &grant.HttpCapabilityResource{ResourceType: "item", ID: grant.HttpResourceExtractor{Kind: "pathSegment", Name: "itemId", Format: "asciiToken"}}, Query: grant.HttpQueryPolicy{Mode: "none"}, Request: grant.HttpRequestPolicy{Body: "none", ForwardHeaders: []string{"x-organization-id"}, Authorization: "forward-user"}, Response: grant.HttpResponsePolicy{MaxBytes: 4096, ForwardHeaders: []string{"content-type"}, Redirects: "deny"}, OrganizationContext: "required"}
+	cap := grant.HttpCapability{CapabilityID: "item-read", Version: 1, Enabled: true, AccessMode: "authorized", Method: method, PathTemplate: "/items/{itemId}", ActionID: &action, Resource: &grant.HttpCapabilityResource{ResourceType: "item", ID: grant.HttpResourceExtractor{Kind: "pathSegment", Name: "itemId", Format: "asciiToken"}}, Query: grant.HttpQueryPolicy{Mode: "none"}, Request: request, Response: grant.HttpResponsePolicy{MaxBytes: 4096, ForwardHeaders: []string{"content-type"}, Redirects: "deny"}, OrganizationContext: "required"}
 	var err error
 	cap.ContractDigest, err = grant.HttpCapabilityContractDigest(cap)
 	if err != nil {
