@@ -339,19 +339,26 @@ func readConsistency(r *http.Request) (grant.ReadConsistency, error) {
 	return "", failure(400, "invalid consistency: "+value)
 }
 
-// decode preserves required non-null fields and closed structs instead of Go's
-// default zero-value coercion. Legacy request DTOs explicitly allow unknown keys.
+const maxJSONBodyBytes = 2 * 1024 * 1024
+
 func decode[T any](r *http.Request, closed bool) (T, error) {
 	var out T
 	mt, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if e != nil || !(mt == "application/json" || strings.HasSuffix(mt, "+json")) {
 		return out, failure(415, "Expected request with Content-Type: application/json")
 	}
-	raw, e := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024+1))
+	raw, e := io.ReadAll(io.LimitReader(r.Body, maxJSONBodyBytes+1))
 	if e != nil {
 		return out, failure(400, "Failed to read request body")
 	}
-	if len(raw) > 2*1024*1024 {
+	return decodeJSON[T](raw, closed)
+}
+
+// decodeJSON preserves required non-null fields and closed structs instead of
+// Go's default zero-value coercion. Legacy request DTOs allow unknown keys.
+func decodeJSON[T any](raw []byte, closed bool) (T, error) {
+	var out T
+	if len(raw) > maxJSONBodyBytes {
 		return out, failure(413, "length limit exceeded")
 	}
 	if !utf8.Valid(raw) {
@@ -365,16 +372,16 @@ func decode[T any](r *http.Request, closed bool) (T, error) {
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
-	if e = validateJSON(d, reflect.TypeFor[T](), closed); e != nil {
+	if e := validateJSON(d, reflect.TypeFor[T](), closed); e != nil {
 		return out, failure(422, e.Error())
 	}
-	if _, e = d.Token(); !errors.Is(e, io.EOF) {
+	if _, e := d.Token(); !errors.Is(e, io.EOF) {
 		return out, failure(400, "trailing JSON input")
 	}
-	if e = json.Unmarshal(raw, &out); e != nil {
+	if e := json.Unmarshal(raw, &out); e != nil {
 		return out, failure(422, e.Error())
 	}
-	if e = validateEnums(out); e != nil {
+	if e := validateEnums(out); e != nil {
 		return out, e
 	}
 	return out, nil

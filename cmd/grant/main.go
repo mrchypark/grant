@@ -32,7 +32,11 @@ func run() (result error) {
 	if e != nil {
 		return e
 	}
-	// Bind both listeners before touching storage. A collision cannot leave a
+	pdpGRPC, e := pdpGRPCFromEnv(cfg.Database)
+	if e != nil {
+		return e
+	}
+	// Bind all listeners before touching storage. A collision cannot leave a
 	// partially initialized database or expose private SQL on the public mux.
 	public, e := net.Listen("tcp", cfg.Server.BindAddr)
 	if e != nil {
@@ -55,7 +59,14 @@ func run() (result error) {
 		}
 		defer operator.Close()
 	}
-	done := make(chan error, 4)
+	pdpListener, e := pdpGRPC.listen()
+	if e != nil {
+		return e
+	}
+	if pdpListener != nil {
+		defer pdpListener.Close()
+	}
+	done := make(chan error, 5)
 	servers := make([]*http.Server, 0, 3)
 	startOperator := func(handler http.Handler) error {
 		if operator == nil {
@@ -133,12 +144,18 @@ func run() (result error) {
 			_ = srv.Close()
 		}
 	}()
+	stopPDPGRPC := func() {}
+	if pdpListener != nil {
+		stopPDPGRPC = pdpGRPC.start(pdpListener, service, done)
+		defer stopPDPGRPC()
+	}
 	select {
 	case e = <-done:
 		if !errors.Is(e, http.ErrServerClosed) {
 			return e
 		}
 	case <-ctx.Done():
+		stopPDPGRPC()
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, srv := range servers {

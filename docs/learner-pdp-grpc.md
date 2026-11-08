@@ -1,0 +1,53 @@
+# Native gRPC transport for the passive learner PDP
+
+Exposure is the policy enforcement point (PEP); Grant's passive learner is the policy decision point (PDP). This optional native gRPC connection carries catalog and decision requests for both HTTP and unary gRPC business capabilities. It carries no business traffic. The existing [HTTP capability](http-capabilities.md) and [unary gRPC capability](grpc-capabilities.md) contracts still define the evidence, policy, leases and receipts. The existing HTTP PDP endpoints remain available for migration and other clients. The learner still uses the [Rhiza replica and voter read fence](runtime-modes.md) to authorize against a current snapshot; the gRPC listener does not replace that path.
+
+This document describes the Grant source in the integration worktree and the expected Exposure client behavior. It does not establish that Exposure implements this transport, that the pair has passed end-to-end tests, or that a release or deployment has changed.
+
+## Pinned service and payloads
+
+Use [api/pdp/v1/pdp.proto](../api/pdp/v1/pdp.proto) and its generated bindings from Grant commit `5f9aa4bd4d1c47ebd3de6555f0c01fd9f4c61a27`. The Go import is `github.com/mrchypark/grant/api/pdp/v1`. Use an authorized import pinned to that private source revision, or the corresponding source-pinned bindings artifact. This contract does not require a new Grant release.
+
+The service is `grant.pdp.v1.PolicyDecisionPoint`. It has four unary methods:
+
+| Method | Request | Response |
+| --- | --- | --- |
+| `GetHttpCatalog` | `provider_id` | `catalog_json`: active HTTP capability catalog |
+| `DecideHttp` | `evidence_json`: HTTP capability decision input | `decision_json`: HTTP capability decision |
+| `GetGrpcCatalog` | `provider_id` | `catalog_json`: active unary gRPC capability catalog |
+| `DecideGrpc` | `evidence_json`: unary gRPC capability decision input | `decision_json`: unary gRPC capability decision |
+
+The protobuf envelope carries JSON bytes using the existing typed Grant DTOs. Preserve their field names, integer precision, closed request schemas, digest preimages and receipt checks. Grant decodes evidence into those types and encodes the typed result; it does not tunnel HTTP requests, HTTP statuses or raw HTTP responses. The listener exposes no legacy simple-read, admin, reflection or streaming RPCs.
+
+## Metadata and decisions
+
+- Every RPC requires exactly one `x-grant-app-auth-key` metadata value, matching the configured Grant app key exactly. Grant also checks the configured PEP's provider binding and active policy through the existing capability service.
+- Both decision RPCs require exactly one `authorization` value with a nonempty Bearer credential. Use the original credential. Grant trims outer whitespace and preserves the scheme, space and token for the existing credential digest. The key and credential belong in metadata, outside the JSON evidence.
+- `DecideGrpc` requires exactly one nonempty `x-organization-id`. For `DecideHttp`, omit it only when the existing HTTP capability and authorization mode permit omission. If supplied, it must be a single nonempty value. Grant trims outer whitespace. Catalog fetches need only the app key.
+- An evaluated denial can return gRPC `OK` with `allowed: false`. Only an explicit allow with a valid, matching, unexpired receipt authorizes forwarding. A gRPC failure, malformed response, mismatched evidence or missing receipt must deny the business call. Do not retry authorization over HTTP.
+
+| gRPC status | Meaning |
+| --- | --- |
+| `InvalidArgument` | Duplicate required metadata values, malformed Bearer or organization metadata, a decoded protobuf request rejected by Grant (for example, unknown fields), or malformed or invalid JSON evidence. Grant maps domain errors 400 and 422 here. |
+| `Unauthenticated` | Missing or invalid app key, missing Bearer metadata on a decision, or a domain authentication failure (401). |
+| `PermissionDenied`, `NotFound` | Domain authorization or binding error (403), or missing catalog (404). |
+| `FailedPrecondition` | Domain precondition failure (409, 412 or 428). |
+| `ResourceExhausted` | A message or JSON size limit was exceeded (including domain 413). |
+| `Unavailable` | The PDP cannot establish authority, such as an unavailable read fence (domain 503). |
+| `DeadlineExceeded`, `Canceled`, `Internal` | Deadline, cancellation, or another server failure. |
+
+If malformed wire bytes fail decoding before the Grant handler runs, grpc-go determines the status. The PEP still fails closed.
+
+The catalog response and decision evidence are each limited to 2 MiB of JSON; a decision response is limited to 64 KiB of JSON. The server's gRPC send and receive message limit is 2 MiB + 1,024 bytes (2,098,176 bytes), including protobuf overhead. This is a message limit, separate from the JSON limits. Each RPC handler caps processing at 10 seconds; a shorter caller deadline still applies. The transport deadline does not extend any catalog lease or decision receipt.
+
+## Listener and client selection
+
+The listener is off by default. Set `GRANT_PDP_GRPC_LISTEN_ADDR` to a TCP `host:port` on a passive Grant learner. The process rejects this listener on voters, promotion learners and remote-only runtimes. For TLS, set both `GRANT_PDP_GRPC_TLS_CERT_FILE` and `GRANT_PDP_GRPC_TLS_KEY_FILE`; a partial pair, or TLS files without a listen address, is invalid.
+
+Plaintext is allowed only on a literal loopback bind address, such as `127.0.0.1:8443` or `[::1]:8443`. Hostnames such as `localhost`, wildcard binds and other nonloopback addresses require TLS 1.2 or later. In TLS mode, the client must trust the server certificate chain and verify the expected hostname or IP against the certificate. The Grant listener does not require a TLS client certificate; the app key remains the PEP credential.
+
+Configure Exposure explicitly for the intended PDP transport and endpoint. For native gRPC, use the configured trust and server identity; never disable certificate verification or downgrade to plaintext on failure. During migration, switch between HTTP and gRPC by explicit configuration. A failed gRPC request must never trigger HTTP fallback.
+
+Exposure issues one logical PDP RPC per operation. Do not retry in application code, configure gRPC retry or hedging policies, or resend after an ambiguous outcome. Use grpc-go's [`WithDisableRetry`](https://github.com/grpc/grpc-go/blob/v1.84.0/dialoptions.go#L678) to disable configured retries. It leaves transparent retries enabled when nothing was written to the wire or the library knows the server application did not receive the RPC for processing. Only that library behavior is permitted, within the original RPC context and deadline, with the same evidence and request binding. A single logical RPC can therefore have more than one physical transport attempt.
+
+Before rollout, verify the pinned client and a real passive learner together: exercise all four RPCs, compare their typed results with the HTTP equivalents, and verify receipt binding. Confirm that a denied decision, bad certificate, lost read fence, or expired deadline yields no business call and no HTTP fallback. These are acceptance checks for the pair, not results established by reviewing the Grant source.
