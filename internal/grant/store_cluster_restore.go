@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -245,14 +244,8 @@ func (s *Store) activateClusterRestore(ctx context.Context, snap StoreSnapshot) 
 	if e != nil {
 		return e
 	}
-	for i, t := range restored.Tables {
-		expected, err := restoredTableDigest(snap.Tables[i], snap.SchemaDigest)
-		if err != nil {
-			return err
-		}
-		if t.Digest != expected {
-			return fmt.Errorf("cluster restore verification mismatch: %s", t.Name)
-		}
+	if e = verifyRestoredSnapshotTables(snap, restored); e != nil {
+		return e
 	}
 	node := s.cfg.Database.NodeID
 	if s.cfg.Database.Rhiza.NodeID != "" {
@@ -316,8 +309,8 @@ func (s *Store) restoreCanonicalAtomic(ctx context.Context, snap StoreSnapshot, 
 		}
 	}
 	var empty []string
-	for _, t := range snap.Tables {
-		empty = append(empty, "NOT EXISTS(SELECT 1 FROM "+quoteIdentifier(t.Name)+")")
+	for _, name := range applicationTables() {
+		empty = append(empty, "NOT EXISTS(SELECT 1 FROM "+quoteIdentifier(name)+")")
 	}
 	ss := []Statement{assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM grant_restore_activation) AND " + strings.Join(empty, " AND "))}
 	// Physical foreign keys follow canonical DDL table order.
@@ -344,11 +337,7 @@ func (s *Store) restoreCanonicalAtomic(ctx context.Context, snap StoreSnapshot, 
 	return nil
 }
 func schemaTableOrder() []string {
-	var names []string
-	for _, m := range regexp.MustCompile(`CREATE TABLE (?:IF NOT EXISTS )?([a-z_][a-z_0-9]*)`).FindAllStringSubmatch(schemaSQL, -1) {
-		names = append(names, m[1])
-	}
-	return names
+	return append(schemaTables(schemaSQL), schemaTables(grpcSchemaV7SQL)...)
 }
 func reserveRestoreDirectory(cfg Config, raw []byte) error {
 	dir := cfg.Database.DataDir

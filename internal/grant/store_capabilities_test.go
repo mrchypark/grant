@@ -243,7 +243,7 @@ func TestSimplifiedSchemaKeepsCanonicalSnapshotOnly(t *testing.T) {
 		t.Fatalf("retired physical state remains: %v %v", rows, err)
 	}
 	snapshot, err := s.ExportSnapshot(ctx)
-	if err != nil || len(snapshot.Tables) != 31 {
+	if err != nil || len(snapshot.Tables) != 33 {
 		t.Fatalf("canonical snapshot: %d tables, %v", len(snapshot.Tables), err)
 	}
 	snapshot.SchemaDigest = "old-schema"

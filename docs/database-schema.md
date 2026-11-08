@@ -84,6 +84,18 @@ PEP가 provider-native HTTP 요청을 권한 tuple로 고정할 때 사용하는
 
 Grant는 capability에 provider origin을 저장하지 않는다. catalog에는 exact method, closed path template, access mode, action/resource tuple, bounded extractor와 닫힌 query/request/response policy DTO만 저장한다. Phase A path는 resource extractor가 명시적으로 모델링한 변수 하나만 허용하며 collection 같은 추가 변수는 거부한다. 실제 origin과 transport는 PEP 배포 설정 소유다. 기존 authority snapshot import는 capability를 생성하거나 활성화하지 않는다.
 
+### `provider_grpc_capability_sets`, `provider_grpc_capability_active`
+
+[Migration 7](../internal/grant/store_schema_grpc_v7.sql) adds a separate catalog for unary gRPC without changing migration statements 1–6 or any HTTP catalog. The sets table stores `provider_id`, `generation`, `catalog_digest`, `canonical_json`, and `created_at`. The primary key is `(provider_id, generation)`. Staging requires an active provider, provider ownership of every referenced action, and a CAS on the latest generation; generations start at 1 and advance by one. A byte-identical retry preserves the existing row and timestamp. The active table stores `provider_id` as its primary key and the selected `generation`, `catalog_digest`, and `activated_at`. Activation compares the expected generation and digest and rechecks provider status and action ownership in the pointer update transaction. Rollback selects an earlier retained generation through the same CAS.
+
+**Relations:** The catalog belongs to `service_providers`. The active pointer references the exact provider, generation, and digest. Every action must belong to its provider at staging and activation. As with HTTP, provider administration can retire actions after a different generation is published. References in inactive generations remain as immutable history, including in snapshots; restore does not turn them back into authority. Activation rejects a generation whose action is missing or has another owner. Provider action deletion and replacement guard the active generation, and organization custom-action deletion also guards all retained generations, matching the existing HTTP rules for each operation. Database triggers protect the active references against direct deletion or changes to action identity or owner. Disabling a provider leaves its catalog history and pointer intact; active reads fail closed while it is disabled.
+
+**Why this structure:** Staging does not publish dispatch policy. A single read snapshot checks the pointer, catalog, provider status, and action ownership together; callers can include this read in a pinned authorization fence. Each enabled, case-sensitive full method maps to at most one capability across all IDs and versions. Methods use `/package.Service/Method` or `/Service/Method` with protobuf identifiers. Resource type and ID are constants; the catalog has no extractor. A catalog can contain up to 256 entries and 48 KiB of canonical JSON, with a per-capability message limit between 1 byte and 16 MiB.
+
+The canonical JSON uses compact UTF-8, lexicographically sorted object keys, decimal integers, and no trailing newline. `contractDigest` hashes the capability object without its own digest; `catalogDigest` hashes the object with `schemaVersion` (1), `providerId`, `generation`, and `capabilities`. It includes each entry's contract digest and preserves capability array order; an empty array is `[]`. The digest format is `sha256:` plus 64 lowercase hex digits. The descriptor digest pins the exact serialized descriptor bytes. CAS inputs and timestamps are outside both hashes.
+
+Logical snapshot envelope version 1 remains unchanged. The v7 schema digest identifies 33 tables, including both gRPC tables. Accepted v3–v6 inputs keep their original digest and 31-table inventory. Restore checks all 31 source tables and verifies the two new tables are empty for a legacy input; v6 PEP policy values are preserved, while v3–v5 still receive the v6 defaults. The restore receipt keeps the source snapshot digest.
+
 ### `provider_pep_clients`, `provider_pep_client_receipts`
 
 V5 rebuilds both tables while retaining every existing binding and receipt. It removes the application foreign key, uniqueness, and NOT NULL constraints, and recreates `idx_provider_pep_clients_provider_lifecycle`. The provider foreign key and global PEP primary key remain. New bindings and receipts use NULL application metadata. This separates service identity from application lifecycle without rewriting historical evidence. V6 snapshot compatibility and the appended policy columns are described below.
@@ -251,6 +263,8 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 - `actions.provider_id` -> `service_providers.id`
 - `provider_http_capability_sets.provider_id` -> `service_providers.id`
 - `provider_http_capability_active.(provider_id, generation)` -> `provider_http_capability_sets.(provider_id, generation)`
+- `provider_grpc_capability_sets.provider_id` -> `service_providers.id`
+- `provider_grpc_capability_active.(provider_id, generation, catalog_digest)` -> `provider_grpc_capability_sets.(provider_id, generation, catalog_digest)`
 - `provider_pep_clients.provider_id` -> `service_providers.id`
 - `provider_pep_clients.application_id`는 nullable 역사 메타데이터이며 V5부터 `applications.id` 외래 키와 unique 제약이 없다. `provider_pep_client_receipts.application_id`도 nullable이다.
 - `roles.organization_id` -> `organizations.id`
@@ -281,7 +295,7 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 
 ## Go/Rhiza storage port
 
-현재 스키마는 Grant 테이블 33개(논리 snapshot 대상 31개, 내부 staging 1개,
+현재 스키마는 Grant 테이블 35개(논리 snapshot 대상 33개, 내부 staging 1개,
 restore receipt 1개)와 명시적 인덱스 16개를 생성한다. 사용하지 않던 import/capability
 assertion 테이블 2개와 중복 capability projection, V2 authority snapshot 저장 기능을 제거했다.
 실제 transaction 검증은 공통 `application_consent_assertions`를 계속 사용한다.

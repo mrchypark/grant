@@ -40,14 +40,24 @@ type StoreSnapshot struct {
 }
 
 func applicationTables() []string {
+	names := append(legacyApplicationTables(), schemaTables(grpcSchemaV7SQL)...)
+	sort.Strings(names)
+	return names
+}
+
+func legacyApplicationTables() []string {
+	names := schemaTables(schemaSQL)
+	names = slices.DeleteFunc(names, func(name string) bool { return name == "grant_import_payloads" })
+	sort.Strings(names)
+	return names
+}
+
+func schemaTables(ddl string) []string {
 	re := regexp.MustCompile(`CREATE TABLE (?:IF NOT EXISTS )?([a-z_][a-z_0-9]*)`)
 	var names []string
-	for _, m := range re.FindAllStringSubmatch(schemaSQL, -1) {
-		if m[1] != "grant_import_payloads" {
-			names = append(names, m[1])
-		}
+	for _, m := range re.FindAllStringSubmatch(ddl, -1) {
+		names = append(names, m[1])
 	}
-	sort.Strings(names)
 	return names
 }
 func snapshotDigest(s StoreSnapshot) (string, error) {
@@ -190,11 +200,20 @@ func ReadStoreSnapshot(path string) (StoreSnapshot, error) {
 	}
 	return s, ValidateStoreSnapshot(s)
 }
+func snapshotHasPEPPolicy(digest string) bool {
+	return digest == canonicalSchemaDigest() || digest == legacySchemaDigestV6()
+}
+
 func ValidateStoreSnapshot(s StoreSnapshot) error {
-	if s.Version != 1 || (s.SchemaDigest != canonicalSchemaDigest() && s.SchemaDigest != legacySchemaDigestV5() && s.SchemaDigest != legacySchemaDigestV4() && s.SchemaDigest != legacySchemaDigestV3()) {
+	current := s.SchemaDigest == canonicalSchemaDigest()
+	if s.Version != 1 || (!current && s.SchemaDigest != legacySchemaDigestV6() && s.SchemaDigest != legacySchemaDigestV5() && s.SchemaDigest != legacySchemaDigestV4() && s.SchemaDigest != legacySchemaDigestV3()) {
 		return fmt.Errorf("snapshot schema mismatch")
 	}
-	expected := applicationTables()
+	expected := legacyApplicationTables()
+	if current {
+		expected = applicationTables()
+	}
+	hasPEPPolicy := snapshotHasPEPPolicy(s.SchemaDigest)
 	if len(s.Tables) != len(expected) {
 		return fmt.Errorf("snapshot table inventory mismatch")
 	}
@@ -210,7 +229,7 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 		case "provider_pep_client_receipts":
 			pepColumns = []string{"receipt_id", "pep_client_id", "application_id", "provider_id", "lifecycle", "valid_until", "changed_at", "changed_by"}
 		}
-		if pepColumns != nil && s.SchemaDigest == canonicalSchemaDigest() {
+		if pepColumns != nil && hasPEPPolicy {
 			pepColumns = append(pepColumns, "authorization_mode", "policy_revision")
 		}
 		if pepColumns != nil && !slices.Equal(t.Columns, pepColumns) {
@@ -220,7 +239,7 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 			if len(r) != len(t.Columns) {
 				return fmt.Errorf("snapshot row shape mismatch")
 			}
-			if pepColumns != nil && s.SchemaDigest == canonicalSchemaDigest() {
+			if pepColumns != nil && hasPEPPolicy {
 				mode, ok := r[len(r)-2].(string)
 				revision, integer := r[len(r)-1].(int64)
 				if !ok || (mode != "application" && mode != "user") || !integer || revision < 1 {
@@ -237,6 +256,9 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 	if e != nil || d != s.Digest {
 		return fmt.Errorf("snapshot digest mismatch")
 	}
+	if current {
+		return validateGRPCSnapshot(s.Tables)
+	}
 	if s.SchemaDigest == legacySchemaDigestV3() {
 		if e := validateLegacyV3IdentityRows(s); e != nil {
 			return e
@@ -248,7 +270,7 @@ func ValidateStoreSnapshot(s StoreSnapshot) error {
 // Compare restored legacy rows after SQLite has supplied the v6 defaults,
 // without changing the source digest used by admission and restore receipts.
 func restoredTableDigest(source SnapshotTable, schemaDigest string) (string, error) {
-	if schemaDigest == canonicalSchemaDigest() || (source.Name != "provider_pep_clients" && source.Name != "provider_pep_client_receipts") {
+	if snapshotHasPEPPolicy(schemaDigest) || (source.Name != "provider_pep_clients" && source.Name != "provider_pep_client_receipts") {
 		return source.Digest, nil
 	}
 	source.Columns = append(append([]string(nil), source.Columns...), "authorization_mode", "policy_revision")
@@ -258,6 +280,137 @@ func restoredTableDigest(source SnapshotTable, schemaDigest string) (string, err
 	}
 	source.Rows = rows
 	return tableDigest(source)
+}
+
+// Verify by name because the gRPC tables sort into the old inventory.
+// Legacy input must restore every source table and leave both new tables empty.
+func verifyRestoredSnapshotTables(source, restored StoreSnapshot) error {
+	inventory := applicationTables()
+	if restored.SchemaDigest != canonicalSchemaDigest() || len(restored.Tables) != len(inventory) {
+		return fmt.Errorf("restored canonical inventory mismatch")
+	}
+	byName := make(map[string]SnapshotTable, len(source.Tables))
+	for _, t := range source.Tables {
+		byName[t.Name] = t
+	}
+	for i, name := range inventory {
+		t := restored.Tables[i]
+		if t.Name != name {
+			return fmt.Errorf("restored canonical inventory mismatch: %s", name)
+		}
+		original, ok := byName[t.Name]
+		if !ok {
+			if columns := grpcSnapshotColumns(t.Name); source.SchemaDigest == canonicalSchemaDigest() ||
+				columns == nil || !slices.Equal(t.Columns, columns) || t.Count != 0 || len(t.Rows) != 0 {
+				return fmt.Errorf("unexpected restored table: %s", t.Name)
+			}
+			continue
+		}
+		expected, err := restoredTableDigest(original, source.SchemaDigest)
+		if err != nil {
+			return err
+		}
+		if t.Digest != expected {
+			return fmt.Errorf("restored table digest mismatch: %s", t.Name)
+		}
+		delete(byName, t.Name)
+	}
+	if len(byName) != 0 {
+		return fmt.Errorf("restore omitted source tables")
+	}
+	return nil
+}
+
+func grpcSnapshotColumns(table string) []string {
+	switch table {
+	case "provider_grpc_capability_sets":
+		return []string{"provider_id", "generation", "catalog_digest", "canonical_json", "created_at"}
+	case "provider_grpc_capability_active":
+		return []string{"provider_id", "generation", "catalog_digest", "activated_at"}
+	default:
+		return nil
+	}
+}
+
+func validateGRPCSnapshot(tables []SnapshotTable) error {
+	byName := make(map[string]SnapshotTable, len(tables))
+	for _, t := range tables {
+		byName[t.Name] = t
+		if columns := grpcSnapshotColumns(t.Name); columns != nil && !slices.Equal(t.Columns, columns) {
+			return fmt.Errorf("snapshot gRPC columns mismatch: %s", t.Name)
+		}
+	}
+	sets := byName["provider_grpc_capability_sets"]
+	active := byName["provider_grpc_capability_active"]
+	if len(sets.Rows) == 0 && len(active.Rows) == 0 {
+		return nil
+	}
+	providerTable := byName["service_providers"]
+	providerIDColumn := slices.Index(providerTable.Columns, "id")
+	actionTable := byName["actions"]
+	actionIDColumn := slices.Index(actionTable.Columns, "id")
+	actionOwnerColumn := slices.Index(actionTable.Columns, "provider_id")
+	if providerIDColumn < 0 || actionIDColumn < 0 || actionOwnerColumn < 0 {
+		return fmt.Errorf("snapshot is missing gRPC reference columns")
+	}
+	providers := make(map[string]bool, len(providerTable.Rows))
+	for _, row := range providerTable.Rows {
+		id, _ := row[providerIDColumn].(string)
+		providers[id] = true
+	}
+	owners := make(map[string]string, len(actionTable.Rows))
+	for _, row := range actionTable.Rows {
+		id, _ := row[actionIDColumn].(string)
+		owner, _ := row[actionOwnerColumn].(string)
+		owners[id] = owner
+	}
+	generations := make(map[string]map[int64]GRPCCatalog)
+	for _, row := range sets.Rows {
+		provider, _ := row[0].(string)
+		generation, _ := row[1].(int64)
+		digest, _ := row[2].(string)
+		payload, _ := row[3].(string)
+		createdAt, _ := row[4].(string)
+		catalog, err := decodeGRPCCatalog(provider, uint64(generation), digest, payload)
+		if err != nil || !providers[provider] || createdAt == "" {
+			return fmt.Errorf("invalid gRPC catalog in snapshot")
+		}
+		if generations[provider] == nil {
+			generations[provider] = make(map[int64]GRPCCatalog)
+		}
+		if _, exists := generations[provider][generation]; exists {
+			return fmt.Errorf("duplicate gRPC generation in snapshot")
+		}
+		generations[provider][generation] = catalog
+	}
+	for _, catalogs := range generations {
+		for generation := range catalogs {
+			if generation > int64(len(catalogs)) {
+				return fmt.Errorf("missing gRPC generation in snapshot")
+			}
+		}
+	}
+	seen := make(map[string]bool, len(active.Rows))
+	for _, row := range active.Rows {
+		provider, _ := row[0].(string)
+		generation, _ := row[1].(int64)
+		digest, _ := row[2].(string)
+		activatedAt, _ := row[3].(string)
+		catalog, found := generations[provider][generation]
+		if seen[provider] || !found || catalog.CatalogDigest != digest || activatedAt == "" {
+			return fmt.Errorf("invalid gRPC active pointer in snapshot")
+		}
+		seen[provider] = true
+		// Administrative retirement may leave missing or reassigned actions
+		// in an inactive generation. It is history, not restorable authority;
+		// activation always rechecks ownership against the live registry.
+		for _, capability := range catalog.Capabilities {
+			if owners[capability.ActionID] != provider {
+				return fmt.Errorf("invalid gRPC active action owner in snapshot")
+			}
+		}
+	}
+	return nil
 }
 
 // A v3 snapshot is admitted only as frozen pre-Goauthy state. Its identity
@@ -375,14 +528,8 @@ func RestoreStoreSnapshot(ctx context.Context, cfg Config, snap StoreSnapshot) (
 		return e
 	}
 	phase = "verify_tables"
-	for i, t := range restored.Tables {
-		expected, err := restoredTableDigest(snap.Tables[i], snap.SchemaDigest)
-		if err != nil {
-			return err
-		}
-		if t.Digest != expected {
-			return fmt.Errorf("restore digest verification failed: %s", t.Name)
-		}
+	if e = verifyRestoredSnapshotTables(snap, restored); e != nil {
+		return e
 	}
 	phase = "verify_schema"
 	if e = s.VerifySchema(ctx); e != nil {
@@ -514,7 +661,7 @@ func ExportLegacySQLite(ctx context.Context, path string) (StoreSnapshot, error)
 	if fieldActions > 0 {
 		return out, fmt.Errorf("legacy active field actions prevent coarse migration")
 	}
-	for _, name := range applicationTables() {
+	for _, name := range legacyApplicationTables() {
 		rows, e := tx.QueryContext(ctx, "SELECT * FROM "+quoteIdentifier(name))
 		if e != nil {
 			return out, fmt.Errorf("legacy schema is not the frozen Grant schema: %w", e)

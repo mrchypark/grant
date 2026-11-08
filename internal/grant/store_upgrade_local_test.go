@@ -135,18 +135,13 @@ func TestUpgradeLocalRetainedV090(t *testing.T) {
 
 func assertUpgradeTables(t *testing.T, want, got StoreSnapshot) {
 	t.Helper()
-	if want.SchemaDigest != got.SchemaDigest || len(want.Tables) != 31 || len(got.Tables) != 31 {
-		t.Fatal("schema or canonical table count changed")
+	if (want.SchemaDigest == legacySchemaDigestV6() && len(want.Tables) != 31) || len(got.Tables) != 33 {
+		t.Fatal("unexpected v6 baseline or v7 candidate table count")
 	}
-	byName := make(map[string]SnapshotTable, len(got.Tables))
-	for _, table := range got.Tables {
-		byName[table.Name] = table
+	if err := verifyRestoredSnapshotTables(want, got); err != nil {
+		t.Fatalf("retained tables changed: %v", err)
 	}
-	for _, table := range want.Tables {
-		actual, ok := byName[table.Name]
-		digest, err := restoredTableDigest(table, want.SchemaDigest)
-		if !ok || err != nil || actual.Digest != digest {
-			t.Fatalf("retained table %s changed", table.Name)
-		}
+	if want.SchemaDigest == legacySchemaDigestV6() {
+		t.Log("verified the two new v7 gRPC tables are empty")
 	}
 }
