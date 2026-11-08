@@ -490,7 +490,7 @@ jobs:
 
   local-bootstrap:
     if: ${{ !cancelled() && !inputs.publish_rauthy_launcher_gar && needs.go-verification.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: go-verification
     timeout-minutes: 60
     permissions:
@@ -530,32 +530,51 @@ jobs:
           sudo mv kubectl /usr/local/bin/kubectl
 
       - name: Install vCluster CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           curl_retry_args=(
             --fail
             --show-error
             --silent
             --location
-            --retry 5
+            --proto '=https'
+            --proto-redir '=https'
+            --retry 2
             --retry-delay 3
-            --retry-all-errors
-            --connect-timeout 20
-            --max-time 300
+            --retry-max-time 60
+            --connect-timeout 15
+            --max-time 60
           )
           VCLUSTER_VERSION="0.33.1"
           ARCH="$(uname -m)"
           case "${ARCH}" in
-            x86_64) ARCH="amd64" ;;
-            aarch64|arm64) ARCH="arm64" ;;
+            x86_64)
+              ARCH="amd64"
+              asset_id=381693948
+              asset_sha256=bed0e91223996ce469b60187d9ec9191987d2b7ea4b785bba9fa6ace7616dfe8
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              asset_id=381693946
+              asset_sha256=426c8b740e7388bfd92c1f09ed32a655570ba1e2220962d231607cc7bc16fbd5
+              ;;
             *)
               echo "unsupported architecture: ${ARCH}" >&2
               exit 1
               ;;
           esac
-          curl "${curl_retry_args[@]}" -o vcluster \
-            "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"
-          chmod +x vcluster
-          sudo mv vcluster /usr/local/bin/vcluster
+          vcluster_bin="$(mktemp)"
+          trap 'unlink "$vcluster_bin"' EXIT
+          if ! curl --disable "${curl_retry_args[@]}" -o "$vcluster_bin" \
+            "https://github.com/loft-sh/vcluster/releases/download/v${VCLUSTER_VERSION}/vcluster-linux-${ARCH}"; then
+            echo "vCluster direct download failed; trying official release asset API (asset $asset_id)" >&2
+            curl --disable "${curl_retry_args[@]}" -o "$vcluster_bin" \
+              -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' \
+              "https://api.github.com/repos/loft-sh/vcluster/releases/assets/$asset_id"
+          fi
+          printf '%s  %s\n' "$asset_sha256" "$vcluster_bin" | sha256sum --check
+          sudo install -m 0755 "$vcluster_bin" /usr/local/bin/vcluster
 
       - name: Preload kernel modules
         run: |

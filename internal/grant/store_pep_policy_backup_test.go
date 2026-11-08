@@ -3,33 +3,41 @@ package grant
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// Materialize the actual historical PEP layout, rather than relabeling v6 rows.
+// Materialize the actual historical table and column inventory.
 func pepSnapshotFixtureVersion(t *testing.T, source StoreSnapshot, digest string) StoreSnapshot {
 	t.Helper()
 	out := source
 	out.SchemaDigest = digest
-	out.Tables = append([]SnapshotTable(nil), source.Tables...)
-	for i := range out.Tables {
-		table := &out.Tables[i]
-		table.Columns = append([]string(nil), table.Columns...)
-		table.Rows = make([][]any, len(source.Tables[i].Rows))
-		for j, row := range source.Tables[i].Rows {
+	out.Tables = make([]SnapshotTable, 0, len(source.Tables))
+	for _, original := range source.Tables {
+		if digest != canonicalSchemaDigest() && grpcSnapshotColumns(original.Name) != nil {
+			if original.Count != 0 || len(original.Rows) != 0 {
+				t.Fatal("legacy fixture would drop gRPC authority")
+			}
+			continue
+		}
+		table := original
+		table.Columns = append([]string(nil), original.Columns...)
+		table.Rows = make([][]any, len(original.Rows))
+		for j, row := range original.Rows {
 			table.Rows[j] = append([]any(nil), row...)
 		}
-		if digest != canonicalSchemaDigest() && (table.Name == "provider_pep_clients" || table.Name == "provider_pep_client_receipts") {
+		if !snapshotHasPEPPolicy(digest) && (table.Name == "provider_pep_clients" || table.Name == "provider_pep_client_receipts") {
 			table.Columns = table.Columns[:len(table.Columns)-2]
 			for j, row := range table.Rows {
 				table.Rows[j] = row[:len(row)-2]
 			}
 		}
 		var err error
-		table.Digest, err = tableDigest(*table)
+		table.Digest, err = tableDigest(table)
 		if err != nil {
 			t.Fatal(err)
 		}
+		out.Tables = append(out.Tables, table)
 	}
 	var err error
 	out.Digest, err = snapshotDigest(out)
@@ -142,14 +150,14 @@ func TestPepPolicySnapshotRejectsInvalidPolicyAndRelabeledLegacy(t *testing.T) {
 		}
 	}
 	for _, digest := range []string{legacySchemaDigestV5(), legacySchemaDigestV4(), legacySchemaDigestV3()} {
-		bad := snapshot
+		bad := pepSnapshotFixtureVersion(t, snapshot, legacySchemaDigestV6())
 		bad.SchemaDigest = digest
 		bad.Digest, err = snapshotDigest(bad)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = ValidateStoreSnapshot(bad); err == nil {
-			t.Fatal("v6 policy columns admitted under a legacy schema digest")
+		if err = ValidateStoreSnapshot(bad); err == nil || !strings.Contains(err.Error(), "PEP columns mismatch") {
+			t.Fatalf("v6 policy columns admitted under a legacy schema digest: %v", err)
 		}
 	}
 }

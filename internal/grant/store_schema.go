@@ -22,6 +22,9 @@ var goauthySchemaV4SQL string
 //go:embed store_schema_pep_policy_v6.sql
 var pepPolicySchemaV6SQL string
 
+//go:embed store_schema_grpc_v7.sql
+var grpcSchemaV7SQL string
+
 const pepIdentityMigrationSQL = `ALTER TABLE provider_pep_clients RENAME TO provider_pep_clients_application_v1;
 ALTER TABLE provider_pep_client_receipts RENAME TO provider_pep_client_receipts_application_v1;
 CREATE TABLE provider_pep_clients (
@@ -51,6 +54,10 @@ DROP TABLE provider_pep_client_receipts_application_v1;
 CREATE INDEX idx_provider_pep_clients_provider_lifecycle ON provider_pep_clients (provider_id, lifecycle, valid_until);`
 
 func canonicalSchemaDigest() string {
+	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL + pepIdentityMigrationSQL + pepPolicySchemaV6SQL + grpcSchemaV7SQL))
+}
+
+func legacySchemaDigestV6() string {
 	return digestBytes([]byte(schemaSQL + indexesSQL + goauthySchemaV4SQL + pepIdentityMigrationSQL + pepPolicySchemaV6SQL))
 }
 
@@ -80,6 +87,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		migrations = append(migrations, rhiza.Migration{Version: int64(len(migrations) + 1), Name: group.name, Statements: stmts})
 	}
+	// The v7 DDL includes trigger bodies. Split only between complete statements.
+	var grpcStatements []Statement
+	for _, q := range strings.Split(strings.TrimSpace(grpcSchemaV7SQL), "\n\n") {
+		grpcStatements = append(grpcStatements, Statement{SQL: q})
+	}
+	migrations = append(migrations, rhiza.Migration{Version: 7, Name: "grant gRPC capability catalogs", Statements: grpcStatements})
 	// Retry precommit transient failures only. An unknown outcome must not be
 	// resubmitted: a time budget does not guarantee retained request receipts.
 	if err := retryNativeOutcome(ctx, func(ctx context.Context) error { return s.db.Migrate(ctx, migrations) }); err != nil {
@@ -112,12 +125,19 @@ func (s *Store) VerifySchema(ctx context.Context) error {
 	return s.verifySchemaAt(ctx, ReadStrong)
 }
 func (s *Store) verifySchemaAt(ctx context.Context, consistency string) error {
-	rows, err := s.Query(ctx, consistency, "SELECT (SELECT COUNT(*) FROM actions WHERE visibility_granting<>0)+(SELECT COUNT(*) FROM role_action_field_views)+(SELECT COUNT(*) FROM field_view_policy_audit_outbox) AS invalid")
+	rows, err := s.Query(ctx, consistency, `SELECT
+ (SELECT COUNT(*) FROM actions WHERE visibility_granting<>0)+(SELECT COUNT(*) FROM role_action_field_views)+(SELECT COUNT(*) FROM field_view_policy_audit_outbox) AS invalid,
+ (SELECT COUNT(*) FROM sqlite_schema WHERE
+ (type='table' AND name IN ('provider_grpc_capability_sets','provider_grpc_capability_active')) OR
+ (type='trigger' AND tbl_name='actions' AND name IN ('provider_grpc_active_action_delete','provider_grpc_active_action_rekey'))) AS grpc_objects`)
 	if err != nil {
 		return err
 	}
 	if rowInt(rows[0], "invalid") != 0 {
 		return fmt.Errorf("active legacy field authorization is incompatible with coarse deployment")
+	}
+	if rowInt(rows[0], "grpc_objects") != 4 {
+		return fmt.Errorf("gRPC capability schema is incomplete")
 	}
 	return s.coarsePreflight(ctx, consistency)
 }

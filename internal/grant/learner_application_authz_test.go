@@ -408,6 +408,75 @@ func TestLearnerApplicationAuthorizationRealReplica(t *testing.T) {
 		t.Fatal("disconnected request did not terminate")
 	}
 	blockFence.Store(false)
+	t.Run("gRPC unary requires a fresh fence", func(t *testing.T) {
+		const provider, org, token = "grant", "conalog-grant", "Bearer token"
+		mode := "user"
+		pep, err := voter.UpsertProviderPepClient(ctx, provider, "grpc-learner-pep", org, UpsertProviderPepClient{
+			Lifecycle: "active", AuthorizationMode: &mode,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cap := GRPCCapability{
+			CapabilityID: "workspace.get", Version: 1, Enabled: true, FullMethod: "/workspace.Workspaces/Get",
+			DescriptorDigest: sha256Text("descriptor"), ActionID: checks[0].Action,
+			ResourceType: checks[0].Resource.ResourceType, ResourceID: checks[0].Resource.ID, MaxMessageBytes: 1024,
+		}
+		cap.ContractDigest, err = GRPCCapabilityContractDigest(cap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := StageGRPCCapabilityGeneration{SchemaVersion: 1, Generation: 1, Capabilities: []GRPCCapability{cap}}
+		stage.CatalogDigest, err = GRPCCapabilityCatalogDigest(provider, stage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = voter.StageGRPCCapabilityGeneration(ctx, provider, stage); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = voter.ActivateGRPCCapabilityGeneration(ctx, provider, ActivateGRPCCapabilityGeneration{
+			TargetGeneration: stage.Generation, TargetCatalogDigest: stage.CatalogDigest,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		grpcCfg := lc
+		grpcCfg.Security.HTTPCapabilityPEPClientID = pep.PepClientID
+		grpcLearner := NewService(grpcCfg, replica)
+		grpcLearner.client = idp.Client()
+		in := GRPCCapabilityDecisionInput{
+			WireVersion: 1, ProviderID: provider, PEPClientID: pep.PepClientID, PEPPolicyRevision: pep.PolicyRevision,
+			CatalogGeneration: stage.Generation, CatalogDigest: stage.CatalogDigest,
+			CapabilityID: cap.CapabilityID, CapabilityVersion: cap.Version, ContractDigest: cap.ContractDigest,
+			FullMethod: cap.FullMethod, DescriptorDigest: cap.DescriptorDigest, RPCKind: "unary",
+			ResourceType: cap.ResourceType, ResourceID: cap.ResourceID, MessageDigest: sha256Text(""),
+			ForwardedMetadataDigest: sha256Text(""), ProviderCredentialDigest: CredentialDigest(token),
+			ProviderCredential: GRPCCredentialEvidence{Subject: goauthySubject(idp.URL, "subject"), Audience: "https://grant.example.test/"},
+			RequestBinding:     "abcdefghijklmnopqrstuv",
+		}
+		checkGRPC := func(want bool) {
+			t.Helper()
+			out, err := grpcLearner.DecideGRPCCapability(ctx, token, org, in)
+			if err != nil || out.Allowed != want || out.OrganizationID != org {
+				t.Fatalf("gRPC decision=%+v err=%v; want allowed=%t", out, err, want)
+			}
+		}
+		checkGRPC(true)
+		if _, err = voter.Exec(ctx, "UPDATE role_bindings SET state='disabled' WHERE id='test-binding'"); err != nil {
+			t.Fatal(err)
+		}
+		checkGRPC(false)
+		if _, err = voter.Exec(ctx, "UPDATE role_bindings SET state='active' WHERE id='test-binding'"); err != nil {
+			t.Fatal(err)
+		}
+		checkGRPC(true)
+		server.Close()
+		if out, err := grpcLearner.DecideGRPCCapability(ctx, token, org, in); err == nil || ErrorStatus(err) != 503 || out != (GRPCCapabilityDecision{}) {
+			t.Fatalf("gRPC decision without fence: %+v %v", out, err)
+		}
+		if _, err := grpcLearner.ActiveGRPCCapabilityCatalog(ctx, provider); err == nil || ErrorStatus(err) != 503 {
+			t.Fatalf("gRPC catalog without fence: %v", err)
+		}
+	})
 	server.Close()
 	check(ctx, false, 503)
 }

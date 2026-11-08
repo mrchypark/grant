@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mrchypark/grant/internal/grant"
@@ -66,12 +67,21 @@ func applicationAuthorizationRead(r *http.Request) bool {
 	return false
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.learner && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
-		if _, pattern := s.mux.Handler(r); pattern == "" {
+	grpcRead := grpcCapabilityRead(r)
+	if grpcRead {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	if s.learner && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && !grpcRead && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
+		_, pattern := s.mux.Handler(r)
+		switch pattern {
+		case "":
 			http.NotFound(w, r)
-			return
+		case "POST " + grpcGenerationPath, "POST " + grpcActivationPath:
+			// Let the route bound any unread body before rejecting the write.
+			s.mux.ServeHTTP(w, r)
+		default:
+			writeError(w, failure(503, "read replica only serves capability decisions and catalogs"))
 		}
-		writeError(w, failure(503, "read replica only serves capability decisions and catalogs"))
 		return
 	}
 	s.mux.ServeHTTP(w, r)
@@ -103,7 +113,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func (s *Server) route(method, path, auth string, voter bool, status int, fn any) {
 	var prepare func(*request) (endpoint, error)
+	var grpcBody bool
 	switch f := fn.(type) {
+	case grpcBodyEndpoint:
+		prepare, grpcBody = f.prepare, true
 	case preparedEndpoint:
 		prepare = f.prepare
 	case func(*request) (any, error):
@@ -114,12 +127,30 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 		panic("invalid endpoint registration")
 	}
 	s.patterns = append(s.patterns, method+" "+path)
+	grpcCatalog := method == http.MethodGet && path == grpcCatalogPath
 	s.mux.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
+		// The GET registration also serves HEAD. Reject declared or streamed
+		// bodies without reading them to determine whether they are empty.
+		catalogBody := grpcCatalog && (r.ContentLength != 0 || len(r.TransferEncoding) != 0)
+		var controller *http.ResponseController
+		var deadlineErr error
+		closeUnreadBody := false
+		if grpcBody || catalogBody {
+			controller = http.NewResponseController(w)
+			// Also bound any body reads net/http performs after an early rejection.
+			deadlineErr = controller.SetReadDeadline(time.Now().Add(grpcBodyTimeout))
+			closeUnreadBody = r.ProtoMajor == 1 && w.Header().Get("Connection") == ""
+			if closeUnreadBody {
+				// Send an auth or decode error without first draining the body.
+				w.Header().Set("Connection", "close")
+			}
+		}
 		if voter && s.learner {
 			writeError(w, failure(503, "endpoint requires voter node"))
 			return
 		}
 		q := &request{Request: r}
+		var handler endpoint
 		var err error
 		if r.Method == "GET" || strings.HasPrefix(r.URL.Path, "/api/v1/authz/") {
 			q.consistency, err = readConsistency(r)
@@ -128,10 +159,12 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 				return
 			}
 		}
-		handler, err := prepare(q)
-		if err != nil {
-			writeError(w, err)
-			return
+		if !grpcBody {
+			handler, err = prepare(q)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
 		}
 		if auth == "master" {
 			if len(r.Header.Values("X-Grant-Master-Key")) > 0 {
@@ -156,26 +189,31 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 				err = failure(401, "unauthorized: missing x-grant-master-key header")
 			}
 		}
-		if auth == "app" || auth == "application" || auth == "http-decision" {
+		decisionAuth := auth == "http-decision" || auth == "grpc-decision"
+		if auth == "app" || auth == "application" || decisionAuth {
 			err = requireKey(r, "x-grant-app-auth-key", s.service.Config().Security.AppAuthKey, "application authorization key")
 		}
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" || auth == "http-decision" {
+		if auth == "grpc-decision" && len(r.Header.Values("authorization")) > 1 {
+			writeError(w, failure(400, "multiple authorization headers"))
+			return
+		}
+		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" || decisionAuth {
 			q.bearer, err = bearerToken(r)
-			if err == nil && auth == "http-decision" && len(r.Header.Values("x-organization-id")) > 1 {
+			if err == nil && decisionAuth && len(r.Header.Values("x-organization-id")) > 1 {
 				err = failure(400, "multiple x-organization-id headers")
 			}
 			if err == nil {
-				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || (auth == "inactive" && s.service.AuthProviderMode() == "pocketbase"))
+				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || auth == "grpc-decision" || (auth == "inactive" && s.service.AuthProviderMode() == "pocketbase"))
 			}
 			if err != nil {
 				writeError(w, err)
 				return
 			}
-			if (auth == "application" || auth == "http-decision") && q.bearer == "" {
+			if (auth == "application" || decisionAuth) && q.bearer == "" {
 				writeError(w, failure(401, "unauthorized: missing authorization header"))
 				return
 			}
@@ -200,6 +238,29 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 		if err != nil {
 			writeError(w, err)
 			return
+		}
+		if grpcBody || catalogBody {
+			if deadlineErr != nil {
+				writeError(w, failure(503, "gRPC request body read deadline unavailable"))
+				return
+			}
+			if catalogBody {
+				writeError(w, failure(400, "gRPC catalog request body is not allowed"))
+				return
+			}
+			handler, err = prepare(q)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			// A successfully decoded body was read to EOF. Restore keep-alive.
+			if err := controller.SetReadDeadline(time.Time{}); err != nil {
+				writeError(w, failure(503, "gRPC request body read deadline could not be cleared"))
+				return
+			}
+			if closeUnreadBody {
+				w.Header().Del("Connection")
+			}
 		}
 		result, err := handler(q)
 		if err != nil {

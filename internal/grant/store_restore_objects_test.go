@@ -188,7 +188,7 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 				t.Fatalf("close learner before archive cold recovery: %v", safeRestoreError("close", closeErr))
 			}
 			beforeClose, err := voter.ExportSnapshot(ctx)
-			if err != nil || len(beforeClose.Tables) != 31 {
+			if err != nil || len(beforeClose.Tables) != 33 {
 				t.Fatal("archive cold recovery source snapshot unavailable")
 			}
 			// Clean Close publishes the archive. This does not qualify crash
@@ -221,7 +221,7 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 				t.Fatal("archive cold recovery schema verification failed")
 			}
 			afterOpen, err := cold.ExportSnapshot(ctx)
-			if err != nil || len(afterOpen.Tables) != 31 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
+			if err != nil || len(afterOpen.Tables) != 33 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
 				t.Fatal("archive cold recovery canonical inventory changed")
 			}
 			for i, want := range beforeClose.Tables {
@@ -236,7 +236,7 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 				t.Fatalf("close recovered archive voter: %v", safeRestoreError("close", closeErr))
 			}
 			if evidence := os.Getenv("GRANT_SINGLE_VOTER_RESTORE_EVIDENCE"); evidence != "" {
-				if err := os.WriteFile(filepath.Join(evidence, image.name+"-archive-cold-dr.txt"), []byte("PASS: clean-close archive cold recovery through ordinary OpenStore; 31 canonical tables/counts/columns/digests preserved; async unchanged; no crash/unflushed-ACK guarantee\n"), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(evidence, image.name+"-archive-cold-dr.txt"), []byte("PASS: clean-close archive cold recovery through ordinary OpenStore; 33 canonical tables/counts/columns/digests preserved; async unchanged; no crash/unflushed-ACK guarantee\n"), 0600); err != nil {
 					t.Fatal("cannot preserve archive cold recovery evidence")
 				}
 			}
@@ -308,6 +308,11 @@ func restoreContractEmulator(t *testing.T, ctx context.Context, provider, image 
 
 func restoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 	t.Helper()
+	return freezeRestoreSourceV6(t, restoreCurrentSource(t, ctx))
+}
+
+func restoreCurrentSource(t *testing.T, ctx context.Context) StoreSnapshot {
+	t.Helper()
 	root := t.TempDir()
 	source, err := OpenStore(ctx, Config{Database: DatabaseConfig{DataDir: filepath.Join(root, "source"), Rhiza: rhiza.Config{Local: true, ClusterID: "source-local", NodeID: "source-local", ObjStoreProvider: "filesystem", ObjStoreDir: filepath.Join(root, "archive"), ObjStoreDurability: rhiza.ObjectStoreDurabilityBeforeAck}}})
 	if err != nil {
@@ -342,17 +347,26 @@ func restoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 	return snap
 }
 
+func freezeRestoreSourceV6(t *testing.T, snap StoreSnapshot) StoreSnapshot {
+	t.Helper()
+	frozen := pepSnapshotFixtureVersion(t, snap, legacySchemaDigestV6())
+	if len(frozen.Tables) != 31 {
+		t.Fatalf("frozen v6 fixture has %d tables, want 31", len(frozen.Tables))
+	}
+	if err := ValidateStoreSnapshot(frozen); err != nil {
+		t.Fatalf("invalid frozen v6 fixture: %v", err)
+	}
+	return frozen
+}
+
 func verifyRestoredTables(t *testing.T, ctx context.Context, voter *Store, snap StoreSnapshot) {
 	t.Helper()
 	got, err := voter.ExportSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, table := range got.Tables {
-		want, err := restoredTableDigest(snap.Tables[i], snap.SchemaDigest)
-		if err != nil || table.Digest != want {
-			t.Fatalf("imported table %s changed", table.Name)
-		}
+	if err := verifyRestoredSnapshotTables(snap, got); err != nil {
+		t.Fatalf("imported tables changed: %v", err)
 	}
 }
 
