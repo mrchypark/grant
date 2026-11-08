@@ -15,18 +15,25 @@ import (
 	"github.com/mrchypark/rhiza"
 )
 
-// CI supplies /usr/local/bin/grant extracted from the verified v0.9.0 image:
-// sha256:da3a5c9c0193870b5c892cb5407f657cc19df88b31593dd7bb8e94b48445e70f
-// OCI revision f0ab0e7684f279dc84f82f22c7537d3679780eb9.
+// CI supplies binaries extracted from source-verified immutable release images.
 // This synthetic Local retained-directory probe establishes neither production
 // non-Local compatibility nor recovery after WAL loss, crash, or downgrade.
 func TestUpgradeLocalRetainedV090(t *testing.T) {
-	binary := os.Getenv("GRANT_UPGRADE_BASELINE_BINARY")
+	testUpgradeLocalRetained(t, "v0.9.0", "GRANT_UPGRADE_BASELINE")
+}
+
+func TestUpgradeLocalRetainedV091(t *testing.T) {
+	testUpgradeLocalRetained(t, "v0.9.1", "GRANT_UPGRADE_V091_BASELINE")
+}
+
+func testUpgradeLocalRetained(t *testing.T, version, prefix string) {
+	t.Helper()
+	binary := os.Getenv(prefix + "_BINARY")
 	if binary == "" {
 		if os.Getenv("GRANT_UPGRADE_BASELINE_REQUIRED") == "1" {
-			t.Fatal("required v0.9.0 baseline binary is missing")
+			t.Fatalf("required %s baseline binary is missing", version)
 		}
-		t.Skip("UNVERIFIED: requires a CI-extracted, source-verified v0.9.0 baseline binary")
+		t.Skipf("UNVERIFIED: requires a CI-extracted, source-verified %s baseline binary", version)
 	}
 	if !filepath.IsAbs(binary) {
 		t.Fatal("baseline binary must be an absolute path")
@@ -38,7 +45,7 @@ func TestUpgradeLocalRetainedV090(t *testing.T) {
 	hash := sha256.New()
 	_, readErr := io.Copy(hash, file)
 	closeErr := file.Close()
-	expected := os.Getenv("GRANT_UPGRADE_BASELINE_SHA256")
+	expected := os.Getenv(prefix + "_SHA256")
 	if readErr != nil || closeErr != nil || len(expected) != 64 || hex.EncodeToString(hash.Sum(nil)) != expected {
 		t.Fatal("baseline binary checksum missing or mismatched")
 	}
@@ -130,7 +137,7 @@ func TestUpgradeLocalRetainedV090(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUpgradeTables(t, after, reopened)
-	t.Log("PASS synthetic v0.9.0 Local native directory -> candidate retained reopen, 31-table/schema preservation, new write and reopen; no non-Local/cold-WAL claim")
+	t.Logf("PASS synthetic %s Local native directory -> candidate retained reopen, 31-table/schema preservation, new write and reopen; no non-Local/cold-WAL claim", version)
 }
 
 func assertUpgradeTables(t *testing.T, want, got StoreSnapshot) {
