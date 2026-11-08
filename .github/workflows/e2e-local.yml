@@ -490,7 +490,7 @@ jobs:
 
   local-bootstrap:
     if: ${{ !cancelled() && !inputs.publish_rauthy_launcher_gar && needs.go-verification.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: go-verification
     timeout-minutes: 60
     permissions:
