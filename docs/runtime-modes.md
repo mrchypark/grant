@@ -1,8 +1,14 @@
 # Native Rhiza runtime modes
 
-## Rhiza v0.23.2 source integration
+## Rhiza v0.23.3 source pins
 
-Current source pins runtime and replica-members helper to Rhiza v0.23.2.
+Current source pins the runtime and replica-members helper to Rhiza v0.23.3
+from supplier SDK source `fd323dbb37ad86c614eb0983c406adbccd16acba`. The CI
+and retained-data qualification below applies to v0.23.2.
+
+## Historical Rhiza v0.23.2 source qualification
+
+That source pinned both runtime and replica-members helper to Rhiza v0.23.2.
 Supplier SDK source `2dc60add1c4cf99a9ff1050bfc7ad586f29ae7e1` is distinct
 from tested Grant runtime `1d8704781590c695196372c07e10af42143665f4`.
 Full [CI 42208148947](https://github.com/mrchypark/grant/actions/runs/42208148947)
@@ -201,7 +207,7 @@ Each catalog or decision request first obtains a quorum-backed applied slot from
 
 For generic application-authorization reads, external identity verification occurs once before the learner's three-second fence/catch-up/retry budget. The complete local identity mapping, active user, configured active/ready application and organization context, and every membership, RBAC, application-admission and consent evaluation use one accepted Grant applied slot across the entire request. A slot change retries the whole local operation, without repeating external verification or returning partial decisions. This detects snapshot movement; it does not lock the database. IdP verification is not part of a distributed snapshot. Voters retain their legacy individual strong reads for application-authorization routes; provider-bound USER reads instead require the fenced snapshot on both voters and learners.
 
-The generic wire format and 1,000-item/2 MiB limits are unchanged. Application-authorization learners apply closed nested validation; provider-bound USER routes apply closed DTOs and duplicate-header rejection on both voters and learners. Filter accepts caller-supplied candidates and returns allowed IDs in input order; it provides no inventory, continuation token, authorized total, expiry lease or effect fence. Recheck protected operations after listing. See [the application HTTP contract](porting-go-http-contract.md#unreleased-learner-application-authorization) and [USER contract](provider-user-authorization.md) for headers, JSON and validation details. The current source engine is Rhiza v0.23.2.
+The generic wire format and 1,000-item/2 MiB limits are unchanged. Application-authorization learners apply closed nested validation; provider-bound USER routes apply closed DTOs and duplicate-header rejection on both voters and learners. Filter accepts caller-supplied candidates and returns allowed IDs in input order; it provides no inventory, continuation token, authorized total, expiry lease or effect fence. Recheck protected operations after listing. See [the application HTTP contract](porting-go-http-contract.md#unreleased-learner-application-authorization) and [USER contract](provider-user-authorization.md) for headers, JSON and validation details. The current source engine is Rhiza v0.23.3.
 
 Configured issuer, client, audience and scope checks remain trust boundaries. A different deployment issuer denotes a different qualified identity; Grant does not automatically alias subjects or merge accounts by email. This release adds no issuer-registration feature, OAuth-client provisioning or missing-account allow fallback. Existing local identity mapping is required; application readiness applies to application mode, not explicit provider-bound USER mode.
 
@@ -213,13 +219,13 @@ Use `scripts/replica-members` with private stdin JSON containing `ClusterID` and
 
 The v0.9.1 image includes `/usr/local/bin/replica-members`, built with Rhiza v0.23.0.
 Current source pins its separate `scripts/replica-members-src` module to Rhiza
-v0.23.2 like the runtime.
+v0.23.3 like the runtime.
 The supplier's [v0.19.0](https://github.com/mrchypark/rhiza/tree/v0.19.0) to
 [v0.23.0](https://github.com/mrchypark/rhiza/tree/v0.23.0) source comparison confirms
 unchanged key derivation without trimming, member conversion/URL fallback and
 `ID`/`PeerURL`/32-number `PublicKey` JSON. This is source-confirmed compatibility,
 not a cross-version golden-key runtime test. Transport/profile/ALPN changes remain
-outside that claim: keep voter, learner and helper on the same version (v0.23.2
+outside that claim: keep voter, learner and helper on the same version (v0.23.3
 for current source), without
 claiming rolling or mixed-version qualification. No Go toolchain is needed in the
 runtime image. Invoke the helper explicitly with the verified published image:
