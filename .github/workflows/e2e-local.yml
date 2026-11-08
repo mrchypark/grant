@@ -43,6 +43,7 @@ on:
       - ".github/workflows/e2e-local.yml"
       - "go.mod"
       - "go.sum"
+      - "api/**"
       - "internal/**"
       - "cmd/**"
       - "Dockerfile"
@@ -458,11 +459,24 @@ jobs:
         run: sh scripts/verify-go-three-voter.sh
 
       - name: Install pinned standalone render tools
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           curl -fSL --retry 3 --connect-timeout 20 --max-time 180 -o kubectl https://dl.k8s.io/release/v1.35.3/bin/linux/amd64/kubectl
           curl -fSL --retry 3 --connect-timeout 20 --max-time 180 -o kubectl.sha256 https://dl.k8s.io/release/v1.35.3/bin/linux/amd64/kubectl.sha256
           echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
-          curl -fSL --retry 3 --connect-timeout 20 --max-time 180 -o yq https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
+          yq_curl_args=(
+            -fsSL --proto '=https' --proto-redir '=https'
+            --retry 2 --retry-delay 3 --retry-max-time 30 --connect-timeout 10 --max-time 30
+          )
+          if ! curl --disable "${yq_curl_args[@]}" -o yq \
+            https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64; then
+            echo "yq direct download failed; trying official release asset API (asset 381629671)" >&2
+            curl --disable "${yq_curl_args[@]}" -o yq \
+              -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' \
+              https://api.github.com/repos/mikefarah/yq/releases/assets/381629671
+          fi
+          printf '%s  yq\n' 75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9 | sha256sum --check
           chmod +x kubectl yq
           sudo mv kubectl yq /usr/local/bin/
           rm kubectl.sha256

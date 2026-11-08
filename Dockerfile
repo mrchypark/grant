@@ -3,6 +3,7 @@ FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d744
 WORKDIR /workspace
 COPY --link go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY --link api ./api
 COPY --link internal ./internal
 COPY --link cmd ./cmd
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
