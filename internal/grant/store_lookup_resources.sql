@@ -109,17 +109,14 @@ candidates AS (
         JOIN actions act
           ON act.id = ra.action_id
          AND act.provider_id = rb.provider_id
+        JOIN organization_memberships om
+          ON om.organization_id = rb.subject_organization_id
+         AND om.user_id = rb.subject_id
+         AND om.status = 'active'
         LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
         WHERE (
             rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
-            OR EXISTS (
-                SELECT 1
-                FROM organization_memberships owner_om
-                WHERE owner_om.organization_id = req.organization_id
-                  AND owner_om.user_id = req.user_id
-                  AND owner_om.status = 'active'
-                  AND owner_om.membership_role = 'owner'
-            )
+            OR om.membership_role = 'owner'
         )
         AND (rb.agreement_id IS NULL OR (
             a.id IS NOT NULL

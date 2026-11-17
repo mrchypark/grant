@@ -655,10 +655,10 @@ func (s *Store) ListBackups(ctx context.Context) ([]BackupInfo, error) {
 		}
 		seen := map[string]bool{}
 		for _, b := range local {
-			seen[b.Name] = true
+			seen[filepath.Base(b.Name)] = true
 		}
 		for _, b := range remote {
-			if !seen[b.Name] {
+			if !seen[filepath.Base(b.Name)] {
 				local = append(local, b)
 			}
 		}

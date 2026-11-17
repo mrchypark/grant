@@ -36,6 +36,8 @@ func (s *Service) cachedIdentity(key string) (cachedIdentity, bool) {
 	}
 	return v, ok
 }
+const maxAuthCacheEntries = 4096
+
 func (s *Service) cacheIdentity(key string, v cachedIdentity) {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
@@ -45,9 +47,23 @@ func (s *Service) cacheIdentity(key string, v cachedIdentity) {
 			delete(s.authCache, k)
 		}
 	}
-	if v.ExpiresAt.After(now) {
-		s.authCache[key] = v
+	if !v.ExpiresAt.After(now) {
+		return
 	}
+	if _, exists := s.authCache[key]; !exists && len(s.authCache) >= maxAuthCacheEntries {
+		var oldestKey string
+		var oldestExp time.Time
+		for k, c := range s.authCache {
+			if oldestKey == "" || c.ExpiresAt.Before(oldestExp) {
+				oldestKey = k
+				oldestExp = c.ExpiresAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.authCache, oldestKey)
+		}
+	}
+	s.authCache[key] = v
 }
 type trustedGatewayIdentityKey struct{}
 

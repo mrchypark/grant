@@ -300,6 +300,9 @@ func header(r *http.Request, name string, required bool) (string, error) {
 		}
 		return "", nil
 	}
+	if len(values) > 1 {
+		return "", failure(400, "multiple "+name+" headers")
+	}
 	value := values[0]
 	if !utf8.ValidString(value) {
 		return "", failure(400, name+" header is not valid UTF-8")

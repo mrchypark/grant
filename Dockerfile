@@ -19,14 +19,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 grant \
     && useradd --system --uid 10001 --gid 10001 --home /app --shell /usr/sbin/nologin grant \
-    && mkdir -p /app /data/rhiza /data/backups /tmp \
-    && chown -R 10001:10001 /app /data/rhiza /data/backups /tmp
+    && mkdir -p /app /var/lib/grant/rhiza /var/lib/grant/backups /tmp \
+    && chown -R 10001:10001 /app /var/lib/grant /tmp
 WORKDIR /app
 COPY --link --from=builder --chown=10001:10001 /workspace/grant /usr/local/bin/grant
 COPY --link --from=builder --chown=10001:10001 /workspace/grant-admin /usr/local/bin/grant-admin
 COPY --link --from=builder --chown=10001:10001 /workspace/grant-patch-data-manifest-digest /usr/local/bin/grant-patch-data-manifest-digest
 COPY --link --from=builder --chown=10001:10001 /workspace/replica-members /usr/local/bin/replica-members
 USER 10001:10001
-ENV GRANT_BIND_ADDR=0.0.0.0:8080 GRANT_DATA_DIR=/data/rhiza GRANT_BACKUP_DIR=/data/backups
+ENV GRANT_BIND_ADDR=0.0.0.0:8080 GRANT_DATA_DIR=/var/lib/grant/rhiza GRANT_BACKUP_DIR=/var/lib/grant/backups
 EXPOSE 8080 8100/udp
 ENTRYPOINT ["/usr/local/bin/grant"]

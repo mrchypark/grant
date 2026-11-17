@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mrchypark/rhiza"
 )
 
 type Error struct {
@@ -33,7 +35,7 @@ func ErrorStatus(err error) int {
 		return 401
 	case strings.Contains(text, "UNIQUE constraint failed"), strings.Contains(text, "already exists"):
 		return 409
-	case strings.Contains(text, "unavailable:"):
+	case errors.Is(err, rhiza.ErrNotReady), errors.Is(err, rhiza.ErrQuorumUnavailable), errors.Is(err, rhiza.ErrDurabilityUnavailable), strings.Contains(text, "unavailable:"):
 		return 503
 	case strings.Contains(text, "not found"):
 		return 404

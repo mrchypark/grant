@@ -75,6 +75,8 @@ func (s *Service) resolveOrglessApplicationContext(ctx context.Context, token st
 		appID = s.cfg.Auth.PocketBase.ApplicationID
 	case "goauthy":
 		appID = s.cfg.Auth.Goauthy.ApplicationID
+	case "external-check":
+		appID = s.cfg.Auth.ExternalCheck.ApplicationID
 	default:
 		apps, e := serviceRows[Application](ctx, s, ReadStrong, "SELECT * FROM applications WHERE rauthy_client_id=? AND active=1 AND provisioning_status='ready'", identity.ClientID)
 		if e != nil {

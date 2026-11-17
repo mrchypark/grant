@@ -80,14 +80,8 @@ func (s *Service) userAuthorizationRead(ctx context.Context, bearer, org, provid
 			actionIDs = append(actionIDs, check.Action)
 			exact[i] = AuthorizationCheck{Subject: AuthorizationSubject{SubjectType: "user", ID: principal.UserID, OrganizationID: principal.OrganizationID}, Action: check.Action, Resource: check.Resource}
 		}
-		for _, id := range actionIDs {
-			action, err := serviceRow[Action](ctx, s, ReadStrong, "SELECT id,provider_id FROM actions WHERE id=?", strings.TrimSpace(id))
-			if err != nil {
-				return UserBatchCheckResult{}, err
-			}
-			if action.ProviderID != provider {
-				return UserBatchCheckResult{}, serviceError(400, "action provider must match path provider")
-			}
+		if err := s.validateProviderActions(ctx, provider, actionIDs); err != nil {
+			return UserBatchCheckResult{}, err
 		}
 		results, err := s.evaluateAuthorizations(ctx, exact, ReadStrong, nil)
 		if err != nil {
@@ -107,6 +101,51 @@ func (s *Service) userAuthorizationRead(ctx context.Context, bearer, org, provid
 		}
 		return UserBatchCheckResult{Results: results, PEPPolicyRevision: pep.PolicyRevision}, nil
 	})
+}
+
+func (s *Service) validateProviderActions(ctx context.Context, provider string, actionIDs []string) error {
+	if len(actionIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(actionIDs))
+	unique := make([]string, 0, len(actionIDs))
+	for _, raw := range actionIDs {
+		id := strings.TrimSpace(raw)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	const chunkSize = 200
+	for start := 0; start < len(unique); start += chunkSize {
+		end := min(start+chunkSize, len(unique))
+		chunk := unique[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := serviceRows[Action](ctx, s, ReadStrong, "SELECT id,provider_id FROM actions WHERE id IN ("+strings.Join(placeholders, ",")+")", args...)
+		if err != nil {
+			return err
+		}
+		found := make(map[string]string, len(rows))
+		for _, a := range rows {
+			found[a.ID] = a.ProviderID
+		}
+		for _, id := range chunk {
+			pid, ok := found[id]
+			if !ok {
+				return serviceError(404, "not found")
+			}
+			if pid != provider {
+				return serviceError(400, "action provider must match path provider")
+			}
+		}
+	}
+	return nil
 }
 
 // UserFilter filters only supplied candidates. Bare IDs require one resource
