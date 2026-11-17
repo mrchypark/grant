@@ -21,6 +21,7 @@ import (
 
 type jwksCache struct {
 	mu          sync.RWMutex
+	refreshMu   sync.Mutex
 	keys        map[string]crypto.PublicKey
 	fetchedAt   time.Time
 	lastRefresh time.Time
@@ -186,7 +187,7 @@ func (s *Service) resolveJWKSKey(ctx context.Context, kid string) (crypto.Public
 		return pub, nil
 	}
 	if !fresh || (!ok && canRefresh) {
-		if err := s.refreshJWKS(ctx); err != nil {
+		if err := s.refreshJWKS(ctx, kid, ttl); err != nil {
 			if ok {
 				return pub, nil
 			}
@@ -202,10 +203,23 @@ func (s *Service) resolveJWKSKey(ctx context.Context, kid string) (crypto.Public
 	return pub, nil
 }
 
-func (s *Service) refreshJWKS(ctx context.Context) error {
+func (s *Service) refreshJWKS(ctx context.Context, kid string, ttl time.Duration) error {
+	s.jwks.refreshMu.Lock()
+	defer s.jwks.refreshMu.Unlock()
+
+	s.jwks.mu.RLock()
+	fresh := !s.jwks.fetchedAt.IsZero() && time.Since(s.jwks.fetchedAt) < ttl
+	_, ok := s.jwks.keys[kid]
+	recentlyRefreshed := time.Since(s.jwks.lastRefresh) < 5*time.Second
+	s.jwks.mu.RUnlock()
+	if fresh && (ok || recentlyRefreshed) {
+		return nil
+	}
+
 	s.jwks.mu.Lock()
-	defer s.jwks.mu.Unlock()
 	s.jwks.lastRefresh = time.Now()
+	s.jwks.mu.Unlock()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", s.cfg.Auth.Rauthy.JWKSURL, nil)
 	if err != nil {
 		return serviceError(503, "unavailable: invalid jwks request")
@@ -235,8 +249,10 @@ func (s *Service) refreshJWKS(ctx context.Context) error {
 			parsed[k.Kid] = pub
 		}
 	}
+	s.jwks.mu.Lock()
 	s.jwks.keys = parsed
 	s.jwks.fetchedAt = time.Now()
+	s.jwks.mu.Unlock()
 	return nil
 }
 

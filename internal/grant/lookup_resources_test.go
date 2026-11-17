@@ -86,6 +86,19 @@ func TestLookupResourcesAndLearnerAuthz(t *testing.T) {
 		t.Fatalf("unexpected owner resource_ids: %+v", ownerRes)
 	}
 
+	// 3b. Disabled organization membership must revoke LookupResources access even with active user role_binding.
+	f.exec(t, "INSERT INTO users(id,display_name,active,created_at) VALUES('disabled-member-user','Disabled Member',1,'now')")
+	f.exec(t, "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES('om-disabled','conalog-grant','disabled-member-user','member','disabled','now','now')")
+	f.exec(t, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES('rb-disabled-member','user','disabled-member-user','conalog-grant','compos','object_type','collection-1','reader','active','conalog-grant','now','now')")
+	disabledSub := AuthorizationSubject{SubjectType: "user", ID: "disabled-member-user", OrganizationID: "conalog-grant"}
+	disabledRes, err := f.learner.LookupResources(ctx, disabledSub, "compos", "object_type", "compos.read", nil, nil, ReadLocal)
+	if err != nil {
+		t.Fatalf("disabled member LookupResources: %v", err)
+	}
+	if len(disabledRes.ResourceIDs) != 0 {
+		t.Fatalf("expected empty resource_ids for disabled membership, got %+v", disabledRes)
+	}
+
 	// 4. Master CheckAuthorizations (/api/v1/authz/*) works on learner with readFence.
 	fencesBefore = f.fences.Load()
 	decisions, err := f.learner.CheckAuthorizations(ctx, []AuthorizationCheck{

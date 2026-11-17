@@ -115,7 +115,7 @@ func (s *Service) CreateApplication(ctx context.Context, user, org string, in Cr
 		uri = &v
 	}
 	err := s.store.InsertApplicationWithRedirectURI(ctx, a, uri)
-	return ApplicationRead{Application: a, RedirectURI: uri}, err
+	return ApplicationRead{Application: a, RedirectURI: uri}, lifecycleError(err)
 }
 func (s *Service) ListApplicationActionsAuthorized(ctx context.Context, user, org, id string, c ReadConsistency) ([]Action, error) {
 	if _, err := s.GetApplicationAuthorized(ctx, user, org, id, c); err != nil {

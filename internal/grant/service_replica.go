@@ -133,14 +133,16 @@ func (s *Store) readFence(ctx context.Context) (uint64, error) {
 	client := s.readFenceClient()
 	var lastErr error
 	for _, base := range s.cfg.Database.RemoteNodes {
-		slot, err := s.fetchReadFence(ctx, client, base)
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
+		slot, err := s.fetchReadFence(attemptCtx, client, base)
+		cancel()
 		if err == nil {
 			return slot, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil {
-			return 0, ctx.Err()
-		}
 	}
 	return 0, lastErr
 }

@@ -141,10 +141,14 @@ func run() (result error) {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		var errs []error
 		for _, srv := range servers {
-			if e = srv.Shutdown(shutdown); e != nil {
-				return fmt.Errorf("HTTP shutdown: %w", e)
+			if err := srv.Shutdown(shutdown); err != nil {
+				errs = append(errs, err)
 			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			return fmt.Errorf("HTTP shutdown: %w", err)
 		}
 	}
 	return nil

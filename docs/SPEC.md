@@ -45,7 +45,7 @@
 
 1. **Key Separation** ([internal/grant/config.go](../internal/grant/config.go)):
    - `GRANT_MASTER_KEY` (`x-grant-master-key`): Required (placeholder `"dev-only-master-key"` rejected). Protects `/api/v1/admin/*`, `/api/v1/authz/*`, and `/ops/*`.
-   - `GRANT_APP_AUTH_KEY` (`x-grant-app-auth-key`): Required, must differ from `GRANT_MASTER_KEY`. Protects `/api/v1/application-authz/*`, `/api/v2/http-capabilities/catalog/{providerId}`, and `/api/v2/http-capabilities/decide`.
+   - `GRANT_APP_AUTH_KEY` (`x-grant-app-auth-key`): Required, must differ from `GRANT_MASTER_KEY`. Protects `/api/v1/application-authz/*`, `/api/v2/providers/{providerId}/authz/{batch-check,filter}`, `/api/v2/http-capabilities/catalog/{providerId}`, and `/api/v2/http-capabilities/decide`.
    - `GRANT_TRUSTED_GATEWAY_KEY` (`x-grant-gateway-key`): Optional (≥32 bytes, distinct from master/app keys). When enabled, an internal gateway that already authenticated the caller may pass `x-grant-gateway-key` + `x-grant-subject` (plus optional `x-grant-client-id`, `x-grant-email`, `x-grant-display-name`). Disabled (fail-closed) when unset.
    - `GRANT_REMOTE_API_SECRET` / `GRANT_READ_FENCE_KEY`: ≥32 bytes, protecting voter runtime transport and learner read-fence checks.
 2. **IdP Verification Modes (`GRANT_AUTH_PROVIDER`)** ([internal/grant/auth_external.go](../internal/grant/auth_external.go), [internal/grant/auth_goauthy.go](../internal/grant/auth_goauthy.go), [internal/grant/auth_jwks.go](../internal/grant/auth_jwks.go)):
