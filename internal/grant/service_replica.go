@@ -130,11 +130,23 @@ func (s *Store) readFence(ctx context.Context) (uint64, error) {
 	if len(s.cfg.Database.ReadFenceKey) < 32 || len(s.cfg.Database.RemoteNodes) == 0 {
 		return 0, fmt.Errorf("replica fence transport is not configured")
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	defer transport.CloseIdleConnections()
-	client := http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.Database.RemoteNodes[0]+"/read-fence", nil)
+	client := s.readFenceClient()
+	var lastErr error
+	for _, base := range s.cfg.Database.RemoteNodes {
+		slot, err := s.fetchReadFence(ctx, client, base)
+		if err == nil {
+			return slot, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+	}
+	return 0, lastErr
+}
+
+func (s *Store) fetchReadFence(ctx context.Context, client *http.Client, base string) (uint64, error) {
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, base+"/read-fence", nil)
 	if e != nil {
 		return 0, e
 	}

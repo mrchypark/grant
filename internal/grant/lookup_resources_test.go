@@ -201,3 +201,46 @@ func TestLookupResourcesAndLearnerAuthz(t *testing.T) {
 		t.Fatalf("expected empty resource_ids after grant revocation, got %+v", revokedViaSvc)
 	}
 }
+
+func TestBatchEvalChunkingAndReadFenceFailover(t *testing.T) {
+	f := newUserAuthzFixture(t)
+	ctx := context.Background()
+
+	// 1. Batch evaluation across >90 checks (3 chunks for 200 checks) preserves order and decisions.
+	checks := make([]AuthorizationCheck, 200)
+	for i := range checks {
+		id := "collection-missing"
+		if i%2 == 0 {
+			id = "collection-1"
+		}
+		checks[i] = AuthorizationCheck{
+			Subject:  AuthorizationSubject{SubjectType: "user", ID: "user", OrganizationID: "conalog-grant"},
+			Action:   "compos.read",
+			Resource: AuthorizationResource{ProviderID: "compos", ResourceType: "object_type", ID: id},
+		}
+	}
+	decisions, err := f.learner.CheckAuthorizations(ctx, checks, ReadLocal)
+	if err != nil {
+		t.Fatalf("batch CheckAuthorizations: %v", err)
+	}
+	if len(decisions) != 200 {
+		t.Fatalf("got %d decisions, want 200", len(decisions))
+	}
+	for i, d := range decisions {
+		want := i%2 == 0
+		if d.Allowed != want {
+			t.Fatalf("decision[%d].Allowed=%v, want %v", i, d.Allowed, want)
+		}
+	}
+
+	// 2. readFence fails over from an unreachable RemoteNodes[0] to RemoteNodes[1].
+	f.learner.store.cfg.Database.RemoteNodes = []string{"http://127.0.0.1:1", f.server.URL}
+	fencesBefore := f.fences.Load()
+	slot, err := f.learner.store.readFence(ctx)
+	if err != nil {
+		t.Fatalf("readFence failover failed: %v", err)
+	}
+	if slot == 0 || f.fences.Load() <= fencesBefore {
+		t.Fatalf("expected failover readFence to hit live voter, slot=%d", slot)
+	}
+}
