@@ -86,18 +86,44 @@ func (s *Store) LookupResources(ctx context.Context, in LookupResourcesInput) (L
 func (s *Store) EvaluateUserActions(ctx context.Context, checks []UserActionCheck) ([]UserActionDecision, error) {
 	return s.evaluateUserActions(ctx, checks, false)
 }
+const authzBatchChunkSize = 90
+
 func (s *Store) evaluateUserActions(ctx context.Context, checks []UserActionCheck, inactive bool) ([]UserActionDecision, error) {
+	if len(checks) == 0 {
+		return []UserActionDecision{}, nil
+	}
 	out := make([]UserActionDecision, 0, len(checks))
-	for _, c := range checks {
-		q := strings.Replace(authorizationSQL, "{values}", "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 1)
-		rows, err := s.Query(ctx, c.Consistency, q, int64(0), c.UserID, c.OrganizationID, c.ProviderID, c.ResourceType, c.ResourceID, c.ActionID, c.ApplicationID, time.Now().UTC().Format(agreementTimeLayout), inactive)
+	now := time.Now().UTC().Format(agreementTimeLayout)
+	for start := 0; start < len(checks); {
+		consistency := checks[start].Consistency
+		end := start + 1
+		for end < len(checks) && end-start < authzBatchChunkSize && checks[end].Consistency == consistency {
+			end++
+		}
+		chunk := checks[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)*10)
+		for i, c := range chunk {
+			placeholders[i] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+			args = append(args, int64(i), c.UserID, c.OrganizationID, c.ProviderID, c.ResourceType, c.ResourceID, c.ActionID, c.ApplicationID, now, inactive)
+		}
+		q := strings.Replace(authorizationSQL, "{values}", strings.Join(placeholders, ", "), 1)
+		rows, err := s.Query(ctx, consistency, q, args...)
 		if err != nil {
 			return nil, err
 		}
-		if len(rows) != 1 {
-			return nil, fmt.Errorf("authorization query did not return exactly one decision")
+		if len(rows) != len(chunk) {
+			return nil, fmt.Errorf("authorization query returned %d decisions, want %d", len(rows), len(chunk))
 		}
-		out = append(out, UserActionDecision{Allowed: rowInt(rows[0], "allowed") != 0, RBACAllowed: rowInt(rows[0], "rbac_allowed") != 0, TrustedApplication: rowInt(rows[0], "trusted_application") != 0, ApplicationAllowed: rowInt(rows[0], "application_allowed") != 0})
+		for _, row := range rows {
+			out = append(out, UserActionDecision{
+				Allowed:            rowInt(row, "allowed") != 0,
+				RBACAllowed:        rowInt(row, "rbac_allowed") != 0,
+				TrustedApplication: rowInt(row, "trusted_application") != 0,
+				ApplicationAllowed: rowInt(row, "application_allowed") != 0,
+			})
+		}
+		start = end
 	}
 	return out, nil
 }

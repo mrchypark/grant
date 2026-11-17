@@ -11,14 +11,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Statement = rhiza.SQLStatement
 type Store struct {
-	db      *rhiza.DB
-	replica *rhiza.ReadReplica
-	cfg     Config
+	db          *rhiza.DB
+	replica     *rhiza.ReadReplica
+	cfg         Config
+	fenceOnce   sync.Once
+	fenceClient *http.Client
 	// Optional observer used by package tests to coordinate real replica queries
 	// with concurrent authority mutations. It cannot replace query results.
 	afterReplicaQuery func(context.Context, string)
@@ -244,7 +247,23 @@ func (s *Store) waitForReady(ctx context.Context, requireVoter bool) error {
 	}
 	return nil
 }
+func (s *Store) readFenceClient() *http.Client {
+	s.fenceOnce.Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.MaxIdleConns = 64
+		transport.MaxIdleConnsPerHost = 32
+		s.fenceClient = &http.Client{
+			Transport:     transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	})
+	return s.fenceClient
+}
 func (s *Store) Close() error {
+	if s.fenceClient != nil {
+		s.fenceClient.CloseIdleConnections()
+	}
 	if s.replica != nil {
 		return s.replica.Close()
 	}
