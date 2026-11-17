@@ -484,12 +484,12 @@ func (s *server) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.cleanupLocked(now)
+	delete(s.sessions, transaction.oldSession)
 	if len(s.sessions) >= maxSessions {
 		s.mu.Unlock()
 		s.failCallback(w)
 		return
 	}
-	delete(s.sessions, transaction.oldSession)
 	s.sessions[sid] = session{token: token, csrf: csrf, expires: expires, subject: info.Subject, email: info.Email, name: info.Name}
 	s.mu.Unlock()
 	s.setCookie(w, sessionCookie, sid, time.Until(expires))

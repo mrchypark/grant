@@ -216,10 +216,6 @@ func (s *Service) refreshJWKS(ctx context.Context, kid string, ttl time.Duration
 		return nil
 	}
 
-	s.jwks.mu.Lock()
-	s.jwks.lastRefresh = time.Now()
-	s.jwks.mu.Unlock()
-
 	req, err := http.NewRequestWithContext(ctx, "GET", s.cfg.Auth.Rauthy.JWKSURL, nil)
 	if err != nil {
 		return serviceError(503, "unavailable: invalid jwks request")
@@ -251,7 +247,9 @@ func (s *Service) refreshJWKS(ctx context.Context, kid string, ttl time.Duration
 	}
 	s.jwks.mu.Lock()
 	s.jwks.keys = parsed
-	s.jwks.fetchedAt = time.Now()
+	now := time.Now()
+	s.jwks.fetchedAt = now
+	s.jwks.lastRefresh = now
 	s.jwks.mu.Unlock()
 	return nil
 }

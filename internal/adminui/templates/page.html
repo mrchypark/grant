@@ -103,7 +103,7 @@
       </div>
       {{end}}
     </div>
-    <div class="form-actions">{{if $f.Danger}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장") "Variant" "destructive")}}{{else}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장"))}}{{end}}
+    <div class="form-actions">{{if $f.Danger}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장") "Variant" "destructive")}}{{else}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장"))}}{{end}}</div>
   </form>
 </details>
 {{end}}

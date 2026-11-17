@@ -170,17 +170,17 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
 
 func validateRoleBinding(b RoleBinding) error {
 	if b.SubjectType != "user" && b.SubjectType != "group" && b.SubjectType != "organization" {
-		return fmt.Errorf("invalid binding subject")
+		return serviceError(400, "invalid binding subject")
 	}
 	if b.State != "active" && b.State != "disabled" {
-		return fmt.Errorf("invalid binding state")
+		return serviceError(400, "invalid binding state")
 	}
 	if b.SubjectType == "organization" && b.SubjectID != b.SubjectOrganizationID {
-		return fmt.Errorf("organization subject mismatch")
+		return serviceError(400, "organization subject mismatch")
 	}
 	cross := b.ProviderID == "grant" && b.ResourceType == "organization" && b.ResourceID != b.SubjectOrganizationID
 	if cross && (b.SubjectType != "organization" || b.AgreementID == nil) {
-		return fmt.Errorf("cross-organization binding requires organization subject and agreement")
+		return serviceError(400, "cross-organization binding requires organization subject and agreement")
 	}
 	return nil
 }

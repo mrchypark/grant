@@ -113,7 +113,7 @@ func retryNativeOutcome(ctx context.Context, call func(context.Context) error) e
 		}
 		select {
 		case <-bounded.Done():
-			return fmt.Errorf("native outcome unresolved (%v): %w", err, bounded.Err())
+			return fmt.Errorf("native outcome unresolved (%w): %w", err, bounded.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

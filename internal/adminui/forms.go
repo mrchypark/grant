@@ -89,8 +89,8 @@ func formsFor(key string) []Form {
 		}
 	case "actions":
 		return []Form{
-			form("action-create", "액션 등록", "위험도와 권한 부여 설정은 이후 권한 확인과 사용자 동의에 영향을 줍니다.", opActionCreate, text("id", "액션 ID", true), text("code", "코드", true), text("name", "이름", true), area("description", "설명"), selectField("riskLevel", "위험도", true, "low", "medium", "high", "critical"), selectField("visibilityGranting", "리소스 표시 권한 부여", true, "true", "false"), selectField("grantableToApplications", "앱에 권한 부여 허용", true, "true", "false"), text("consentLabel", "동의 화면 레이블", false), area("consentDescription", "동의 안내")),
-			form("action-update", "액션 수정", "선택 항목을 비워 두면 현재 값을 유지합니다.", opActionUpdate, text("id", "액션 ID", true), text("name", "이름", false), area("description", "설명"), selectField("riskLevel", "위험도", false, "low", "medium", "high", "critical"), selectField("visibilityGranting", "리소스 표시 권한 부여", false, "true", "false"), selectField("grantableToApplications", "앱에 권한 부여 허용", false, "true", "false"), text("consentLabel", "동의 화면 레이블", false), area("consentDescription", "동의 안내")),
+			form("action-create", "액션 등록", "위험도와 권한 부여 설정은 이후 권한 확인과 사용자 동의에 영향을 줍니다.", opActionCreate, text("id", "액션 ID", true), text("code", "코드", true), text("name", "이름", true), area("description", "설명"), selectField("riskLevel", "위험도", true, "low", "medium", "high", "critical"), selectField("grantableToApplications", "앱에 권한 부여 허용", true, "true", "false"), text("consentLabel", "동의 화면 레이블", false), area("consentDescription", "동의 안내")),
+			form("action-update", "액션 수정", "선택 항목을 비워 두면 현재 값을 유지합니다.", opActionUpdate, text("id", "액션 ID", true), text("name", "이름", false), area("description", "설명"), selectField("riskLevel", "위험도", false, "low", "medium", "high", "critical"), selectField("grantableToApplications", "앱에 권한 부여 허용", false, "true", "false"), text("consentLabel", "동의 화면 레이블", false), area("consentDescription", "동의 안내")),
 			form("action-delete", "액션 삭제", "활성 카탈로그에서 사용 중인 액션은 삭제가 거부될 수 있습니다.", opActionDelete, text("id", "액션 ID", true)),
 		}
 	case "http":
@@ -138,7 +138,7 @@ func formsFor(key string) []Form {
 			confirm(form("application-actions", "앱 액션 목록 교체", "액션 ID를 쉼표로 구분해 입력합니다. 비워 두면 기존 액션 연결을 모두 제거합니다.", opApplicationActions, text("id", "앱 ID", true), area("actionIds", "액션 ID 목록")), "액션 목록이 비어 있으면 이 앱의 모든 액션 연결이 제거됩니다. 계속할까요?"),
 			form("application-trust", "앱 신뢰 상태 변경", "조직 범위에 적용되는 플랫폼 작업입니다.", opApplicationTrust, text("id", "앱 ID", true), selectField("trusted", "신뢰 상태", true, "true", "false")),
 			form("application-identity", "외부 계정 연결", "앱을 외부 클라이언트 계정에 연결합니다.", opApplicationIdentity, text("id", "앱 ID", true), text("clientId", "외부 클라이언트 ID", true)),
-			confirm(form("application-consent", "사용자 동의 액션 목록 교체", "선택한 앱에서 현재 사용자의 동의와 버전을 불러옵니다. 액션 ID를 쉼표로 구분해 입력하고, 비워 두면 연결을 모두 제거합니다.", opApplicationConsent, text("id", "앱 ID", true), area("actionIds", "액션 ID 목록")), "액션 목록이 비어 있으면 현재 동의의 액션 연결이 모두 제거됩니다. 계속할까요?"),
+			form("application-consent", "사용자 동의 액션 목록 교체", "선택한 앱에서 현재 사용자의 동의를 교체합니다. 액션 ID를 쉼표로 구분해 1개 이상 입력하세요. 동의를 모두 제거하려면 아래 동의 철회를 사용하세요.", opApplicationConsent, text("id", "앱 ID", true), areaRequired("actionIds", "액션 ID 목록")),
 			form("application-consent-revoke", "사용자 동의 철회", "현재 로그인한 운영자의 앱 동의를 철회합니다.", opApplicationConsentRevoke, text("id", "앱 ID", true)),
 			form("grant-revoke", "앱 권한 부여 철회", "기존 권한 부여 기록을 철회합니다.", opGrantRevoke, text("id", "권한 부여 ID", true)),
 		}

@@ -203,6 +203,9 @@ func (s *Store) ActivateHttpCapabilityGeneration(ctx context.Context, p, actor s
 	if e != nil {
 		return out, e
 	}
+	if len(r) != 1 {
+		return out, serviceError(503, "unavailable: activation receipt not found")
+	}
 	return decodeRow[HttpCapabilityActivation](r[0])
 }
 func (s *Store) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, p string) (AdminHttpCapabilityCatalog, error) {

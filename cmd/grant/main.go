@@ -61,7 +61,7 @@ func run() (result error) {
 		if operator == nil {
 			return nil
 		}
-		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		servers = append(servers, server)
 		go func() { done <- server.Serve(operator) }()
 		return nil
@@ -115,7 +115,7 @@ func run() (result error) {
 		h := publicHandler
 		publicHandlerMu.RUnlock()
 		h.ServeHTTP(w, r)
-	}), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() { done <- server.Serve(public) }()
 	servers = append(servers, server)
 	if private != nil {
@@ -124,7 +124,7 @@ func run() (result error) {
 			h := runtimeHandler
 			publicHandlerMu.RUnlock()
 			h.ServeHTTP(w, r)
-		}), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+		}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		servers = append(servers, runtimeServer)
 		go func() { done <- runtimeServer.Serve(private) }()
 	}
