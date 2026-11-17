@@ -123,22 +123,19 @@ func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org
 	if err != nil {
 		return nil, err
 	}
-	var identity ExternalIdentity
-	if s.cfg.Database.LocalNodeRole == "learner" {
-		// No replicated cache lookup/write or inner Rauthy memory-cache hit:
-		// this request needs fresh external evidence before its local fence.
-		if s.AuthProviderMode() == "rauthy" && s.cfg.Auth.Rauthy.JWKSURL == "" {
-			identity, err = s.rauthyIdentityWithCache(ctx, token, false)
-		} else {
-			identity, err = s.externalIdentity(ctx, token)
-		}
-	} else {
-		identity, err = s.resolveExternalIdentity(ctx, token, ReadStrong)
-	}
+	identity, err := s.resolveApplicationIdentity(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	return localReplicaRead(ctx, s, func(readCtx context.Context) ([]AuthorizationDecision, error) {
+	return localReplicaRead(ctx, s, func(readCtx context.Context) (out []AuthorizationDecision, err error) {
+		if s.cfg.Database.LocalNodeRole == "learner" {
+			defer func() {
+				if readCtx.Err() != nil {
+					out = nil
+					err = serviceError(503, "unavailable: authorization read budget expired")
+				}
+			}()
+		}
 		c, err := s.resolveLocalApplicationAuthorizationContext(readCtx, identity, org)
 		if err != nil {
 			return nil, err
@@ -147,6 +144,13 @@ func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org
 		for i, v := range checks {
 			exact[i] = AuthorizationCheck{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: v.Action, Resource: v.Resource}
 		}
-		return s.evaluateAuthorizations(readCtx, exact, ReadStrong, &c.ApplicationID)
+		out, err = s.evaluateAuthorizations(readCtx, exact, ReadStrong, &c.ApplicationID)
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyLearnerReadProof(readCtx, s); err != nil {
+			return nil, err
+		}
+		return out, nil
 	})
 }
