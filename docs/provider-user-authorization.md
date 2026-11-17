@@ -144,9 +144,10 @@ For reverse lookup, supply `resource` (`provider`, `type`) instead of `resources
 ```json
 {"resource_ids":["<resource-id>"],"next_cursor":"<resource-id>","pepPolicyRevision":1}
 ```
-IDs. It does not discover resources, return an authorized total, or provide a
-continuation token. The caller supplies its candidates and must preserve their
-provider/type context when using the returned bare IDs.
+
+In candidate mode, the caller supplies its candidates and must preserve their
+provider/type context when using the returned bare IDs. In reverse-lookup mode,
+`next_cursor` is omitted on the final page.
 
 `resources: []` is valid with a nonempty registered action. Even this empty
 filter validates the action's provider, user, membership and current fenced PEP
@@ -156,10 +157,13 @@ policy before returning an empty `resource_ids` array and positive revision.
 
 - Bodies are closed and field names are case-sensitive on both voters and
   learners. Batch accepts only `checks`; each check accepts `action` and
-  `resource`. Filter accepts only `action` and `resources`. Each resource uses
+  `resource`. Filter accepts `action` and either `resources` (candidate mode)
+  or `resource` (`provider`, `type`) with optional `limit` (`1..1000`, default
+  `100`) and `cursor` (reverse-lookup mode). Each candidate resource uses
   `provider`, `type`, and `id`.
 - Unknown or duplicate JSON fields, missing required fields, null arrays and
-  null required strings are rejected. Strings must be nonblank. The legacy
+  null required strings are rejected. Required strings must be nonblank;
+  empty or whitespace-only `cursor` is treated as unset. The legacy
   `resource.view` field is unsupported, including an explicit null value.
 - No subject/user ID, application ID, authorization mode or request policy
   revision override is accepted. Grant derives the subject and reads policy.

@@ -45,110 +45,155 @@ eligible AS (
        )
 ),
 candidates AS (
-    SELECT rb.resource_id
-    FROM eligible req
-    JOIN role_bindings rb
-      ON rb.subject_type = 'organization'
-     AND rb.subject_id = req.organization_id
-     AND rb.subject_organization_id = req.organization_id
-     AND rb.provider_id = req.provider_id
-     AND rb.resource_type = req.resource_type
-     AND rb.state = 'active'
-     AND (req.cursor_id = '' OR rb.resource_id > req.cursor_id)
-    JOIN role_actions ra
-      ON ra.role_id = rb.role_id
-     AND ra.action_id = req.action_id
-    JOIN actions act
-      ON act.id = ra.action_id
-     AND act.provider_id = rb.provider_id
-    JOIN organization_memberships om
-      ON om.organization_id = rb.subject_id
-     AND om.user_id = req.user_id
-     AND om.status = 'active'
-    LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
-    WHERE (
-        rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
-        OR om.membership_role = 'owner'
-    )
-    AND (rb.agreement_id IS NULL OR (
-        a.id IS NOT NULL
-        AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
-        AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
-    ))
-
-    UNION
-
-    SELECT rb.resource_id
-    FROM eligible req
-    JOIN role_bindings rb
-      ON rb.subject_type = 'user'
-     AND rb.subject_id = req.user_id
-     AND rb.subject_organization_id = req.organization_id
-     AND rb.provider_id = req.provider_id
-     AND rb.resource_type = req.resource_type
-     AND rb.state = 'active'
-     AND (req.cursor_id = '' OR rb.resource_id > req.cursor_id)
-    JOIN role_actions ra
-      ON ra.role_id = rb.role_id
-     AND ra.action_id = req.action_id
-    JOIN actions act
-      ON act.id = ra.action_id
-     AND act.provider_id = rb.provider_id
-    JOIN organization_memberships om
-      ON om.organization_id = rb.subject_organization_id
-     AND om.user_id = rb.subject_id
-     AND om.status = 'active'
-    LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
-    WHERE (
-        rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
-        OR om.membership_role = 'owner'
-    )
-    AND (rb.agreement_id IS NULL OR (
-        a.id IS NOT NULL
-        AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
-        AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
-    ))
-
-    UNION
-
-    SELECT rb.resource_id
-    FROM eligible req
-    JOIN role_bindings rb
-      ON rb.subject_type = 'group'
-     AND rb.subject_organization_id = req.organization_id
-     AND rb.provider_id = req.provider_id
-     AND rb.resource_type = req.resource_type
-     AND rb.state = 'active'
-     AND (req.cursor_id = '' OR rb.resource_id > req.cursor_id)
-    JOIN role_actions ra
-      ON ra.role_id = rb.role_id
-     AND ra.action_id = req.action_id
-    JOIN actions act
-      ON act.id = ra.action_id
-     AND act.provider_id = rb.provider_id
-    JOIN group_memberships gm ON gm.group_id = rb.subject_id
-    JOIN organization_memberships om
-      ON om.id = gm.organization_membership_id
-     AND om.user_id = req.user_id
-     AND om.organization_id = req.organization_id
-     AND om.status = 'active'
-    LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
-    WHERE (
-        rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
-        OR EXISTS (
-            SELECT 1
-            FROM organization_memberships owner_om
-            WHERE owner_om.organization_id = req.organization_id
-              AND owner_om.user_id = req.user_id
-              AND owner_om.status = 'active'
-              AND owner_om.membership_role = 'owner'
+    SELECT resource_id FROM (
+        SELECT rb.resource_id
+        FROM eligible req
+        JOIN role_bindings rb
+          ON rb.subject_type = 'organization'
+         AND rb.subject_id = req.organization_id
+         AND rb.subject_organization_id = req.organization_id
+         AND rb.provider_id = req.provider_id
+         AND rb.resource_type = req.resource_type
+         AND rb.state = 'active'
+         AND rb.resource_id > req.cursor_id
+        JOIN role_actions ra
+          ON ra.role_id = rb.role_id
+         AND ra.action_id = req.action_id
+        JOIN actions act
+          ON act.id = ra.action_id
+         AND act.provider_id = rb.provider_id
+        JOIN organization_memberships om
+          ON om.organization_id = rb.subject_id
+         AND om.user_id = req.user_id
+         AND om.status = 'active'
+        LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
+        WHERE (
+            rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
+            OR om.membership_role = 'owner'
         )
+        AND (rb.agreement_id IS NULL OR (
+            a.id IS NOT NULL
+            AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
+            AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
+        ))
+        AND (
+            req.provider_id <> 'grant'
+            OR req.resource_type <> 'organization'
+            OR EXISTS (
+                SELECT 1
+                FROM organizations target_org
+                WHERE target_org.id = rb.resource_id
+                  AND target_org.inactivated_at IS NULL
+            )
+        )
+        ORDER BY rb.resource_id ASC
+        LIMIT ?
     )
-    AND (rb.agreement_id IS NULL OR (
-        a.id IS NOT NULL
-        AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
-        AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
-    ))
+
+    UNION
+
+    SELECT resource_id FROM (
+        SELECT rb.resource_id
+        FROM eligible req
+        JOIN role_bindings rb
+          ON rb.subject_type = 'user'
+         AND rb.subject_id = req.user_id
+         AND rb.subject_organization_id = req.organization_id
+         AND rb.provider_id = req.provider_id
+         AND rb.resource_type = req.resource_type
+         AND rb.state = 'active'
+         AND rb.resource_id > req.cursor_id
+        JOIN role_actions ra
+          ON ra.role_id = rb.role_id
+         AND ra.action_id = req.action_id
+        JOIN actions act
+          ON act.id = ra.action_id
+         AND act.provider_id = rb.provider_id
+        LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
+        WHERE (
+            rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
+            OR EXISTS (
+                SELECT 1
+                FROM organization_memberships owner_om
+                WHERE owner_om.organization_id = req.organization_id
+                  AND owner_om.user_id = req.user_id
+                  AND owner_om.status = 'active'
+                  AND owner_om.membership_role = 'owner'
+            )
+        )
+        AND (rb.agreement_id IS NULL OR (
+            a.id IS NOT NULL
+            AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
+            AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
+        ))
+        AND (
+            req.provider_id <> 'grant'
+            OR req.resource_type <> 'organization'
+            OR EXISTS (
+                SELECT 1
+                FROM organizations target_org
+                WHERE target_org.id = rb.resource_id
+                  AND target_org.inactivated_at IS NULL
+            )
+        )
+        ORDER BY rb.resource_id ASC
+        LIMIT ?
+    )
+
+    UNION
+
+    SELECT resource_id FROM (
+        SELECT rb.resource_id
+        FROM eligible req
+        JOIN role_bindings rb
+          ON rb.subject_type = 'group'
+         AND rb.subject_organization_id = req.organization_id
+         AND rb.provider_id = req.provider_id
+         AND rb.resource_type = req.resource_type
+         AND rb.state = 'active'
+         AND rb.resource_id > req.cursor_id
+        JOIN role_actions ra
+          ON ra.role_id = rb.role_id
+         AND ra.action_id = req.action_id
+        JOIN actions act
+          ON act.id = ra.action_id
+         AND act.provider_id = rb.provider_id
+        JOIN group_memberships gm ON gm.group_id = rb.subject_id
+        JOIN organization_memberships om
+          ON om.id = gm.organization_membership_id
+         AND om.user_id = req.user_id
+         AND om.organization_id = req.organization_id
+         AND om.status = 'active'
+        LEFT JOIN valid_agreements a ON a.id = rb.agreement_id
+        WHERE (
+            rb.role_id NOT IN ('role-system-bootstrap-owner', 'role-system-management-owner')
+            OR EXISTS (
+                SELECT 1
+                FROM organization_memberships owner_om
+                WHERE owner_om.organization_id = req.organization_id
+                  AND owner_om.user_id = req.user_id
+                  AND owner_om.status = 'active'
+                  AND owner_om.membership_role = 'owner'
+            )
+        )
+        AND (rb.agreement_id IS NULL OR (
+            a.id IS NOT NULL
+            AND (a.starts_at IS NULL OR a.starts_at <= req.validation_time)
+            AND (a.ends_at IS NULL OR a.ends_at >= req.validation_time)
+        ))
+        AND (
+            req.provider_id <> 'grant'
+            OR req.resource_type <> 'organization'
+            OR EXISTS (
+                SELECT 1
+                FROM organizations target_org
+                WHERE target_org.id = rb.resource_id
+                  AND target_org.inactivated_at IS NULL
+            )
+        )
+        ORDER BY rb.resource_id ASC
+        LIMIT ?
+    )
 
     UNION
 
@@ -170,18 +215,9 @@ candidates AS (
      AND act.provider_id = req.provider_id
     WHERE req.resource_type = 'organization'
       AND req.provider_id IN ('grant', 'grant-management')
-      AND (req.cursor_id = '' OR req.organization_id > req.cursor_id)
+      AND req.organization_id > req.cursor_id
 )
 SELECT DISTINCT c.resource_id
 FROM candidates c
-CROSS JOIN eligible req
-WHERE req.provider_id <> 'grant'
-   OR req.resource_type <> 'organization'
-   OR EXISTS (
-       SELECT 1
-       FROM organizations target_org
-       WHERE target_org.id = c.resource_id
-         AND target_org.inactivated_at IS NULL
-   )
 ORDER BY c.resource_id ASC
 LIMIT ?

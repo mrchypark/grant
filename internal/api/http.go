@@ -76,6 +76,10 @@ func applicationAuthorizationRead(r *http.Request) bool {
 	return false
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.learner && masterAuthorizationRead(r) && len(r.Header.Values("X-Grant-Master-Key")) > 1 {
+		writeError(w, failure(400, "multiple X-Grant-Master-Key headers"))
+		return
+	}
 	if s.learner && !masterAuthorizationRead(r) && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
 		if _, pattern := s.mux.Handler(r); pattern == "" {
 			http.NotFound(w, r)

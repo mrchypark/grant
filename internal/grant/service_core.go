@@ -82,8 +82,23 @@ func (s *Service) CheckAuthorization(ctx context.Context, subject AuthorizationS
 	return decisions[0], nil
 }
 func (s *Service) CheckAuthorizations(ctx context.Context, checks []AuthorizationCheck, consistency ReadConsistency) ([]AuthorizationDecision, error) {
-	return localReplicaRead(ctx, s, func(readCtx context.Context) ([]AuthorizationDecision, error) {
-		return s.evaluateAuthorizations(readCtx, checks, consistency, nil)
+	return localReplicaRead(ctx, s, func(readCtx context.Context) (out []AuthorizationDecision, err error) {
+		if s.cfg.Database.LocalNodeRole == "learner" {
+			defer func() {
+				if readCtx.Err() != nil {
+					out = nil
+					err = serviceError(503, "unavailable: authorization read budget expired")
+				}
+			}()
+		}
+		out, err = s.evaluateAuthorizations(readCtx, checks, consistency, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyLearnerReadProof(readCtx, s); err != nil {
+			return nil, err
+		}
+		return out, nil
 	})
 }
 func (s *Service) evaluateAuthorizations(ctx context.Context, checks []AuthorizationCheck, consistency ReadConsistency, applicationID *string) ([]AuthorizationDecision, error) {

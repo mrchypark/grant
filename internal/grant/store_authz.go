@@ -62,6 +62,9 @@ func (s *Store) LookupResources(ctx context.Context, in LookupResourcesInput) (L
 		time.Now().UTC().Format(agreementTimeLayout),
 		in.Cursor,
 		int64(limit+1),
+		int64(limit+1),
+		int64(limit+1),
+		int64(limit+1),
 	)
 	if err != nil {
 		return LookupResourcesResult{}, err

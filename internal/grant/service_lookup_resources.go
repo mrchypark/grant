@@ -53,13 +53,42 @@ func normalizeLookupResourcesInput(subject AuthorizationSubject, providerID, res
 	}, nil
 }
 
+func verifyLearnerReadProof(ctx context.Context, s *Service) error {
+	if s.cfg.Database.LocalNodeRole != "learner" {
+		return nil
+	}
+	if _, err := s.store.Query(ctx, ReadStrong, "SELECT 1"); err != nil {
+		return err
+	}
+	scope := readScope(ctx)
+	if ctx.Err() != nil || scope == nil || !scope.pinned || scope.changed || scope.slot < scope.fence {
+		return serviceError(503, "unavailable: replica authorization read proof expired")
+	}
+	return nil
+}
+
 func (s *Service) LookupResources(ctx context.Context, subject AuthorizationSubject, providerID, resourceType, actionID string, limit *int, cursor *string, consistency ReadConsistency) (LookupResourcesResult, error) {
 	in, err := normalizeLookupResourcesInput(subject, providerID, resourceType, actionID, limit, cursor, consistency)
 	if err != nil {
 		return LookupResourcesResult{}, err
 	}
-	return localReplicaRead(ctx, s, func(readCtx context.Context) (LookupResourcesResult, error) {
-		return s.store.LookupResources(readCtx, in)
+	return localReplicaRead(ctx, s, func(readCtx context.Context) (out LookupResourcesResult, err error) {
+		if s.cfg.Database.LocalNodeRole == "learner" {
+			defer func() {
+				if readCtx.Err() != nil {
+					out = LookupResourcesResult{}
+					err = serviceError(503, "unavailable: authorization read budget expired")
+				}
+			}()
+		}
+		out, err = s.store.LookupResources(readCtx, in)
+		if err != nil {
+			return LookupResourcesResult{}, err
+		}
+		if err := verifyLearnerReadProof(readCtx, s); err != nil {
+			return LookupResourcesResult{}, err
+		}
+		return out, nil
 	})
 }
 
@@ -96,7 +125,15 @@ func (s *Service) LookupApplicationResources(ctx context.Context, token, org, pr
 	if err != nil {
 		return LookupResourcesResult{}, err
 	}
-	return localReplicaRead(ctx, s, func(readCtx context.Context) (LookupResourcesResult, error) {
+	return localReplicaRead(ctx, s, func(readCtx context.Context) (out LookupResourcesResult, err error) {
+		if s.cfg.Database.LocalNodeRole == "learner" {
+			defer func() {
+				if readCtx.Err() != nil {
+					out = LookupResourcesResult{}
+					err = serviceError(503, "unavailable: authorization read budget expired")
+				}
+			}()
+		}
 		c, err := s.resolveLocalApplicationAuthorizationContext(readCtx, identity, org)
 		if err != nil {
 			return LookupResourcesResult{}, err
@@ -104,13 +141,20 @@ func (s *Service) LookupApplicationResources(ctx context.Context, token, org, pr
 		in.UserID = c.UserID
 		in.OrganizationID = c.OrganizationID
 		in.ApplicationID = c.ApplicationID
-		return s.store.LookupResources(readCtx, in)
+		out, err = s.store.LookupResources(readCtx, in)
+		if err != nil {
+			return LookupResourcesResult{}, err
+		}
+		if err := verifyLearnerReadProof(readCtx, s); err != nil {
+			return LookupResourcesResult{}, err
+		}
+		return out, nil
 	})
 }
 
 func (s *Service) UserLookupResources(ctx context.Context, bearer, org, provider, resourceType, actionID string, limit *int, cursor *string) (UserLookupResourcesResult, error) {
-	if s.AuthProviderMode() != "goauthy" {
-		return UserLookupResourcesResult{}, serviceError(400, "provider user authorization requires goauthy auth provider mode")
+	if s.AuthProviderMode() != "goauthy" || s.cfg.Auth.Goauthy == nil {
+		return UserLookupResourcesResult{}, serviceError(403, "forbidden: Goauthy user authentication required")
 	}
 	org, err := required("organizationId", org)
 	if err != nil {

@@ -294,11 +294,7 @@ membership, party 사업자번호, group membership, activation sequence/receipt
 restore 검증에서 거부된다. 기존 데이터 경로에 덮어쓰거나 자동 삭제하지 않는다.
 새 스키마로 만든 별도 데이터 경로와 snapshot을 사용해야 한다.
 
-The Go runtime's canonical schema is [store_schema.sql](../internal/grant/store_schema.sql),
-with base indexes in [store_indexes.sql](../internal/grant/store_indexes.sql) and authz lookup
-indexes (`idx_organization_memberships_user_org_status`, `idx_group_memberships_member_group`,
-`idx_role_bindings_resource_lookup`, `idx_role_actions_action_role`) in
-[store_schema.go](../internal/grant/store_schema.go). Rhiza v0.25.0
+`grant`의 Go 런타임 정식 스키마는 [store_schema.sql](../internal/grant/store_schema.sql), 기본 인덱스는 [store_indexes.sql](../internal/grant/store_indexes.sql)(`role_bindings` 활성 역조회용 커버링 부분 인덱스 `idx_role_bindings_active_lookup` 포함), authz 조회 인덱스는 [store_schema.go](../internal/grant/store_schema.go)에 정의되어 있다. Rhiza v0.25.0
 applies the seven named migrations through its replicated migration ledger. Existing
 Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
 export/restore procedure in [backup-restore.md](backup-restore.md).

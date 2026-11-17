@@ -116,6 +116,18 @@ func TestLookupResourcesAndLearnerAuthz(t *testing.T) {
 	if _, err := f.voter.UserLookupResources(ctx, "Bearer opaque-token", "conalog-grant", "compos", "object_type", "other.read", nil, nil); ErrorStatus(err) != 400 {
 		t.Fatalf("mismatched action provider status=%d, want 400", ErrorStatus(err))
 	}
+	nonGoauthyCfg := f.voter.cfg
+	nonGoauthyCfg.Auth.ProviderMode = "pocketbase"
+	nonGoauthy := NewService(nonGoauthyCfg, f.voter.store)
+	if _, err := nonGoauthy.UserLookupResources(ctx, "Bearer opaque-token", "conalog-grant", "compos", "object_type", "compos.read", nil, nil); ErrorStatus(err) != 403 {
+		t.Fatalf("non-goauthy UserLookupResources status=%d, want 403", ErrorStatus(err))
+	}
+	nilGoauthyCfg := f.voter.cfg
+	nilGoauthyCfg.Auth.Goauthy = nil
+	nilGoauthy := NewService(nilGoauthyCfg, f.voter.store)
+	if _, err := nilGoauthy.UserLookupResources(ctx, "Bearer opaque-token", "conalog-grant", "compos", "object_type", "compos.read", nil, nil); ErrorStatus(err) != 403 {
+		t.Fatalf("nil goauthy UserLookupResources status=%d, want 403", ErrorStatus(err))
+	}
 
 	// 6. Application consent gate via store.LookupResources and LookupApplicationResources.
 	for _, sql := range []string{
@@ -169,5 +181,23 @@ func TestLookupResourcesAndLearnerAuthz(t *testing.T) {
 	}
 	if len(appRevokedRes.ResourceIDs) != 0 {
 		t.Fatalf("expected empty resource_ids without consent grant action, got %+v", appRevokedRes)
+	}
+	// LookupApplicationResources with untrusted app + explicit consent, then revoked.
+	f.exec(t, "INSERT INTO application_grant_actions(application_grant_id,action_id) VALUES('grant-1','compos.read')")
+	f.learner.cfg.Auth.Goauthy.ApplicationID = "app-untrusted"
+	untrustedViaSvc, err := f.learner.LookupApplicationResources(ctx, "Bearer opaque-token", "conalog-grant", "compos", "object_type", "compos.read", nil, nil)
+	if err != nil {
+		t.Fatalf("learner untrusted LookupApplicationResources: %v", err)
+	}
+	if !slices.Equal(untrustedViaSvc.ResourceIDs, []string{"collection-1", "collection-2", "collection-3", "collection-4", "collection-5"}) {
+		t.Fatalf("unexpected untrusted LookupApplicationResources: %+v", untrustedViaSvc)
+	}
+	f.exec(t, "UPDATE application_grants SET status='revoked' WHERE id='grant-1'")
+	revokedViaSvc, err := f.learner.LookupApplicationResources(ctx, "Bearer opaque-token", "conalog-grant", "compos", "object_type", "compos.read", nil, nil)
+	if err != nil {
+		t.Fatalf("learner revoked LookupApplicationResources: %v", err)
+	}
+	if len(revokedViaSvc.ResourceIDs) != 0 {
+		t.Fatalf("expected empty resource_ids after grant revocation, got %+v", revokedViaSvc)
 	}
 }

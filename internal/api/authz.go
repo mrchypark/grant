@@ -80,6 +80,9 @@ func validateLookupTarget(action string, target lookupResourceTarget, limit *int
 }
 
 func validateFilterRequest(action string, resources []resource, target *lookupResourceTarget, limit *int, cursor *string) (bool, error) {
+	if strings.TrimSpace(action) == "" {
+		return false, failure(422, "action is required")
+	}
 	if resources != nil && target != nil {
 		return false, failure(400, "filter accepts either resources or resource, not both")
 	}
@@ -159,12 +162,12 @@ func first(v []grant.AuthorizationDecision, e error) (any, error) {
 	return v[0], nil
 }
 func (s *Server) authorizationRoutes() {
-	s.route("POST", "/api/v1/authz/check", "master", false, 200, body(false, func(r *request, v check) (any, error) { return first(s.checks(r, []check{v})) }))
-	s.route("POST", "/api/v1/authz/batch-check", "master", false, 200, body(false, func(r *request, v batch) (any, error) {
+	s.route("POST", "/api/v1/authz/check", "master", false, 200, body(s.learner, func(r *request, v check) (any, error) { return first(s.checks(r, []check{v})) }))
+	s.route("POST", "/api/v1/authz/batch-check", "master", false, 200, body(s.learner, func(r *request, v batch) (any, error) {
 		out, e := s.checks(r, v.Checks)
 		return map[string]any{"results": out}, e
 	}))
-	s.route("POST", "/api/v1/authz/filter", "master", false, 200, body(false, func(r *request, v filter) (any, error) {
+	s.route("POST", "/api/v1/authz/filter", "master", false, 200, body(s.learner, func(r *request, v filter) (any, error) {
 		isLookup, err := validateFilterRequest(v.Action, v.Resources, v.Resource, v.Limit, v.Cursor)
 		if err != nil {
 			return nil, err
