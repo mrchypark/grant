@@ -297,11 +297,23 @@ func TestJSONUnicodeBoundary(t *testing.T) {
 func TestLearnerOnlyPublishesPDP(t *testing.T) {
 	s := testServer()
 	s.learner = true
-	for _, path := range []string{"/api/v1/authz/check", "/api/v1/admin/providers", "/ops/migrations/patch-data-authority"} {
+	for _, path := range []string{"/api/v1/admin/providers", "/ops/migrations/patch-data-authority"} {
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
 		if w.Code != 503 {
-			t.Errorf("%s status%d", path, w.Code)
+			t.Errorf("%s status %d", path, w.Code)
+		}
+	}
+	for _, path := range []string{
+		"/api/v1/authz/check",
+		"/api/v1/authz/batch-check",
+		"/api/v1/authz/filter",
+		"/api/v1/application-authz/filter",
+	} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
+		if w.Code == 503 {
+			t.Errorf("%s unexpectedly returned 503 on learner", path)
 		}
 	}
 	w := httptest.NewRecorder()

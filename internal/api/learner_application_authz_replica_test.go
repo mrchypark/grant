@@ -109,7 +109,7 @@ func TestLearnerApplicationAuthorizationHTTPRealReplica(t *testing.T) {
 		t.Fatalf("filter=%v", out)
 	}
 	request("/api/v1/application-authz/filter", filter, "wrong-key", 401)
-	request("/api/v1/authz/check", check, "fixture-app-key", 503)
+	request("/api/v1/admin/providers", `{}`, "fixture-app-key", 503)
 	exec("DELETE FROM application_actions WHERE application_id='fixture-app'")
 	out = request("/api/v1/application-authz/filter", filter, "fixture-app-key", 200)
 	if ids, ok := out["resource_ids"].([]any); !ok || len(ids) != 0 {

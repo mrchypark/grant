@@ -20,7 +20,7 @@
 
 `grant` uses Rhiza's consensus and replicated object-store architecture:
 - **`voter`**: Consensus-voting node with full read, write, migration, and admin capabilities.
-- **`learner`**: Non-voting read-only replica that syncs from voters/object store and serves only `/healthz`, `/readyz`, `/api/v2/http-capabilities/catalog/{providerId}`, `/api/v2/http-capabilities/decide`, and learner-enabled provider/user authz endpoints (returning `503` for voter-only routes).
+- **`learner`**: Non-voting read-only replica that syncs from voters/object store and serves only `/healthz`, `/readyz`, `/api/v2/http-capabilities/catalog/{providerId}`, `/api/v2/http-capabilities/decide`, `/api/v1/authz/{check,batch-check,filter}`, `/api/v1/application-authz/{check,batch-check,filter}`, and `/api/v2/providers/{providerId}/authz/{batch-check,filter}` (returning `503` for voter-only routes).
 
 ### 2.1 Binaries (`cmd/`)
 
