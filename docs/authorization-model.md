@@ -119,7 +119,11 @@ POST /api/v1/authz/batch-check
 POST /api/v1/authz/filter
 ```
 
-`check`는 단일 resource 판정, `batch-check`는 여러 판정, `filter`는 서비스가 넘긴 후보 resource 중 허용된 id만 반환한다.
+`check`는 단일 resource 판정, `batch-check`는 여러 판정, `filter`는 두 가지 모드를 지원한다:
+1. 후보 필터 모드(`resources` 전달): 서비스가 넘긴 후보 resource 중 허용된 id만 반환한다.
+2. 역조회 모드(`resource: { provider, type }` 및 선택적 `limit`, `cursor` 전달): Grant에 저장된 활성 `role_bindings`와 시스템 `owner` 권한을 기준으로 해당 주체가 `action`을 수행할 수 있는 `resource_ids`를 `next_cursor` 페이지네이션으로 반환한다(`limit` 기본값 100, 최대 1000).
+
+`/api/v1/authz/*`와 `/api/v1/application-authz/*`, `/api/v2/providers/{providerId}/authz/*` 읽기 경로는 모두 voter뿐 아니라 `learner` 노드에서도 `readScope` 쿼럼 펜싱을 통해 고속으로 응답한다.
 
 grant는 외부 provider의 전체 resource 목록을 모른다. 따라서 unbounded list API는 제공하지 않는다.
 

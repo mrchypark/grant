@@ -12,7 +12,73 @@ import (
 //go:embed store_authz.sql
 var authorizationSQLTemplate string
 
+//go:embed store_lookup_resources.sql
+var lookupResourcesSQLTemplate string
+
 var authorizationSQL = strings.Replace(authorizationSQLTemplate, "{agreement_bounds}", agreementBoundsSQL, 1)
+var lookupResourcesSQL = strings.Replace(lookupResourcesSQLTemplate, "{agreement_bounds}", agreementBoundsSQL, 1)
+
+type LookupResourcesInput struct {
+	UserID         string
+	OrganizationID string
+	ProviderID     string
+	ResourceType   string
+	ActionID       string
+	ApplicationID  string
+	Limit          int
+	Cursor         string
+	Consistency    ReadConsistency
+}
+
+type LookupResourcesResult struct {
+	ResourceIDs []string `json:"resource_ids"`
+	NextCursor  string   `json:"next_cursor,omitempty"`
+}
+
+type UserLookupResourcesResult struct {
+	ResourceIDs       []string `json:"resource_ids"`
+	NextCursor        string   `json:"next_cursor,omitempty"`
+	PEPPolicyRevision int64    `json:"pepPolicyRevision"`
+}
+
+func (s *Store) LookupResources(ctx context.Context, in LookupResourcesInput) (LookupResourcesResult, error) {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		return LookupResourcesResult{}, serviceError(400, "limit must be between 1 and 1000")
+	}
+	rows, err := s.Query(
+		ctx,
+		in.Consistency,
+		lookupResourcesSQL,
+		in.UserID,
+		in.OrganizationID,
+		in.ProviderID,
+		in.ResourceType,
+		in.ActionID,
+		in.ApplicationID,
+		time.Now().UTC().Format(agreementTimeLayout),
+		in.Cursor,
+		int64(limit+1),
+	)
+	if err != nil {
+		return LookupResourcesResult{}, err
+	}
+	ids := make([]string, 0, min(len(rows), limit))
+	for i, row := range rows {
+		if i == limit {
+			break
+		}
+		ids = append(ids, rowString(row, "resource_id"))
+	}
+	var next string
+	if len(rows) > limit && len(ids) > 0 {
+		next = ids[len(ids)-1]
+	}
+	return LookupResourcesResult{ResourceIDs: ids, NextCursor: next}, nil
+}
 
 func (s *Store) EvaluateUserActions(ctx context.Context, checks []UserActionCheck) ([]UserActionDecision, error) {
 	return s.evaluateUserActions(ctx, checks, false)

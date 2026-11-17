@@ -55,6 +55,16 @@ func New(service *grant.Service, learner bool) *Server {
 	s.routes()
 	return s
 }
+func masterAuthorizationRead(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	switch r.URL.Path {
+	case "/api/v1/authz/check", "/api/v1/authz/batch-check", "/api/v1/authz/filter":
+		return true
+	}
+	return false
+}
 func applicationAuthorizationRead(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
@@ -66,7 +76,7 @@ func applicationAuthorizationRead(r *http.Request) bool {
 	return false
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.learner && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
+	if s.learner && !masterAuthorizationRead(r) && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
 		if _, pattern := s.mux.Handler(r); pattern == "" {
 			http.NotFound(w, r)
 			return

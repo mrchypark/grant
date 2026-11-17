@@ -11,7 +11,7 @@ learners:
 | Method | Path | Result |
 |--------|------|--------|
 | POST | `/api/v2/providers/{providerId}/authz/batch-check` | One decision per supplied check. |
-| POST | `/api/v2/providers/{providerId}/authz/filter` | Allowed IDs from supplied candidates. |
+| POST | `/api/v2/providers/{providerId}/authz/filter` | Allowed IDs from supplied candidates (`resources`), or bounded paginated reverse lookup (`resource` + `limit`/`cursor`). |
 
 There is no single-check route, resource inventory, or mutation endpoint. Network
 placement is private even though these routes share the Grant API listener.
@@ -128,6 +128,22 @@ POST /api/v2/providers/<provider-id>/authz/filter
 
 All candidates must use one resource type and the path provider. The response
 contains only allowed candidate IDs, preserving input order and repeated allowed
+IDs.
+
+For reverse lookup, supply `resource` (`provider`, `type`) instead of `resources`, with optional `limit` (default `100`, `1..1000`) and `cursor`:
+
+```json
+{
+  "action": "<registered-action-id>",
+  "resource": {"provider": "<provider-id>", "type": "<resource-type>"},
+  "limit": 100,
+  "cursor": "<last-resource-id>"
+}
+```
+
+```json
+{"resource_ids":["<resource-id>"],"next_cursor":"<resource-id>","pepPolicyRevision":1}
+```
 IDs. It does not discover resources, return an authorized total, or provide a
 continuation token. The caller supplies its candidates and must preserve their
 provider/type context when using the returned bare IDs.

@@ -82,7 +82,9 @@ func (s *Service) CheckAuthorization(ctx context.Context, subject AuthorizationS
 	return decisions[0], nil
 }
 func (s *Service) CheckAuthorizations(ctx context.Context, checks []AuthorizationCheck, consistency ReadConsistency) ([]AuthorizationDecision, error) {
-	return s.evaluateAuthorizations(ctx, checks, consistency, nil)
+	return localReplicaRead(ctx, s, func(readCtx context.Context) ([]AuthorizationDecision, error) {
+		return s.evaluateAuthorizations(readCtx, checks, consistency, nil)
+	})
 }
 func (s *Service) evaluateAuthorizations(ctx context.Context, checks []AuthorizationCheck, consistency ReadConsistency, applicationID *string) ([]AuthorizationDecision, error) {
 	dbChecks := make([]UserActionCheck, 0, len(checks))

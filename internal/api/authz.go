@@ -55,13 +55,58 @@ type applicationBatch struct {
 	Checks []applicationCheck `json:"checks"`
 }
 type filter struct {
-	Subject   subject    `json:"subject"`
-	Action    string     `json:"action"`
-	Resources []resource `json:"resources"`
+	Subject   subject               `json:"subject"`
+	Action    string                `json:"action"`
+	Resources []resource            `json:"resources,omitempty"`
+	Resource  *lookupResourceTarget `json:"resource,omitempty"`
+	Limit     *int                  `json:"limit,omitempty"`
+	Cursor    *string               `json:"cursor,omitempty"`
 }
+type lookupResourceTarget struct {
+	Provider string `json:"provider"`
+	Type     string `json:"type"`
+}
+
+func validateLookupTarget(action string, target lookupResourceTarget, limit *int) error {
+	for _, value := range []string{action, target.Provider, target.Type} {
+		if strings.TrimSpace(value) == "" {
+			return failure(422, "action and resource provider, type are required")
+		}
+	}
+	if limit != nil && (*limit < 1 || *limit > 1000) {
+		return failure(400, "limit must be between 1 and 1000")
+	}
+	return nil
+}
+
+func validateFilterRequest(action string, resources []resource, target *lookupResourceTarget, limit *int, cursor *string) (bool, error) {
+	if resources != nil && target != nil {
+		return false, failure(400, "filter accepts either resources or resource, not both")
+	}
+	if resources == nil && target == nil {
+		return false, failure(422, "resources or resource is required")
+	}
+	if target != nil {
+		if err := validateLookupTarget(action, *target, limit); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if limit != nil || cursor != nil {
+		return false, failure(400, "limit and cursor are only supported for resource lookup")
+	}
+	if len(resources) > 1000 {
+		return false, failure(400, "resources must contain at most 1000 items")
+	}
+	return false, nil
+}
+
 type applicationFilter struct {
-	Action    string     `json:"action"`
-	Resources []resource `json:"resources"`
+	Action    string                `json:"action"`
+	Resources []resource            `json:"resources,omitempty"`
+	Resource  *lookupResourceTarget `json:"resource,omitempty"`
+	Limit     *int                  `json:"limit,omitempty"`
+	Cursor    *string               `json:"cursor,omitempty"`
 }
 
 func (s *Server) checks(r *request, values []check) ([]grant.AuthorizationDecision, error) {
@@ -120,8 +165,16 @@ func (s *Server) authorizationRoutes() {
 		return map[string]any{"results": out}, e
 	}))
 	s.route("POST", "/api/v1/authz/filter", "master", false, 200, body(false, func(r *request, v filter) (any, error) {
-		if len(v.Resources) > 1000 {
-			return nil, failure(400, "resources must contain at most 1000 items")
+		isLookup, err := validateFilterRequest(v.Action, v.Resources, v.Resource, v.Limit, v.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		if isLookup {
+			sub, err := v.Subject.input()
+			if err != nil {
+				return nil, err
+			}
+			return s.service.LookupResources(r.Context(), sub, v.Resource.Provider, v.Resource.Type, v.Action, v.Limit, v.Cursor, r.consistency)
 		}
 		checks := make([]check, len(v.Resources))
 		for i, res := range v.Resources {
@@ -147,8 +200,12 @@ func (s *Server) authorizationRoutes() {
 		return map[string]any{"results": out}, e
 	}))
 	s.route("POST", "/api/v1/application-authz/filter", "application", false, 200, applicationAuthorizationBody(s, func(r *request, v applicationFilter) (any, error) {
-		if len(v.Resources) > 1000 {
-			return nil, failure(400, "resources must contain at most 1000 items")
+		isLookup, err := validateFilterRequest(v.Action, v.Resources, v.Resource, v.Limit, v.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		if isLookup {
+			return s.service.LookupApplicationResources(r.Context(), r.bearer, r.org, v.Resource.Provider, v.Resource.Type, v.Action, v.Limit, v.Cursor)
 		}
 		checks := make([]applicationCheck, len(v.Resources))
 		for i, res := range v.Resources {
@@ -194,8 +251,12 @@ func applicationAuthorizationBody[T any](s *Server, fn func(*request, T) (any, e
 				}
 				checks = value.Checks
 			case applicationFilter:
-				if value.Resources == nil {
-					return nil, failure(422, "resources is required")
+				isLookup, err := validateFilterRequest(value.Action, value.Resources, value.Resource, value.Limit, value.Cursor)
+				if err != nil {
+					return nil, err
+				}
+				if isLookup {
+					return func(r *request) (any, error) { return fn(r, v) }, nil
 				}
 				if strings.TrimSpace(value.Action) == "" {
 					return nil, failure(422, "action is required")
