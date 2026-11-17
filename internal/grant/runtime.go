@@ -111,10 +111,6 @@ func openStore(ctx context.Context, cfg Config, restoring bool, startOperator fu
 	if err := localStoragePreflight(cfg, restoring); err != nil {
 		return nil, err
 	}
-	restoreSnapshot, err := clusterRestorePreflight(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
 	c, err := effectiveRhizaConfig(cfg.Database)
 	if err != nil {
 		return nil, err
@@ -165,6 +161,10 @@ func openStore(ctx context.Context, cfg Config, restoring bool, startOperator fu
 		}
 		s.replica, err = rhiza.OpenLearner(ctx, r)
 		return s, err
+	}
+	restoreSnapshot, err := clusterRestorePreflight(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	s.db, err = rhiza.Open(ctx, c)
 	if err != nil {
@@ -310,7 +310,7 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 	if s.db == nil && (s.replica == nil || mode == rhiza.ConsistencyLinearizable) {
 		var remote rhiza.QueryResponse
 		err := s.remoteCall(ctx, "/sql/query", req, &remote)
-		if err != nil && consistency == ReadPreferStrong && s.replica != nil {
+		if err != nil && consistency == ReadPreferStrong && s.replica != nil && isReadAvailabilityError(err) {
 			req.Consistency = rhiza.ConsistencyLocal
 			return s.replica.Query(ctx, req)
 		}
@@ -323,7 +323,7 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 	} else {
 		result, err = s.db.Query(ctx, req)
 	}
-	if err != nil && consistency == ReadPreferStrong {
+	if err != nil && consistency == ReadPreferStrong && isReadAvailabilityError(err) {
 		req.Consistency = rhiza.ConsistencyLocal
 		if s.replica != nil {
 			return s.replica.Query(ctx, req)
@@ -331,6 +331,10 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 		return s.db.Query(ctx, req)
 	}
 	return result, err
+}
+
+func isReadAvailabilityError(err error) bool {
+	return errors.Is(err, rhiza.ErrNotReady) || errors.Is(err, rhiza.ErrQuorumUnavailable) || strings.HasPrefix(err.Error(), "unavailable:")
 }
 func sqlArgs(args []any) []any {
 	out := make([]any, len(args))

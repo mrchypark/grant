@@ -58,7 +58,7 @@ func TestRestoreLocalStorageEntrypoint(t *testing.T) {
 					cmd.Env = append(cmd.Env, v)
 				}
 			}
-			cmd.Env = append(cmd.Env, "GRANT_RECOVERY_TEST_CHILD=1", "GRANT_DATA_DIR="+root, "GRANT_PEER_ADDR=", "GRANT_RHIZA_CONFIG_JSON="+string(raw), "GRANT_BIND_ADDR=invalid-listener-address", "GRANT_APP_AUTH_KEY=test-app-key", "GRANT_RAUTHY_CLIENT_ID=test-client", "GRANT_RAUTHY_CLIENT_SECRET=test-client-secret")
+			cmd.Env = append(cmd.Env, "GRANT_RECOVERY_TEST_CHILD=1", "GRANT_DATA_DIR="+root, "GRANT_PEER_ADDR=", "GRANT_RHIZA_CONFIG_JSON="+string(raw), "GRANT_BIND_ADDR=invalid-listener-address", "GRANT_MASTER_KEY=test-master-key", "GRANT_APP_AUTH_KEY=test-app-key", "GRANT_RAUTHY_CLIENT_ID=test-client", "GRANT_RAUTHY_CLIENT_SECRET=test-client-secret")
 			if mode == "extra" {
 				cmd.Env = append(cmd.Env, "GRANT_RECOVERY_TEST_EXTRA=1")
 			}

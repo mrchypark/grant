@@ -282,7 +282,7 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 ## Go/Rhiza storage port
 
 현재 스키마는 Grant 테이블 33개(논리 snapshot 대상 31개, 내부 staging 1개,
-restore receipt 1개)와 명시적 인덱스 16개를 생성한다. 사용하지 않던 import/capability
+restore receipt 1개)와 명시적 인덱스 20개를 생성한다. 사용하지 않던 import/capability
 assertion 테이블 2개와 중복 capability projection, V2 authority snapshot 저장 기능을 제거했다.
 실제 transaction 검증은 공통 `application_consent_assertions`를 계속 사용한다.
 membership, party 사업자번호, group membership, activation sequence/receipt의 중복 인덱스
@@ -295,8 +295,11 @@ restore 검증에서 거부된다. 기존 데이터 경로에 덮어쓰거나 �
 새 스키마로 만든 별도 데이터 경로와 snapshot을 사용해야 한다.
 
 The Go runtime's canonical schema is [store_schema.sql](../internal/grant/store_schema.sql),
-with indexes in [store_indexes.sql](../internal/grant/store_indexes.sql). Rhiza v0.19.0
-applies the three named migrations through its replicated migration ledger. Existing
+with base indexes in [store_indexes.sql](../internal/grant/store_indexes.sql) and authz lookup
+indexes (`idx_organization_memberships_user_org_status`, `idx_group_memberships_member_group`,
+`idx_role_bindings_resource_lookup`, `idx_role_actions_action_role`) in
+[store_schema.go](../internal/grant/store_schema.go). Rhiza v0.25.0
+applies the seven named migrations through its replicated migration ledger. Existing
 Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
 export/restore procedure in [backup-restore.md](backup-restore.md).
 

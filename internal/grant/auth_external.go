@@ -19,9 +19,16 @@ func (s *Service) externalIdentity(ctx context.Context, authorization string) (E
 	switch s.cfg.Auth.ProviderMode {
 	case "pocketbase":
 		return s.pocketBaseIdentity(ctx, authorization)
+	case "external-check":
+		return s.externalCheckIdentity(ctx, authorization)
 	case "goauthy":
 		return s.goauthyIdentity(ctx, authorization)
-	case "rauthy":
+	case "jwks":
+		return s.jwksIdentity(ctx, authorization)
+	case "rauthy", "oidc":
+		if s.cfg.Auth.Rauthy.JWKSURL != "" {
+			return s.jwksIdentity(ctx, authorization)
+		}
 		return s.rauthyIdentity(ctx, authorization)
 	default:
 		return ExternalIdentity{}, serviceError(503, "authentication provider is not configured")
@@ -266,4 +273,125 @@ func (s *Service) pocketBaseIdentity(ctx context.Context, authorization string) 
 		name = r.ID
 	}
 	return ExternalIdentity{Provider: "pocketbase", Issuer: issuer, CollectionID: r.CollectionID, ExternalUserID: r.ID, ClientID: cfg.ApplicationID, Email: email, DisplayName: name, Active: true}, nil
+}
+
+func (s *Service) externalCheckIdentity(ctx context.Context, authorization string) (ExternalIdentity, error) {
+	cfg := s.cfg.Auth.ExternalCheck
+	if cfg == nil || strings.TrimSpace(cfg.URL) == "" {
+		return ExternalIdentity{}, serviceError(503, "external-check is not configured")
+	}
+	method := strings.ToUpper(strings.TrimSpace(cfg.Method))
+	if method == "" {
+		method = "POST"
+	}
+	req, err := http.NewRequest(method, cfg.URL, nil)
+	if err != nil {
+		return ExternalIdentity{}, err
+	}
+	req.Header.Set("Authorization", authorization)
+	var payload map[string]any
+	if err = s.authJSON(ctx, req, &payload, "external-check"); err != nil {
+		return ExternalIdentity{}, err
+	}
+	if cfg.TokenPath != "" {
+		if tok, ok := jsonPathString(payload, cfg.TokenPath); !ok || strings.TrimSpace(tok) == "" {
+			return ExternalIdentity{}, serviceError(503, "invalid external-check verified token")
+		}
+	}
+	if cfg.ExpectedField != "" {
+		if got, ok := jsonPathString(payload, cfg.ExpectedField); !ok || got != cfg.ExpectedValue {
+			return ExternalIdentity{}, serviceError(503, "invalid external-check assertion")
+		}
+	}
+	subjectPath := cfg.SubjectPath
+	if subjectPath == "" {
+		subjectPath = "sub"
+	}
+	sub, ok := jsonPathString(payload, subjectPath)
+	sub = strings.TrimSpace(sub)
+	if !ok || sub == "" {
+		return ExternalIdentity{}, serviceError(503, "invalid external-check verified subject")
+	}
+	var email *string
+	emailPath := cfg.EmailPath
+	if emailPath == "" {
+		emailPath = "email"
+	}
+	verifiedPath := cfg.EmailVerifiedPath
+	if verifiedPath == "" {
+		verifiedPath = "email_verified"
+	}
+	if rawEmail, ok := jsonPathString(payload, emailPath); ok && strings.Contains(rawEmail, "@") {
+		if verified, hasVerified := jsonPathBool(payload, verifiedPath); hasVerified && verified {
+			v := strings.ToLower(strings.TrimSpace(rawEmail))
+			email = &v
+		}
+	}
+	namePath := cfg.NamePath
+	if namePath == "" {
+		namePath = "name"
+	}
+	name, _ := jsonPathString(payload, namePath)
+	name = strings.TrimSpace(name)
+	if name == "" && cfg.FallbackNamePath != "" {
+		name, _ = jsonPathString(payload, cfg.FallbackNamePath)
+		name = strings.TrimSpace(name)
+	}
+	if name == "" && email != nil {
+		name = *email
+	}
+	if name == "" {
+		name = sub
+	}
+	clientID := strings.TrimSpace(cfg.ApplicationID)
+	if cfg.ClientIDPath != "" {
+		if v, ok := jsonPathString(payload, cfg.ClientIDPath); ok && strings.TrimSpace(v) != "" {
+			clientID = strings.TrimSpace(v)
+		}
+	}
+	return ExternalIdentity{
+		Provider:       "external-check",
+		ExternalUserID: sub,
+		ClientID:       clientID,
+		Email:          email,
+		DisplayName:    name,
+		Active:         true,
+	}, nil
+}
+
+func jsonPathValue(root map[string]any, path string) (any, bool) {
+	if root == nil || path == "" {
+		return nil, false
+	}
+	var cur any = root
+	for _, seg := range strings.Split(path, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		v, exists := m[seg]
+		if !exists || v == nil {
+			return nil, false
+		}
+		cur = v
+	}
+	return cur, true
+}
+
+func jsonPathString(root map[string]any, path string) (string, bool) {
+	v, ok := jsonPathValue(root, path)
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
+func jsonPathBool(root map[string]any, path string) (bool, bool) {
+	v, ok := jsonPathValue(root, path)
+	if !ok {
+		return false, false
+	}
+	b, ok := v.(bool)
+	return b, ok
 }

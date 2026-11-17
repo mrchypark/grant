@@ -66,12 +66,22 @@ func legacySchemaDigestV3() string {
 	return digestBytes([]byte(schemaSQL + indexesSQL))
 }
 
+const authzLookupIndexesSQL = `
+CREATE INDEX IF NOT EXISTS idx_organization_memberships_user_org_status
+ ON organization_memberships (user_id, organization_id, status);
+CREATE INDEX IF NOT EXISTS idx_group_memberships_member_group
+ ON group_memberships (organization_membership_id, group_id);
+CREATE INDEX IF NOT EXISTS idx_role_bindings_resource_lookup
+ ON role_bindings (provider_id, resource_type, resource_id, state, subject_type, subject_id);
+CREATE INDEX IF NOT EXISTS idx_role_actions_action_role
+ ON role_actions (action_id, role_id);`
+
 func (s *Store) Migrate(ctx context.Context) error {
 	if e := s.coarsePreflight(ctx, ReadStrong); e != nil {
 		return e
 	}
 	var migrations []rhiza.Migration
-	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}, {"grant PEP authorization policy", pepPolicySchemaV6SQL}} {
+	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}, {"grant PEP authorization policy", pepPolicySchemaV6SQL}, {"grant authz lookup indexes", authzLookupIndexesSQL}} {
 		var stmts []Statement
 		for _, q := range strings.Split(group.sql, ";") {
 			if strings.TrimSpace(q) != "" {
