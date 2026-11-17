@@ -46,7 +46,7 @@ eligible AS (
 ),
 candidates AS (
     SELECT resource_id FROM (
-        SELECT rb.resource_id
+        SELECT DISTINCT rb.resource_id
         FROM eligible req
         JOIN role_bindings rb
           ON rb.subject_type = 'organization'
@@ -93,7 +93,7 @@ candidates AS (
     UNION
 
     SELECT resource_id FROM (
-        SELECT rb.resource_id
+        SELECT DISTINCT rb.resource_id
         FROM eligible req
         JOIN role_bindings rb
           ON rb.subject_type = 'user'
@@ -140,7 +140,7 @@ candidates AS (
     UNION
 
     SELECT resource_id FROM (
-        SELECT rb.resource_id
+        SELECT DISTINCT rb.resource_id
         FROM eligible req
         JOIN role_bindings rb
           ON rb.subject_type = 'group'

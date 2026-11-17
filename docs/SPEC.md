@@ -52,6 +52,7 @@
    - **`goauthy`**: Audience/resource/scope-enforced OAuth 2.0 introspection against `GRANT_GOAUTHY_ISSUER`.
    - **`jwks`** (or `oidc`/`rauthy` with `GRANT_OIDC_JWKS_URL`): Local JWT signature verification (`RS256`, `ES256`, `EdDSA`) against `GRANT_OIDC_JWKS_URL` validating `exp`, `nbf`, `iss` (`GRANT_OIDC_ISSUER`), `aud` (`GRANT_OIDC_AUDIENCE`), `sub`, and `client_id`/`azp`.
    - **`oidc` / `rauthy`**: Standard OAuth 2.0 Token Introspection + UserInfo with `auth_identity_cache`.
+   - **`pocketbase`**: Online `POST /api/collections/{collection}/auth-refresh` against the configured PocketBase origin bound to `GRANT_POCKETBASE_APPLICATION_ID`.
    - **`external-check`**: Configurable HTTP verification endpoint (`GRANT_EXTERNAL_CHECK_URL`, `GRANT_EXTERNAL_CHECK_METHOD`) with dot-separated JSON response field mappings (`GRANT_EXTERNAL_CHECK_SUBJECT_PATH`, `EMAIL_PATH`, `EMAIL_VERIFIED_PATH`, `NAME_PATH`, `TOKEN_PATH`, `EXPECTED_FIELD`/`EXPECTED_VALUE`) bound to `GRANT_EXTERNAL_CHECK_APPLICATION_ID`.
 
 ---

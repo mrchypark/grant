@@ -127,7 +127,7 @@ func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org
 	if s.cfg.Database.LocalNodeRole == "learner" {
 		// No replicated cache lookup/write or inner Rauthy memory-cache hit:
 		// this request needs fresh external evidence before its local fence.
-		if s.AuthProviderMode() == "rauthy" {
+		if s.AuthProviderMode() == "rauthy" && s.cfg.Auth.Rauthy.JWKSURL == "" {
 			identity, err = s.rauthyIdentityWithCache(ctx, token, false)
 		} else {
 			identity, err = s.externalIdentity(ctx, token)

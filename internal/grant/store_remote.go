@@ -78,12 +78,25 @@ func (s *Store) remoteCall(ctx context.Context, path string, in, out any) error 
 	}
 	client := s.readFenceClient()
 	var lastErr error
-	for _, base := range nodes {
+	for i, base := range nodes {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		req, e := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(payload))
+		attemptCtx := ctx
+		var cancel context.CancelFunc
+		if path == "/sql/query" && len(nodes)-i > 1 {
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining > 0 {
+					attemptCtx, cancel = context.WithTimeout(ctx, remaining/time.Duration(len(nodes)-i))
+				}
+			}
+		}
+		req, e := http.NewRequestWithContext(attemptCtx, http.MethodPost, base+path, bytes.NewReader(payload))
 		if e != nil {
+			if cancel != nil {
+				cancel()
+			}
 			return e
 		}
 		req.Header.Set("Authorization", "Bearer "+s.cfg.Database.RemoteAPISecret)
@@ -91,8 +104,15 @@ func (s *Store) remoteCall(ctx context.Context, path string, in, out any) error 
 		attemptClient := *client
 		attemptClient.Timeout = 30 * time.Second
 		res, e := attemptClient.Do(req)
+		if cancel != nil {
+			cancel()
+		}
 		if e != nil {
-			lastErr = fmt.Errorf("runtime remote call failed (mutation status may be unknown): %w", e)
+			if path == "/sql/query" {
+				lastErr = serviceError(503, fmt.Sprintf("unavailable: runtime remote call failed: %v", e))
+			} else {
+				lastErr = fmt.Errorf("runtime remote call failed (mutation status may be unknown): %w", e)
+			}
 			continue
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(res.Body, remoteBodyLimit+1))

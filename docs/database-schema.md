@@ -1,6 +1,6 @@
 # Database Schema
 
-이 문서는 immutable V1/V2 DDL과 V4 forward migration을 합친 현재 실제 스키마를 설명한다.
+이 문서는 immutable V1/V2 DDL과 V4~V7 forward migration을 합친 현재 실제 스키마를 설명한다.
 
 ## 프로젝트 경계
 
@@ -282,7 +282,7 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 ## Go/Rhiza storage port
 
 현재 스키마는 Grant 테이블 33개(논리 snapshot 대상 31개, 내부 staging 1개,
-restore receipt 1개)와 명시적 인덱스 20개를 생성한다. 사용하지 않던 import/capability
+restore receipt 1개)와 명시적 인덱스 21개를 생성한다. 사용하지 않던 import/capability
 assertion 테이블 2개와 중복 capability projection, V2 authority snapshot 저장 기능을 제거했다.
 실제 transaction 검증은 공통 `application_consent_assertions`를 계속 사용한다.
 membership, party 사업자번호, group membership, activation sequence/receipt의 중복 인덱스
