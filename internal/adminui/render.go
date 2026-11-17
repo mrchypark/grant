@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	ui "github.com/mrchypark/ely-htmx"
+	ui "github.com/mrchypark/elysdui/ui/gohtmx"
 )
 
 //go:embed templates/*.html assets/*
