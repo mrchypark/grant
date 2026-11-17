@@ -49,8 +49,17 @@ func (s *Service) cacheIdentity(key string, v cachedIdentity) {
 		s.authCache[key] = v
 	}
 }
+type trustedGatewayIdentityKey struct{}
+
+func WithTrustedGatewayIdentity(ctx context.Context, identity ExternalIdentity) context.Context {
+	return context.WithValue(ctx, trustedGatewayIdentityKey{}, identity)
+}
+
 func (s *Service) resolveExternalIdentity(ctx context.Context, authorization string, c ReadConsistency) (ExternalIdentity, error) {
 	if identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity); ok {
+		return identity, nil
+	}
+	if identity, ok := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity); ok {
 		return identity, nil
 	}
 	if s.AuthProviderMode() != "rauthy" || s.store == nil {

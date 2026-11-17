@@ -74,6 +74,17 @@ func (s *Service) resolveLocalApplicationAuthorizationContext(ctx context.Contex
 		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
 			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured PocketBase application is not active for this organization")
 		}
+	} else if s.AuthProviderMode() == "external-check" {
+		if s.cfg.Auth.ExternalCheck == nil {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: external-check application is not configured")
+		}
+		a, err = s.store.GetApplicationWithConsistency(ctx, s.cfg.Auth.ExternalCheck.ApplicationID, ReadStrong)
+		if err != nil {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured external-check application is not ready")
+		}
+		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured external-check application is not active for this organization")
+		}
 	} else if s.AuthProviderMode() == "goauthy" {
 		if s.cfg.Auth.Goauthy == nil {
 			return applicationAuthorizationContext{}, serviceError(503, "Goauthy is not configured")

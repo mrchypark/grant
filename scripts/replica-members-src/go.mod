@@ -1,8 +1,8 @@
 module grant.local/replica-members
 
-go 1.27.3
+go 1.27.4
 
-require github.com/mrchypark/rhiza v0.23.0
+require github.com/mrchypark/rhiza v0.25.0
 
 require (
 	cel.dev/expr v0.25.3 // indirect
@@ -67,7 +67,7 @@ require (
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/minio-go/v7 v7.3.0 // indirect
-	github.com/mrchypark/latticedb-go v0.11.3 // indirect
+	github.com/mrchypark/latticedb-go v0.13.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f // indirect
 	github.com/ncruces/go-sqlite3 v0.35.6 // indirect

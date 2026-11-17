@@ -61,10 +61,11 @@ type Service struct {
 	client    *http.Client
 	authMu    sync.Mutex
 	authCache map[string]cachedIdentity
+	jwks      *jwksCache
 }
 
 func NewService(cfg Config, store *Store) *Service {
-	return &Service{cfg: cfg, store: store, authCache: make(map[string]cachedIdentity), client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &Service{cfg: cfg, store: store, authCache: make(map[string]cachedIdentity), jwks: &jwksCache{}, client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func (s *Service) Config() Config           { return s.cfg }
 func (s *Service) RauthyBaseURL() string    { return s.cfg.Auth.Rauthy.BaseURL }

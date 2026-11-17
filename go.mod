@@ -1,6 +1,6 @@
 module github.com/mrchypark/grant
 
-go 1.27.3
+go 1.27.4
 
 require (
 	cloud.google.com/go/storage v1.69.0
@@ -9,7 +9,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.2
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/mrchypark/ely-htmx v0.1.0
-	github.com/mrchypark/rhiza v0.23.0
+	github.com/mrchypark/rhiza v0.25.0
 	github.com/ncruces/go-sqlite3 v0.35.6
 	github.com/nlnwa/whatwg-url v0.6.2
 	google.golang.org/api v0.301.0
@@ -75,7 +75,7 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/mrchypark/latticedb-go v0.11.3 // indirect
+	github.com/mrchypark/latticedb-go v0.13.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f // indirect
 	github.com/ncruces/go-sqlite3-wasm/v6 v6.3.35304 // indirect
