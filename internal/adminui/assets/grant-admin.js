@@ -35,17 +35,6 @@ function updateCurrentNavigation() {
   }
 }
 
-function allowErrorPartialSwap(event) {
-  const detail = event.detail;
-  if (!detail || !detail.xhr || detail.xhr.status < 400) return;
-  if (typeof detail.serverResponse === "string" && detail.serverResponse.includes('id="admin-content"')) {
-    detail.shouldSwap = true;
-    detail.isError = false;
-  }
-}
-
-document.addEventListener("htmx:beforeSwap", allowErrorPartialSwap);
-document.addEventListener("htmx:before:swap", allowErrorPartialSwap);
 document.addEventListener("htmx:after:swap", updateCurrentNavigation);
 document.addEventListener("htmx:after:history:update", updateCurrentNavigation);
 document.addEventListener("htmx:after:history:restore", updateCurrentNavigation);
