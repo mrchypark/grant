@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/mrchypark/rhiza"
 	"io"
@@ -80,6 +81,12 @@ func (s *Store) remoteCall(ctx context.Context, path string, in, out any) error 
 	var lastErr error
 	for i, base := range nodes {
 		if ctx.Err() != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			if path == "/sql/query" {
+				return serviceError(503, fmt.Sprintf("unavailable: %v", ctx.Err()))
+			}
 			return ctx.Err()
 		}
 		attemptCtx := ctx
@@ -92,51 +99,18 @@ func (s *Store) remoteCall(ctx context.Context, path string, in, out any) error 
 				}
 			}
 		}
-		req, e := http.NewRequestWithContext(attemptCtx, http.MethodPost, base+path, bytes.NewReader(payload))
-		if e != nil {
-			if cancel != nil {
-				cancel()
-			}
-			return e
-		}
-		req.Header.Set("Authorization", "Bearer "+s.cfg.Database.RemoteAPISecret)
-		req.Header.Set("Content-Type", "application/json")
-		attemptClient := *client
-		attemptClient.Timeout = 30 * time.Second
-		res, e := attemptClient.Do(req)
+		err, retry := s.doRemoteAttempt(attemptCtx, client, base+path, path, payload, out)
 		if cancel != nil {
 			cancel()
 		}
-		if e != nil {
-			if path == "/sql/query" {
-				lastErr = serviceError(503, fmt.Sprintf("unavailable: runtime remote call failed: %v", e))
-			} else {
-				lastErr = fmt.Errorf("runtime remote call failed (mutation status may be unknown): %w", e)
-			}
-			continue
+		if err == nil {
+			lastErr = nil
+			break
 		}
-		raw, readErr := io.ReadAll(io.LimitReader(res.Body, remoteBodyLimit+1))
-		_ = res.Body.Close()
-		if res.StatusCode == http.StatusServiceUnavailable {
-			lastErr = serviceError(503, "unavailable: remote runtime unavailable")
-			continue
+		lastErr = err
+		if !retry {
+			return err
 		}
-		if res.StatusCode != http.StatusOK {
-			return fmt.Errorf("remote runtime returned %d", res.StatusCode)
-		}
-		if readErr != nil {
-			return readErr
-		}
-		if len(raw) > remoteBodyLimit {
-			return fmt.Errorf("remote response too large")
-		}
-		d := json.NewDecoder(bytes.NewReader(raw))
-		d.UseNumber()
-		if e = d.Decode(out); e != nil {
-			return e
-		}
-		lastErr = nil
-		break
 	}
 	if lastErr != nil {
 		return lastErr
@@ -241,7 +215,11 @@ func (s *Store) RuntimeHandler() http.Handler {
 			return
 		}
 		if err != nil {
-			if isReadAvailabilityError(err) {
+			if r.URL.Path == "/sql/query" && isReadAvailabilityError(err) {
+				http.Error(w, "unavailable: runtime unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if r.URL.Path != "/sql/query" && (errors.Is(err, rhiza.ErrNotReady) || errors.Is(err, rhiza.ErrQuorumUnavailable) || errors.Is(err, rhiza.ErrDurabilityUnavailable)) {
 				http.Error(w, "unavailable: runtime unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -251,6 +229,47 @@ func (s *Store) RuntimeHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	})
+}
+
+func (s *Store) doRemoteAttempt(ctx context.Context, client *http.Client, url, path string, payload []byte, out any) (err error, retry bool) {
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if e != nil {
+		return e, false
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Database.RemoteAPISecret)
+	req.Header.Set("Content-Type", "application/json")
+	attemptClient := *client
+	attemptClient.Timeout = 30 * time.Second
+	res, e := attemptClient.Do(req)
+	if e != nil {
+		if path == "/sql/query" {
+			return serviceError(503, fmt.Sprintf("unavailable: runtime remote call failed: %v", e)), true
+		}
+		return fmt.Errorf("runtime remote call failed (mutation status may be unknown): %w", e), false
+	}
+	defer res.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(res.Body, remoteBodyLimit+1))
+	if res.StatusCode == http.StatusServiceUnavailable {
+		return serviceError(503, "unavailable: remote runtime unavailable"), true
+	}
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote runtime returned %d", res.StatusCode), false
+	}
+	if readErr != nil {
+		if path == "/sql/query" {
+			return serviceError(503, fmt.Sprintf("unavailable: runtime remote read failed: %v", readErr)), true
+		}
+		return readErr, false
+	}
+	if len(raw) > remoteBodyLimit {
+		return fmt.Errorf("remote response too large"), false
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if e = d.Decode(out); e != nil {
+		return e, false
+	}
+	return nil, false
 }
 
 func decodeRemoteRequest(d *json.Decoder, v any) error {
