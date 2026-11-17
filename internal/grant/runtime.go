@@ -353,7 +353,7 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 }
 
 func isReadAvailabilityError(err error) bool {
-	return errors.Is(err, rhiza.ErrNotReady) || errors.Is(err, rhiza.ErrQuorumUnavailable) || strings.HasPrefix(err.Error(), "unavailable:")
+	return errors.Is(err, rhiza.ErrNotReady) || errors.Is(err, rhiza.ErrQuorumUnavailable) || errors.Is(err, rhiza.ErrDurabilityUnavailable) || errors.Is(err, context.DeadlineExceeded) || strings.HasPrefix(err.Error(), "unavailable:")
 }
 func sqlArgs(args []any) []any {
 	out := make([]any, len(args))
