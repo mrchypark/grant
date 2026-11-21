@@ -36,6 +36,7 @@ func (s *Service) cachedIdentity(key string) (cachedIdentity, bool) {
 	}
 	return v, ok
 }
+
 const maxAuthCacheEntries = 4096
 
 func (s *Service) cacheIdentity(key string, v cachedIdentity) {
@@ -65,6 +66,7 @@ func (s *Service) cacheIdentity(key string, v cachedIdentity) {
 	}
 	s.authCache[key] = v
 }
+
 type trustedGatewayIdentityKey struct{}
 
 func WithTrustedGatewayIdentity(ctx context.Context, identity ExternalIdentity) context.Context {
