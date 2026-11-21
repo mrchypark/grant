@@ -2,6 +2,10 @@
 
 Current source selects Rhiza v0.27.3 in both runtime and member helper and requires
 Go 1.27.4. The following qualification is historical and does not qualify v0.27.3.
+Deploy the current runtime greenfield with an empty data directory and an independent
+archive or object-store namespace. Migration or reuse of an earlier installation's
+data or archives is not supported or qualified; recovery requires a complete archive
+compatible with the current runtime.
 For Grant v0.9.1 with Rhiza v0.23.0, full
 [CI 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
 passed for exact runtime source `8c3dd5d9ff252b033452ea107ec91c0e872ae929`,

@@ -4,6 +4,10 @@ Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a sep
 
 Current source selects Rhiza v0.27.3. The v0.9.1 / v0.23.0 qualification
 below is historical and does not by itself qualify the current runtime.
+The current deployment is greenfield: start with a new, empty data directory and
+an independent archive or object-store namespace. Migration and reuse of data or
+archives from earlier installations are not supported or qualified. Recovery of
+the current deployment requires a complete archive compatible with its runtime.
 
 ## Grant v0.9.1 / Rhiza v0.23.0 qualification
 
