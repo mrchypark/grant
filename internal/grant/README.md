@@ -1,6 +1,6 @@
 # `internal/grant/` — Core Domain, Authorization, and Rhiza Store
 
-`internal/grant` implements Grant's authorization engine, external identity verification, lifecycle management, and replicated SQLite storage on top of `rhiza v0.25.0`.
+`internal/grant` implements Grant's authorization engine, external identity verification, lifecycle management, and replicated SQLite storage on top of `rhiza v0.27.3`.
 
 ## Key Areas
 

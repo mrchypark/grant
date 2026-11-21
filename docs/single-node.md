@@ -1,6 +1,6 @@
 # Standalone Local Kubernetes
 
-Current source selects Rhiza v0.25.0 Local storage. The standalone overlay runs
+Current source selects Rhiza v0.27.3 Local storage. The standalone overlay runs
 one Grant process and targets the v0.4.1 release candidate.
 It contains no Operator or HA membership. Do not combine it with the
 HA base or Operator overlay. Grant's `voter` role selects its writable API;
