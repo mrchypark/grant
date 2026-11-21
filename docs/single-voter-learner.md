@@ -2,7 +2,7 @@
 
 ## Grant v0.9.1 and verification provenance
 
-The v0.9.1 release target uses Rhiza v0.23.0 in both runtime and member helper.
+Current source uses Rhiza v0.25.0 in both runtime and member helper. The v0.9.1 release target used v0.23.0; its qualification below is historical.
 [CI 42138972875](https://github.com/mrchypark/grant/actions/runs/42138972875)
 completed with overall **SUCCESS** for exact runtime source
 `8c3dd5d9ff252b033452ea107ec91c0e872ae929`: Go contracts/race, native quorum and

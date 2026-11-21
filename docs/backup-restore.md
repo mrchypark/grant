@@ -2,6 +2,9 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
+Current source selects Rhiza v0.25.0. The v0.9.1 / v0.23.0 qualification
+below is historical and does not by itself qualify the current runtime.
+
 ## Grant v0.9.1 / Rhiza v0.23.0 qualification
 
 The v0.9.1 target selects v0.23.0 in runtime and helper. Full
@@ -65,7 +68,7 @@ This migration uses the existing logical snapshot and coordinated restore comman
 
 ## Single-instance Local archive recovery
 
-For current v0.9.1 operations, use Rhiza v0.23.0 with a complete compatible archive,
+For v0.9.1 operations, use Rhiza v0.23.0 with a complete compatible archive,
 stable identity and exclusive writer ownership as qualified above. Old-state
 compatibility must not be inferred from the following v0.21 format history.
 
@@ -80,7 +83,7 @@ replace, remount or externally remove them while in use. Stop the old process
 before offline restore or copying files; a Pod deletion response is not proof of
 termination. Remote maintenance tokens cannot be cleared based on age or process state.
 
-The current v0.23.0 Local contract supports automatic archive restore for one Grant instance configured
+The v0.23.0 Local contract supports automatic archive restore for one Grant instance configured
 with `Local: true`, a stable `NodeID` and `ClusterID`, and an archive outside its
 local data directory. Explicit `ObjStoreDurability: "before-ack"` waits for remote
 archival; explicit `"async"` permits acknowledged writes ahead of the archive.
