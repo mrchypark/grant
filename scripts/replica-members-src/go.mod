@@ -2,7 +2,7 @@ module grant.local/replica-members
 
 go 1.27.4
 
-require github.com/mrchypark/rhiza v0.25.0
+require github.com/mrchypark/rhiza v0.27.3
 
 require (
 	cel.dev/expr v0.25.3 // indirect

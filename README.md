@@ -1,6 +1,6 @@
 # grant
 
-`grant`는 조직, 애플리케이션, 서비스 provider와 resource scope에 대한 권한을 관리하는 Go 1.27.4 서비스다. 저장소는 Rhiza v0.25.0의 native Go API를 사용하며 cgo를 사용하지 않는다. 로그인과 외부 identity 확인은 Goauthy / 표준 OIDC(JWKS·Introspection) / 범용 `external-check` 또는 Trusted Gateway가 담당한다.
+`grant`는 조직, 애플리케이션, 서비스 provider와 resource scope에 대한 권한을 관리하는 Go 1.27.4 서비스다. 저장소는 Rhiza v0.27.3의 native Go API를 사용하며 cgo를 사용하지 않는다. 로그인과 외부 identity 확인은 Goauthy / 표준 OIDC(JWKS·Introspection) / 범용 `external-check` 또는 Trusted Gateway가 담당한다.
 
 For one retained-PVC Local instance with application-owned Open/Close init, see
 [the standalone guide](docs/single-node.md). The overlay targets the forthcoming

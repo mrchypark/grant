@@ -86,6 +86,7 @@ func (s *Store) LookupResources(ctx context.Context, in LookupResourcesInput) (L
 func (s *Store) EvaluateUserActions(ctx context.Context, checks []UserActionCheck) ([]UserActionDecision, error) {
 	return s.evaluateUserActions(ctx, checks, false)
 }
+
 const authzBatchChunkSize = 90
 
 func (s *Store) evaluateUserActions(ctx context.Context, checks []UserActionCheck, inactive bool) ([]UserActionDecision, error) {

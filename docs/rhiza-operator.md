@@ -1,6 +1,6 @@
 # Embedded Rhiza Operator
 
-`deploy/overlays/rhiza-operator` connects Grant's embedded Rhiza v0.21.2 runtime to the upstream namespace-scoped recovery Operator. It is an optional fresh-cluster deployment contract, not a live deployment command and not an in-place upgrade for an existing v0.12 store.
+`deploy/overlays/rhiza-operator` is an optional fresh-cluster deployment contract, not a live deployment command or an in-place upgrade for an existing v0.12 store. Current Grant source selects Rhiza v0.27.3; this legacy overlay remains unqualified with that runtime.
 
 One Grant instance in native `Local` mode cannot use this recovery Operator.
 Upstream v0.21.2 enforces `voterCount >= 3` in both the
@@ -14,7 +14,7 @@ still three Grant instances. For the supported one-instance archive recovery pat
 see [the Local recovery verification](backup-restore.md#single-instance-local-archive-recovery).
 
 The optional controller image remains pinned to v0.19.0. Its compatibility with
-the v0.21.2 embedded runtime is **unverified**; this module upgrade does not qualify
+the v0.27.3 embedded runtime is **unverified**; this module upgrade does not qualify
 that controller/runtime combination or upgrade the deployed controller.
 
 The rendered default namespace is `grant`. For an IED composition, transform the whole overlay to the target namespace and provision the same secrets there; do not combine it with a broad recovery-port policy. The shared `grant-lifecycle-state` ConfigMap remains Rauthy-only lifecycle input and is not read by this controller.

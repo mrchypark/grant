@@ -9,7 +9,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.2
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/mrchypark/elysdui v0.3.0
-	github.com/mrchypark/rhiza v0.25.0
+	github.com/mrchypark/rhiza v0.27.3
 	github.com/ncruces/go-sqlite3 v0.35.6
 	github.com/nlnwa/whatwg-url v0.6.2
 	google.golang.org/api v0.301.0
@@ -55,7 +55,7 @@ require (
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.6 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.6.1 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
