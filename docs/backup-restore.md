@@ -2,7 +2,7 @@
 
 Grant's Rhiza database is not file-compatible with Hiqlite. Rauthy remains a separate identity system with its existing backup/lifecycle controls. The old Grant/Rauthy encrypted backup-pair procedures are retained in [history/hiqlite/backup-restore.md](history/hiqlite/backup-restore.md) for recovering a legacy source; do not run the Hiqlite restore wrapper around the Go executable.
 
-Current source selects Rhiza v0.27.4. The v0.9.1 / v0.23.0 qualification
+Current source selects Rhiza v0.27.5. The v0.9.1 / v0.23.0 qualification
 below is historical and does not by itself qualify the current runtime.
 The current deployment is greenfield: start with a new, empty data directory and
 an independent archive or object-store namespace. Migration and reuse of data or

@@ -1,6 +1,6 @@
 # Grant Specification
 
-`grant` is a Go 1.27.4 multi-tenant authorization service acting as a Policy Decision Point (PDP) and Policy Administration Point (PAP), backed by [Rhiza v0.27.4](https://github.com/mrchypark/rhiza) native Go storage without cgo.
+`grant` is a Go 1.27.4 multi-tenant authorization service acting as a Policy Decision Point (PDP) and Policy Administration Point (PAP), backed by [Rhiza v0.27.5](https://github.com/mrchypark/rhiza) native Go storage without cgo.
 
 > This document is the unified specification derived from the `mrchypark/grant` Go codebase. Detailed references live in [architecture.md](architecture.md), [authorization-model.md](authorization-model.md), [database-schema.md](database-schema.md), [runtime-modes.md](runtime-modes.md), [api-lifecycle.md](api-lifecycle.md), [http-capabilities.md](http-capabilities.md), [management-api.md](management-api.md), [provider-user-authorization.md](provider-user-authorization.md), [admin-ui.md](admin-ui.md), and [backup-restore.md](backup-restore.md).
 
@@ -16,7 +16,7 @@
 
 ---
 
-## 2. Runtime Architecture and Storage (`rhiza v0.27.4`)
+## 2. Runtime Architecture and Storage (`rhiza v0.27.5`)
 
 `grant` uses Rhiza's consensus and replicated object-store architecture:
 - **`voter`**: Consensus-voting node with full read, write, migration, and admin capabilities.
@@ -37,7 +37,7 @@
 - **`GRANT_RUNTIME_MODE`**: `embedded` | `remote` | `split`
 - **`GRANT_LOCAL_NODE_ROLE`**: `voter` | `learner`
 - **`GRANT_READ_CONSISTENCY`**: `local` (default), `strong` (linearizable), `prefer-strong` (linearizable with fallback to `local` strictly on `rhiza.ErrNotReady`, `rhiza.ErrQuorumUnavailable`, or `"unavailable:"`). HTTP `?consistency=strong` is supported on read/authz routes.
-- **Cluster Peer Identity (`rhiza v0.27.4`)**: `rhiza.Member` carries public `PublicKey` (base64); each voter's private `PeerToken` is loaded separately via `RHIZA_PEER_TOKEN` / `GRANT_RHIZA_CONFIG_JSON` and forbidden on learners.
+- **Cluster Peer Identity (`rhiza v0.27.5`)**: `rhiza.Member` carries public `PublicKey` (base64); each voter's private `PeerToken` is loaded separately via `RHIZA_PEER_TOKEN` / `GRANT_RHIZA_CONFIG_JSON` and forbidden on learners.
 
 ---
 
