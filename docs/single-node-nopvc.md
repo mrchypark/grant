@@ -1,5 +1,10 @@
 # Experimental single-node Local DR without PVC
 
+Current source selects Rhiza v0.27.4. The image and recovery evidence below are
+version-specific historical evidence, not qualification of a v0.27.4 Grant image.
+For a new release, run the independent S3, GCS and Azure recovery fixture against
+the release source and verify the published image separately before deployment.
+
 This opt-in profile uses one embedded Local writer with a stable NodeID and
 ClusterID, no peers and no Operator. Local data and local logical backup exports
 live on disk-backed emptyDir. An independent remote S3 archive is required with
