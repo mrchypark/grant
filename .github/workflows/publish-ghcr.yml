@@ -74,7 +74,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify published image and private package
+      - name: Verify published image and public package
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ghcr.io/${{ github.repository }}
@@ -88,7 +88,7 @@ jobs:
           image_digest="$(docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" --format '{{.Manifest.Digest}}')"
           test "$image_digest" = "$BUILD_DIGEST"
           visibility="$(gh api "users/$PACKAGE_OWNER/packages/container/$PACKAGE_NAME" --jq .visibility)"
-          test "$visibility" = private
+          test "$visibility" = public
           {
             echo '## GHCR publication verified'
             echo
