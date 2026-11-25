@@ -232,6 +232,13 @@
                     valid INTEGER NOT NULL
                         CONSTRAINT application_consent_assertion_valid CHECK (valid = 1)
                 );
+                CREATE TABLE IF NOT EXISTS patch_data_authority_imports (
+                    provider_id TEXT PRIMARY KEY,
+                    generation TEXT NOT NULL,
+                    ledger_digest TEXT NOT NULL,
+                    foundation_digest TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS organization_hierarchy_edges (
                     source_provider TEXT NOT NULL,
                     parent_organization_id TEXT NOT NULL,
@@ -240,6 +247,12 @@
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (source_provider, parent_organization_id, child_organization_id),
                     UNIQUE (source_provider, child_organization_id)
+                );
+                CREATE TABLE IF NOT EXISTS patch_data_authority_import_entities (
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    source_generation TEXT NOT NULL,
+                    PRIMARY KEY (entity_type, entity_id)
                 );
                 CREATE TABLE IF NOT EXISTS provider_http_capability_sets (
                     provider_id TEXT NOT NULL,
@@ -292,4 +305,5 @@
                     changed_at TEXT NOT NULL,
                     changed_by TEXT NOT NULL
                 );
+ALTER TABLE patch_data_authority_imports ADD COLUMN manifest_version TEXT NOT NULL DEFAULT 'grant.patch-data-authority.v1';
 CREATE TABLE grant_import_payloads (import_id TEXT NOT NULL, kind TEXT NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(import_id,kind,ordinal));

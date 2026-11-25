@@ -221,7 +221,7 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 				t.Fatal("archive cold recovery schema verification failed")
 			}
 			afterOpen, err := cold.ExportSnapshot(ctx)
-			if err != nil || len(afterOpen.Tables) != 31 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
+			if err != nil || len(afterOpen.Tables) != 29 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
 				t.Fatal("archive cold recovery canonical inventory changed")
 			}
 			for i, want := range beforeClose.Tables {

@@ -43,7 +43,7 @@ func applicationTables() []string {
 	re := regexp.MustCompile(`CREATE TABLE (?:IF NOT EXISTS )?([a-z_][a-z_0-9]*)`)
 	var names []string
 	for _, m := range re.FindAllStringSubmatch(schemaSQL, -1) {
-		if m[1] != "grant_import_payloads" {
+		if m[1] != "grant_import_payloads" && m[1] != "patch_data_authority_imports" && m[1] != "patch_data_authority_import_entities" {
 			names = append(names, m[1])
 		}
 	}

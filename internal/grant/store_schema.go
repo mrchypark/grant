@@ -76,12 +76,16 @@ CREATE INDEX IF NOT EXISTS idx_role_bindings_resource_lookup
 CREATE INDEX IF NOT EXISTS idx_role_actions_action_role
  ON role_actions (action_id, role_id);`
 
+const dropRetiredPatchDataTablesSQL = `
+DROP TABLE IF EXISTS patch_data_authority_import_entities;
+DROP TABLE IF EXISTS patch_data_authority_imports;`
+
 func (s *Store) Migrate(ctx context.Context) error {
 	if e := s.coarsePreflight(ctx, ReadStrong); e != nil {
 		return e
 	}
 	var migrations []rhiza.Migration
-	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}, {"grant PEP authorization policy", pepPolicySchemaV6SQL}, {"grant authz lookup indexes", authzLookupIndexesSQL}} {
+	for _, group := range []struct{ name, sql string }{{"grant canonical tables", schemaSQL}, {"grant canonical indexes", indexesSQL}, {"grant restore activation", "CREATE TABLE IF NOT EXISTS grant_restore_activation (id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, cluster_id TEXT NOT NULL, activated_at TEXT NOT NULL)"}, {"grant qualified Goauthy identities", goauthySchemaV4SQL}, {"grant independent PEP identities", pepIdentityMigrationSQL}, {"grant PEP authorization policy", pepPolicySchemaV6SQL}, {"grant authz lookup indexes", authzLookupIndexesSQL}, {"drop retired patch_data_authority tables", dropRetiredPatchDataTablesSQL}} {
 		var stmts []Statement
 		for _, q := range strings.Split(group.sql, ";") {
 			if strings.TrimSpace(q) != "" {
