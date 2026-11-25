@@ -7,11 +7,9 @@ dockerfile=${1:-"$root/Dockerfile"}
 verify() {
   file=$1
   grep -F -- './cmd/grant' "$file" >/dev/null &&
-  grep -F -- './cmd/grant-admin' "$file" >/dev/null &&
-  grep -F -- 'COPY --link scripts/replica-members-src /workspace/replica-members-src' "$file" >/dev/null &&
-  grep -F -- 'cd /workspace/replica-members-src' "$file" >/dev/null &&
-  grep -F -- '-o /workspace/replica-members .' "$file" >/dev/null &&
-  grep -F -- '/workspace/replica-members /usr/local/bin/replica-members' "$file" >/dev/null &&
+  grep -F -- '/workspace/grant /usr/local/bin/grant' "$file" >/dev/null &&
+  grep -F -- 'ln -s /usr/local/bin/grant /usr/local/bin/grant-admin' "$file" >/dev/null &&
+  grep -F -- '/usr/local/bin/replica-members' "$file" >/dev/null &&
   grep -F -- 'ENTRYPOINT ["/usr/local/bin/grant"]' "$file" >/dev/null
 }
 

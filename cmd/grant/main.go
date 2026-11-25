@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mrchypark/grant/internal/adminserver"
 	"github.com/mrchypark/grant/internal/api"
 	"github.com/mrchypark/grant/internal/grant"
 	"log/slog"
@@ -11,12 +12,24 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 )
 
 func main() {
+	switch filepath.Base(os.Args[0]) {
+	case "grant-admin":
+		if e := adminserver.Run(); e != nil {
+			slog.Error("Grant admin stopped", "error", e)
+			os.Exit(1)
+		}
+		return
+	case "replica-members":
+		runReplicaMembers()
+		return
+	}
 	if e := run(); e != nil {
 		slog.Error("Grant stopped", "error", e)
 		os.Exit(1)

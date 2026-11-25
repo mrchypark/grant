@@ -656,7 +656,7 @@ verify_static() {
     "${ROOT_DIR}/.github/workflows/rauthy-launcher-image.yml"; then
     fail "Rauthy launcher publish still depends on unsupported GitHub repository attestations"
   fi
-  grep -q 'ca-certificates curl libcurl4 libssl3' "${ROOT_DIR}/Dockerfile" \
+  grep -q 'ca-certificates curl' "${ROOT_DIR}/Dockerfile" \
     || fail "Grant runtime image is missing the restore readiness HTTP probe"
   grep -q 'REQUIRED_BASE64_DOCKER_CONFIG_JSON' "${ROOT_DIR}/deploy/overlays/production/rauthy-launcher-pull-secret.example.yaml" \
     || fail "production private registry pull Secret example is missing"
