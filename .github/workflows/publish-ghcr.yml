@@ -90,8 +90,8 @@ jobs:
           image_digest="$(docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" --format '{{.Manifest.Digest}}')"
           test "$image_digest" = "$BUILD_DIGEST"
           manifest_json="$(docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" --raw)"
-          printf '%s\n' "$manifest_json" | grep -q '"architecture":"amd64"'
-          printf '%s\n' "$manifest_json" | grep -q '"architecture":"arm64"'
+          printf '%s\n' "$manifest_json" | grep -Eq '"architecture":[[:space:]]*"amd64"'
+          printf '%s\n' "$manifest_json" | grep -Eq '"architecture":[[:space:]]*"arm64"'
           visibility="$(gh api "users/$PACKAGE_OWNER/packages/container/$PACKAGE_NAME" --jq .visibility)"
           test "$visibility" = public
           {
