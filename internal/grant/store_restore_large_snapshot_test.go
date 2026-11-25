@@ -154,8 +154,8 @@ func largeRestoreFrozenSource(t *testing.T, ctx context.Context) StoreSnapshot {
 		t.Fatalf("synthetic size/count requirements unmet: secondCapabilities=%d catalogs=%d firstBytes=%d secondBytes=%d catalogsRowsBytes=%d actionsRowsBytes=%d",
 			len(second.Capabilities), len(catalogTable.Rows), len(first), len(secondJSON), len(jsonBytes(catalogTable.Rows)), len(jsonBytes(actionTable.Rows)))
 	}
-	if len(snap.Tables) != 31 {
-		t.Fatalf("expected 31 canonical tables, got %d", len(snap.Tables))
+	if len(snap.Tables) != 29 {
+		t.Fatalf("expected 29 canonical tables, got %d", len(snap.Tables))
 	}
 	for i := range snap.Tables {
 		snap.Tables[i].Count = int64(len(snap.Tables[i].Rows))

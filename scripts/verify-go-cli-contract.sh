@@ -10,10 +10,4 @@ if "$task_dir/grant" invalid-command >"$task_dir/server.out" 2>"$task_dir/server
  echo 'server accepted unknown command' >&2; exit 1
 fi
 [ ! -s "$task_dir/server.out" ] && [ -s "$task_dir/server.err" ]
-printf '%s' '{"manifestVersion":"grant.patch-data-authority.v1","generation":"1","ledgerDigest":"x","users":[],"organizations":[],"memberships":[],"hierarchyEdges":[],"plantBindings":[],"applicationAssignments":[]}' \
- | "$task_dir/grant-patch-data-manifest-digest" >"$task_dir/digest.out" 2>"$task_dir/digest.err"
-[ ! -s "$task_dir/digest.err" ]
-[ "$(wc -l < "$task_dir/digest.out" | tr -d ' ')" = 1 ]
-[ "$(wc -c < "$task_dir/digest.out" | tr -d ' ')" = 65 ]
-case "$(cat "$task_dir/digest.out")" in *[!a-f0-9]*) echo 'digest stdout contamination' >&2; exit 1 ;; esac
 printf '%s\n' 'Both cgo-free executable stdout contracts passed'

@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-func (s *Service) ImportPatchDataAuthority(ctx context.Context, v PatchDataAuthorityImport) (PatchDataAuthorityImportResult, error) {
-	return s.store.ImportPatchDataAuthority(ctx, v)
-}
 func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v StageHttpCapabilityGeneration) (StagedHttpCapabilityGeneration, error) {
 	actions, err := serviceRows[Action](ctx, s, ReadStrong, "SELECT * FROM actions WHERE provider_id=?", provider)
 	if err != nil {
@@ -99,7 +96,7 @@ func (s *Service) activeHttpCapabilityCatalog(ctx context.Context, provider stri
 	if err != nil {
 		return ActiveHttpCapabilityCatalog{}, err
 	}
-	catalog, err := s.store.ActiveHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
+	catalog, err := s.store.activeHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
 	if err != nil {
 		return ActiveHttpCapabilityCatalog{}, err
 	}

@@ -583,8 +583,6 @@ verify_static() {
   kubectl kustomize "${ROOT_DIR}/deploy/k8s" >"${TMP_DIR}/base.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ephemeral" >"${TMP_DIR}/ephemeral.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied" >"${TMP_DIR}/ied.yaml"
-  kubectl kustomize "${ROOT_DIR}/deploy/overlays/patch-data" >"${TMP_DIR}/patch-data.yaml"
-  kubectl kustomize "${ROOT_DIR}/deploy/overlays/ied-patch-data" >"${TMP_DIR}/ied-patch-data.yaml"
   kubectl kustomize "${ROOT_DIR}/deploy/overlays/production" >"${TMP_DIR}/production.yaml"
 
   assert_repository_rauthy_launcher_pin "${ROOT_DIR}/deploy/k8s/rauthy-statefulset.yaml" \
@@ -685,26 +683,6 @@ verify_static() {
   assert_ha_contract "${TMP_DIR}/base.yaml" base
   assert_ha_contract "${TMP_DIR}/ephemeral.yaml" ephemeral
   assert_ha_contract "${TMP_DIR}/ied.yaml" ied
-  if ! grep -q 'GRANT_AUTH_PROVIDER: pocketbase' "${TMP_DIR}/patch-data.yaml" \
-    || ! grep -q 'GRANT_POCKETBASE_BASE_URL: http://patch-auth.patch.svc.cluster.local:8090' "${TMP_DIR}/patch-data.yaml" \
-    || ! grep -q 'GRANT_POCKETBASE_APPLICATION_ID: patch-data-exposure' "${TMP_DIR}/patch-data.yaml"; then
-    fail "Patch Data overlay configuration is incomplete"
-  fi
-  if grep -Eiq 'rauthy|GRANT_RAUTHY_' "${TMP_DIR}/patch-data.yaml"; then
-    fail "Patch Data overlay retains a Rauthy resource, configuration, or credential reference"
-  fi
-  if grep -Eq '^[[:space:]]+- secretRef:' "${TMP_DIR}/patch-data.yaml"; then
-    fail "Patch Data overlay broadly imports a Secret"
-  fi
-  for required_key in GRANT_MASTER_KEY GRANT_APP_AUTH_KEY HQL_SECRET_RAFT HQL_SECRET_API ENC_KEYS ENC_KEY_ACTIVE; do
-    if [ "$(grep -c "name: ${required_key}$" "${TMP_DIR}/patch-data.yaml" || true)" -ne 1 ] \
-      || [ "$(grep -c "key: ${required_key}$" "${TMP_DIR}/patch-data.yaml" || true)" -ne 1 ]; then
-      fail "Patch Data overlay does not bind exactly one required ${required_key} key"
-    fi
-  done
-  if ! cmp -s "${TMP_DIR}/patch-data.yaml" "${TMP_DIR}/ied-patch-data.yaml"; then
-    fail "ied-patch-data must compose the exact Patch Data Grant-only contract"
-  fi
   assert_ha_contract "${TMP_DIR}/production.yaml" production
 
   [ "$(grep -c 'whenUnsatisfiable: DoNotSchedule' "${TMP_DIR}/production.yaml" || true)" -eq 2 ] \

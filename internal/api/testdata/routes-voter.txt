@@ -76,7 +76,6 @@ POST /api/v2/http-capabilities/decide
 POST /api/v2/providers/{providerId}/authz/batch-check
 POST /api/v2/providers/{providerId}/authz/filter
 POST /ops/backups
-POST /ops/migrations/patch-data-authority
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/actions/{actionId}
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/identity-binding
 PUT /api/v1/admin/orgs/{organizationId}/apps/{applicationId}/trust

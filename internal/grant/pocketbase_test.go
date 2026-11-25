@@ -62,22 +62,6 @@ func TestPocketBaseScopedIdentityAndImport(t *testing.T) {
 	if _, e = s.BindIdentityToUser(ctx, BindIdentityInput{Provider: "pocketbase", UserID: first.ID, ExternalUserID: "same_id"}); e == nil {
 		t.Fatal("unqualified PocketBase binding accepted")
 	}
-	in := PatchDataAuthorityImport{ManifestVersion: "grant.patch-data-authority.v1", Generation: "one", LedgerDigest: strings.Repeat("a", 64), Users: []PatchDataImportedUser{{UserID: "imported-user", Issuer: base.Issuer, CollectionID: base.CollectionID, ExternalUserID: "imported_id", DisplayName: "Imported", Active: true}}}
-	in.ManifestDigest = PatchDataManifestDigest(in)
-	if _, e = s.ImportPatchDataAuthority(ctx, in); e != nil {
-		t.Fatal(e)
-	}
-	u, e := s.EnsureExternalIdentity(ctx, ExternalIdentityMaterialization{Provider: "pocketbase", Issuer: base.Issuer, CollectionID: base.CollectionID, ExternalUserID: "imported_id", DisplayName: "Current"})
-	if e != nil || u.ID != "imported-user" {
-		t.Fatal("explicit import namespace did not resolve", e)
-	}
-	bad := in
-	bad.Users = append([]PatchDataImportedUser(nil), in.Users...)
-	bad.Users[0].Issuer = ""
-	bad.ManifestDigest = PatchDataManifestDigest(bad)
-	if _, e = s.ImportPatchDataAuthority(ctx, bad); e == nil {
-		t.Fatal("unqualified import accepted")
-	}
 }
 
 func TestCapabilityServiceCredentialContract(t *testing.T) {

@@ -111,7 +111,13 @@ func (s *Store) catchUpFence(ctx context.Context, fence uint64) error {
 		return fmt.Errorf("read replica required")
 	}
 	for {
-		if e := s.replica.Sync(ctx); e != nil {
+		if s.replica.Status().AppliedSlot >= fence {
+			return nil
+		}
+		if e := s.syncReplica(ctx, s.replica.Sync); e != nil {
+			if s.replica.Status().AppliedSlot >= fence {
+				return nil
+			}
 			return e
 		}
 		if s.replica.Status().AppliedSlot >= fence {
@@ -126,20 +132,56 @@ func (s *Store) catchUpFence(ctx context.Context, fence uint64) error {
 		}
 	}
 }
+
+// syncReplica coalesces concurrent replica.Sync calls and lets waiters exit
+// immediately on ctx cancellation instead of blocking on rhiza's un-cancellable syncMu.
+func (s *Store) syncReplica(ctx context.Context, syncFn func(context.Context) error) error {
+	s.syncMu.Lock()
+	call := s.syncCall
+	if call == nil {
+		call = &replicaSyncCall{done: make(chan struct{})}
+		s.syncCall = call
+		s.syncMu.Unlock()
+		go func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			call.err = syncFn(syncCtx)
+			s.syncMu.Lock()
+			if s.syncCall == call {
+				s.syncCall = nil
+			}
+			s.syncMu.Unlock()
+			close(call.done)
+		}()
+	} else {
+		s.syncMu.Unlock()
+	}
+	select {
+	case <-call.done:
+		return call.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *Store) readFence(ctx context.Context) (uint64, error) {
 	if len(s.cfg.Database.ReadFenceKey) < 32 || len(s.cfg.Database.RemoteNodes) == 0 {
 		return 0, fmt.Errorf("replica fence transport is not configured")
 	}
 	client := s.readFenceClient()
+	nodes := s.cfg.Database.RemoteNodes
+	start := int(s.lastFenceNode.Load() % uint64(len(nodes)))
 	var lastErr error
-	for _, base := range s.cfg.Database.RemoteNodes {
+	for offset := range nodes {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
+		idx := (start + offset) % len(nodes)
 		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
-		slot, err := s.fetchReadFence(attemptCtx, client, base)
+		slot, err := s.fetchReadFence(attemptCtx, client, nodes[idx])
 		cancel()
 		if err == nil {
+			s.lastFenceNode.Store(uint64(idx))
 			return slot, nil
 		}
 		lastErr = err

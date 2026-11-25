@@ -297,7 +297,7 @@ func TestJSONUnicodeBoundary(t *testing.T) {
 func TestLearnerOnlyPublishesPDP(t *testing.T) {
 	s := testServer()
 	s.learner = true
-	for _, path := range []string{"/api/v1/admin/providers", "/ops/migrations/patch-data-authority"} {
+	for _, path := range []string{"/api/v1/admin/providers"} {
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
 		if w.Code != 503 {

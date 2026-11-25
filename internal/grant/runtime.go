@@ -12,16 +12,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Statement = rhiza.SQLStatement
+type replicaSyncCall struct {
+	done chan struct{}
+	err  error
+}
 type Store struct {
-	db          *rhiza.DB
-	replica     *rhiza.ReadReplica
-	cfg         Config
-	fenceOnce   sync.Once
-	fenceClient *http.Client
+	db            *rhiza.DB
+	replica       *rhiza.ReadReplica
+	cfg           Config
+	fenceOnce     sync.Once
+	fenceClient   *http.Client
+	lastFenceNode atomic.Uint64
+	syncMu        sync.Mutex
+	syncCall      *replicaSyncCall
 	// Optional observer used by package tests to coordinate real replica queries
 	// with concurrent authority mutations. It cannot replace query results.
 	afterReplicaQuery func(context.Context, string)

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -173,5 +174,57 @@ func TestReadFenceNeverUsesEnvironmentProxy(t *testing.T) {
 	slot, e := store.readFence(context.Background())
 	if e != nil || slot != 3 || called {
 		t.Fatalf("slot=%d proxy=%v err=%v", slot, called, e)
+	}
+}
+
+func TestSyncReplicaCoalescesAndRespectsContext(t *testing.T) {
+	var store Store
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	syncFn := func(ctx context.Context) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	errCh1 := make(chan error, 1)
+	go func() {
+		errCh1 <- store.syncReplica(context.Background(), syncFn)
+	}()
+	<-started
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err2 := store.syncReplica(shortCtx, syncFn)
+	if !errors.Is(err2, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err2)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("waiter blocked too long on in-flight sync: %v", time.Since(start))
+	}
+
+	errCh3 := make(chan error, 1)
+	go func() {
+		errCh3 <- store.syncReplica(context.Background(), syncFn)
+	}()
+	time.Sleep(15 * time.Millisecond)
+	close(release)
+
+	if err1 := <-errCh1; err1 != nil {
+		t.Fatalf("leader sync failed: %v", err1)
+	}
+	if err3 := <-errCh3; err3 != nil {
+		t.Fatalf("coalesced waiter failed: %v", err3)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected 1 coalesced sync call, got %d", calls.Load())
 	}
 }
