@@ -1,18 +1,20 @@
 # syntax=docker/dockerfile:1.7
-FROM golang:1.27.4-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /workspace
 COPY --link go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --link internal ./internal
 COPY --link cmd ./cmd
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant ./cmd/grant \
-    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-admin ./cmd/grant-admin
+    GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant ./cmd/grant \
+    && GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/grant-admin ./cmd/grant-admin
 COPY --link scripts/replica-members-src /workspace/replica-members-src
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     cd /workspace/replica-members-src \
     && go test ./... \
-    && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/replica-members .
+    && GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /workspace/replica-members .
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
