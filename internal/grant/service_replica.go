@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/mrchypark/rhiza"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -93,6 +94,8 @@ func readAtFence[T any](ctx context.Context, s *Service, fence uint64, read func
 	for attempt := 0; attempt < 3; attempt++ {
 		if s.store.replica != nil {
 			if e := s.store.catchUpFence(ctx, fence); e != nil {
+				st := s.store.replica.Status()
+				slog.Warn("learner catch-up failed", "fence", fence, "applied_slot", st.AppliedSlot, "source_tip", st.SourceTip, "source", st.Source, "last_error", st.LastError, "error", e)
 				return zero, serviceError(503, "unavailable: replica has not reached quorum fence")
 			}
 		}
@@ -143,7 +146,7 @@ func (s *Store) syncReplica(ctx context.Context, syncFn func(context.Context) er
 		s.syncCall = call
 		s.syncMu.Unlock()
 		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			syncCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			call.err = syncFn(syncCtx)
 			s.syncMu.Lock()
