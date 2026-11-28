@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-func (s *Service) ImportPatchDataAuthority(ctx context.Context, v PatchDataAuthorityImport) (PatchDataAuthorityImportResult, error) {
-	return s.store.ImportPatchDataAuthority(ctx, v)
-}
 func (s *Service) StageHttpCapabilityGenerationAdmin(ctx context.Context, provider string, v StageHttpCapabilityGeneration) (StagedHttpCapabilityGeneration, error) {
 	actions, err := serviceRows[Action](ctx, s, ReadStrong, "SELECT * FROM actions WHERE provider_id=?", provider)
 	if err != nil {
@@ -99,7 +96,7 @@ func (s *Service) activeHttpCapabilityCatalog(ctx context.Context, provider stri
 	if err != nil {
 		return ActiveHttpCapabilityCatalog{}, err
 	}
-	catalog, err := s.store.ActiveHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
+	catalog, err := s.store.activeHttpCapabilityCatalog(ctx, provider, pep.PepClientID)
 	if err != nil {
 		return ActiveHttpCapabilityCatalog{}, err
 	}
@@ -114,11 +111,17 @@ func (s *Service) activeHttpCapabilityCatalog(ctx context.Context, provider stri
 	return catalog, nil
 }
 func (s *Service) DecideHttpCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput) (HttpCapabilityDecision, error) {
-	if strings.TrimSpace(token) == "" {
-		return HttpCapabilityDecision{}, serviceError(401, "unauthorized: missing bearer token")
-	}
 	identity, ok := ctx.Value(replicaIdentityKey{}).(ExternalIdentity)
 	if !ok {
+		if trusted, trustedOK := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity); trustedOK {
+			identity = trusted
+			ok = true
+		}
+	}
+	if !ok {
+		if strings.TrimSpace(token) == "" {
+			return HttpCapabilityDecision{}, serviceError(401, "unauthorized: missing bearer token")
+		}
 		var err error
 		identity, err = s.externalIdentity(ctx, token)
 		if err != nil {
@@ -132,7 +135,8 @@ func (s *Service) DecideHttpCapability(ctx context.Context, token, org string, r
 }
 func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput) (HttpCapabilityDecision, error) {
 	token = strings.TrimSpace(token)
-	if token == "" {
+	_, trustedGateway := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
+	if token == "" && !trustedGateway {
 		return HttpCapabilityDecision{}, serviceError(401, "unauthorized: missing bearer token")
 	}
 	pep, err := s.configuredPEP(ctx, r.ProviderID)
@@ -178,7 +182,7 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if err = validateHTTPRequestEvidence(*cap, r); err != nil {
 		return HttpCapabilityDecision{}, err
 	}
-	if CredentialDigest(token) != r.ProviderCredentialDigest {
+	if (!trustedGateway || token != "") && CredentialDigest(token) != r.ProviderCredentialDigest {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential digest mismatch")
 	}
 	if org == "" && cap.OrganizationContext != "optional" {
@@ -230,7 +234,7 @@ func (s *Service) decideHttpCapability(ctx context.Context, token, org string, r
 	if err != nil {
 		return HttpCapabilityDecision{}, err
 	}
-	if c.ExternalSubject != r.ProviderCredential.Subject || c.ProviderAudience != r.ProviderCredential.Audience {
+	if (!trustedGateway || token != "") && (c.ExternalSubject != r.ProviderCredential.Subject || c.ProviderAudience != r.ProviderCredential.Audience) {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential principal mismatch")
 	}
 	if cap.ActionID == nil || cap.Resource == nil {
@@ -319,7 +323,8 @@ func httpCapabilityDecisionResult(r HttpCapabilityDecisionInput, c applicationAu
 }
 
 func (s *Service) decideUserHTTPCapability(ctx context.Context, token, org string, r HttpCapabilityDecisionInput, pep ProviderPepClient, cap HttpCapability, c applicationAuthorizationContext) (HttpCapabilityDecision, error) {
-	if c.ExternalSubject != r.ProviderCredential.Subject || c.ProviderAudience != r.ProviderCredential.Audience {
+	_, trustedGateway := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
+	if (!trustedGateway || token != "") && (c.ExternalSubject != r.ProviderCredential.Subject || c.ProviderAudience != r.ProviderCredential.Audience) {
 		return HttpCapabilityDecision{}, serviceError(403, "forbidden: provider credential principal mismatch")
 	}
 	if cap.ActionID == nil || cap.Resource == nil {

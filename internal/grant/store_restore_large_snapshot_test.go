@@ -159,8 +159,8 @@ func largeRestoreCurrentSource(t *testing.T, ctx context.Context) StoreSnapshot 
 		t.Fatalf("synthetic size/count requirements unmet: secondCapabilities=%d catalogs=%d firstBytes=%d secondBytes=%d catalogsRowsBytes=%d actionsRowsBytes=%d",
 			len(second.Capabilities), len(catalogTable.Rows), len(first), len(secondJSON), len(jsonBytes(catalogTable.Rows)), len(jsonBytes(actionTable.Rows)))
 	}
-	if snap.SchemaDigest != canonicalSchemaDigest() || len(snap.Tables) != 33 {
-		t.Fatalf("expected current schema with 33 canonical tables, got %d", len(snap.Tables))
+	if snap.SchemaDigest != canonicalSchemaDigest() || len(snap.Tables) != 31 {
+		t.Fatalf("expected current schema with 31 canonical tables, got %d", len(snap.Tables))
 	}
 	for i := range snap.Tables {
 		snap.Tables[i].Count = int64(len(snap.Tables[i].Rows))

@@ -9,4 +9,4 @@ jobs:
     with:
       application-name: 'grant'
       dockerfile: './Dockerfile'
-      arch: 'linux/amd64'
+      arch: 'linux/amd64,linux/arm64'

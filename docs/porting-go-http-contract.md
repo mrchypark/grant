@@ -2,7 +2,7 @@
 
 Baseline: `c716877` (same application tree as `ee5852b`).
 
-The executable route inventory is `internal/api/testdata/routes-voter.txt` (88 routes; 71 management capabilities). GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
+The executable route inventory is `internal/api/testdata/routes-voter.txt` (98 routes). GET also accepts HEAD. This is a code contract, not evidence that IED has received the new management catalog.
 
 The inventory counts above are an existing baseline, not a refreshed candidate inventory. The principal-mode additions below describe the current candidate; published v0.7.0 does not support the new mode, and this document does not establish CI or runtime PASS.
 
@@ -80,7 +80,7 @@ Only user catalogs add `authorizationMode`/`pepPolicyRevision`; user decisions r
 
 Current learner routing rejects both `POST /api/v1/me/ensure` and `GET /api/v1/me` with HTTP 503 and `read replica only serves capability decisions and catalogs`. The legacy `false` registration flag for `GET /api/v1/me` does not override this server-level restriction.
 
-The unreleased candidate additionally admits exactly the three application-authorization POST routes described below. Published v0.4.1 rejects those routes on learners. The registration flags in the table do not independently establish learner availability; master `/api/v1/authz/*` and administration remain blocked.
+Learners additionally admit the three `/api/v1/authz/{check,batch-check,filter}` routes (`master`), the three `/api/v1/application-authz/{check,batch-check,filter}` routes (`application`), and the two `/api/v2/providers/{providerId}/authz/{batch-check,filter}` routes (`application`). Administration and mutation routes remain blocked (`503`) on learners.
 
 `master` requires `x-grant-master-key`; `app` requires the distinct `x-grant-app-auth-key`. `application` additionally validates Bearer syntax and requires `x-organization-id`; the service binds the authenticated subject and application. `user` authenticates the selected organization and rejects a different organization in the URL. Writes use strong consistency. `inactive` uses the separately reviewed reactivation authentication path. Secret comparison hashes both operands and uses constant-time digest comparison.
 
@@ -121,7 +121,7 @@ Limits remain 1,000 checks/candidates and a 2 MiB JSON body. Learner-only pre-ev
 
 External identity verification occurs once before the learner fence budget. The complete Grant-local identity/user/application active-ready/org context and the whole batch's membership, RBAC, action admission and consent evaluation must share one accepted applied slot at or beyond the request's quorum fence. Snapshot movement retries the whole local operation, at most three attempts within the existing three-second learner budget. External verification is not repeated by those retries and is not pinned to Grant's slot. This is not an IdP/Grant distributed snapshot or a lock. Voters retain individual strong reads; no whole-batch slot guarantee is added there.
 
-Filter is candidate-in/candidate-out, not allowed-resource enumeration: no continuation token, authorized total or full-scope snapshot is returned. The caller owns candidate inventory and pagination. Neither these responses nor the accepted slot provide an expiry lease or effect fence; recheck authorization for protected operations. Configured issuer/client/audience/scope validation and application readiness remain mandatory. No new issuer registry, automatic identity alias/email merge, OAuth client, or missing-account allow fallback is introduced.
+In candidate mode, Filter evaluates only supplied candidates. In reverse-lookup mode (`resource: { provider, type }` instead of `resources`), Filter returns bounded, keyset-paginated `resource_ids` (`limit` 1..1000, default 100) with `next_cursor`. Neither these responses nor the accepted slot provide an expiry lease or effect fence; recheck authorization for protected operations. Configured issuer/client/audience/scope validation and application readiness remain mandatory. No new issuer registry, automatic identity alias/email merge, OAuth client, or missing-account allow fallback is introduced.
 
 For these learner reads, external verification is uncached and performs no cache writes. Rauthy bypasses both memory and replicated caches regardless of positive TTL; an inactive token returns 401 and an unavailable IdP fails closed without cached identity fallback. Voter Rauthy cache semantics are unchanged; Goauthy/PocketBase online validation is preserved.
 
@@ -202,8 +202,10 @@ admin import and pep-clients paths return 404 without aliases.
 In the table, `master` also supports an explicitly authorized platform bearer
 for cataloged admin routes. Private operations and bootstrap do not. The
 learner's global gate admits health/readiness, runtime catalog reads and
-HTTP decide, plus the unreleased candidate's exact three application-authz POST
-routes above; `Voter only=false` on a registration does not override that gate.
+HTTP decide, `/api/v1/authz/{check,batch-check,filter}`,
+`/api/v1/application-authz/{check,batch-check,filter}`, and
+`/api/v2/providers/{providerId}/authz/{batch-check,filter}`;
+`Voter only=false` on a registration does not override that gate.
 
 Provider POST is create-only and returns 409 on duplicate ID. Metadata PATCH
 preserves omitted fields, clears nullable text with null, and rejects empty

@@ -1,6 +1,6 @@
 # Standalone Local Kubernetes
 
-Current source selects Rhiza v0.21.2 Local storage. The standalone overlay runs
+Current source selects Rhiza v0.27.5 Local storage. The standalone overlay runs
 one Grant process and targets the v0.4.1 release candidate.
 It contains no Operator or HA membership. Do not combine it with the
 HA base or Operator overlay. Grant's `voter` role selects its writable API;
@@ -9,7 +9,7 @@ Local mode has one stable identity and no peer replication.
 ## Image prerequisite
 
 Both containers target `ghcr.io/mrchypark/grant:v0.4.1` with `IfNotPresent`.
-This forthcoming patch release selects Rhiza v0.21.2; v0.4.0 contains v0.21.1.
+The overlay targets the historical v0.4.1 image with Rhiza v0.21.2; v0.4.0 contains v0.21.1. The historical image and evidence do not qualify the current source.
 Verify publication and the image source revision before using the new tag.
 For isolated testing, build the candidate and explicitly override both images in
 a separate local customization before importing it into the selected cluster:

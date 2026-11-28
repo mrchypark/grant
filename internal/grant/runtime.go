@@ -11,14 +11,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Statement = rhiza.SQLStatement
+type replicaSyncCall struct {
+	done chan struct{}
+	err  error
+}
 type Store struct {
-	db      *rhiza.DB
-	replica *rhiza.ReadReplica
-	cfg     Config
+	db            *rhiza.DB
+	replica       *rhiza.ReadReplica
+	cfg           Config
+	fenceOnce     sync.Once
+	fenceClient   *http.Client
+	lastFenceNode atomic.Uint64
+	syncMu        sync.Mutex
+	syncCall      *replicaSyncCall
 	// Optional observer used by package tests to coordinate real replica queries
 	// with concurrent authority mutations. It cannot replace query results.
 	afterReplicaQuery func(context.Context, string)
@@ -111,10 +122,6 @@ func openStore(ctx context.Context, cfg Config, restoring bool, startOperator fu
 	if err := localStoragePreflight(cfg, restoring); err != nil {
 		return nil, err
 	}
-	restoreSnapshot, err := clusterRestorePreflight(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
 	c, err := effectiveRhizaConfig(cfg.Database)
 	if err != nil {
 		return nil, err
@@ -165,6 +172,10 @@ func openStore(ctx context.Context, cfg Config, restoring bool, startOperator fu
 		}
 		s.replica, err = rhiza.OpenLearner(ctx, r)
 		return s, err
+	}
+	restoreSnapshot, err := clusterRestorePreflight(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	s.db, err = rhiza.Open(ctx, c)
 	if err != nil {
@@ -244,7 +255,23 @@ func (s *Store) waitForReady(ctx context.Context, requireVoter bool) error {
 	}
 	return nil
 }
+func (s *Store) readFenceClient() *http.Client {
+	s.fenceOnce.Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.MaxIdleConns = 64
+		transport.MaxIdleConnsPerHost = 32
+		s.fenceClient = &http.Client{
+			Transport:     transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	})
+	return s.fenceClient
+}
 func (s *Store) Close() error {
+	if s.fenceClient != nil {
+		s.fenceClient.CloseIdleConnections()
+	}
 	if s.replica != nil {
 		return s.replica.Close()
 	}
@@ -310,7 +337,7 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 	if s.db == nil && (s.replica == nil || mode == rhiza.ConsistencyLinearizable) {
 		var remote rhiza.QueryResponse
 		err := s.remoteCall(ctx, "/sql/query", req, &remote)
-		if err != nil && consistency == ReadPreferStrong && s.replica != nil {
+		if err != nil && consistency == ReadPreferStrong && s.replica != nil && isReadAvailabilityError(err) {
 			req.Consistency = rhiza.ConsistencyLocal
 			return s.replica.Query(ctx, req)
 		}
@@ -323,7 +350,7 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 	} else {
 		result, err = s.db.Query(ctx, req)
 	}
-	if err != nil && consistency == ReadPreferStrong {
+	if err != nil && consistency == ReadPreferStrong && isReadAvailabilityError(err) {
 		req.Consistency = rhiza.ConsistencyLocal
 		if s.replica != nil {
 			return s.replica.Query(ctx, req)
@@ -331,6 +358,10 @@ func (s *Store) QueryRaw(ctx context.Context, consistency, sql string, args ...a
 		return s.db.Query(ctx, req)
 	}
 	return result, err
+}
+
+func isReadAvailabilityError(err error) bool {
+	return errors.Is(err, rhiza.ErrNotReady) || errors.Is(err, rhiza.ErrQuorumUnavailable) || errors.Is(err, rhiza.ErrDurabilityUnavailable) || errors.Is(err, context.DeadlineExceeded) || strings.HasPrefix(err.Error(), "unavailable:")
 }
 func sqlArgs(args []any) []any {
 	out := make([]any, len(args))

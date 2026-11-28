@@ -17,9 +17,7 @@ func (f directoryReadTransport) RoundTrip(r *http.Request) (*http.Response, erro
 func TestListUsersAdminStrongRead(t *testing.T) {
 	calls := 0
 	fail := false
-	original := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = original })
-	http.DefaultTransport = directoryReadTransport(func(r *http.Request) (*http.Response, error) {
+	transport := directoryReadTransport(func(r *http.Request) (*http.Response, error) {
 		w := httptest.NewRecorder()
 		calls++
 		if r.URL.Path != "/sql/query" {
@@ -40,7 +38,9 @@ func TestListUsersAdminStrongRead(t *testing.T) {
 		return w.Result(), nil
 	})
 	cfg := Config{Database: DatabaseConfig{DefaultReadConsistency: ReadLocal, RemoteNodes: []string{"http://voter.test"}}}
-	svc := NewService(cfg, &Store{cfg: cfg})
+	store := &Store{cfg: cfg, fenceClient: &http.Client{Transport: transport}}
+	store.fenceOnce.Do(func() {})
+	svc := NewService(cfg, store)
 	page, err := svc.ListUsersAdmin(context.Background(), "", "", 1)
 	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "a" || page.NextCursor != "a" || calls != 1 {
 		t.Fatalf("page=%+v err=%v calls=%d", page, err, calls)

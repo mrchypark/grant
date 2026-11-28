@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mrchypark/rhiza"
 )
 
 type Error struct {
@@ -33,7 +35,7 @@ func ErrorStatus(err error) int {
 		return 401
 	case strings.Contains(text, "UNIQUE constraint failed"), strings.Contains(text, "already exists"):
 		return 409
-	case strings.Contains(text, "unavailable:"):
+	case errors.Is(err, rhiza.ErrNotReady), errors.Is(err, rhiza.ErrQuorumUnavailable), errors.Is(err, rhiza.ErrDurabilityUnavailable), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled), strings.Contains(text, "unavailable:"):
 		return 503
 	case strings.Contains(text, "not found"):
 		return 404
@@ -61,10 +63,11 @@ type Service struct {
 	client    *http.Client
 	authMu    sync.Mutex
 	authCache map[string]cachedIdentity
+	jwks      *jwksCache
 }
 
 func NewService(cfg Config, store *Store) *Service {
-	return &Service{cfg: cfg, store: store, authCache: make(map[string]cachedIdentity), client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &Service{cfg: cfg, store: store, authCache: make(map[string]cachedIdentity), jwks: &jwksCache{}, client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func (s *Service) Config() Config           { return s.cfg }
 func (s *Service) RauthyBaseURL() string    { return s.cfg.Auth.Rauthy.BaseURL }
@@ -81,7 +84,24 @@ func (s *Service) CheckAuthorization(ctx context.Context, subject AuthorizationS
 	return decisions[0], nil
 }
 func (s *Service) CheckAuthorizations(ctx context.Context, checks []AuthorizationCheck, consistency ReadConsistency) ([]AuthorizationDecision, error) {
-	return s.evaluateAuthorizations(ctx, checks, consistency, nil)
+	return localReplicaRead(ctx, s, func(readCtx context.Context) (out []AuthorizationDecision, err error) {
+		if s.cfg.Database.LocalNodeRole == "learner" {
+			defer func() {
+				if readCtx.Err() != nil {
+					out = nil
+					err = serviceError(503, "unavailable: authorization read budget expired")
+				}
+			}()
+		}
+		out, err = s.evaluateAuthorizations(readCtx, checks, consistency, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyLearnerReadProof(readCtx, s); err != nil {
+			return nil, err
+		}
+		return out, nil
+	})
 }
 func (s *Service) evaluateAuthorizations(ctx context.Context, checks []AuthorizationCheck, consistency ReadConsistency, applicationID *string) ([]AuthorizationDecision, error) {
 	dbChecks := make([]UserActionCheck, 0, len(checks))

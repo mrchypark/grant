@@ -7,12 +7,103 @@ import (
 	"testing"
 )
 
-func batchFixture(t *testing.T) (StageHttpCapabilityGeneration, HttpCapability, map[string]HttpCapability) {
+func testCapabilityCatalog(t *testing.T, generation uint64) (StageHttpCapabilityGeneration, []Action) {
 	t.Helper()
-	stage, _, err := PatchDataCatalog(1, nil)
+	provider := "patch-data"
+	mkAction := func(col, op, risk string) Action {
+		id := provider + "." + col + "." + op
+		return Action{ID: id, ProviderID: provider, Code: col + "." + op, Name: id, RiskLevel: risk, GrantableToApplications: true}
+	}
+	mkCap := func(id, method, path string, actionID string, resourceType string, extKind string, bodyMode string, queryMode string) HttpCapability {
+		maxBytes := uint64(1 << 20)
+		if bodyMode == "none" {
+			maxBytes = 0
+		}
+		c := HttpCapability{
+			CapabilityID: id, Version: 1, Enabled: true, AccessMode: "authorized",
+			Method: method, PathTemplate: path, ActionID: &actionID,
+			Resource: &HttpCapabilityResource{ResourceType: resourceType, ID: HttpResourceExtractor{Kind: extKind, Name: "id", Format: "asciiToken"}},
+			Query:    HttpQueryPolicy{Mode: queryMode},
+			Request:  HttpRequestPolicy{Body: bodyMode, MaxBytes: maxBytes, Authorization: "service-token", ForwardHeaders: []string{}},
+			Response: HttpResponsePolicy{MaxBytes: 1 << 20, ForwardHeaders: []string{}, Redirects: "deny"},
+		}
+		if extKind == "constant" {
+			c.Resource.ID = HttpResourceExtractor{Kind: "constant", Value: resourceType}
+		}
+		var err error
+		c.ContractDigest, err = HttpCapabilityContractDigest(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	actions := []Action{
+		mkAction("files", "create", "medium"),
+		mkAction("files", "update", "medium"),
+		mkAction("files", "delete", "high"),
+		mkAction("permissions", "read", "low"),
+		mkAction("plant", "read", "low"),
+		mkAction("batch", "execute", "high"),
+	}
+	permGet := mkCap("permissions.get.0", "GET", "/api/collections/permissions/records/{id}", actions[3].ID, "permissions", "pathSegment", "none", "exact")
+	permGet.Query = HttpQueryPolicy{Mode: "exact", Parameters: []HttpQueryParameter{{Name: "expand", Format: "text", MaxBytes: 64}}}
+	permGet.ResponseAuthorization = &HttpResponseAuthorization{RootKey: "permissions", RecordsPointer: "", ExpansionField: "expand", QueryParameter: "expand", MaxDepth: 2, MaxRecords: 50}
+	var err error
+	permGet.ContractDigest, err = HttpCapabilityContractDigest(permGet)
 	if err != nil {
 		t.Fatal(err)
 	}
+	permList := mkCap("permissions.list.0", "GET", "/api/collections/permissions/records", actions[3].ID, "permissions", "constant", "none", "exact")
+	permList.Query = HttpQueryPolicy{Mode: "exact", Parameters: []HttpQueryParameter{{Name: "expand", Format: "text", MaxBytes: 64}, {Name: "filter", Format: "text", MaxBytes: 4096}}}
+	permList.RecordScope = &HttpRecordScopePolicy{FilterParameter: "filter", RowKey: "id", Grammar: "fexpr", MaxIDs: 100, MaxFilterBytes: 4096, AllowedFields: []string{"id"}}
+	permList.ResponseAuthorization = &HttpResponseAuthorization{RootKey: "permissions", RecordsPointer: "/items", ExpansionField: "expand", QueryParameter: "expand", MaxDepth: 2, MaxRecords: 50}
+	permList.ContractDigest, err = HttpCapabilityContractDigest(permList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := []HttpCapability{
+		mkCap("files.create.0", "POST", "/api/collections/files/records", actions[0].ID, "files", "constant", "json", "none"),
+		mkCap("files.update.0", "PATCH", "/api/collections/files/records/{id}", actions[1].ID, "files", "pathSegment", "json", "none"),
+		mkCap("files.delete.0", "DELETE", "/api/collections/files/records/{id}", actions[2].ID, "files", "pathSegment", "none", "none"),
+		permList,
+		permGet,
+	}
+	policy := &HttpBatchPolicy{
+		Encoding: "request-array", RequestsPointer: "/requests", MethodField: "method", URLField: "url", BodyField: "body", HeadersField: "headers",
+		MaxOperations:        20,
+		AllowedCapabilityIDs: []string{"files.create.0", "files.delete.0", "files.update.0"},
+		Upserts:              []HttpBatchUpsert{{Method: "PUT", PathTemplate: "/api/collections/files/records", CreateCapabilityID: "files.create.0", UpdateCapabilityID: "files.update.0", IDPointer: "/id"}},
+		Multipart:            &HttpBatchMultipart{PayloadField: "@jsonPayload", FileFieldPatterns: []string{"requests.{index}.{field}", "requests[{index}].{field}"}},
+	}
+	batchCap := HttpCapability{
+		CapabilityID: "patch-data.batch", Version: 1, Enabled: true, AccessMode: "authorized",
+		Method: "POST", PathTemplate: "/api/batch", ActionID: &actions[5].ID,
+		Resource: &HttpCapabilityResource{ResourceType: "batch", ID: HttpResourceExtractor{Kind: "constant", Value: "patch-data"}},
+		Query:    HttpQueryPolicy{Mode: "none"},
+		Request:  HttpRequestPolicy{Body: "opaque", MaxBytes: 128 << 20, Authorization: "service-token", ForwardHeaders: []string{"content-type"}, ContentTypes: []string{"application/json", "multipart/form-data"}},
+		Response: HttpResponsePolicy{MaxBytes: 128 << 20, ForwardHeaders: []string{"content-type"}, Redirects: "deny", ErrorStatuses: []int{400, 403, 404, 409, 422}},
+		Batch:    policy,
+	}
+	batchCap.ContractDigest, err = HttpCapabilityContractDigest(batchCap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps = append(caps, batchCap)
+	resNodes := []HttpResponseResource{
+		{Key: "permissions", ResourceType: "permissions", ActionID: actions[3].ID, IDField: "id", IDFormat: "pocketbaseId", IdentityField: "collectionName", IdentityValue: "permissions", Relations: []HttpResponseRelation{{Field: "plant", TargetKey: "plants"}}},
+		{Key: "plants", ResourceType: "plant", ActionID: actions[4].ID, IDField: "id", IDFormat: "pocketbaseId", IdentityField: "collectionName", IdentityValue: "plants"},
+	}
+	stage := StageHttpCapabilityGeneration{SchemaVersion: 1, Generation: generation, Capabilities: caps, ResponseResources: resNodes}
+	stage.CatalogDigest, err = HttpCapabilityCatalogDigest(provider, stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stage, actions
+}
+
+func batchFixture(t *testing.T) (StageHttpCapabilityGeneration, HttpCapability, map[string]HttpCapability) {
+	t.Helper()
+	stage, _ := testCapabilityCatalog(t, 1)
 	byID := map[string]HttpCapability{}
 	for _, cap := range stage.Capabilities {
 		byID[cap.CapabilityID] = cap
@@ -178,10 +269,7 @@ func testBatchDecisionRequiresRootAndEveryChild(t *testing.T, orgless bool) {
 	if _, err = svc.UpsertServiceProviderAdmin(ctx, ServiceProvider{ID: "patch-data", Name: "Patch Data", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	stage, actions, err := PatchDataCatalog(1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stage, actions := testCapabilityCatalog(t, 1)
 	if orgless {
 		optional := map[string]bool{}
 		for _, c := range stage.Capabilities {

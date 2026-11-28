@@ -308,7 +308,11 @@ func TestLearnerApplicationAuthorizationRealReplica(t *testing.T) {
 			}
 		}
 	}
-	result, err = learner.CheckApplicationAuthorizations(laterCtx, "Bearer token", "conalog-grant", []ApplicationAuthorizationCheck{checks[0], checks[0], checks[0]})
+	laterChecks := make([]ApplicationAuthorizationCheck, authzBatchChunkSize+1)
+	for i := range laterChecks {
+		laterChecks[i] = checks[0]
+	}
+	result, err = learner.CheckApplicationAuthorizations(laterCtx, "Bearer token", "conalog-grant", laterChecks)
 	replica.afterReplicaQuery = nil
 	if queryCount != 2 || err == nil || len(result) != 0 {
 		t.Fatalf("later batch cancellation: queries=%d out=%v err=%v", queryCount, result, err)

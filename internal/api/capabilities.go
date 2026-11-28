@@ -40,9 +40,6 @@ func (s *Server) capabilityRoutes() {
 		}
 		return s.service.DecideHttpCapability(r.Context(), r.bearer, r.org, v)
 	}))
-	s.route("POST", "/ops/migrations/patch-data-authority", "master", true, 200, body(true, func(r *request, v grant.PatchDataAuthorityImport) (any, error) {
-		return s.service.ImportPatchDataAuthority(r.Context(), v)
-	}))
 }
 
 func validatePEPPolicyIDs(r *request) error {

@@ -389,10 +389,19 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	oldSession, _ := s.sessionCookie(r)
 	s.mu.Lock()
 	s.cleanupLocked(time.Now())
-	if len(s.logins) >= maxLogins {
-		s.mu.Unlock()
-		http.Error(w, "authentication busy", http.StatusServiceUnavailable)
-		return
+	for len(s.logins) >= maxLogins {
+		var oldestKey string
+		var oldestExp time.Time
+		for k, l := range s.logins {
+			if oldestKey == "" || l.expires.Before(oldestExp) {
+				oldestKey = k
+				oldestExp = l.expires
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.logins, oldestKey)
 	}
 	s.logins[key] = login{state: state, verifier: verifier, oldSession: oldSession, expires: time.Now().Add(loginLifetime)}
 	s.mu.Unlock()
@@ -475,12 +484,12 @@ func (s *server) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.cleanupLocked(now)
+	delete(s.sessions, transaction.oldSession)
 	if len(s.sessions) >= maxSessions {
 		s.mu.Unlock()
 		s.failCallback(w)
 		return
 	}
-	delete(s.sessions, transaction.oldSession)
 	s.sessions[sid] = session{token: token, csrf: csrf, expires: expires, subject: info.Subject, email: info.Email, name: info.Name}
 	s.mu.Unlock()
 	s.setCookie(w, sessionCookie, sid, time.Until(expires))

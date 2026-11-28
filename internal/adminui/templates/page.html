@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"...","swap":true}]}'>
   <title>{{if .Title}}{{.Title}} · {{end}}Grant 관리</title>
   <link rel="stylesheet" href="/assets/app.css">
-  <link rel="stylesheet" href="/assets/grant-admin.css">
   <script src="/assets/htmx.min.js" defer></script>
   {{template "ui-component-assets"}}
+  <link rel="stylesheet" href="/assets/grant-admin.css?v=5">
   <script src="/assets/grant-admin.js" defer></script>
 </head>
 <body>
@@ -103,7 +104,7 @@
       </div>
       {{end}}
     </div>
-    <div class="form-actions">{{if $f.Danger}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장") "Variant" "destructive")}}{{else}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장"))}}{{end}}
+    <div class="form-actions">{{if $f.Danger}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장") "Variant" "destructive")}}{{else}}{{template "button" (dict "Type" "submit" "Label" (or $f.SubmitLabel "저장"))}}{{end}}</div>
   </form>
 </details>
 {{end}}

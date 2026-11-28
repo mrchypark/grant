@@ -94,10 +94,8 @@ func TestActiveRegistryReferencesAndAdminReadback(t *testing.T) {
 	if _, err := s.ActiveHttpCapabilityCatalogAdmin(ctx, "patch-data"); ErrorStatus(err) != 404 {
 		t.Fatal(err)
 	}
-	stage, actions, err := PatchDataCatalog(1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stage, actions := testCapabilityCatalog(t, 1)
+	var err error
 	responseAction := Action{ID: "patch-data.response-only.read", ProviderID: "patch-data", Code: "response-only.read", Name: "Response only", RiskLevel: "high", GrantableToApplications: true}
 	actions = append(actions, responseAction)
 	node := stage.ResponseResources[0]
@@ -142,7 +140,7 @@ func TestActiveRegistryReferencesAndAdminReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, err := s.ActiveHttpCapabilityCatalogAdmin(ctx, "patch-data")
-	if err != nil || before.CapabilityCount != 369 || before.ResponseResourceCount != len(stage.ResponseResources) {
+	if err != nil || before.CapabilityCount != len(stage.Capabilities) || before.ResponseResourceCount != len(stage.ResponseResources) {
 		t.Fatal(before, err)
 	}
 	for _, kept := range [][]Action{actions[:len(actions)-1], actions[1:]} {
