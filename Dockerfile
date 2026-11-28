@@ -5,6 +5,7 @@ ARG TARGETARCH
 WORKDIR /workspace
 COPY --link go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY --link api ./api
 COPY --link internal ./internal
 COPY --link cmd ./cmd
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
