@@ -15,8 +15,13 @@ func (s *Service) resolveLocalUserAuthorizationContext(ctx context.Context, iden
 	if err != nil {
 		return applicationAuthorizationContext{}, err
 	}
+	_, trustedGateway := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
 	cfg := s.cfg.Auth.Goauthy
-	if s.AuthProviderMode() != "goauthy" || cfg == nil || identity.Provider != "goauthy" || !identity.Active || !identity.UserInfoVerified || identity.Issuer != cfg.Issuer || identity.ExternalUserID == "" || identity.TokenClientID == "" || identity.TokenAudience == "" {
+	if trustedGateway {
+		if !identity.Active || identity.ExternalUserID == "" {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: active trusted gateway identity required")
+		}
+	} else if s.AuthProviderMode() != "goauthy" || cfg == nil || identity.Provider != "goauthy" || !identity.Active || !identity.UserInfoVerified || identity.Issuer != cfg.Issuer || identity.ExternalUserID == "" || identity.TokenClientID == "" || identity.TokenAudience == "" {
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: verified Goauthy user identity required")
 	}
 	u, err := s.localIdentity(ctx, identity, ReadStrong)
@@ -33,7 +38,11 @@ func (s *Service) resolveLocalUserAuthorizationContext(ctx context.Context, iden
 	if !member {
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is not an active member of an active organization")
 	}
-	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: goauthySubject(identity.Issuer, identity.ExternalUserID), ProviderAudience: identity.TokenAudience}, nil
+	subject := identity.ExternalUserID
+	if identity.Issuer != "" {
+		subject = goauthySubject(identity.Issuer, identity.ExternalUserID)
+	}
+	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: subject, ProviderAudience: identity.TokenAudience}, nil
 }
 
 func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, token, org string) (applicationAuthorizationContext, error) {

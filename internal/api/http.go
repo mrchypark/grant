@@ -281,13 +281,20 @@ func (s *Server) applyGatewayIdentity(r *http.Request) (*http.Request, bool, err
 	if provider == "" {
 		provider = "gateway"
 	}
+	issuer := ""
+	if s.service.Config().Auth.Goauthy != nil {
+		issuer = s.service.Config().Auth.Goauthy.Issuer
+	}
 	ctx := grant.WithTrustedGatewayIdentity(r.Context(), grant.ExternalIdentity{
-		Provider:       provider,
-		ExternalUserID: sub,
-		ClientID:       clientID,
-		Email:          emailPtr,
-		DisplayName:    displayName,
-		Active:         true,
+		Provider:         provider,
+		Issuer:           issuer,
+		ExternalUserID:   sub,
+		ClientID:         clientID,
+		TokenClientID:    clientID,
+		Email:            emailPtr,
+		DisplayName:      displayName,
+		UserInfoVerified: true,
+		Active:           true,
 	})
 	return r.WithContext(ctx), true, nil
 }

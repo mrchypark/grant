@@ -45,9 +45,13 @@ func (s *Service) userAuthorizationRead(ctx context.Context, bearer, org, provid
 	}
 	// Bypass identity caches and perform introspection/UserInfo once, outside
 	// the three-second local retry budget. The caller supplies the original header.
-	identity, err := s.externalIdentity(ctx, bearer)
-	if err != nil {
-		return UserBatchCheckResult{}, err
+	identity, ok := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
+	if !ok {
+		var err error
+		identity, err = s.externalIdentity(ctx, bearer)
+		if err != nil {
+			return UserBatchCheckResult{}, err
+		}
 	}
 	ctx = context.WithValue(ctx, replicaIdentityKey{}, identity)
 	return capabilityAuthorizationRead(ctx, s, func(ctx context.Context) (out UserBatchCheckResult, err error) {
