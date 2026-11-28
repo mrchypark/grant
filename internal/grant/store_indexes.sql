@@ -32,6 +32,18 @@
                     );
                 CREATE INDEX IF NOT EXISTS idx_role_bindings_subject_resource_state
                     ON role_bindings (subject_type, subject_id, provider_id, resource_type, resource_id, state);
+                CREATE INDEX IF NOT EXISTS idx_role_bindings_active_lookup
+                    ON role_bindings (
+                        subject_type,
+                        subject_id,
+                        subject_organization_id,
+                        provider_id,
+                        resource_type,
+                        resource_id,
+                        role_id,
+                        agreement_id
+                    )
+                    WHERE state = 'active';
                 DROP INDEX IF EXISTS idx_role_bindings_logical_unique;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_role_bindings_logical_unique
                     ON role_bindings (

@@ -221,7 +221,7 @@ func TestSingleVoterRestoreObjectAdapters(t *testing.T) {
 				t.Fatal("archive cold recovery schema verification failed")
 			}
 			afterOpen, err := cold.ExportSnapshot(ctx)
-			if err != nil || len(afterOpen.Tables) != 33 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
+			if err != nil || len(afterOpen.Tables) != 31 || afterOpen.SchemaDigest != beforeClose.SchemaDigest {
 				t.Fatal("archive cold recovery canonical inventory changed")
 			}
 			for i, want := range beforeClose.Tables {
@@ -350,8 +350,8 @@ func restoreCurrentSource(t *testing.T, ctx context.Context) StoreSnapshot {
 func freezeRestoreSourceV6(t *testing.T, snap StoreSnapshot) StoreSnapshot {
 	t.Helper()
 	frozen := pepSnapshotFixtureVersion(t, snap, legacySchemaDigestV6())
-	if len(frozen.Tables) != 31 {
-		t.Fatalf("frozen v6 fixture has %d tables, want 31", len(frozen.Tables))
+	if len(frozen.Tables) != 29 {
+		t.Fatalf("frozen v6 fixture has %d tables, want 29", len(frozen.Tables))
 	}
 	if err := ValidateStoreSnapshot(frozen); err != nil {
 		t.Fatalf("invalid frozen v6 fixture: %v", err)

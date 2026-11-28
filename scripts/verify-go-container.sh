@@ -14,6 +14,7 @@ trap cleanup EXIT HUP INT TERM
 docker run -d --name "$container" --platform linux/amd64 \
  --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
  --memory 512m --cpus 1 --pids-limit 256 \
+ --tmpfs /var/lib/grant:rw,uid=10001,gid=10001,size=512m \
  --tmpfs /data:rw,uid=10001,gid=10001,size=512m --tmpfs /tmp:rw,uid=10001,gid=10001,size=64m \
  -p 127.0.0.1::8080 \
  -e GRANT_MASTER_KEY=local-smoke-master-secret -e GRANT_APP_AUTH_KEY=local-smoke-app-secret \

@@ -200,7 +200,7 @@ func (s *Server) routes() {
 	s.actionMutationRoutes()
 	s.lifecycleRoutes()
 	if s.learner {
-		for _, path := range []string{"/api/v1/admin/providers", "/api/v1/admin/providers/{providerId}/actions", "/api/v1/admin/providers/{providerId}/http-capability-generations", "/api/v1/admin/providers/{providerId}/http-capability-active", "/ops/providers/{providerId}/enforcers/{pepClientId}", "/ops/backups", "/api/v1/admin/bootstrap/owner", "/ops/migrations/patch-data-authority"} {
+		for _, path := range []string{"/api/v1/admin/providers", "/api/v1/admin/providers/{providerId}/actions", "/api/v1/admin/providers/{providerId}/http-capability-generations", "/api/v1/admin/providers/{providerId}/http-capability-active", "/ops/providers/{providerId}/enforcers/{pepClientId}", "/ops/backups", "/api/v1/admin/bootstrap/owner"} {
 			s.mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 				writeError(w, failure(503, "endpoint requires voter node"))
 			})

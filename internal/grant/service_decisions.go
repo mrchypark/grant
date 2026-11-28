@@ -15,8 +15,13 @@ func (s *Service) resolveLocalUserAuthorizationContext(ctx context.Context, iden
 	if err != nil {
 		return applicationAuthorizationContext{}, err
 	}
+	_, trustedGateway := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
 	cfg := s.cfg.Auth.Goauthy
-	if s.AuthProviderMode() != "goauthy" || cfg == nil || identity.Provider != "goauthy" || !identity.Active || !identity.UserInfoVerified || identity.Issuer != cfg.Issuer || identity.ExternalUserID == "" || identity.TokenClientID == "" || identity.TokenAudience == "" {
+	if trustedGateway {
+		if !identity.Active || identity.ExternalUserID == "" {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: active trusted gateway identity required")
+		}
+	} else if s.AuthProviderMode() != "goauthy" || cfg == nil || identity.Provider != "goauthy" || !identity.Active || !identity.UserInfoVerified || identity.Issuer != cfg.Issuer || identity.ExternalUserID == "" || identity.TokenClientID == "" || identity.TokenAudience == "" {
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: verified Goauthy user identity required")
 	}
 	u, err := s.localIdentity(ctx, identity, ReadStrong)
@@ -33,7 +38,11 @@ func (s *Service) resolveLocalUserAuthorizationContext(ctx context.Context, iden
 	if !member {
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is not an active member of an active organization")
 	}
-	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: goauthySubject(identity.Issuer, identity.ExternalUserID), ProviderAudience: identity.TokenAudience}, nil
+	subject := identity.ExternalUserID
+	if identity.Issuer != "" {
+		subject = goauthySubject(identity.Issuer, identity.ExternalUserID)
+	}
+	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: subject, ProviderAudience: identity.TokenAudience}, nil
 }
 
 func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, token, org string) (applicationAuthorizationContext, error) {
@@ -74,6 +83,17 @@ func (s *Service) resolveLocalApplicationAuthorizationContext(ctx context.Contex
 		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
 			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured PocketBase application is not active for this organization")
 		}
+	} else if s.AuthProviderMode() == "external-check" {
+		if s.cfg.Auth.ExternalCheck == nil {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: external-check application is not configured")
+		}
+		a, err = s.store.GetApplicationWithConsistency(ctx, s.cfg.Auth.ExternalCheck.ApplicationID, ReadStrong)
+		if err != nil {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured external-check application is not ready")
+		}
+		if a.OrganizationID != org || !a.Active || a.ProvisioningStatus != "ready" {
+			return applicationAuthorizationContext{}, serviceError(403, "forbidden: configured external-check application is not active for this organization")
+		}
 	} else if s.AuthProviderMode() == "goauthy" {
 		if s.cfg.Auth.Goauthy == nil {
 			return applicationAuthorizationContext{}, serviceError(503, "Goauthy is not configured")
@@ -112,22 +132,19 @@ func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org
 	if err != nil {
 		return nil, err
 	}
-	var identity ExternalIdentity
-	if s.cfg.Database.LocalNodeRole == "learner" {
-		// No replicated cache lookup/write or inner Rauthy memory-cache hit:
-		// this request needs fresh external evidence before its local fence.
-		if s.AuthProviderMode() == "rauthy" {
-			identity, err = s.rauthyIdentityWithCache(ctx, token, false)
-		} else {
-			identity, err = s.externalIdentity(ctx, token)
-		}
-	} else {
-		identity, err = s.resolveExternalIdentity(ctx, token, ReadStrong)
-	}
+	identity, err := s.resolveApplicationIdentity(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	return localReplicaRead(ctx, s, func(readCtx context.Context) ([]AuthorizationDecision, error) {
+	return localReplicaRead(ctx, s, func(readCtx context.Context) (out []AuthorizationDecision, err error) {
+		if s.cfg.Database.LocalNodeRole == "learner" {
+			defer func() {
+				if readCtx.Err() != nil {
+					out = nil
+					err = serviceError(503, "unavailable: authorization read budget expired")
+				}
+			}()
+		}
 		c, err := s.resolveLocalApplicationAuthorizationContext(readCtx, identity, org)
 		if err != nil {
 			return nil, err
@@ -136,6 +153,13 @@ func (s *Service) CheckApplicationAuthorizations(ctx context.Context, token, org
 		for i, v := range checks {
 			exact[i] = AuthorizationCheck{Subject: AuthorizationSubject{SubjectType: "user", ID: c.UserID, OrganizationID: c.OrganizationID}, Action: v.Action, Resource: v.Resource}
 		}
-		return s.evaluateAuthorizations(readCtx, exact, ReadStrong, &c.ApplicationID)
+		out, err = s.evaluateAuthorizations(readCtx, exact, ReadStrong, &c.ApplicationID)
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyLearnerReadProof(readCtx, s); err != nil {
+			return nil, err
+		}
+		return out, nil
 	})
 }

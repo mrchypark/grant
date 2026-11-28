@@ -203,6 +203,9 @@ func (s *Store) ActivateHttpCapabilityGeneration(ctx context.Context, p, actor s
 	if e != nil {
 		return out, e
 	}
+	if len(r) != 1 {
+		return out, serviceError(503, "unavailable: activation receipt not found")
+	}
 	return decodeRow[HttpCapabilityActivation](r[0])
 }
 func (s *Store) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, p string) (AdminHttpCapabilityCatalog, error) {
@@ -239,14 +242,17 @@ func (s *Store) ActiveHttpCapabilityCatalogAdmin(ctx context.Context, p string) 
 	return AdminHttpCapabilityCatalog{SchemaVersion: 1, ProviderID: p, Generation: v.Generation, CatalogDigest: rowString(rows[0], "catalog_digest"), ActivatedAt: rowString(rows[0], "activated_at"), ActivatedBy: rowString(rows[0], "activated_by"), CapabilityCount: len(v.Capabilities), ResponseResourceCount: len(v.ResponseResources), Capabilities: v.Capabilities, ResponseResources: v.ResponseResources}, nil
 }
 func (s *Store) ActiveHttpCapabilityCatalog(ctx context.Context, p, pepID string) (ActiveHttpCapabilityCatalog, error) {
-	var out ActiveHttpCapabilityCatalog
 	pep, e := s.ProviderPepClient(ctx, p, pepID)
 	if e != nil {
-		return out, e
+		return ActiveHttpCapabilityCatalog{}, e
 	}
 	if e = requireActivePEP(pep, time.Now()); e != nil {
-		return out, e
+		return ActiveHttpCapabilityCatalog{}, e
 	}
+	return s.activeHttpCapabilityCatalog(ctx, p, pepID)
+}
+func (s *Store) activeHttpCapabilityCatalog(ctx context.Context, p, pepID string) (ActiveHttpCapabilityCatalog, error) {
+	var out ActiveHttpCapabilityCatalog
 	r, e := s.Query(ctx, ReadStrong, "WITH RECURSIVE catalog AS (SELECT s.canonical_json,a.catalog_digest FROM provider_http_capability_active a JOIN provider_http_capability_sets s ON s.provider_id=a.provider_id AND s.generation=a.generation AND s.catalog_digest=a.catalog_digest JOIN service_providers sp ON sp.id=a.provider_id AND sp.active=1 WHERE a.provider_id=?), chunks(payload,remaining,catalog_digest,ordinal) AS (SELECT substr(canonical_json,1,60000),substr(canonical_json,60001),catalog_digest,0 FROM catalog UNION ALL SELECT substr(remaining,1,60000),substr(remaining,60001),catalog_digest,ordinal+1 FROM chunks WHERE remaining<>'') SELECT payload,catalog_digest FROM chunks ORDER BY ordinal", p)
 	if e != nil {
 		return out, e

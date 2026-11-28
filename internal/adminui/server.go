@@ -796,25 +796,21 @@ func operationRequest(section, provider, org string, f url.Values) (string, stri
 	case opActionCreate:
 		method, route = "POST", "/api/v1/admin/providers/{providerId}/actions"
 		set("id", "code", "name", "description", "riskLevel", "consentLabel", "consentDescription")
-		for _, n := range []string{"visibilityGranting", "grantableToApplications"} {
-			b, e := boolValue(n)
-			if e != nil {
-				return "", "", nil, nil, nil, fmt.Errorf("%s must be true or false", n)
-			}
-			body[n] = b
+		body["visibilityGranting"] = false
+		b, e := boolValue("grantableToApplications")
+		if e != nil {
+			return "", "", nil, nil, nil, fmt.Errorf("grantableToApplications must be true or false")
 		}
+		body["grantableToApplications"] = b
 	case opActionUpdate:
 		method, route, vars["actionId"] = "PATCH", "/api/v1/admin/providers/{providerId}/actions/{actionId}", id
-		vars["providerId"] = provider
 		set("name", "description", "riskLevel", "consentLabel", "consentDescription")
-		for _, n := range []string{"visibilityGranting", "grantableToApplications"} {
-			if f.Has(n) && str(n) != "" {
-				b, e := boolValue(n)
-				if e != nil {
-					return "", "", nil, nil, nil, e
-				}
-				body[n] = b
+		if f.Has("grantableToApplications") && str("grantableToApplications") != "" {
+			b, e := boolValue("grantableToApplications")
+			if e != nil {
+				return "", "", nil, nil, nil, e
 			}
+			body["grantableToApplications"] = b
 		}
 	case opActionDelete:
 		method, route, vars["actionId"] = "DELETE", "/api/v1/admin/providers/{providerId}/actions/{actionId}", id

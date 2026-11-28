@@ -47,7 +47,9 @@ func applicationTables() []string {
 
 func legacyApplicationTables() []string {
 	names := schemaTables(schemaSQL)
-	names = slices.DeleteFunc(names, func(name string) bool { return name == "grant_import_payloads" })
+	names = slices.DeleteFunc(names, func(name string) bool {
+		return name == "grant_import_payloads" || name == "patch_data_authority_imports" || name == "patch_data_authority_import_entities"
+	})
 	sort.Strings(names)
 	return names
 }
@@ -802,10 +804,10 @@ func (s *Store) ListBackups(ctx context.Context) ([]BackupInfo, error) {
 		}
 		seen := map[string]bool{}
 		for _, b := range local {
-			seen[b.Name] = true
+			seen[filepath.Base(b.Name)] = true
 		}
 		for _, b := range remote {
-			if !seen[b.Name] {
+			if !seen[filepath.Base(b.Name)] {
 				local = append(local, b)
 			}
 		}

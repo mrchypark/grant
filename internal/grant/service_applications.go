@@ -102,7 +102,7 @@ func (s *Service) CreateApplication(ctx context.Context, user, org string, in Cr
 		vals[i] = x
 	}
 	a := Application{ID: vals[0], OrganizationID: org, Slug: vals[1], Name: vals[2], Description: optionalText(in.Description), ApplicationType: in.ApplicationType, AppType: in.AppType, FirstParty: false, ConsentPolicy: "explicit", Active: in.Active, ProvisioningStatus: "unprovisioned", CreatedByUserID: user}
-	if s.cfg.Auth.ProviderMode == "pocketbase" {
+	if s.cfg.Auth.ProviderMode == "pocketbase" || s.cfg.Auth.ProviderMode == "external-check" {
 		a.ProvisioningStatus = "ready"
 		a.RauthyClientID = nil
 	}
@@ -115,7 +115,7 @@ func (s *Service) CreateApplication(ctx context.Context, user, org string, in Cr
 		uri = &v
 	}
 	err := s.store.InsertApplicationWithRedirectURI(ctx, a, uri)
-	return ApplicationRead{Application: a, RedirectURI: uri}, err
+	return ApplicationRead{Application: a, RedirectURI: uri}, lifecycleError(err)
 }
 func (s *Service) ListApplicationActionsAuthorized(ctx context.Context, user, org, id string, c ReadConsistency) ([]Action, error) {
 	if _, err := s.GetApplicationAuthorized(ctx, user, org, id, c); err != nil {

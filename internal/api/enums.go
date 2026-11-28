@@ -33,23 +33,6 @@ func validateEnums(v any) error {
 				return e
 			}
 		}
-	case grant.PatchDataAuthorityImport:
-		for _, m := range x.Memberships {
-			if e := oneOf("role", m.Role, "owner", "admin", "member"); e != nil {
-				return e
-			}
-			if e := oneOf("status", m.Status, "active", "disabled"); e != nil {
-				return e
-			}
-		}
-		for _, b := range x.PlantBindings {
-			if e := oneOf("subjectType", b.SubjectType, "organization", "group", "user"); e != nil {
-				return e
-			}
-			if e := oneOf("state", b.State, "active", "disabled"); e != nil {
-				return e
-			}
-		}
 	}
 	return nil
 }
