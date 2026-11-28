@@ -102,6 +102,10 @@ func (s *Service) resolveOnboardingContext(ctx context.Context, token, action st
 		if s.cfg.Auth.PocketBase == nil || s.cfg.Auth.PocketBase.ApplicationID != app.ID || identity.ClientID != app.ID {
 			return applicationAuthorizationContext{}, serviceError(403, "onboarding application mismatch")
 		}
+	} else if identity.Provider == "external-check" {
+		if s.cfg.Auth.ExternalCheck == nil || s.cfg.Auth.ExternalCheck.ApplicationID != app.ID || identity.ClientID != app.ID {
+			return applicationAuthorizationContext{}, serviceError(403, "onboarding application mismatch")
+		}
 	} else if identity.Provider == "goauthy" {
 		if s.cfg.Auth.Goauthy == nil || s.cfg.Auth.Goauthy.ApplicationID != app.ID || identity.ClientID != app.ID {
 			return applicationAuthorizationContext{}, serviceError(403, "onboarding application mismatch")

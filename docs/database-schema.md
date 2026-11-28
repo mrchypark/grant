@@ -1,6 +1,6 @@
 # Database Schema
 
-이 문서는 immutable V1/V2 DDL과 V4 forward migration을 합친 현재 실제 스키마를 설명한다.
+이 문서는 immutable V1/V2 DDL과 V4~V7 forward migration을 합친 현재 실제 스키마를 설명한다.
 
 ## 프로젝트 경계
 
@@ -20,7 +20,7 @@
 
 ### Rhiza 저장 형식 호환성
 
-현재 선택 버전은 Rhiza v0.21.2과 latticedb-go v0.11.3이며, 업그레이드 후보 상태다. Rhiza v0.19.0의 SQL 실행 정책 7은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
+현재 선택 버전은 `go.mod` 기준 Rhiza v0.27.5과 latticedb-go v0.13.0이다. Rhiza v0.19.0 이후 SQL 실행 정책은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
 
 ### 1차 단순 배포 기준
 
@@ -60,13 +60,9 @@ fresh schema seed는 `grant` provider와 Grant 자체 action만 만든다. `expo
 
 사용자와 조직의 소속 관계. `(organization_id, user_id)`는 unique다. 활성 `membership_role='owner'`인 row와 active user/org가 조합된 집합이 canonical owner다. owner는 여러 명일 수 있으며 별도 owner role binding은 ownership source가 아니다. owner 변경은 ETag 기반 snapshot과 last-active-owner 가드를 같은 transaction에서 확인한다.
 
-### `patch_data_authority_imports`, `patch_data_authority_import_entities`, `organization_hierarchy_edges`
+### `organization_hierarchy_edges`
 
-Patch Data API rule 이동의 deterministic import receipt와 소유권 provenance, 조직 parent-child snapshot이다. `grant.patch-data-authority.v1` manifest는 user/external identity, organization, membership, hierarchy edge, plant binding, active/ready application assignment를 정렬된 전체 snapshot으로 전달한다. receipt는 provider별 exact `generation`, 원본 ledger lowercase SHA-256, versioned payload 전체의 length-framed canonical SHA-256, manifest version, 적용 시각을 저장한다. canonical digest는 `manifestDigest` 자신과 `expectedPreviousGeneration`만 제외하므로 CAS 경로와 무관하게 같은 authority payload는 같은 digest를 갖는다.
-
-`patch_data_authority_import_entities`는 importer가 교체할 수 있는 canonical user, organization, membership, plant binding, application assignment의 `(entity_type, entity_id)`만 추적한다. importer는 absent row를 만들거나 같은 kind/id가 이미 import-owned인 경우만 갱신한다. 우연히 같은 native row는 채택하지 않으며 import replacement나 omission으로 삭제하지도 않는다. 다음 generation은 이전 import-owned membership, binding, `application_actions` assignment만 제거한 뒤 새 snapshot과 provenance를 하나의 Rhiza transaction으로 기록한다. omitted user/organization/identity는 남을 수 있지만 imported membership/binding이 없어서 권한을 갖지 않는다. application 자체는 importer가 생성·수정·삭제하지 않고 manifest의 `applicationAssignments`가 가리키는 existing active/ready same-org application만 검증한다.
-
-각 import는 `patch-data` provider, `patch-data.plant.read` action, global `role-patch-data-plant-reader` role/action을 canonical catalog에 보장하고, membership을 `organization_memberships`, plant permission을 `role_bindings`, application capability를 `application_actions`에 직접 반영한다. 따라서 strong evaluator와 plant-read decision은 정상 요청에서 Patch Data relation이나 import staging table을 dual-read하지 않는다. hierarchy는 child당 parent 하나, sorted/unique/acyclic/referentially complete를 검증하지만 의미가 확정되지 않아 evaluator에는 연결하지 않는다. `application_consent_assertions`는 generation CAS, catalog/native-row collision, application readiness, partial-write를 transaction 안에서 fail closed시키는 CHECK 기반 임시 row이고 성공 시 비워진다.
+조직 parent-child 계층 snapshot 테이블. `(source_provider, parent_organization_id, child_organization_id)`가 primary key이고 `(source_provider, child_organization_id)`는 unique다.
 
 ### `groups`, `group_memberships`
 
@@ -295,8 +291,8 @@ PocketBase service token은 자체 사용자 규칙을 우회할 수 있으므�
 
 ## Go/Rhiza storage port
 
-현재 스키마는 Grant 테이블 35개(논리 snapshot 대상 33개, 내부 staging 1개,
-restore receipt 1개)와 명시적 인덱스 16개를 생성한다. 사용하지 않던 import/capability
+현재 스키마는 Grant 테이블 33개(논리 snapshot 대상 31개, 내부 staging 1개,
+restore receipt 1개)와 명시적 인덱스 21개를 생성한다. 사용하지 않던 import/capability
 assertion 테이블 2개와 중복 capability projection, V2 authority snapshot 저장 기능을 제거했다.
 실제 transaction 검증은 공통 `application_consent_assertions`를 계속 사용한다.
 membership, party 사업자번호, group membership, activation sequence/receipt의 중복 인덱스
@@ -308,9 +304,8 @@ membership, party 사업자번호, group membership, activation sequence/receipt
 restore 검증에서 거부된다. 기존 데이터 경로에 덮어쓰거나 자동 삭제하지 않는다.
 새 스키마로 만든 별도 데이터 경로와 snapshot을 사용해야 한다.
 
-The Go runtime's canonical schema is [store_schema.sql](../internal/grant/store_schema.sql),
-with indexes in [store_indexes.sql](../internal/grant/store_indexes.sql). Rhiza v0.19.0
-applies the three named migrations through its replicated migration ledger. Existing
+`grant`의 Go 런타임 정식 스키마는 [store_schema.sql](../internal/grant/store_schema.sql), 기본 인덱스는 [store_indexes.sql](../internal/grant/store_indexes.sql)(`role_bindings` 활성 역조회용 커버링 부분 인덱스 `idx_role_bindings_active_lookup` 포함), authz 조회 인덱스는 [store_schema.go](../internal/grant/store_schema.go)에 정의되어 있다. Rhiza v0.27.5
+applies the seven named migrations through its replicated migration ledger. Existing
 Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
 export/restore procedure in [backup-restore.md](backup-restore.md).
 

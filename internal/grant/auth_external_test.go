@@ -87,4 +87,29 @@ func TestRauthyIntrospectionAndUserinfoBinding(t *testing.T) {
 	if _, err = s.externalIdentity(context.Background(), "raw"); err == nil {
 		t.Fatal("Rauthy accepted missing bearer scheme")
 	}
+
+	ecSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/check" || r.Header.Get("Authorization") != "Bearer ext-tok" {
+			w.WriteHeader(401)
+			return
+		}
+		fmt.Fprint(w, `{"token":"ok","record":{"id":"ext-1","collectionName":"users","email":"EXT@EXAMPLE.TEST","verified":true,"name":"Ext User"}}`)
+	}))
+	defer ecSrv.Close()
+	ecSvc := NewService(Config{Auth: AuthConfig{ProviderMode: "external-check", ExternalCheck: &ExternalCheckConfig{
+		URL:               ecSrv.URL + "/check",
+		Method:            "POST",
+		ApplicationID:     "ext-app",
+		SubjectPath:       "record.id",
+		EmailPath:         "record.email",
+		EmailVerifiedPath: "record.verified",
+		NamePath:          "record.name",
+		TokenPath:         "token",
+		ExpectedField:     "record.collectionName",
+		ExpectedValue:     "users",
+	}}}, nil)
+	extID, err := ecSvc.externalIdentity(context.Background(), "Bearer ext-tok")
+	if err != nil || extID.Provider != "external-check" || extID.ExternalUserID != "ext-1" || ptrValue(extID.Email) != "ext@example.test" || extID.ClientID != "ext-app" {
+		t.Fatalf("external-check failed: id=%+v err=%v", extID, err)
+	}
 }

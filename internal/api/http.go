@@ -56,6 +56,16 @@ func New(service *grant.Service, learner bool) *Server {
 	s.routes()
 	return s
 }
+func masterAuthorizationRead(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	switch r.URL.Path {
+	case "/api/v1/authz/check", "/api/v1/authz/batch-check", "/api/v1/authz/filter":
+		return true
+	}
+	return false
+}
 func applicationAuthorizationRead(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
@@ -71,7 +81,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if grpcRead {
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	if s.learner && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && !grpcRead && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
+	if s.learner && masterAuthorizationRead(r) && len(r.Header.Values("X-Grant-Master-Key")) > 1 {
+		writeError(w, failure(400, "multiple X-Grant-Master-Key headers"))
+		return
+	}
+	if s.learner && !masterAuthorizationRead(r) && !applicationAuthorizationRead(r) && !s.providerUserAuthorizationRead(r) && !grpcRead && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v2/http-capabilities/decide" && !strings.HasPrefix(r.URL.Path, "/api/v2/http-capabilities/catalog/") {
 		_, pattern := s.mux.Handler(r)
 		switch pattern {
 		case "":
@@ -170,9 +184,16 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 			if len(r.Header.Values("X-Grant-Master-Key")) > 0 {
 				err = requireKey(r, "x-grant-master-key", s.service.Config().Security.MasterKey, "master key")
 			} else if route, ok := grant.LookupManagementRoute(method, path); ok && route.Platform {
-				q.bearer, err = bearerToken(r)
-				if err == nil && q.bearer == "" {
-					err = failure(401, "unauthorized: missing bearer token")
+				var gatewayUsed bool
+				r, gatewayUsed, err = s.applyGatewayIdentity(r)
+				if err == nil {
+					q.Request = r
+					if !gatewayUsed {
+						q.bearer, err = bearerToken(r)
+						if err == nil && q.bearer == "" {
+							err = failure(401, "unauthorized: missing bearer token")
+						}
+					}
 				}
 				if err == nil {
 					q.org, err = header(r, "x-organization-id", true)
@@ -202,18 +223,25 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 			return
 		}
 		if auth == "user" || auth == "inactive" || auth == "application" || auth == "bearer" || decisionAuth {
-			q.bearer, err = bearerToken(r)
+			var gatewayUsed bool
+			r, gatewayUsed, err = s.applyGatewayIdentity(r)
+			if err == nil {
+				q.Request = r
+				if !gatewayUsed {
+					q.bearer, err = bearerToken(r)
+				}
+			}
 			if err == nil && decisionAuth && len(r.Header.Values("x-organization-id")) > 1 {
 				err = failure(400, "multiple x-organization-id headers")
 			}
 			if err == nil {
-				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || auth == "grpc-decision" || (auth == "inactive" && s.service.AuthProviderMode() == "pocketbase"))
+				q.org, err = header(r, "x-organization-id", auth == "user" || auth == "application" || auth == "grpc-decision" || (auth == "inactive" && (s.service.AuthProviderMode() == "pocketbase" || s.service.AuthProviderMode() == "external-check")))
 			}
 			if err != nil {
 				writeError(w, err)
 				return
 			}
-			if (auth == "application" || decisionAuth) && q.bearer == "" {
+			if (auth == "application" || decisionAuth) && !gatewayUsed && q.bearer == "" {
 				writeError(w, failure(401, "unauthorized: missing authorization header"))
 				return
 			}
@@ -222,7 +250,7 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 					q.consistency = "strong"
 				}
 				if auth == "inactive" {
-					if s.service.AuthProviderMode() == "pocketbase" && q.org != r.PathValue("organizationId") {
+					if (s.service.AuthProviderMode() == "pocketbase" || s.service.AuthProviderMode() == "external-check") && q.org != r.PathValue("organizationId") {
 						writeError(w, failure(403, "forbidden: organization path does not match selected organization"))
 						return
 					}
@@ -270,6 +298,68 @@ func (s *Server) route(method, path, auth string, voter bool, status int, fn any
 		writeJSON(w, status, result)
 	})
 }
+func (s *Server) applyGatewayIdentity(r *http.Request) (*http.Request, bool, error) {
+	if len(r.Header.Values("X-Grant-Gateway-Key")) == 0 {
+		return r, false, nil
+	}
+	expected := s.service.Config().Security.TrustedGatewayKey
+	if expected == "" {
+		return r, false, failure(401, "unauthorized: trusted gateway authentication is disabled")
+	}
+	if err := requireKey(r, "x-grant-gateway-key", expected, "trusted gateway key"); err != nil {
+		return r, false, err
+	}
+	sub, err := header(r, "x-grant-subject", false)
+	if err != nil {
+		return r, false, err
+	}
+	if sub == "" {
+		return r, false, failure(401, "unauthorized: missing x-grant-subject header")
+	}
+	clientID, err := header(r, "x-grant-client-id", false)
+	if err != nil {
+		return r, false, err
+	}
+	if clientID == "" {
+		clientID = "gateway"
+	}
+	email, err := header(r, "x-grant-email", false)
+	if err != nil {
+		return r, false, err
+	}
+	var emailPtr *string
+	if email != "" {
+		emailPtr = &email
+	}
+	displayName, err := header(r, "x-grant-display-name", false)
+	if err != nil {
+		return r, false, err
+	}
+	if displayName == "" {
+		displayName = sub
+	}
+	provider := s.service.AuthProviderMode()
+	if provider == "" {
+		provider = "gateway"
+	}
+	issuer := ""
+	if s.service.Config().Auth.Goauthy != nil {
+		issuer = s.service.Config().Auth.Goauthy.Issuer
+	}
+	ctx := grant.WithTrustedGatewayIdentity(r.Context(), grant.ExternalIdentity{
+		Provider:         provider,
+		Issuer:           issuer,
+		ExternalUserID:   sub,
+		ClientID:         clientID,
+		TokenClientID:    clientID,
+		Email:            emailPtr,
+		DisplayName:      displayName,
+		UserInfoVerified: true,
+		Active:           true,
+	})
+	return r.WithContext(ctx), true, nil
+}
+
 func header(r *http.Request, name string, required bool) (string, error) {
 	values := r.Header.Values(name)
 	if len(values) == 0 {
@@ -277,6 +367,9 @@ func header(r *http.Request, name string, required bool) (string, error) {
 			return "", failure(400, "missing "+name+" header")
 		}
 		return "", nil
+	}
+	if len(values) > 1 {
+		return "", failure(400, "multiple "+name+" headers")
 	}
 	value := values[0]
 	if !utf8.ValidString(value) {

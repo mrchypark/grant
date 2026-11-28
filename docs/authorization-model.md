@@ -4,13 +4,15 @@
 
 ## 인증 공급자 방향과 현재 지원 범위
 
-인증 연동 대상은 **PocketBase, Rauthy, Goauthy**다. `GRANT_AUTH_PROVIDER`는 배포당 `rauthy`, `pocketbase`, `goauthy` 중 하나를 선택한다. Goauthy는 고정 issuer의 online introspection과 userinfo로 subject를 검증한다.
+인증 연동 모드는 `GRANT_AUTH_PROVIDER`로 배포당 `jwks`, `rauthy`, `oidc`, `external-check`, `pocketbase`, `goauthy` 중 하나를 선택한다.
 
 | 대상 | 현재 구현 |
 |---|---|
-| PocketBase | 설정된 issuer origin 및 auth collection 하나의 auth-refresh를 호출한다. patch-auth의 users, viewers, temporary_accounts 중 선택할 수 있으며 요청자가 endpoint를 바꾸지 못한다. |
-| Rauthy | 설정된 introspection endpoint에 client 인증과 토큰을 보내고, userinfo의 subject가 같은지 확인한다. 기본 경로는 `/auth/v1/oidc/introspect`, `/auth/v1/oidc/userinfo`다. 로컬 JWT 서명 검증이나 OIDC discovery 방식은 아니다. |
-| Goauthy | canonical HTTPS issuer에 introspection/userinfo를 호출한다. introspection의 `client_id`는 expected client와 정확히 같아야 하고, `aud`는 configured resource 하나만 정확히 담아야 하며, `sub`와 `openid goauthy.read` scope도 검증한다. 서명 JWT projection의 client ID audience를 introspection `aud` 계약으로 사용하지 않는다. Goauthy application ID는 Grant application admission과 evidence audience에 사용한다. |
+| `jwks` | `GRANT_OIDC_JWKS_URL` 기반 로컬 JWT 서명 검증(`RS256`, `ES256`, `EdDSA`)을 수행하며 `exp`, `nbf`, `iss`, `aud`, `sub`, `client_id`/`azp`를 검증한다. |
+| `rauthy` / `oidc` | `GRANT_OIDC_JWKS_URL` 설정 시 로컬 JWT 검증을 수행하고, 미설정 시 introspection endpoint + userinfo의 subject 일치 여부를 검증한다. |
+| `external-check` | 설정된 HTTP 검증 endpoint(`GRANT_EXTERNAL_CHECK_URL`)와 JSON 경로 매핑으로 토큰을 검증하고 `GRANT_EXTERNAL_CHECK_APPLICATION_ID`에 바인딩한다. |
+| `pocketbase` | 설정된 issuer origin 및 auth collection 하나의 auth-refresh를 호출한다. patch-auth의 users, viewers, temporary_accounts 중 선택할 수 있으며 요청자가 endpoint를 바꾸지 못한다. |
+| `goauthy` | canonical HTTPS issuer에 introspection/userinfo를 호출한다. introspection의 `client_id`는 expected client와 정확히 같아야 하고, `aud`는 configured resource 하나만 정확히 담아야 하며, `sub`와 `openid goauthy.read` scope도 검증한다. Goauthy application ID는 Grant application admission과 evidence audience에 사용한다. |
 
 인증 공급자와 권한 대상인 `service_providers`는 다른 개념이다. PocketBase identity는 issuer·collection·record를 모두 구분한다. 권한 catalog의 `patch-data` provider 이름은 유지하며 인증 공급자 이름과 연결하지 않는다. 외부 subject를 내부 사용자 ID로 추정하지 않는다.
 
@@ -119,7 +121,11 @@ POST /api/v1/authz/batch-check
 POST /api/v1/authz/filter
 ```
 
-`check`는 단일 resource 판정, `batch-check`는 여러 판정, `filter`는 서비스가 넘긴 후보 resource 중 허용된 id만 반환한다.
+`check`는 단일 resource 판정, `batch-check`는 여러 판정, `filter`는 두 가지 모드를 지원한다:
+1. 후보 필터 모드(`resources` 전달): 서비스가 넘긴 후보 resource 중 허용된 id만 반환한다.
+2. 역조회 모드(`resource: { provider, type }` 및 선택적 `limit`, `cursor` 전달): Grant에 저장된 활성 `role_bindings`와 시스템 `owner` 권한을 기준으로 해당 주체가 `action`을 수행할 수 있는 `resource_ids`를 `next_cursor` 페이지네이션으로 반환한다(`limit` 기본값 100, 최대 1000).
+
+`/api/v1/authz/*`와 `/api/v1/application-authz/*`, `/api/v2/providers/{providerId}/authz/*` 읽기 경로는 모두 voter뿐 아니라 `learner` 노드에서도 `readScope` 쿼럼 펜싱을 통해 고속으로 응답한다.
 
 grant는 외부 provider의 전체 resource 목록을 모른다. 따라서 unbounded list API는 제공하지 않는다.
 

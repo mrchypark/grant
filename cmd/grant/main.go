@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mrchypark/grant/internal/adminserver"
 	"github.com/mrchypark/grant/internal/api"
 	"github.com/mrchypark/grant/internal/grant"
 	"log/slog"
@@ -11,12 +12,24 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 )
 
 func main() {
+	switch filepath.Base(os.Args[0]) {
+	case "grant-admin":
+		if e := adminserver.Run(); e != nil {
+			slog.Error("Grant admin stopped", "error", e)
+			os.Exit(1)
+		}
+		return
+	case "replica-members":
+		runReplicaMembers()
+		return
+	}
 	if e := run(); e != nil {
 		slog.Error("Grant stopped", "error", e)
 		os.Exit(1)
@@ -61,7 +74,7 @@ func run() (result error) {
 		if operator == nil {
 			return nil
 		}
-		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		servers = append(servers, server)
 		go func() { done <- server.Serve(operator) }()
 		return nil
@@ -115,7 +128,7 @@ func run() (result error) {
 		h := publicHandler
 		publicHandlerMu.RUnlock()
 		h.ServeHTTP(w, r)
-	}), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() { done <- server.Serve(public) }()
 	servers = append(servers, server)
 	if private != nil {
@@ -124,7 +137,7 @@ func run() (result error) {
 			h := runtimeHandler
 			publicHandlerMu.RUnlock()
 			h.ServeHTTP(w, r)
-		}), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+		}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		servers = append(servers, runtimeServer)
 		go func() { done <- runtimeServer.Serve(private) }()
 	}
@@ -141,10 +154,14 @@ func run() (result error) {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		var errs []error
 		for _, srv := range servers {
-			if e = srv.Shutdown(shutdown); e != nil {
-				return fmt.Errorf("HTTP shutdown: %w", e)
+			if err := srv.Shutdown(shutdown); err != nil {
+				errs = append(errs, err)
 			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			return fmt.Errorf("HTTP shutdown: %w", err)
 		}
 	}
 	return nil

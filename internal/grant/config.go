@@ -19,21 +19,30 @@ const (
 )
 
 type ServerConfig struct{ BindAddr string }
-type SecurityConfig struct{ MasterKey, AppAuthKey, HTTPCapabilityPEPClientID, ManagementApplicationID, ManagementOrganizationID, BootstrapUserID, BootstrapUserName string }
+type SecurityConfig struct {
+	MasterKey, AppAuthKey, TrustedGatewayKey, HTTPCapabilityPEPClientID, ManagementApplicationID, ManagementOrganizationID, BootstrapUserID, BootstrapUserName string
+}
 type RauthyConfig struct {
 	BaseURL, IntrospectPath, UserinfoPath, ClientID, ClientSecret, ClientReadAPIKey string
-	CacheTTLSeconds                                                                 uint64
+	JWKSURL, Issuer, Audience                                                       string
+	CacheTTLSeconds, JWKSCacheTTLSeconds                                            uint64
 }
 type PocketBaseConfig struct{ BaseURL, Collection, ApplicationID string }
+type ExternalCheckConfig struct {
+	URL, Method, ApplicationID                                            string
+	SubjectPath, EmailPath, EmailVerifiedPath, NamePath, FallbackNamePath string
+	ClientIDPath, TokenPath, ExpectedField, ExpectedValue                 string
+}
 type GoauthyConfig struct {
 	Issuer, IntrospectionClientID, IntrospectionClientSecret, ExpectedClientID, Resource, ApplicationID string
 	RequiredScopes                                                                                      []string
 }
 type AuthConfig struct {
-	ProviderMode string
-	Rauthy       RauthyConfig
-	PocketBase   *PocketBaseConfig
-	Goauthy      *GoauthyConfig
+	ProviderMode  string
+	Rauthy        RauthyConfig
+	PocketBase    *PocketBaseConfig
+	ExternalCheck *ExternalCheckConfig
+	Goauthy       *GoauthyConfig
 }
 type DatabaseConfig struct {
 	ClusterRestoreSnapshot                                                                                             string
@@ -56,6 +65,14 @@ type configuredMember struct {
 	Token string `json:"token"`
 }
 
+func envFirst(fallback string, keys ...string) string {
+	for _, k := range keys {
+		if x, ok := os.LookupEnv(k); ok && x != "" {
+			return x
+		}
+	}
+	return fallback
+}
 func envDefault(k, v string) string {
 	if x, ok := os.LookupEnv(k); ok {
 		return x
@@ -71,21 +88,85 @@ func ConfigFromEnv() (Config, error) {
 	if managementApp == "" {
 		managementApp = legacyManagementApp
 	}
-	c := Config{Server: ServerConfig{BindAddr: envDefault("GRANT_BIND_ADDR", "0.0.0.0:8080")}, Security: SecurityConfig{MasterKey: envDefault("GRANT_MASTER_KEY", "dev-only-master-key"), AppAuthKey: os.Getenv("GRANT_APP_AUTH_KEY"), HTTPCapabilityPEPClientID: strings.TrimSpace(os.Getenv("GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID")), ManagementApplicationID: managementApp, ManagementOrganizationID: strings.TrimSpace(os.Getenv("GRANT_MANAGEMENT_ORGANIZATION_ID")), BootstrapUserID: envDefault("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"), BootstrapUserName: envDefault("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant")}}
+	c := Config{Server: ServerConfig{BindAddr: envDefault("GRANT_BIND_ADDR", "0.0.0.0:8080")}, Security: SecurityConfig{MasterKey: os.Getenv("GRANT_MASTER_KEY"), AppAuthKey: os.Getenv("GRANT_APP_AUTH_KEY"), TrustedGatewayKey: os.Getenv("GRANT_TRUSTED_GATEWAY_KEY"), HTTPCapabilityPEPClientID: strings.TrimSpace(os.Getenv("GRANT_HTTP_CAPABILITY_PEP_CLIENT_ID")), ManagementApplicationID: managementApp, ManagementOrganizationID: strings.TrimSpace(os.Getenv("GRANT_MANAGEMENT_ORGANIZATION_ID")), BootstrapUserID: envDefault("GRANT_BOOTSTRAP_USER_ID", "conalog-grant"), BootstrapUserName: envDefault("GRANT_BOOTSTRAP_USER_NAME", "Conalog Grant")}}
+	if c.Security.MasterKey == "" || c.Security.MasterKey == "dev-only-master-key" {
+		return c, fmt.Errorf("GRANT_MASTER_KEY is required and must not use the dev placeholder")
+	}
 	if c.Security.AppAuthKey == "" || c.Security.AppAuthKey == c.Security.MasterKey {
 		return c, fmt.Errorf("GRANT_APP_AUTH_KEY is required and must differ from GRANT_MASTER_KEY")
 	}
+	if c.Security.TrustedGatewayKey != "" && (len(c.Security.TrustedGatewayKey) < 32 || c.Security.TrustedGatewayKey == c.Security.MasterKey || c.Security.TrustedGatewayKey == c.Security.AppAuthKey) {
+		return c, fmt.Errorf("GRANT_TRUSTED_GATEWAY_KEY must be at least 32 bytes and distinct from master/app keys")
+	}
 	c.Auth.ProviderMode = envDefault("GRANT_AUTH_PROVIDER", "rauthy")
-	c.Auth.Rauthy = RauthyConfig{BaseURL: envDefault("GRANT_RAUTHY_BASE_URL", "http://127.0.0.1:8080"), IntrospectPath: envDefault("GRANT_RAUTHY_INTROSPECT_PATH", "/auth/v1/oidc/introspect"), UserinfoPath: envDefault("GRANT_RAUTHY_USERINFO_PATH", "/auth/v1/oidc/userinfo"), ClientID: os.Getenv("GRANT_RAUTHY_CLIENT_ID"), ClientSecret: os.Getenv("GRANT_RAUTHY_CLIENT_SECRET"), ClientReadAPIKey: os.Getenv("GRANT_RAUTHY_CLIENT_READ_API_KEY")}
+	defaultIntrospectPath := "/auth/v1/oidc/introspect"
+	defaultUserinfoPath := "/auth/v1/oidc/userinfo"
+	if c.Auth.ProviderMode == "oidc" {
+		defaultIntrospectPath = "/oauth2/introspect"
+		defaultUserinfoPath = "/userinfo"
+	}
+	c.Auth.Rauthy = RauthyConfig{
+		BaseURL:          envFirst("http://127.0.0.1:8080", "GRANT_OIDC_BASE_URL", "GRANT_RAUTHY_BASE_URL"),
+		IntrospectPath:   envFirst(defaultIntrospectPath, "GRANT_OIDC_INTROSPECT_PATH", "GRANT_RAUTHY_INTROSPECT_PATH"),
+		UserinfoPath:     envFirst(defaultUserinfoPath, "GRANT_OIDC_USERINFO_PATH", "GRANT_RAUTHY_USERINFO_PATH"),
+		ClientID:         envFirst("", "GRANT_OIDC_CLIENT_ID", "GRANT_RAUTHY_CLIENT_ID"),
+		ClientSecret:     envFirst("", "GRANT_OIDC_CLIENT_SECRET", "GRANT_RAUTHY_CLIENT_SECRET"),
+		ClientReadAPIKey: envFirst("", "GRANT_OIDC_CLIENT_READ_API_KEY", "GRANT_RAUTHY_CLIENT_READ_API_KEY"),
+		JWKSURL:          strings.TrimSpace(os.Getenv("GRANT_OIDC_JWKS_URL")),
+		Issuer:           strings.TrimSpace(os.Getenv("GRANT_OIDC_ISSUER")),
+		Audience:         strings.TrimSpace(os.Getenv("GRANT_OIDC_AUDIENCE")),
+	}
 	var err error
-	c.Auth.Rauthy.CacheTTLSeconds, err = strconv.ParseUint(envDefault("GRANT_RAUTHY_CACHE_TTL_SECONDS", "30"), 10, 64)
+	c.Auth.Rauthy.CacheTTLSeconds, err = strconv.ParseUint(envFirst("30", "GRANT_OIDC_CACHE_TTL_SECONDS", "GRANT_RAUTHY_CACHE_TTL_SECONDS"), 10, 64)
 	if err != nil {
 		return c, err
 	}
+	c.Auth.Rauthy.JWKSCacheTTLSeconds, err = strconv.ParseUint(envDefault("GRANT_OIDC_JWKS_CACHE_TTL_SECONDS", "300"), 10, 64)
+	if err != nil {
+		return c, err
+	}
+	if c.Auth.Rauthy.JWKSURL != "" {
+		u, e := url.Parse(c.Auth.Rauthy.JWKSURL)
+		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return c, fmt.Errorf("invalid GRANT_OIDC_JWKS_URL")
+		}
+	}
 	switch c.Auth.ProviderMode {
-	case "rauthy":
-		if c.Auth.Rauthy.ClientID == "" || c.Auth.Rauthy.ClientSecret == "" {
-			return c, fmt.Errorf("Rauthy client ID and client secret are required")
+	case "jwks":
+		if c.Auth.Rauthy.JWKSURL == "" {
+			return c, fmt.Errorf("GRANT_OIDC_JWKS_URL is required for jwks auth provider")
+		}
+	case "rauthy", "oidc":
+		if c.Auth.Rauthy.JWKSURL == "" && (c.Auth.Rauthy.ClientID == "" || c.Auth.Rauthy.ClientSecret == "") {
+			return c, fmt.Errorf("OIDC client ID and client secret are required")
+		}
+	case "external-check":
+		rawURL := strings.TrimSpace(os.Getenv("GRANT_EXTERNAL_CHECK_URL"))
+		u, e := url.Parse(rawURL)
+		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+			return c, fmt.Errorf("invalid GRANT_EXTERNAL_CHECK_URL")
+		}
+		method := strings.ToUpper(envDefault("GRANT_EXTERNAL_CHECK_METHOD", "POST"))
+		if method != "POST" && method != "GET" {
+			return c, fmt.Errorf("invalid GRANT_EXTERNAL_CHECK_METHOD")
+		}
+		appID := strings.TrimSpace(os.Getenv("GRANT_EXTERNAL_CHECK_APPLICATION_ID"))
+		if appID == "" {
+			return c, fmt.Errorf("GRANT_EXTERNAL_CHECK_APPLICATION_ID is required")
+		}
+		c.Auth.ExternalCheck = &ExternalCheckConfig{
+			URL:               rawURL,
+			Method:            method,
+			ApplicationID:     appID,
+			SubjectPath:       envDefault("GRANT_EXTERNAL_CHECK_SUBJECT_PATH", "sub"),
+			EmailPath:         envDefault("GRANT_EXTERNAL_CHECK_EMAIL_PATH", "email"),
+			EmailVerifiedPath: envDefault("GRANT_EXTERNAL_CHECK_EMAIL_VERIFIED_PATH", "email_verified"),
+			NamePath:          envDefault("GRANT_EXTERNAL_CHECK_NAME_PATH", "name"),
+			FallbackNamePath:  os.Getenv("GRANT_EXTERNAL_CHECK_FALLBACK_NAME_PATH"),
+			ClientIDPath:      os.Getenv("GRANT_EXTERNAL_CHECK_CLIENT_ID_PATH"),
+			TokenPath:         os.Getenv("GRANT_EXTERNAL_CHECK_TOKEN_PATH"),
+			ExpectedField:     os.Getenv("GRANT_EXTERNAL_CHECK_EXPECTED_FIELD"),
+			ExpectedValue:     os.Getenv("GRANT_EXTERNAL_CHECK_EXPECTED_VALUE"),
 		}
 	case "pocketbase":
 		p := &PocketBaseConfig{BaseURL: os.Getenv("GRANT_POCKETBASE_BASE_URL"), Collection: envDefault("GRANT_POCKETBASE_COLLECTION", "users"), ApplicationID: os.Getenv("GRANT_POCKETBASE_APPLICATION_ID")}

@@ -12,23 +12,119 @@ import (
 //go:embed store_authz.sql
 var authorizationSQLTemplate string
 
+//go:embed store_lookup_resources.sql
+var lookupResourcesSQLTemplate string
+
 var authorizationSQL = strings.Replace(authorizationSQLTemplate, "{agreement_bounds}", agreementBoundsSQL, 1)
+var lookupResourcesSQL = strings.Replace(lookupResourcesSQLTemplate, "{agreement_bounds}", agreementBoundsSQL, 1)
+
+type LookupResourcesInput struct {
+	UserID         string
+	OrganizationID string
+	ProviderID     string
+	ResourceType   string
+	ActionID       string
+	ApplicationID  string
+	Limit          int
+	Cursor         string
+	Consistency    ReadConsistency
+}
+
+type LookupResourcesResult struct {
+	ResourceIDs []string `json:"resource_ids"`
+	NextCursor  string   `json:"next_cursor,omitempty"`
+}
+
+type UserLookupResourcesResult struct {
+	ResourceIDs       []string `json:"resource_ids"`
+	NextCursor        string   `json:"next_cursor,omitempty"`
+	PEPPolicyRevision int64    `json:"pepPolicyRevision"`
+}
+
+func (s *Store) LookupResources(ctx context.Context, in LookupResourcesInput) (LookupResourcesResult, error) {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		return LookupResourcesResult{}, serviceError(400, "limit must be between 1 and 1000")
+	}
+	rows, err := s.Query(
+		ctx,
+		in.Consistency,
+		lookupResourcesSQL,
+		in.UserID,
+		in.OrganizationID,
+		in.ProviderID,
+		in.ResourceType,
+		in.ActionID,
+		in.ApplicationID,
+		time.Now().UTC().Format(agreementTimeLayout),
+		in.Cursor,
+		int64(limit+1),
+		int64(limit+1),
+		int64(limit+1),
+		int64(limit+1),
+	)
+	if err != nil {
+		return LookupResourcesResult{}, err
+	}
+	ids := make([]string, 0, min(len(rows), limit))
+	for i, row := range rows {
+		if i == limit {
+			break
+		}
+		ids = append(ids, rowString(row, "resource_id"))
+	}
+	var next string
+	if len(rows) > limit && len(ids) > 0 {
+		next = ids[len(ids)-1]
+	}
+	return LookupResourcesResult{ResourceIDs: ids, NextCursor: next}, nil
+}
 
 func (s *Store) EvaluateUserActions(ctx context.Context, checks []UserActionCheck) ([]UserActionDecision, error) {
 	return s.evaluateUserActions(ctx, checks, false)
 }
+
+const authzBatchChunkSize = 90
+
 func (s *Store) evaluateUserActions(ctx context.Context, checks []UserActionCheck, inactive bool) ([]UserActionDecision, error) {
+	if len(checks) == 0 {
+		return []UserActionDecision{}, nil
+	}
 	out := make([]UserActionDecision, 0, len(checks))
-	for _, c := range checks {
-		q := strings.Replace(authorizationSQL, "{values}", "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 1)
-		rows, err := s.Query(ctx, c.Consistency, q, int64(0), c.UserID, c.OrganizationID, c.ProviderID, c.ResourceType, c.ResourceID, c.ActionID, c.ApplicationID, time.Now().UTC().Format(agreementTimeLayout), inactive)
+	now := time.Now().UTC().Format(agreementTimeLayout)
+	for start := 0; start < len(checks); {
+		consistency := checks[start].Consistency
+		end := start + 1
+		for end < len(checks) && end-start < authzBatchChunkSize && checks[end].Consistency == consistency {
+			end++
+		}
+		chunk := checks[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)*10)
+		for i, c := range chunk {
+			placeholders[i] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+			args = append(args, int64(i), c.UserID, c.OrganizationID, c.ProviderID, c.ResourceType, c.ResourceID, c.ActionID, c.ApplicationID, now, inactive)
+		}
+		q := strings.Replace(authorizationSQL, "{values}", strings.Join(placeholders, ", "), 1)
+		rows, err := s.Query(ctx, consistency, q, args...)
 		if err != nil {
 			return nil, err
 		}
-		if len(rows) != 1 {
-			return nil, fmt.Errorf("authorization query did not return exactly one decision")
+		if len(rows) != len(chunk) {
+			return nil, fmt.Errorf("authorization query returned %d decisions, want %d", len(rows), len(chunk))
 		}
-		out = append(out, UserActionDecision{Allowed: rowInt(rows[0], "allowed") != 0, RBACAllowed: rowInt(rows[0], "rbac_allowed") != 0, TrustedApplication: rowInt(rows[0], "trusted_application") != 0, ApplicationAllowed: rowInt(rows[0], "application_allowed") != 0})
+		for _, row := range rows {
+			out = append(out, UserActionDecision{
+				Allowed:            rowInt(row, "allowed") != 0,
+				RBACAllowed:        rowInt(row, "rbac_allowed") != 0,
+				TrustedApplication: rowInt(row, "trusted_application") != 0,
+				ApplicationAllowed: rowInt(row, "application_allowed") != 0,
+			})
+		}
+		start = end
 	}
 	return out, nil
 }
@@ -75,17 +171,17 @@ func (s *Store) InsertRoleBinding(ctx context.Context, b RoleBinding) error {
 
 func validateRoleBinding(b RoleBinding) error {
 	if b.SubjectType != "user" && b.SubjectType != "group" && b.SubjectType != "organization" {
-		return fmt.Errorf("invalid binding subject")
+		return serviceError(400, "invalid binding subject")
 	}
 	if b.State != "active" && b.State != "disabled" {
-		return fmt.Errorf("invalid binding state")
+		return serviceError(400, "invalid binding state")
 	}
 	if b.SubjectType == "organization" && b.SubjectID != b.SubjectOrganizationID {
-		return fmt.Errorf("organization subject mismatch")
+		return serviceError(400, "organization subject mismatch")
 	}
 	cross := b.ProviderID == "grant" && b.ResourceType == "organization" && b.ResourceID != b.SubjectOrganizationID
 	if cross && (b.SubjectType != "organization" || b.AgreementID == nil) {
-		return fmt.Errorf("cross-organization binding requires organization subject and agreement")
+		return serviceError(400, "cross-organization binding requires organization subject and agreement")
 	}
 	return nil
 }

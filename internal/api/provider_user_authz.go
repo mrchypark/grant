@@ -20,6 +20,13 @@ func (s *Server) providerUserAuthorizationRoutes() {
 		return s.providerUserChecks(r, v.Checks)
 	}))
 	s.route("POST", providerUserFilterPath, "application", false, 200, providerUserAuthorizationBody(func(r *request, v applicationFilter) (any, error) {
+		if v.Resource != nil {
+			out, err := s.service.UserLookupResources(r.Context(), r.bearer, r.org, r.PathValue("providerId"), v.Resource.Type, v.Action, v.Limit, v.Cursor)
+			if err == nil && (out.PEPPolicyRevision <= 0 || out.ResourceIDs == nil) {
+				return nil, failure(503, "incomplete provider user authorization result")
+			}
+			return out, err
+		}
 		resources := make([]grant.AuthorizationResource, len(v.Resources))
 		for i, resource := range v.Resources {
 			var err error
@@ -74,7 +81,17 @@ func providerUserAuthorizationBody[T any](fn func(*request, T) (any, error)) pre
 		case applicationBatch:
 			checks = value.Checks
 		case applicationFilter:
-			if value.Resources == nil || strings.TrimSpace(value.Action) == "" {
+			isLookup, err := validateFilterRequest(value.Action, value.Resources, value.Resource, value.Limit, value.Cursor)
+			if err != nil {
+				return nil, err
+			}
+			if isLookup {
+				if value.Resource.Provider != provider {
+					return nil, failure(400, "resource provider must match path provider")
+				}
+				return func(r *request) (any, error) { return fn(r, v) }, nil
+			}
+			if strings.TrimSpace(value.Action) == "" {
 				return nil, failure(422, "action and resources are required")
 			}
 			checks = make([]applicationCheck, len(value.Resources))

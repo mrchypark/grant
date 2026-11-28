@@ -65,10 +65,7 @@ func newPrincipalHTTPFixture(t *testing.T) *principalHTTPFixture {
 	if _, err = f.svc.UpsertServiceProviderAdmin(ctx, ServiceProvider{ID: "patch-data", Name: "Patch Data", Active: true}); err != nil {
 		t.Fatal(err)
 	}
-	stage, actions, err := PatchDataCatalog(1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stage, actions := testCapabilityCatalog(t, 1)
 	f.stage, f.caps = stage, map[string]HttpCapability{}
 	for _, c := range stage.Capabilities {
 		f.caps[c.CapabilityID] = c
