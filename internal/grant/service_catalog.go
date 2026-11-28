@@ -115,6 +115,15 @@ func (s *Service) ReplaceProviderActionsAdmin(ctx context.Context, provider stri
 	if len(refs) != 0 {
 		return nil, serviceError(409, "actions are referenced by the active HTTP capability catalog")
 	}
+	const activeGRPCReferences = grpcActiveActionReferences + ` AND ref.value->>'actionId' NOT IN
+ (SELECT json_extract(value,'$.id') FROM json_each(?))`
+	refs, err = s.store.Query(ctx, ReadStrong, activeGRPCReferences, provider, payload)
+	if err != nil {
+		return nil, err
+	}
+	if len(refs) != 0 {
+		return nil, serviceError(409, "actions are referenced by the active gRPC capability catalog")
+	}
 	// Keep the complete replacement atomic without repeating the full action
 	// manifest in five statements inside one bounded consensus command.
 	stageID := requestID()
@@ -125,6 +134,7 @@ func (s *Service) ReplaceProviderActionsAdmin(ctx context.Context, provider stri
 	rows := "json_each(" + stagedTextSQL() + ")"
 	stmts := []Statement{assertion("SELECT 1 FROM service_providers WHERE id=?", provider), assertion("SELECT 1 WHERE json_array_length("+stagedTextSQL()+")=?", stageID, stageKind, len(normalized))}
 	stmts = append(stmts, assertion("SELECT 1 WHERE NOT EXISTS("+strings.Replace(activeReferences, "json_each(?)", rows, 1)+")", provider, stageID, stageKind))
+	stmts = append(stmts, assertion("SELECT 1 WHERE NOT EXISTS("+strings.Replace(activeGRPCReferences, "json_each(?)", rows, 1)+")", provider, stageID, stageKind))
 	for _, table := range []string{"application_grant_actions", "application_actions"} {
 		stmts = append(stmts, Statement{SQL: "DELETE FROM " + table + " WHERE action_id IN(SELECT json_extract(value,'$.id') FROM " + rows + " WHERE json_extract(value,'$.grantableToApplications')=0)", Args: []any{stageID, stageKind}})
 	}

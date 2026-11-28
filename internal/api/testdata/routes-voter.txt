@@ -36,6 +36,7 @@ GET /api/v1/orgs/{organizationId}/providers/{providerId}/actions
 GET /api/v1/orgs/{organizationId}/roles
 GET /api/v1/orgs/{organizationId}/roles/{roleId}/actions
 GET /api/v1/providers
+GET /api/v2/grpc-capabilities/catalog/{providerId}
 GET /api/v2/http-capabilities/catalog/{providerId}
 GET /healthz
 GET /ops/backups
@@ -54,6 +55,8 @@ POST /api/v1/admin/identity-links/goauthy
 POST /api/v1/admin/orgs
 POST /api/v1/admin/providers
 POST /api/v1/admin/providers/{providerId}/actions
+POST /api/v1/admin/providers/{providerId}/grpc-capability-active
+POST /api/v1/admin/providers/{providerId}/grpc-capability-generations
 POST /api/v1/admin/providers/{providerId}/http-capability-active
 POST /api/v1/admin/providers/{providerId}/http-capability-generations
 POST /api/v1/application-authz/batch-check
@@ -72,6 +75,7 @@ POST /api/v1/orgs/{organizationId}/groups
 POST /api/v1/orgs/{organizationId}/reactivate
 POST /api/v1/orgs/{organizationId}/roles
 POST /api/v1/orgs/{organizationId}/providers/{providerId}/actions
+POST /api/v2/grpc-capabilities/decide
 POST /api/v2/http-capabilities/decide
 POST /api/v2/providers/{providerId}/authz/batch-check
 POST /api/v2/providers/{providerId}/authz/filter

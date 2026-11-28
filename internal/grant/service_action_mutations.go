@@ -194,6 +194,7 @@ func (s *Service) DeleteCustomActionAuthorized(ctx context.Context, user, org, p
 	}
 	const refs = `SELECT 1 FROM provider_http_capability_sets c JOIN json_tree(c.canonical_json) ref ON ref.key='actionId' WHERE c.provider_id=? AND ref.value=?`
 	guard = append(guard, assertion("SELECT 1 FROM actions WHERE id=? AND provider_id=? AND code GLOB ? AND id=provider_id||'.'||code", id, provider, organizationCustomNamespace(org)+"*"), assertion("SELECT 1 WHERE NOT EXISTS("+refs+")", provider, id))
+	guard = append(guard, assertion("SELECT 1 WHERE NOT EXISTS("+grpcRetainedActionReferences+" AND ref.value->>'actionId'=?)", provider, id))
 	for _, table := range []string{"application_grant_actions", "application_actions", "role_actions"} {
 		guard = append(guard, assertion("SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM "+table+" WHERE action_id=?)", id))
 	}
@@ -367,7 +368,10 @@ func (s *Service) DeleteProviderAction(ctx context.Context, provider, id string)
 	// Repeat the dependency check inside the delete transaction so activation
 	// cannot introduce a dangling reference between the check and the write.
 	const references = `SELECT 1 FROM provider_http_capability_active ac JOIN provider_http_capability_sets c ON c.provider_id=ac.provider_id AND c.generation=ac.generation JOIN json_tree(c.canonical_json) ref ON ref.key='actionId' WHERE ac.provider_id=? AND ref.value=?`
-	stmts := []Statement{assertion("SELECT 1 WHERE NOT EXISTS("+references+")", provider, id)}
+	stmts := []Statement{
+		assertion("SELECT 1 WHERE NOT EXISTS("+references+")", provider, id),
+		assertion("SELECT 1 WHERE NOT EXISTS("+grpcActiveActionReferences+" AND ref.value->>'actionId'=?)", provider, id),
+	}
 	for _, table := range []string{"application_grant_actions", "application_actions", "role_actions"} {
 		stmts = append(stmts, Statement{SQL: "DELETE FROM " + table + " WHERE action_id IN(SELECT id FROM actions WHERE id=? AND provider_id=?)", Args: []any{id, provider}})
 	}
