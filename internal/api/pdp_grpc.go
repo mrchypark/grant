@@ -213,6 +213,7 @@ func (s *pdpGRPC) pdpDecisionMetadata(ctx context.Context, requireOrg bool) (con
 			ExternalUserID:   sub,
 			ClientID:         clientID,
 			TokenClientID:    clientID,
+			TokenAudience:    clientID,
 			Email:            emailPtr,
 			DisplayName:      displayName,
 			UserInfoVerified: true,

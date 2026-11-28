@@ -352,6 +352,7 @@ func (s *Server) applyGatewayIdentity(r *http.Request) (*http.Request, bool, err
 		ExternalUserID:   sub,
 		ClientID:         clientID,
 		TokenClientID:    clientID,
+		TokenAudience:    clientID,
 		Email:            emailPtr,
 		DisplayName:      displayName,
 		UserInfoVerified: true,

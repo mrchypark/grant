@@ -39,10 +39,14 @@ func (s *Service) resolveLocalUserAuthorizationContext(ctx context.Context, iden
 		return applicationAuthorizationContext{}, serviceError(403, "forbidden: local user is not an active member of an active organization")
 	}
 	subject := identity.ExternalUserID
-	if identity.Issuer != "" {
+	if !trustedGateway && identity.Issuer != "" {
 		subject = goauthySubject(identity.Issuer, identity.ExternalUserID)
 	}
-	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: subject, ProviderAudience: identity.TokenAudience}, nil
+	audience := identity.TokenAudience
+	if trustedGateway && audience == "" {
+		audience = identity.TokenClientID
+	}
+	return applicationAuthorizationContext{UserID: u.ID, OrganizationID: org, ExternalSubject: subject, ProviderAudience: audience}, nil
 }
 
 func (s *Service) resolveApplicationAuthorizationContext(ctx context.Context, token, org string) (applicationAuthorizationContext, error) {
