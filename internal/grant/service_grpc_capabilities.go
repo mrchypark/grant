@@ -144,7 +144,8 @@ func validateGRPCRequestEvidence(in GRPCCapabilityDecisionInput) error {
 }
 
 func (s *Service) DecideGRPCCapability(ctx context.Context, token, org string, in GRPCCapabilityDecisionInput) (GRPCCapabilityDecision, error) {
-	if strings.TrimSpace(token) == "" {
+	identity, trustedGateway := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
+	if !trustedGateway && strings.TrimSpace(token) == "" {
 		return GRPCCapabilityDecision{}, serviceError(401, "unauthorized: missing bearer token")
 	}
 	if err := exactValue("organizationId", org, 256); err != nil {
@@ -153,19 +154,22 @@ func (s *Service) DecideGRPCCapability(ctx context.Context, token, org string, i
 	if err := validateGRPCRequestEvidence(in); err != nil {
 		return GRPCCapabilityDecision{}, err
 	}
-	if CredentialDigest(token) != in.ProviderCredentialDigest {
+	if (!trustedGateway || strings.TrimSpace(token) != "") && CredentialDigest(token) != in.ProviderCredentialDigest {
 		return GRPCCapabilityDecision{}, serviceError(403, "forbidden: provider credential digest mismatch")
 	}
-	identity, err := s.externalIdentity(ctx, token)
-	if err != nil {
-		return GRPCCapabilityDecision{}, err
+	if !trustedGateway || strings.TrimSpace(token) != "" {
+		var err error
+		identity, err = s.externalIdentity(ctx, token)
+		if err != nil {
+			return GRPCCapabilityDecision{}, err
+		}
 	}
 	return capabilityAuthorizationRead(ctx, s, func(ctx context.Context) (GRPCCapabilityDecision, error) {
-		return s.decideGRPCCapability(ctx, identity, org, in)
+		return s.decideGRPCCapability(ctx, identity, token, org, in)
 	})
 }
 
-func (s *Service) decideGRPCCapability(ctx context.Context, identity ExternalIdentity, org string, in GRPCCapabilityDecisionInput) (GRPCCapabilityDecision, error) {
+func (s *Service) decideGRPCCapability(ctx context.Context, identity ExternalIdentity, token, org string, in GRPCCapabilityDecisionInput) (GRPCCapabilityDecision, error) {
 	pep, catalog, err := s.grpcCapabilityPolicy(ctx, in.ProviderID)
 	if err != nil {
 		return GRPCCapabilityDecision{}, err
@@ -178,13 +182,13 @@ func (s *Service) decideGRPCCapability(ctx context.Context, identity ExternalIde
 	}
 	for _, cap := range catalog.Capabilities {
 		if cap.Enabled && cap.CapabilityID == in.CapabilityID && cap.Version == in.CapabilityVersion {
-			return s.evaluateGRPCRequest(ctx, identity, org, in, cap, pep)
+			return s.evaluateGRPCRequest(ctx, identity, token, org, in, cap, pep)
 		}
 	}
 	return GRPCCapabilityDecision{}, serviceError(403, "forbidden: gRPC capability is not active")
 }
 
-func (s *Service) evaluateGRPCRequest(ctx context.Context, identity ExternalIdentity, org string, in GRPCCapabilityDecisionInput, cap GRPCCapability, pep ProviderPepClient) (GRPCCapabilityDecision, error) {
+func (s *Service) evaluateGRPCRequest(ctx context.Context, identity ExternalIdentity, token, org string, in GRPCCapabilityDecisionInput, cap GRPCCapability, pep ProviderPepClient) (GRPCCapabilityDecision, error) {
 	// Grant binds trusted PEP evidence to the catalog. Exposure checks the pinned
 	// descriptor's unary flags and hashes the exact protobuf bytes before framing.
 	if in.ContractDigest != cap.ContractDigest || in.FullMethod != cap.FullMethod ||
@@ -196,7 +200,8 @@ func (s *Service) evaluateGRPCRequest(ctx context.Context, identity ExternalIden
 	if err != nil {
 		return GRPCCapabilityDecision{}, err
 	}
-	if p.ExternalSubject != in.ProviderCredential.Subject || p.ProviderAudience != in.ProviderCredential.Audience {
+	_, trustedGateway := ctx.Value(trustedGatewayIdentityKey{}).(ExternalIdentity)
+	if (!trustedGateway || strings.TrimSpace(token) != "") && (p.ExternalSubject != in.ProviderCredential.Subject || p.ProviderAudience != in.ProviderCredential.Audience) {
 		return GRPCCapabilityDecision{}, serviceError(403, "forbidden: provider credential principal mismatch")
 	}
 	// The active catalog read verified that the action still belongs to this provider.

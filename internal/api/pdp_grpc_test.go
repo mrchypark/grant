@@ -327,3 +327,139 @@ func pdpTestJSON(t *testing.T, value any) []byte {
 func pdpTestDigest(value string) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(value)))
 }
+
+func TestPDPGRPCTrustedGatewayDecideHttp(t *testing.T) {
+	ctx := t.Context()
+	store, err := grant.OpenStore(ctx, grant.Config{Database: grant.DatabaseConfig{DataDir: t.TempDir(), DefaultReadConsistency: grant.ReadStrong}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.EnsureBootstrapData(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	gatewayKey := strings.Repeat("g", 32)
+	appAuthKey := strings.Repeat("a", 32)
+	masterKey := strings.Repeat("m", 32)
+	svc := grant.NewService(grant.Config{
+		Security: grant.SecurityConfig{
+			MasterKey:                 masterKey,
+			AppAuthKey:                appAuthKey,
+			TrustedGatewayKey:         gatewayKey,
+			HTTPCapabilityPEPClientID: "exposure-pep",
+		},
+		Auth: grant.AuthConfig{
+			ProviderMode: "goauthy",
+			Goauthy: &grant.GoauthyConfig{
+				Issuer:        "https://auth.example.test",
+				ApplicationID: "operable-app",
+			},
+		},
+	}, store)
+
+	if _, err := svc.UpsertServiceProviderAdmin(ctx, grant.ServiceProvider{ID: "operable", Name: "Operable", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	actionID := "operable.entity.read"
+	if _, err := svc.ReplaceProviderActionsAdmin(ctx, "operable", []grant.Action{{ID: actionID, ProviderID: "operable", Code: "entity.read", Name: "Read", RiskLevel: "low", GrantableToApplications: true}}); err != nil {
+		t.Fatal(err)
+	}
+	mode := "user"
+	if _, err := store.UpsertProviderPepClient(ctx, "operable", "exposure-pep", "conalog-grant", grant.UpsertProviderPepClient{Lifecycle: "active", AuthorizationMode: &mode}); err != nil {
+		t.Fatal(err)
+	}
+	cap := grant.HttpCapability{
+		CapabilityID: "entity.read.0", Version: 1, Enabled: true, AccessMode: "authorized",
+		Method: "GET", PathTemplate: "/entities/{id}", ActionID: &actionID,
+		Resource: &grant.HttpCapabilityResource{ResourceType: "entity", ID: grant.HttpResourceExtractor{Kind: "pathSegment", Name: "id", Format: "asciiToken"}},
+		Query:    grant.HttpQueryPolicy{Mode: "none"},
+		Request:  grant.HttpRequestPolicy{Body: "none", MaxBytes: 0, ForwardHeaders: []string{}},
+		Response: grant.HttpResponsePolicy{MaxBytes: 1 << 20, ForwardHeaders: []string{}, Redirects: "deny"},
+	}
+	cap.ContractDigest, err = grant.HttpCapabilityContractDigest(cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := grant.StageHttpCapabilityGeneration{SchemaVersion: 1, Generation: 1, Capabilities: []grant.HttpCapability{cap}}
+	stage.CatalogDigest, err = grant.HttpCapabilityCatalogDigest("operable", stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StageHttpCapabilityGeneration(ctx, "operable", stage); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateHttpCapabilityGeneration(ctx, "operable", "conalog-grant", grant.ActivateHttpCapabilityGeneration{TargetGeneration: 1, TargetCatalogDigest: stage.CatalogDigest}); err != nil {
+		t.Fatal(err)
+	}
+
+	u, err := store.EnsureExternalIdentity(ctx, grant.ExternalIdentityMaterialization{
+		Provider:       "goauthy",
+		Issuer:         "https://auth.example.test",
+		ExternalUserID: "gw-user-1",
+		DisplayName:    "GW User",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Exec(ctx, "INSERT INTO organization_memberships(id,organization_id,user_id,membership_role,status,created_at,updated_at) VALUES('gw-mem','conalog-grant',?,'owner','active','now','now')", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Exec(ctx, "INSERT INTO role_actions(role_id,action_id) VALUES('role-system-bootstrap-owner',?)", actionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Exec(ctx, "INSERT INTO role_bindings(id,subject_type,subject_id,subject_organization_id,provider_id,resource_type,resource_id,role_id,state,created_by_user_id,created_at,updated_at) VALUES('gw-bind','user',?,'conalog-grant','operable','entity','ent-1','role-system-bootstrap-owner','active','conalog-grant','now','now')", u.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &pdpGRPC{service: svc}
+	idName := "id"
+	emptyDigest := pdpTestDigest("")
+	evidence := pdpTestJSON(t, grant.HttpCapabilityDecisionInput{
+		WireVersion:              2,
+		PEPPolicyRevision:        1,
+		ProviderID:               "operable",
+		PEPClientID:              "exposure-pep",
+		CatalogGeneration:        1,
+		CatalogDigest:            stage.CatalogDigest,
+		CapabilityID:             cap.CapabilityID,
+		CapabilityVersion:        1,
+		ContractDigest:           cap.ContractDigest,
+		Method:                   "GET",
+		CanonicalPath:            "/entities/ent-1",
+		CanonicalQueryDigest:     emptyDigest,
+		ForwardedHeaderDigest:    emptyDigest,
+		BodyDigest:               emptyDigest,
+		ProviderCredentialDigest: emptyDigest,
+		ProviderCredential:       grant.HttpCapabilityCredentialEvidence{Subject: "gw-user-1", Audience: "operable-app"},
+		ResourceEvidence:         grant.HttpCapabilityResourceEvidence{Kind: "pathSegment", Name: &idName, CanonicalValue: "ent-1"},
+		ResourceType:             "entity",
+		ResourceID:               "ent-1",
+		RequestBinding:           strings.Repeat("a", 22),
+	})
+
+	md := metadata.Pairs(
+		"x-grant-app-auth-key", appAuthKey,
+		"x-grant-gateway-key", gatewayKey,
+		"x-grant-subject", "gw-user-1",
+		"x-grant-client-id", "operable-app",
+		"x-organization-id", "conalog-grant",
+	)
+	resp, err := srv.DecideHttp(metadata.NewIncomingContext(ctx, md), &pdppb.DecisionRequest{EvidenceJson: evidence})
+	if err != nil {
+		t.Fatalf("DecideHttp with trusted gateway failed: %v", err)
+	}
+	var decision grant.HttpCapabilityDecision
+	if err := json.Unmarshal(resp.GetDecisionJson(), &decision); err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("expected allowed=true, got %+v", decision)
+	}
+
+	// Missing x-grant-subject must return Unauthenticated.
+	badMD := metadata.Pairs("x-grant-app-auth-key", appAuthKey, "x-grant-gateway-key", gatewayKey, "x-organization-id", "conalog-grant")
+	if _, err := srv.DecideHttp(metadata.NewIncomingContext(ctx, badMD), &pdppb.DecisionRequest{EvidenceJson: evidence}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated for missing subject, got %v", err)
+	}
+}

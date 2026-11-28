@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	pdppb "github.com/mrchypark/grant/api/pdp/v1"
 	"github.com/mrchypark/grant/internal/grant"
@@ -60,7 +61,7 @@ func (s *pdpGRPC) BatchCheckProviderUser(ctx context.Context, r *pdppb.ProviderU
 	if err := s.authenticatePEP(ctx); err != nil {
 		return nil, err
 	}
-	bearer, org, err := pdpDecisionMetadata(ctx, true)
+	ctx, bearer, org, err := s.pdpDecisionMetadata(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +110,7 @@ func pdpDecision[Input, Output any](ctx context.Context, s *pdpGRPC, r *pdppb.De
 	if err := s.authenticatePEP(ctx); err != nil {
 		return nil, err
 	}
-	bearer, org, err := pdpDecisionMetadata(ctx, requireOrg)
+	ctx, bearer, org, err := s.pdpDecisionMetadata(ctx, requireOrg)
 	if err != nil {
 		return nil, err
 	}
@@ -150,33 +151,117 @@ func (s *pdpGRPC) authenticatePEP(ctx context.Context) error {
 	return nil
 }
 
-func pdpDecisionMetadata(ctx context.Context, requireOrg bool) (string, string, error) {
-	auth := metadata.ValueFromIncomingContext(ctx, "authorization")
+func (s *pdpGRPC) pdpDecisionMetadata(ctx context.Context, requireOrg bool) (context.Context, string, string, error) {
 	orgs := metadata.ValueFromIncomingContext(ctx, "x-organization-id")
-	if len(auth) > 1 || len(orgs) > 1 {
-		return "", "", status.Error(codes.InvalidArgument, "duplicate decision metadata")
+	if len(orgs) > 1 {
+		return ctx, "", "", status.Error(codes.InvalidArgument, "duplicate decision metadata")
 	}
-	if len(auth) == 0 {
-		return "", "", status.Error(codes.Unauthenticated, "Bearer credential required")
+	gatewayKeys := metadata.ValueFromIncomingContext(ctx, "x-grant-gateway-key")
+	if len(gatewayKeys) > 1 {
+		return ctx, "", "", status.Error(codes.InvalidArgument, "duplicate gateway key metadata")
 	}
-	// Preserve the whole credential, including scheme case and internal spaces,
-	// because the existing digest binds that exact string.
-	bearer := strings.TrimSpace(auth[0])
-	token, ok := strings.CutPrefix(bearer, "Bearer ")
-	if !ok {
-		token, ok = strings.CutPrefix(bearer, "bearer ")
-	}
-	if !ok || strings.TrimSpace(token) == "" {
-		return "", "", status.Error(codes.InvalidArgument, "invalid Bearer credential")
+	var bearer string
+	if len(gatewayKeys) == 1 {
+		expected := s.service.Config().Security.TrustedGatewayKey
+		if expected == "" {
+			return ctx, "", "", status.Error(codes.Unauthenticated, "trusted gateway authentication is disabled")
+		}
+		got, want := sha256.Sum256([]byte(gatewayKeys[0])), sha256.Sum256([]byte(expected))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			return ctx, "", "", status.Error(codes.Unauthenticated, "invalid trusted gateway key")
+		}
+		sub, err := singleMetadataValue(ctx, "x-grant-subject")
+		if err != nil {
+			return ctx, "", "", err
+		}
+		if sub == "" {
+			return ctx, "", "", status.Error(codes.Unauthenticated, "missing x-grant-subject metadata")
+		}
+		clientID, err := singleMetadataValue(ctx, "x-grant-client-id")
+		if err != nil {
+			return ctx, "", "", err
+		}
+		if clientID == "" {
+			clientID = "gateway"
+		}
+		email, err := singleMetadataValue(ctx, "x-grant-email")
+		if err != nil {
+			return ctx, "", "", err
+		}
+		var emailPtr *string
+		if email != "" {
+			emailPtr = &email
+		}
+		displayName, err := singleMetadataValue(ctx, "x-grant-display-name")
+		if err != nil {
+			return ctx, "", "", err
+		}
+		if displayName == "" {
+			displayName = sub
+		}
+		provider := s.service.AuthProviderMode()
+		if provider == "" {
+			provider = "gateway"
+		}
+		issuer := ""
+		if s.service.Config().Auth.Goauthy != nil {
+			issuer = s.service.Config().Auth.Goauthy.Issuer
+		}
+		ctx = grant.WithTrustedGatewayIdentity(ctx, grant.ExternalIdentity{
+			Provider:         provider,
+			Issuer:           issuer,
+			ExternalUserID:   sub,
+			ClientID:         clientID,
+			TokenClientID:    clientID,
+			Email:            emailPtr,
+			DisplayName:      displayName,
+			UserInfoVerified: true,
+			Active:           true,
+		})
+	} else {
+		auth := metadata.ValueFromIncomingContext(ctx, "authorization")
+		if len(auth) > 1 {
+			return ctx, "", "", status.Error(codes.InvalidArgument, "duplicate decision metadata")
+		}
+		if len(auth) == 0 {
+			return ctx, "", "", status.Error(codes.Unauthenticated, "Bearer credential required")
+		}
+		// Preserve the whole credential, including scheme case and internal spaces,
+		// because the existing digest binds that exact string.
+		bearer = strings.TrimSpace(auth[0])
+		token, ok := strings.CutPrefix(bearer, "Bearer ")
+		if !ok {
+			token, ok = strings.CutPrefix(bearer, "bearer ")
+		}
+		if !ok || strings.TrimSpace(token) == "" {
+			return ctx, "", "", status.Error(codes.InvalidArgument, "invalid Bearer credential")
+		}
 	}
 	var org string
 	if len(orgs) == 1 {
+		if !utf8.ValidString(orgs[0]) {
+			return ctx, "", "", status.Error(codes.InvalidArgument, "x-organization-id metadata is not valid UTF-8")
+		}
 		org = strings.TrimSpace(orgs[0])
 	}
 	if org == "" && (requireOrg || len(orgs) != 0) {
-		return "", "", status.Error(codes.InvalidArgument, "organization required")
+		return ctx, "", "", status.Error(codes.InvalidArgument, "organization required")
 	}
-	return bearer, org, nil
+	return ctx, bearer, org, nil
+}
+
+func singleMetadataValue(ctx context.Context, key string) (string, error) {
+	values := metadata.ValueFromIncomingContext(ctx, key)
+	if len(values) > 1 {
+		return "", status.Error(codes.InvalidArgument, "duplicate "+key+" metadata")
+	}
+	if len(values) == 0 {
+		return "", nil
+	}
+	if !utf8.ValidString(values[0]) {
+		return "", status.Error(codes.InvalidArgument, key+" metadata is not valid UTF-8")
+	}
+	return strings.TrimSpace(values[0]), nil
 }
 
 func pdpEncode(ctx context.Context, result any, err error, maxBytes int) ([]byte, error) {
