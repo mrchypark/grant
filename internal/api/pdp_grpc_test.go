@@ -123,6 +123,44 @@ func TestPDPGRPCMetadataAndStrictPayload(t *testing.T) {
 	})
 }
 
+func TestPDPGRPCProviderUserBatchBoundary(t *testing.T) {
+	client := newPDPTestClient(t, testServer().service)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	app := metadata.AppendToOutgoingContext(ctx, "x-grant-app-auth-key", "app-secret")
+	user := metadata.AppendToOutgoingContext(app, "authorization", "Bearer tok")
+	valid := metadata.AppendToOutgoingContext(user, "x-organization-id", "org")
+	const local = `{"action":"read","resource":{"provider":"provider","type":"row","id":"one"}}`
+	const foreign = `{"action":"read","resource":{"provider":"other","type":"row","id":"two"}}`
+	for _, tc := range []struct {
+		name           string
+		ctx            context.Context
+		provider, body string
+		code           codes.Code
+	}{
+		{"missing key", ctx, "provider", `{"checks":[]}`, codes.Unauthenticated},
+		{"duplicate key", metadata.AppendToOutgoingContext(valid, "x-grant-app-auth-key", "app-secret"), "provider", `{"checks":[]}`, codes.InvalidArgument},
+		{"missing bearer", app, "provider", `{"checks":[]}`, codes.Unauthenticated},
+		{"duplicate bearer", metadata.AppendToOutgoingContext(valid, "authorization", "Bearer other"), "provider", `{"checks":[]}`, codes.InvalidArgument},
+		{"missing organization", user, "provider", `{"checks":[]}`, codes.InvalidArgument},
+		{"duplicate organization", metadata.AppendToOutgoingContext(valid, "x-organization-id", "other"), "provider", `{"checks":[]}`, codes.InvalidArgument},
+		{"invalid provider", valid, "provider/other", `{"checks":[]}`, codes.InvalidArgument},
+		{"bare array", valid, "provider", `[]`, codes.InvalidArgument},
+		{"null checks", valid, "provider", `{"checks":null}`, codes.InvalidArgument},
+		{"unknown nested field", valid, "provider", `{"checks":[` + strings.Replace(local, `"id":"one"`, `"id":"one","do-not-leak":"hint"`, 1) + `]}`, codes.InvalidArgument},
+		{"mixed providers", valid, "provider", `{"checks":[` + local + `,` + foreign + `]}`, codes.InvalidArgument},
+		{"too many checks", valid, "provider", `{"checks":[` + strings.Repeat(local+",", 1000) + local + `]}`, codes.InvalidArgument},
+		{"oversized JSON", valid, "provider", strings.Repeat(" ", maxJSONBodyBytes+1), codes.ResourceExhausted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := client.BatchCheckProviderUser(tc.ctx, &pdppb.ProviderUserBatchRequest{ProviderId: tc.provider, ChecksJson: []byte(tc.body)})
+			if out != nil || status.Code(err) != tc.code || strings.Contains(fmt.Sprint(err), "do-not-leak") {
+				t.Fatalf("reply=%v status=%v, want %s and no response", out, err, tc.code)
+			}
+		})
+	}
+}
+
 // Use the normal protobuf decoder on the server and for any client response.
 type truncatedPDPProto struct{}
 
