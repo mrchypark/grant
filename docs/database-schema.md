@@ -20,7 +20,7 @@
 
 ### Rhiza 저장 형식 호환성
 
-현재 선택 버전은 `go.mod` 기준 Rhiza v0.27.4과 latticedb-go v0.13.0이다. Rhiza v0.19.0 이후 SQL 실행 정책은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
+현재 선택 버전은 `go.mod` 기준 Rhiza v0.27.5과 latticedb-go v0.13.0이다. Rhiza v0.19.0 이후 SQL 실행 정책은 이전 SQL 이력, materialization, checkpoint를 거부하며 기존 배포를 새 cluster ID·peer identity·object-store prefix·data directory로 논리 마이그레이션해야 한다. 이는 조건부 전환 요건이며 배포나 마이그레이션이 완료됐다는 뜻은 아니다. 테이블 정의와 Grant canonical schema에는 변경이 없다. rolling upgrade, 혼합 버전 peer, 활성화 뒤 downgrade, 기존 SQL 이력/checkpoint 복사는 지원하지 않는다. 운영 전환 전에는 원본 WAL을 보존하는 승인된 영속 디스크 전략이나 외부 fencing을 갖춘 Rhiza Operator 복구 전략이 필요하다. 현재 `emptyDir`의 동일 voter 교체는 `ErrVoterStateLost`로 실패한다. 구체적인 전환 요건은 [backup-restore.md](backup-restore.md)를 따른다.
 
 ### 1차 단순 배포 기준
 
@@ -290,7 +290,7 @@ membership, party 사업자번호, group membership, activation sequence/receipt
 restore 검증에서 거부된다. 기존 데이터 경로에 덮어쓰거나 자동 삭제하지 않는다.
 새 스키마로 만든 별도 데이터 경로와 snapshot을 사용해야 한다.
 
-`grant`의 Go 런타임 정식 스키마는 [store_schema.sql](../internal/grant/store_schema.sql), 기본 인덱스는 [store_indexes.sql](../internal/grant/store_indexes.sql)(`role_bindings` 활성 역조회용 커버링 부분 인덱스 `idx_role_bindings_active_lookup` 포함), authz 조회 인덱스는 [store_schema.go](../internal/grant/store_schema.go)에 정의되어 있다. Rhiza v0.27.4
+`grant`의 Go 런타임 정식 스키마는 [store_schema.sql](../internal/grant/store_schema.sql), 기본 인덱스는 [store_indexes.sql](../internal/grant/store_indexes.sql)(`role_bindings` 활성 역조회용 커버링 부분 인덱스 `idx_role_bindings_active_lookup` 포함), authz 조회 인덱스는 [store_schema.go](../internal/grant/store_schema.go)에 정의되어 있다. Rhiza v0.27.5
 applies the seven named migrations through its replicated migration ledger. Existing
 Hiqlite directories are never opened as Rhiza stores; use the explicit, separate-path
 export/restore procedure in [backup-restore.md](backup-restore.md).

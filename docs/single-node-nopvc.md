@@ -1,7 +1,7 @@
 # Experimental single-node Local DR without PVC
 
-Current source selects Rhiza v0.27.4. The image and recovery evidence below are
-version-specific historical evidence, not qualification of a v0.27.4 Grant image.
+Current source selects Rhiza v0.27.5. The image and recovery evidence below are
+version-specific historical evidence, not qualification of a v0.27.5 Grant image.
 For a new release, run the independent S3, GCS and Azure recovery fixture against
 the release source and verify the published image separately before deployment.
 
